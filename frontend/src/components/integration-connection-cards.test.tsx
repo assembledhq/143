@@ -233,6 +233,9 @@ describe("integration connection cards", () => {
         onConnectCircleCI={vi.fn()}
         mezmoConnected={false}
         onConnectMezmo={vi.fn()}
+        githubAccountConnected={false}
+        githubAccountRequirement="recommended"
+        onConnectGitHubAccount={vi.fn()}
       />
     );
 
@@ -500,13 +503,20 @@ describe("integration connection cards", () => {
         mezmoConnected={false}
         onConnectMezmo={vi.fn()}
         onDisconnect={vi.fn()}
+        githubAccountConnected={false}
+        githubAccountRequirement="recommended"
+        onConnectGitHubAccount={vi.fn()}
         readOnly
       />
     );
 
-    expect(screen.queryByRole("button", { name: /Connect/ })).not.toBeInTheDocument();
+    // Org-wide integration connect/disconnect controls are hidden for non-admins.
+    expect(screen.queryByRole("button", { name: "Connect Sentry" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Slack" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Disconnect/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Disconnect acme\/api/ })).not.toBeInTheDocument();
+    // The per-user GitHub account action stays available to everyone.
+    expect(screen.getByRole("button", { name: "Connect GitHub account" })).toBeInTheDocument();
     expect(screen.getAllByText("Connected").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Not connected").length).toBeGreaterThan(0);
   });

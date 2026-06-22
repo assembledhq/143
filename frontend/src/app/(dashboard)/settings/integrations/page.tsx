@@ -272,6 +272,8 @@ function GitHubRepositoryClaims({
   pendingRepoID,
   onSyncRepos,
   isSyncing,
+  accountConnected,
+  onConnectAccount,
 }: {
   installationId?: number;
   enabled: boolean;
@@ -281,6 +283,11 @@ function GitHubRepositoryClaims({
   pendingRepoID?: string | null;
   onSyncRepos: () => void;
   isSyncing: boolean;
+  // Whether the current user has connected their personal GitHub account.
+  // Transferring a repo owned by another org needs that user token, so we
+  // surface a proactive prompt instead of letting the Transfer click fail.
+  accountConnected: boolean;
+  onConnectAccount: () => void;
 }) {
   const queryClient = useQueryClient();
   const [transferRepo, setTransferRepo] = useState<GitHubRepositoryClaimCandidate | null>(null);
@@ -308,6 +315,10 @@ function GitHubRepositoryClaims({
     repo.status === "unclaimed" || repo.status === "disconnected_in_current_org" || (repo.status === "owned_by_other_org" && repo.can_transfer)
   );
   const connectedCount = repos.filter((repo) => repo.status === "owned_by_current_org").length;
+  // Transfers (claiming a repo owned by another org) require the user's GitHub
+  // account token. Detect that case up front so we can prompt before the click.
+  const transferCandidates = repos.filter((repo) => repo.status === "owned_by_other_org" && repo.can_transfer);
+  const needsAccountForTransfer = !accountConnected && transferCandidates.length > 0;
   const claimError = claimMutation.error;
   const needsGitHubUserAuth = claimError instanceof ApiError && claimError.code === "GITHUB_USER_AUTH_REQUIRED";
 
@@ -351,6 +362,16 @@ function GitHubRepositoryClaims({
             <p className="text-xs text-muted-foreground">
               {repos.length} repositor{repos.length === 1 ? "y" : "ies"} · {connectedCount} connected · {actionable.length} available
             </p>
+            {needsAccountForTransfer && (
+              <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
+                <p className="text-xs text-muted-foreground">
+                  Transferring a repo owned by another organization needs your GitHub account. Connect it first to avoid an interrupted transfer.
+                </p>
+                <Button variant="link" size="sm" className="mt-1 h-auto p-0 text-xs" onClick={onConnectAccount}>
+                  Connect account to transfer
+                </Button>
+              </div>
+            )}
             <div
               data-testid="github-repository-grid"
               className="grid grid-cols-[repeat(auto-fit,minmax(12rem,1fr))] gap-2"
@@ -1775,6 +1796,8 @@ function IntegrationDetailSheet({
   repositories,
   githubInstallationId,
   githubAccountLogin,
+  githubAccountConnected,
+  onConnectGitHubAccount,
   onDisconnect,
   disconnectingProvider,
   onDisconnectRepo,
@@ -1796,6 +1819,8 @@ function IntegrationDetailSheet({
   repositories: Repository[];
   githubInstallationId?: number;
   githubAccountLogin?: string;
+  githubAccountConnected: boolean;
+  onConnectGitHubAccount: () => void;
   onDisconnect: (provider: IntegrationKey) => void;
   disconnectingProvider?: IntegrationKey | null;
   onDisconnectRepo: (repoID: string) => void;
@@ -1853,6 +1878,8 @@ function IntegrationDetailSheet({
                 pendingRepoID={pendingRepoID}
                 onSyncRepos={onSyncRepos}
                 isSyncing={isSyncingRepos}
+                accountConnected={githubAccountConnected}
+                onConnectAccount={onConnectGitHubAccount}
               />
             </>
           ) : null}
@@ -2097,6 +2124,29 @@ export default function IntegrationsPage() {
     },
   });
 
+  // Per-user GitHub account status (distinct from the org-wide GitHub App).
+  // Drives the "Your GitHub account" row and the proactive transfer prompt.
+  const { data: githubAccountStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+  });
+  const githubAccountConnected = githubAccountStatus?.connected ?? false;
+  // A credential row exists but is no longer usable (expired / refresh failed).
+  // The backend reports this directly so the UI can prompt a reconnect.
+  const githubAccountNeedsReconnect = githubAccountStatus?.needs_reconnect ?? false;
+  const githubAccountDisconnectMutation = useMutation({
+    mutationFn: () => api.githubStatus.disconnect(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["github-status"] });
+      queryClient.invalidateQueries({ queryKey: ["team-github-status"] });
+    },
+    onError: (err: Error) => {
+      notify.error("Couldn't disconnect your GitHub account", {
+        description: err.message || "Please try again.",
+      });
+    },
+  });
+
   const [notionDialogOpen, setNotionDialogOpen] = useState(false);
   const [notionError, setNotionError] = useState<string | null>(null);
   const notionConnectMutation = useMutation({
@@ -2235,6 +2285,13 @@ export default function IntegrationsPage() {
         onConnectPagerDuty={() => {
           api.integrations.loginPagerDuty();
         }}
+        githubAccountConnected={githubAccountConnected}
+        githubAccountLogin={githubAccountStatus?.github_login}
+        githubAccountNeedsReconnect={githubAccountNeedsReconnect}
+        githubAccountRequirement={githubAccountStatus?.account_requirement ?? "recommended"}
+        onConnectGitHubAccount={() => api.githubStatus.connect()}
+        onDisconnectGitHubAccount={() => githubAccountDisconnectMutation.mutate()}
+        githubAccountDisconnecting={githubAccountDisconnectMutation.isPending}
         onManageGitHub={isAdmin ? () => setSelectedIntegration("github") : undefined}
         onManageIntegration={isAdmin ? (provider) => setSelectedIntegration(provider) : undefined}
         summaries={{
@@ -2277,6 +2334,8 @@ export default function IntegrationsPage() {
         repositories={repositories}
         githubInstallationId={githubIntegration?.github_installation_id}
         githubAccountLogin={githubIntegration?.github_account_login}
+        githubAccountConnected={githubAccountConnected && !githubAccountNeedsReconnect}
+        onConnectGitHubAccount={() => api.githubStatus.connect()}
         onDisconnect={(provider) => disconnectMutation.mutate(provider, { onSuccess: () => setSelectedIntegration(null) })}
         disconnectingProvider={disconnectMutation.isPending ? disconnectMutation.variables : null}
         onDisconnectRepo={(repoID) => repositoryStatusMutation.mutate({ repoID, action: "disconnect" })}

@@ -30,6 +30,8 @@ const {
   loginPagerDutyMock,
   teamListMembersMock,
   githubConnectMock,
+  githubStatusGetMock,
+  githubDisconnectMock,
   currentUserMock,
   ApiErrorMock,
   routerReplaceMock,
@@ -71,6 +73,8 @@ const {
     loginPagerDutyMock: vi.fn(),
     teamListMembersMock: vi.fn(),
     githubConnectMock: vi.fn(),
+    githubStatusGetMock: vi.fn(),
+    githubDisconnectMock: vi.fn(),
     currentUserMock: {
       id: "user-1",
       email: "admin@example.com",
@@ -143,6 +147,8 @@ vi.mock("@/lib/api", () => ({
     },
     githubStatus: {
       connect: githubConnectMock,
+      get: githubStatusGetMock,
+      disconnect: githubDisconnectMock,
     },
     team: {
       listMembers: teamListMembersMock,
@@ -300,6 +306,15 @@ describe("IntegrationsPage", () => {
     );
     githubConnectMock.mockClear();
     loginPagerDutyMock.mockClear();
+    githubStatusGetMock.mockResolvedValue({
+      connected: false,
+      has_repo_scope: false,
+      pr_authorship_mode: "user_preferred",
+      pr_draft_default: false,
+      account_requirement: "recommended",
+      needs_reconnect: false,
+    });
+    githubDisconnectMock.mockResolvedValue(undefined);
     currentUserMock.role = "admin";
     routerReplaceMock.mockReset();
     notifySuccessMock.mockReset();
@@ -353,6 +368,93 @@ describe("IntegrationsPage", () => {
     expect(routerReplaceMock).not.toHaveBeenCalled();
   });
 
+  it("renders a first-class 'Your GitHub account' row with a connect action when not connected", async () => {
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByText("Your GitHub account")).toBeInTheDocument();
+    const connect = await screen.findByRole("button", { name: "Connect GitHub account" });
+    const user = userEvent.setup();
+    await user.click(connect);
+    expect(githubConnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the connected GitHub login and a disconnect action when connected", async () => {
+    githubStatusGetMock.mockResolvedValue({
+      connected: true,
+      has_repo_scope: true,
+      github_login: "octocat",
+      pr_authorship_mode: "user_preferred",
+      pr_draft_default: false,
+      account_requirement: "recommended",
+    });
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByText("Connected as @octocat")).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Disconnect GitHub account" }));
+    // Confirm the destructive action in the dialog.
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(githubDisconnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks the account optional and explains app authorship under app_only", async () => {
+    githubStatusGetMock.mockResolvedValue({
+      connected: false,
+      has_repo_scope: false,
+      pr_authorship_mode: "app_only",
+      pr_draft_default: false,
+      account_requirement: "optional",
+    });
+    renderWithProviders(<IntegrationsPage />);
+
+    // Wait for the github-status query to resolve so the requirement-specific
+    // copy (not the default "recommended" copy) has rendered.
+    expect(await screen.findByText(/PRs are authored by the 143 app/)).toBeInTheDocument();
+    // "Optional" also appears on other integration cards, so just assert presence.
+    expect(screen.getAllByText("Optional").length).toBeGreaterThan(0);
+  });
+
+  it("prompts a reconnect when the account credential is no longer usable", async () => {
+    githubStatusGetMock.mockResolvedValue({
+      connected: false,
+      has_repo_scope: false,
+      github_login: "octocat",
+      pr_authorship_mode: "user_required",
+      pr_draft_default: false,
+      account_requirement: "required",
+      needs_reconnect: true,
+    });
+    renderWithProviders(<IntegrationsPage />);
+
+    expect(await screen.findByRole("button", { name: "Reconnect GitHub account" })).toBeInTheDocument();
+  });
+
+  it("proactively prompts to connect the account before a repo transfer", async () => {
+    listGitHubRepositoriesMock.mockResolvedValue({
+      data: [
+        {
+          github_id: 222,
+          full_name: "other/api",
+          default_branch: "main",
+          private: true,
+          clone_url: "https://github.com/other/api.git",
+          installation_id: 12345,
+          status: "owned_by_other_org",
+          can_transfer: true,
+        },
+      ],
+      meta: {},
+    });
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage GitHub" }));
+    await screen.findByText("other/api");
+    expect(
+      screen.getByText(/Transferring a repo owned by another organization needs your GitHub account/),
+    ).toBeInTheDocument();
+  });
+
   it("keeps GitHub repository claiming controls inside the manage sidesheet", async () => {
     renderWithProviders(<IntegrationsPage />);
 
@@ -360,7 +462,7 @@ describe("IntegrationsPage", () => {
     expect(screen.queryByText("Available")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Claim" })).not.toBeInTheDocument();
 
-    const githubCard = screen.getByText("GitHub").closest("[data-testid='integration-card']");
+    const githubCard = screen.getByText("GitHub App").closest("[data-testid='integration-card']");
     expect(githubCard).not.toBeNull();
 
     const user = userEvent.setup();
