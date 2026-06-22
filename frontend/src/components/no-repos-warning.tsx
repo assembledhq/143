@@ -43,12 +43,12 @@ export function NoReposWarning({
   compact = false,
   asRow = false,
 }: NoReposWarningProps) {
-  const { data: integrationsResp } = useQuery({
+  const { data: integrationsResp, isPending: integrationsPending } = useQuery({
     queryKey: ["integrations"],
     queryFn: () => api.integrations.list(),
   });
 
-  const { data: reposResp } = useQuery({
+  const { data: reposResp, isPending: reposPending } = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
@@ -78,6 +78,11 @@ export function NoReposWarning({
   useEffect(() => {
     autoSyncIfNeeded(hasGitHub && !githubAppInstalled, hasRepos);
   }, [hasGitHub, githubAppInstalled, hasRepos, autoSyncIfNeeded]);
+
+  // Don't render anything until both queries have resolved. Otherwise hasGitHub
+  // defaults to false during loading and we briefly flash the "GitHub setup
+  // required" warning before the data reveals GitHub is actually connected.
+  if (integrationsPending || reposPending) return null;
 
   if (!hasGitHub) {
     if (!showDisconnectedState) return null;
