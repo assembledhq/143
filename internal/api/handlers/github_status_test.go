@@ -433,6 +433,44 @@ func TestGitHubStatusHandler_HandleConnectCallback_UsesStateScopedResumeCookie(t
 	require.Equal(t, secondResumeToken, parsed.Query().Get("resume_pr"), "callback should return the state-scoped resume token")
 }
 
+func TestGitHubStatusHandler_HandleConnectCallback_RedirectsToIntegrations(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	handler := NewGitHubStatusHandler(
+		&stubGHCredentialStore{}, &stubGHOrgReader{},
+		"test-client-id", "test-secret", "https://app.143.dev", "https://app.143.dev",
+	)
+	handler.appUserAuth = &stubGitHubAppUserAuthService{
+		exchangeCodeFunc: func(context.Context, string) (*models.GitHubAppUserConfig, error) {
+			return &models.GitHubAppUserConfig{
+				AccessToken:           "ghu_test",
+				TokenType:             "bearer",
+				ExpiresAt:             time.Now().Add(time.Hour),
+				RefreshToken:          "ghr_test",
+				RefreshTokenExpiresAt: time.Now().Add(30 * 24 * time.Hour),
+			}, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github/callback?state=ok&code=abc", nil)
+	req.AddCookie(&http.Cookie{Name: githubPRConnectStateCookie, Value: "ok"})
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.HandleConnectCallback(rr, req)
+
+	require.Equal(t, http.StatusTemporaryRedirect, rr.Code, "callback should redirect after successful auth")
+	loc := rr.Header().Get("Location")
+	parsed, parseErr := url.Parse(loc)
+	require.NoError(t, parseErr, "redirect location should parse")
+	require.Equal(t, "/settings/integrations", parsed.Path, "non-resume callback should return to the integrations page where the connect button lives")
+	require.Equal(t, "connected", parsed.Query().Get("github_pr"), "redirect should note successful GitHub PR auth")
+}
+
 func TestGitHubStatusHandler_GetStatus_Unauthorized(t *testing.T) {
 	t.Parallel()
 

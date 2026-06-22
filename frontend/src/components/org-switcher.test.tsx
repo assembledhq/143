@@ -84,6 +84,30 @@ describe("OrgSwitcher", () => {
     });
   });
 
+  it("adopts the server-resolved active org into sessionStorage on first load, without writing it server-side", async () => {
+    let setActiveOrgCalls = 0;
+    // Fresh tab: beforeEach cleared sessionStorage, so nothing is pinned yet.
+    mockMemberships([{ org_id: "org-1", org_name: "Acme", role: "admin" }], "org-1");
+    server.use(
+      http.post("/api/v1/auth/active-org", () => {
+        setActiveOrgCalls += 1;
+        return new HttpResponse(null, { status: 204 });
+      }),
+    );
+
+    renderWithProviders(<OrgSwitcher userEmail="alex@example.com" />);
+
+    // Once memberships resolve, the tab pins the server-resolved org so every
+    // subsequent request carries an explicit X-Active-Org-ID header instead of
+    // relying on the shared, sibling-tab-mutable last_org_id fallback.
+    await waitFor(() => {
+      expect(getActiveOrgId()).toBe("org-1");
+    });
+    // Adoption is strictly local: it must NOT POST /auth/active-org, which
+    // would mutate the cross-tab hint and drag sibling tabs to this org.
+    expect(setActiveOrgCalls).toBe(0);
+  });
+
   it("shows all memberships in the dropdown with a check on the active one", async () => {
     mockMemberships(
       [
@@ -626,7 +650,11 @@ describe("OrgSwitcher", () => {
       await userEvent.click(await screen.findByTestId("joinable-org-join-org-2"));
 
       expect(await screen.findByText("Joined Assembled")).toBeInTheDocument();
-      expect(getActiveOrgId()).toBeNull();
+      // Joining must not switch the active org to the joined org. The tab still
+      // adopts the server-resolved active org (org-1) on bootstrap, so the
+      // assertion is "not the joined org", not "nothing pinned".
+      expect(getActiveOrgId()).not.toBe("org-2");
+      expect(getActiveOrgId()).toBe("org-1");
     });
 
     it("a join rejected as NOT_ELIGIBLE surfaces an error toast", async () => {

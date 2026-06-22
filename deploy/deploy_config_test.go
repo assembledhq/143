@@ -164,6 +164,36 @@ func TestCLIDistributionRoutesProxyToAPI(t *testing.T) {
 	require.Contains(t, cliDistBlock, "port 8080", "CLI distribution routes must target the main API port")
 }
 
+// TestCaddyfilePromotedInPlaceNotRenamed pins the fix for the June 2026 "Caddy
+// bind-mount drift" incident: docker-compose.app.yml bind-mounts the Caddyfile
+// as a single file, and Docker pins single-file mounts to the inode at container
+// start. Promoting a new Caddyfile with `mv` swaps the inode, so the running
+// container keeps reading the old file and `caddy reload` is a silent no-op
+// ("config is unchanged"). stage_caddy_config_if_changed must overwrite the
+// live Caddyfile in place (cat > preserves the inode) so reloads actually apply.
+func TestCaddyfilePromotedInPlaceNotRenamed(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+
+	fn := extractShellFunction(t, deployText, "stage_caddy_config_if_changed", "stage_caddy_dockerfile_if_changed")
+	require.Contains(t, fn, `cat "$new_file" > "$cur_file"`,
+		"stage_caddy_config_if_changed must overwrite the live Caddyfile in place to preserve the bind-mounted inode")
+	require.NotContains(t, fn, `mv "$new_file" "$cur_file"`,
+		"stage_caddy_config_if_changed must not mv the staged Caddyfile over the live one — mv swaps the inode and the single-file bind mount keeps serving the old config")
+
+	// The in-place overwrite is not atomic, so the function must guard against
+	// truncating the live config to an empty/partial file: refuse an empty
+	// staged file and abort (exit) on a failed write rather than silently
+	// reporting "unchanged".
+	require.Contains(t, fn, `[ ! -s "$new_file" ]`,
+		"stage_caddy_config_if_changed must refuse to promote an empty staged Caddyfile before truncating the live config")
+	require.Contains(t, fn, "exit 1",
+		"stage_caddy_config_if_changed must abort the deploy on an empty staged file or failed write instead of leaving a corrupt live Caddyfile")
+}
+
 func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
 	t.Parallel()
 
@@ -233,6 +263,23 @@ func TestRoutineAppDeployLeavesUnchangedCaddyRunning(t *testing.T) {
     docker compose -f "$COMPOSE_FILE" build caddy`, "app deploys should not unconditionally rebuild Caddy because compose may recreate the Cloudflare-facing origin")
 }
 
+func TestAppDeployReconcilesCaddyWhenServiceConfigChanges(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, "caddy_service_config_fingerprint", "app deploy should fingerprint the caddy compose service block")
+	require.Contains(t, deployText, "compose_service_fingerprint /opt/143/docker-compose.app.yml caddy", "caddy service fingerprint should use the app compose caddy service block")
+	require.Contains(t, deployText, "caddy_service_config_changed", "caddy reconcile should track compose service config drift separately")
+	require.Contains(t, deployText, `|| [ "$caddy_service_config_changed" -eq 1 ]`, "caddy reconcile should recreate the service when compose wiring changes")
+
+	changedFn := extractShellFunction(t, deployText, "caddy_service_config_changed", "commit_caddy_service_config_fingerprint")
+	require.Contains(t, changedFn, `[ ! -f "$fp_file" ]`, "first deploy with service fingerprinting should reconcile Caddy once")
+	require.Contains(t, changedFn, `printf '%s\n' "$next" > "$fp_file.new"`, "service fingerprint should only be staged until Caddy reconciliation succeeds")
+}
+
 func TestWorkerProvisioningIncludesGitHubAppUserAuthSecrets(t *testing.T) {
 	t.Parallel()
 
@@ -298,7 +345,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.NoError(t, err, "test should read the deploy workflow")
 	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"`, "CI should use deploy-fleet's default app/worker role set for routine main-branch deploys")
 	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the artifact upload step can find per-host logs")
-	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v4`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
+	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v7`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
 
 	makefile, err := os.ReadFile("../Makefile")
 	require.NoError(t, err, "test should read Makefile")
@@ -519,7 +566,9 @@ func TestWorkerDeployPreflightTargetValidatesBlueGreenReadiness(t *testing.T) {
 
 	require.Contains(t, preflightText, "NODE_ID WORKER_PRIVATE_IP DB_HOST DB_PASSWORD", "preflight should validate required worker env values")
 	require.Contains(t, preflightText, "WORKER_BLUE_GREEN_PORT_START and WORKER_BLUE_GREEN_PORT_END must be numeric", "preflight should validate numeric blue/green port range")
-	require.Contains(t, preflightText, "SELECT COUNT(*) FROM preview_runtimes", "preflight should validate preview runtime endpoint ownership queries")
+	require.Contains(t, preflightText, "FROM preview_runtimes WHERE endpoint_url", "preflight should validate preview runtime endpoint ownership queries")
+	require.Contains(t, preflightText, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "preflight should treat node registry ownership as an endpoint blocker")
+	require.NotContains(t, preflightText, "last_heartbeat_at >= now() - interval '2 minutes'", "preflight should wait for node rows to be marked dead before reusing their preview endpoint")
 	require.Contains(t, preflightText, "No safe worker blue/green port found", "preflight should give an actionable message when routine deploy cannot find a safe endpoint")
 	require.Contains(t, preflightText, "Use DEPLOY_MODE=maintenance only for disruptive host/runtime/support-service changes", "preflight should preserve the routine-vs-maintenance operator contract")
 }
@@ -683,6 +732,8 @@ func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	require.Contains(t, deploy, "load_worker_endpoint_check_env", "synchronous worker deploy should load DB endpoint-check credentials before selecting a routine port")
 	require.Contains(t, deploy, "FROM preview_runtimes WHERE endpoint_url", "worker deploy should query active preview runtime endpoints before selecting a generation port")
 	require.Contains(t, deploy, "status IN ('starting', 'ready', 'draining')", "worker deploy should treat starting, ready, and draining preview runtimes as endpoint owners")
+	require.Contains(t, deploy, "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "worker deploy should query node registry endpoint ownership before selecting a generation port")
+	require.NotContains(t, deploy, "last_heartbeat_at >= now() - interval '2 minutes'", "worker deploy should wait for node rows to be marked dead before reusing advertised endpoints")
 	require.Contains(t, deploy, `find_free_worker_port "$worker_private_ip"`, "worker deploy should pass the worker private IP into port selection so endpoint URLs match runtime routing")
 	require.Contains(t, deploy, "refusing to reuse it", "worker deploy should fail closed when runtime endpoint ownership cannot be verified")
 	require.NotContains(t, deploy, "falling back to blocking worker drain", "routine worker deploy should not interrupt old workers when no extra blue/green port is configured")
@@ -1140,8 +1191,10 @@ esac
 	require.Contains(t, string(args), "run -i --rm", "worker endpoint ownership query should keep stdin open for dockerized psql")
 	require.Contains(t, string(args), "-v endpoint=http://100.96.213.15:8087", "worker endpoint ownership query should pass the checked endpoint as a psql variable")
 	require.NotContains(t, string(args), "-c", "worker endpoint ownership query should not use psql -c with psql variables")
-	require.Contains(t, string(stdin), "SELECT COUNT(*) FROM preview_runtimes", "worker endpoint ownership query should be sent to psql on stdin")
+	require.Contains(t, string(stdin), "FROM preview_runtimes WHERE endpoint_url", "worker endpoint ownership query should include preview runtime ownership")
 	require.Contains(t, string(stdin), "endpoint_url = :'endpoint'", "worker endpoint ownership query should use psql SQL-quoted variable interpolation")
+	require.Contains(t, string(stdin), "FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint'", "worker endpoint ownership query should include node registry ownership")
+	require.NotContains(t, string(stdin), "last_heartbeat_at >= now() - interval '2 minutes'", "worker endpoint ownership query should block active/draining node rows until recovery marks them dead")
 }
 
 func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {

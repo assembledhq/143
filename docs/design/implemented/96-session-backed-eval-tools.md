@@ -1,6 +1,6 @@
 # Design: Session-Backed Eval Tools
 
-> **Status:** Implemented with product hardening | **Last reviewed:** 2026-06-10
+> **Status:** Implemented with product hardening | **Last reviewed:** 2026-06-19
 
 ## Implementation Status
 
@@ -768,8 +768,9 @@ Current implementation:
   prove that both candidate commits exist;
 - creates a sandbox checkout to prove `solution_diff` exactly matches the
   normalized `base_commit_sha..solution_commit_sha` diff;
-- checks out the proposed solution commit and dry-runs every deterministic
-  `code_check` command before acceptance;
+- checks out the proposed solution commit, applies `.143/config.json`
+  dependency/bootstrap setup in the validation sandbox, and dry-runs every
+  deterministic `code_check` command before acceptance;
 - requires at least one deterministic `code_check` criterion before acceptance;
 - emits structured `validation_warnings` in the candidate payload while keeping
   legacy warning-code chips;

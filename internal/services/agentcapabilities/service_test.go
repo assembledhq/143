@@ -63,8 +63,28 @@ func TestServiceResolveForSessionUsesRecommendedDefaultsWhenNoPolicyExists(t *te
 	require.Equal(t, []models.AgentCapabilityID{
 		models.AgentCapabilityRepoContext,
 		models.AgentCapabilityPRHistory,
+		models.AgentCapabilityReviewFeedback,
+		models.AgentCapabilityCIHistory,
 		models.AgentCapabilityPublishing,
-	}, snapshotIDs(snapshot), "manual repository sessions should get recommended low-friction defaults")
+	}, snapshotIDs(snapshot), "manual repository sessions should get recommended commonly-used defaults")
+	require.NotContains(t, snapshotIDs(snapshot), models.AgentCapabilityIssueSources,
+		"manual sessions should not get issue sources by default")
+}
+
+func TestServiceResolveForSessionAddsIssueSourcesForTriggeredSessions(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(&memoryPolicyStore{})
+	repoID := uuid.New()
+
+	snapshot, err := svc.ResolveForSession(context.Background(), ResolveInput{
+		OrgID:         uuid.New(),
+		RepositoryID:  &repoID,
+		SessionOrigin: models.SessionOriginIssueTrigger,
+	})
+	require.NoError(t, err, "triggered repository session should resolve default snapshot")
+	require.Contains(t, snapshotIDs(snapshot), models.AgentCapabilityIssueSources,
+		"issue-triggered sessions should get issue sources scoped to that origin")
 }
 
 func TestServiceRequestGrantCreatesHumanInputApproval(t *testing.T) {

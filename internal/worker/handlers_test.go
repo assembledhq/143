@@ -126,6 +126,20 @@ func (workerLinearMissingIntegrationReader) GetByOrgAndProvider(context.Context,
 	return models.Integration{}, pgx.ErrNoRows
 }
 
+type fakeSlackRoutingLLM struct {
+	response string
+	err      error
+	calls    int
+}
+
+func (l *fakeSlackRoutingLLM) Complete(_ context.Context, _, _ string) (string, error) {
+	l.calls++
+	if l.err != nil {
+		return "", l.err
+	}
+	return l.response, nil
+}
+
 type fakeGitHubOrgRosterService struct {
 	members []ghservice.OrgMember
 	err     error
@@ -800,6 +814,7 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 			},
 		},
 		slackbotsvc.SlackRoutingModeAnswerOnly,
+		true,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should let users correct channel repository defaults")
@@ -807,6 +822,35 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_preview_target"), "ack should offer a preview target selector when preview context is missing")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_pull_request"), "ack should offer a PR selector when PR context is missing")
 	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
+}
+
+func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	session := &models.Session{ID: uuid.New(), OrgID: orgID}
+
+	blocks := slackSessionAckBlocks(
+		context.Background(),
+		nil,
+		&Services{FrontendURL: "https://143.test"},
+		zerolog.Nop(),
+		orgID,
+		uuid.New(),
+		"T123",
+		"C123",
+		session,
+		"Starting a 143 session",
+		slackbotsvc.SlackSessionContextSummary{
+			RepositoryName: "acme/api",
+			Branch:         "main",
+		},
+		slackbotsvc.SlackRoutingModeStartWork,
+		false,
+	)
+
+	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should still let users correct channel repository defaults")
+	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "ack should hide start-work action once work is already queued")
 }
 
 func TestSlackSessionAckBlocksSuppressStartWorkForAutoRouting(t *testing.T) {
@@ -832,6 +876,7 @@ func TestSlackSessionAckBlocksSuppressStartWorkForAutoRouting(t *testing.T) {
 			Branch:         "main",
 		},
 		slackbotsvc.SlackRoutingModeAuto,
+		false,
 	)
 
 	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "auto-routed Slack acks should not show a Start work escalation while the session is already running")
@@ -867,17 +912,178 @@ func TestShouldEnqueueSlackStartedRunRequiresRepository(t *testing.T) {
 	t.Parallel()
 
 	session := &models.Session{ID: uuid.New(), OrgID: uuid.New()}
-	resolved := slackbotsvc.SlackContextResolveResult{}
+	resolved := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeStartWork}
 
 	require.False(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should not enqueue without a repository")
+
+	require.True(t, shouldEnqueueSlackStartedRun(session, slackbotsvc.SlackContextResolveResult{
+		RoutingMode: slackbotsvc.SlackRoutingModeAnswerOnly,
+	}), "Slack-started answer-only sessions should enqueue without a repository so Slack receives an answer")
 
 	repoID := uuid.New()
 	session.RepositoryID = &repoID
 
 	require.True(t, shouldEnqueueSlackStartedRun(session, resolved), "Slack-started durable work should enqueue once repository context exists and no blocking context is missing")
 	require.False(t, shouldEnqueueSlackStartedRun(session, slackbotsvc.SlackContextResolveResult{
-		Missing: []slackbotsvc.MissingSlackContext{{Kind: "pull_request"}},
+		RoutingMode: slackbotsvc.SlackRoutingModeStartWork,
+		Missing:     []slackbotsvc.MissingSlackContext{{Kind: "pull_request"}},
 	}), "Slack-started durable work should remain blocked when other required context is missing")
+}
+
+func TestResolveSlackAutoRoutingWithClassifier(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		text             string
+		llmResponse      string
+		expectedRouting  slackbotsvc.SlackRoutingMode
+		expectedLLMCalls int
+	}{
+		{
+			name:             "question classifies as answer only",
+			text:             "<@U143> does our slack bot post notifications when a job finishes?",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.93,"reason":"question asking for information"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "implementation request classifies as start work",
+			text:             "<@U143> fix the Slack final response notification",
+			llmResponse:      `{"routing_mode":"start_work","confidence":0.91,"reason":"request to modify behavior"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "invalid classifier response falls back conservatively",
+			text:             "<@U143> does our slack bot post notifications when a job finishes?",
+			llmResponse:      `not json`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "invalid classifier response keeps question with work verb answer only",
+			text:             "<@U143> does this update the Slack thread when the job finishes?",
+			llmResponse:      `not json`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeAnswerOnly,
+			expectedLLMCalls: 1,
+		},
+		{
+			name:             "explicit start override skips classifier",
+			text:             "<@U143> start fix the Slack final response notification",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.99,"reason":"should not be used"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			classifier := &fakeSlackRoutingLLM{response: tt.llmResponse}
+			resolved := slackbotsvc.SlackContextResolveResult{RoutingMode: slackbotsvc.SlackRoutingModeAuto}
+			actual := resolveSlackAutoRouting(context.Background(), classifier, zerolog.Nop(), tt.text, resolved)
+
+			require.Equal(t, tt.expectedRouting, actual.RoutingMode, "Slack auto routing should resolve to expected mode")
+			require.Equal(t, tt.expectedLLMCalls, classifier.calls, "classifier should only be called for auto routing without explicit override")
+		})
+	}
+}
+
+func TestSlackRoutingManifestRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	inputManifest := slackRoutingInputManifest(nil, slackbotsvc.SlackRoutingModeAnswerOnly, "question asking for information")
+	mode, ok := slackRoutingModeFromInputManifest(inputManifest)
+
+	require.True(t, ok, "input manifest should expose persisted Slack routing mode")
+	require.Equal(t, slackbotsvc.SlackRoutingModeAnswerOnly, mode, "input manifest should preserve answer-only routing")
+	require.JSONEq(t, `{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`, string(inputManifest), "input manifest should store Slack routing metadata under the Slack namespace")
+}
+
+func TestRefreshSlackLinkedSessionRoutingPersistsExplicitStartOverride(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	previousManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"initial question"}}`)
+	updatedManifest := slackRoutingInputManifest(previousManifest, slackbotsvc.SlackRoutingModeStartWork, "explicit Slack routing command")
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "input_manifest", updatedManifest)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET input_manifest = @input_manifest[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	classifier := &fakeSlackRoutingLLM{response: `{"routing_mode":"answer_only","confidence":0.99,"reason":"should not be used"}`}
+	session := models.Session{ID: sessionID, OrgID: orgID, InputManifest: previousManifest}
+	refreshed, routingMode, err := refreshSlackLinkedSessionRouting(
+		context.Background(),
+		&Stores{Sessions: db.NewSessionStore(mock)},
+		classifier,
+		zerolog.Nop(),
+		orgID,
+		"T123",
+		"C123",
+		"<@U143> start fix the Slack final response notification",
+		session,
+	)
+
+	require.NoError(t, err, "linked Slack routing refresh should persist explicit start overrides")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, routingMode, "linked Slack replies should switch from answer-only to start-work on explicit start")
+	require.Equal(t, 0, classifier.calls, "explicit start override should not call the classifier")
+	mode, ok := slackRoutingModeFromInputManifest(refreshed.InputManifest)
+	require.True(t, ok, "refreshed session manifest should include Slack routing metadata")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, mode, "refreshed session manifest should persist start-work routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "linked Slack routing refresh should update the session manifest")
+}
+
+func TestRefreshSlackLinkedSessionRoutingPersistsClassifierStartWork(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	previousManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"initial question"}}`)
+	updatedManifest := slackRoutingInputManifest(previousManifest, slackbotsvc.SlackRoutingModeStartWork, "request to modify behavior")
+	row := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumnValue(row, "input_manifest", updatedManifest)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET input_manifest = @input_manifest[\s\S]+WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL[\s\S]+RETURNING`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+
+	classifier := &fakeSlackRoutingLLM{response: `{"routing_mode":"start_work","confidence":0.91,"reason":"request to modify behavior"}`}
+	session := models.Session{ID: sessionID, OrgID: orgID, InputManifest: previousManifest}
+	refreshed, routingMode, err := refreshSlackLinkedSessionRouting(
+		context.Background(),
+		&Stores{Sessions: db.NewSessionStore(mock)},
+		classifier,
+		zerolog.Nop(),
+		orgID,
+		"T123",
+		"C123",
+		"<@U143> fix the Slack final response notification",
+		session,
+	)
+
+	require.NoError(t, err, "linked Slack routing refresh should persist classifier decisions")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, routingMode, "linked Slack replies should switch to start-work when auto-classified as work")
+	require.Equal(t, 1, classifier.calls, "auto-routed linked Slack replies should call the classifier")
+	mode, ok := slackRoutingModeFromInputManifest(refreshed.InputManifest)
+	require.True(t, ok, "refreshed session manifest should include Slack routing metadata")
+	require.Equal(t, slackbotsvc.SlackRoutingModeStartWork, mode, "refreshed session manifest should persist classifier start-work routing")
+	require.NoError(t, mock.ExpectationsWereMet(), "linked Slack classifier refresh should update the session manifest")
 }
 
 func TestPostSlackMessageWithFallback_InvalidBlocksRetriesPlainTextAndRecordsFallback(t *testing.T) {
@@ -4946,6 +5152,11 @@ func TestUserFacingPRError(t *testing.T) {
 			want: "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session.",
 		},
 		{
+			name: "branch diverged",
+			err:  ghservice.ErrPushBranchDiverged,
+			want: "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again.",
+		},
+		{
 			name: "sandbox auth unavailable",
 			err:  fmt.Errorf("open sandbox auth socket: %w", ghservice.ErrSandboxAuthUnavailable),
 			want: "143 could not prepare GitHub credentials for this push.",
@@ -4977,6 +5188,7 @@ func TestShouldDeadLetterPRError(t *testing.T) {
 		{name: "snapshot not captured is terminal", err: ghservice.ErrSnapshotNotCaptured, want: true},
 		{name: "snapshot unavailable is terminal", err: ghservice.ErrSnapshotUnavailable, want: true},
 		{name: "no changes is terminal", err: ghservice.ErrNoChanges, want: true},
+		{name: "branch diverged is terminal", err: ghservice.ErrPushBranchDiverged, want: true},
 		{name: "generic error retries", err: errors.New("boom"), want: false},
 	}
 
@@ -5379,6 +5591,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 	userID := uuid.New()
 	jobID := uuid.New()
 	workerNodeID := "worker-a"
+	snapshotKey := "snapshots/session.tar.zst"
 	now := time.Now()
 	session := models.Session{
 		ID:                sessionID,
@@ -5386,6 +5599,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 3,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5398,10 +5612,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_CacheModeEnqueuesLowPriorityJob(t *
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
@@ -5475,12 +5693,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 	repoID := uuid.New()
 	userID := uuid.New()
 	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
 	session := models.Session{
 		ID:                sessionID,
 		OrgID:             orgID,
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 5,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5493,7 +5713,7 @@ func TestEnqueueSessionPreviewPrewarmOnStart_RecordsCapacitySkip(t *testing.T) {
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeCache), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
@@ -5524,12 +5744,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	userID := uuid.New()
 	classifyJobID := uuid.New()
 	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
 	session := models.Session{
 		ID:                sessionID,
 		OrgID:             orgID,
 		RepositoryID:      &repoID,
 		TriggeredByUserID: &userID,
 		WorkspaceRevision: 4,
+		SnapshotKey:       &snapshotKey,
 	}
 
 	mock.ExpectQuery("SELECT id, name, settings").
@@ -5542,10 +5764,14 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
-			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, true, true, userID, now, now))
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
 	mock.ExpectQuery("SELECT COUNT").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
 	mock.ExpectQuery("SELECT EXISTS").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
@@ -5562,6 +5788,115 @@ func TestEnqueueSessionPreviewPrewarmOnStart_SmartModeEnqueuesClassifier(t *test
 	}, zerolog.Nop(), session)
 
 	require.NoError(t, mock.ExpectationsWereMet(), "smart-mode session-start prewarm should enqueue a classifier job")
+}
+
+func TestEnqueueSessionPreviewPostTurnClassifier_SkipsWhenUserPreviewAlreadyActive(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Previews = db.NewPreviewStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
+	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(7))
+	setWorkerSessionColumn(sessionRow, "status", string(models.SessionStatusIdle))
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerPreviewInstanceColumns()).
+			AddRow(newWorkerPreviewInstanceRow(previewID, sessionID, orgID, userID, now)...))
+
+	enqueueSessionPreviewPostTurnClassifier(context.Background(), stores, &Services{
+		PreviewCachePrewarmEnabled:  true,
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "post-turn classifier should skip when a user preview is already active")
+}
+
+func TestEnqueueSessionPreviewWarmBuildIfCandidate_TargetsCacheLocalWorkerWithoutLiveSession(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.Organizations = db.NewOrganizationStore(mock)
+	stores.Previews = db.NewPreviewStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	userID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snapshots/session.tar.zst"
+	cacheWorkerID := "worker-cache"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
+	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
+	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(8))
+	setWorkerSessionColumn(sessionRow, "status", string(models.SessionStatusIdle))
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("SELECT id, org_id, repository_id, auto_mode").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerRepositoryPreviewPolicyColumns()).
+			AddRow(uuid.New(), orgID, repoID, string(models.PreviewAutoModeWarm), string(models.PreviewSessionPrewarmModeSmart), false, false, true, true, "", userID, now, now))
+	mock.ExpectQuery("SELECT .+ FROM session_preview_prewarm_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "decided", nil, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+	mock.ExpectQuery("SELECT id, name, settings").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerOrganizationColumns()).
+			AddRow(orgID, "Assembled", json.RawMessage(`{"preview_session_prewarm_max_active":2}`), now, now))
+	mock.ExpectExec("UPDATE session_preview_prewarm_runs[\\s\\S]+SET status = 'failed'").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("WITH fresh_workers").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"fresh_workers", "workers_with_slots", "live_sandboxes", "reserved_sandboxes", "max_sandboxes"}).
+			AddRow(1, 1, 1, 0, 4))
+	mock.ExpectQuery("INSERT INTO session_preview_prewarm_runs").
+		WithArgs(workerAnyArgs(18)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "queued", nil, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+	mock.ExpectQuery("SELECT cache.worker_node_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id"}).AddRow(cacheWorkerID))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "preview", models.JobTypeSessionPreviewWarmBuild, pgxmock.AnyArg(), -49, pgxmock.AnyArg(), &cacheWorkerID).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectQuery("INSERT INTO session_preview_prewarm_runs").
+		WithArgs(workerAnyArgs(18)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionPreviewPrewarmRunColumns()).
+			AddRow(uuid.New(), orgID, repoID, sessionID, int64(8), "digest", string(models.PreviewSessionPrewarmModeSmart), string(models.PreviewSpeculativeDecisionWarmCandidate), float64(0.9), "ui_change", "Likely UI.", "queued", &jobID, nil, nil, json.RawMessage(`{}`), "", now, now, nil, nil, nil))
+
+	enqueueSessionPreviewWarmBuildIfCandidate(context.Background(), stores, &Services{
+		PreviewCachePrewarmPriority: -50,
+	}, zerolog.Nop(), orgID, sessionID, "post_turn_classifier")
+
+	require.NoError(t, mock.ExpectationsWereMet(), "warm build should target a cache-local worker when there is no live session worker")
 }
 
 type fakeSessionPrewarmClassifier struct {
@@ -5595,6 +5930,8 @@ func TestSessionPreviewPrewarmClassifyHandler_CacheDecisionEnqueuesPrewarm(t *te
 	setWorkerSessionColumn(sessionRow, "repository_id", &repoID)
 	setWorkerSessionColumn(sessionRow, "triggered_by_user_id", &userID)
 	setWorkerSessionColumn(sessionRow, "workspace_revision", int64(9))
+	snapshotKey := "snapshots/session.tar.zst"
+	setWorkerSessionColumn(sessionRow, "snapshot_key", &snapshotKey)
 	diff := "diff --git a/frontend/src/app/page.tsx b/frontend/src/app/page.tsx\n--- a/frontend/src/app/page.tsx\n+++ b/frontend/src/app/page.tsx\n" +
 		"diff --git a/internal/api/server.go b/internal/api/server.go\n--- a/internal/api/server.go\n+++ b/internal/api/server.go\n"
 	setWorkerSessionColumn(sessionRow, "diff", &diff)
@@ -5735,12 +6072,58 @@ func TestSessionPreviewPrewarmUntrustedFork(t *testing.T) {
 	}
 }
 
+func TestSessionPreviewPrewarmBlockedByUntrustedFork(t *testing.T) {
+	t.Parallel()
+
+	untrustedSession := models.Session{InputManifest: json.RawMessage(`{"github":{"pull_request":{"head":{"repo":{"fork":true}}}}}`)}
+	trustedSession := models.Session{InputManifest: json.RawMessage(`{"github":{"pull_request":{"head":{"repo":{"fork":false}}}}}`)}
+
+	tests := []struct {
+		name     string
+		session  models.Session
+		policy   *models.RepositoryPreviewPolicy
+		expected bool
+	}{
+		{
+			name:     "blocks untrusted fork by default",
+			session:  untrustedSession,
+			policy:   nil,
+			expected: true,
+		},
+		{
+			name:     "blocks untrusted fork when policy disallows it",
+			session:  untrustedSession,
+			policy:   &models.RepositoryPreviewPolicy{SessionPrewarmUntrustedFork: false},
+			expected: true,
+		},
+		{
+			name:     "allows untrusted fork when policy explicitly allows it",
+			session:  untrustedSession,
+			policy:   &models.RepositoryPreviewPolicy{SessionPrewarmUntrustedFork: true},
+			expected: false,
+		},
+		{
+			name:     "allows trusted branch regardless of policy",
+			session:  trustedSession,
+			policy:   nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, sessionPreviewPrewarmBlockedByUntrustedFork(tt.session, tt.policy), "fork policy helper should require explicit opt-in only for untrusted fork sessions")
+		})
+	}
+}
+
 func workerOrganizationColumns() []string {
 	return []string{"id", "name", "settings", "created_at", "updated_at"}
 }
 
 func workerRepositoryPreviewPolicyColumns() []string {
-	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "updated_by_user_id", "created_at", "updated_at"}
+	return []string{"id", "org_id", "repository_id", "auto_mode", "session_prewarm_mode", "session_prewarm_untrusted_fork", "pr_preview_surfaces_enabled", "github_pr_comment_enabled", "github_commit_status_enabled", "preview_config_name", "updated_by_user_id", "created_at", "updated_at"}
 }
 
 func workerRepositoryColumns() []string {
@@ -5753,6 +6136,29 @@ func workerRepositoryColumns() []string {
 func workerSessionPreviewPrewarmRunColumns() []string {
 	return []string{
 		"id", "org_id", "repository_id", "session_id", "workspace_revision", "config_digest", "mode", "decision", "confidence", "reason", "explanation", "status", "job_id", "preview_id", "preview_group_id", "capacity_snapshot", "error", "created_at", "updated_at", "started_at", "completed_at", "panel_opened_at",
+	}
+}
+
+func workerPreviewInstanceColumns() []string {
+	return []string{
+		"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
+		"provider", "worker_node_id", "preview_handle", "primary_service", "port",
+		"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
+		"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
+		"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+		"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at",
+		"runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	}
+}
+
+func newWorkerPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, now time.Time) []any {
+	return []any{
+		previewID, sessionID, nil, orgID, userID, "bootstrap", "web", string(models.PreviewStatusReady),
+		"docker", "worker-a", "handle", "web", 3000,
+		"digest", "", now, now.Add(time.Hour), nil,
+		"/", 512, 500, 10240, json.RawMessage(`{}`), json.RawMessage(`{}`),
+		"ready", nil, "", now, now, nil, nil,
+		nil, nil, nil, nil, "", "", false,
 	}
 }
 
@@ -9188,6 +9594,121 @@ func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T)
 	require.NotNil(t, retryable.RetryAfter, "sibling sandbox race retries should use a short deliberate backoff")
 	require.ErrorIs(t, retryable.Err, agent.ErrSandboxSiblingRace, "the wrapped error must preserve the ErrSandboxSiblingRace sentinel")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestRunPRReadinessHandler_DeadLetterMarksReadinessFailed(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.PRReadiness = db.NewPRReadinessStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	readinessID := uuid.New()
+
+	mock.ExpectQuery("FROM pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("database unavailable"))
+	mock.ExpectExec("UPDATE pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
+
+	err := handler(ctx, "run_pr_readiness", payload)
+	require.Error(t, err, "handler should surface the readiness load failure")
+
+	jobctx.RunDeadLetterHooks(ctx, errors.New("retryable job timed out after 8m0s"))
+
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should mark the readiness run failed")
+}
+
+func TestRunPRReadinessHandler_RunningReviewLoopBypassesRetryWindow(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.PRReadiness = db.NewPRReadinessStore(mock)
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	readinessID := uuid.New()
+	loopID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/org/session/workspace.tar.zst"
+
+	mock.ExpectQuery("FROM pr_readiness_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "status",
+			"evaluated_workspace_revision", "evaluated_snapshot_key", "summary", "review_packet",
+			"triggered_by_user_id", "started_at", "completed_at", "created_at", "updated_at",
+		}).AddRow(readinessID, orgID, sessionID, nil, models.PRReadinessRunStatusRunning, int64(2), &snapshotKey, "Queued", nil, nil, now, nil, now, now))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 2, nil, &snapshotKey)...,
+		))
+	mock.ExpectQuery("FROM session_review_loops").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusRunning,
+			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 0,
+			true, nil, nil, &snapshotKey, &snapshotKey, nil, nil, now, nil,
+		))
+
+	handler := newRunPRReadinessHandler(stores, &Services{}, zerolog.Nop())
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","readiness_id":"` + readinessID.String() + `"}`)
+
+	err := handler(context.Background(), "run_pr_readiness", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "running review loop should defer readiness with a retryable error")
+	require.True(t, retryable.BypassMaxRetryDuration, "review-loop waits must not spend the generic retryable job window")
+	require.NotNil(t, retryable.RetryAfter, "review-loop waits should use a short fixed retry delay")
+	require.Equal(t, prePRReviewRetryDelay, *retryable.RetryAfter, "review-loop waits should use the PR review retry delay")
+	require.ErrorContains(t, retryable.Err, "PR readiness review loop is still running", "retryable reason should explain the review-loop wait")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestEnsureReadinessReviewLoop_UsesTerminalLoopForSnapshot(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.ReviewLoops = db.NewSessionReviewLoopStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	loopID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snapshots/org/session/workspace.tar.zst"
+	latestSummary := "Review still needs a decision."
+	session := models.Session{ID: sessionID, OrgID: orgID, AgentType: models.AgentTypeCodex}
+
+	mock.ExpectQuery("FROM session_review_loops").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
+			loopID, orgID, sessionID, nil, &threadID, models.ReviewLoopStatusNeedsHumanDecision,
+			models.ReviewLoopSourceManual, models.AgentTypeCodex, 1, models.ReviewLoopFixModeMinimal, 1,
+			true, nil, nil, &snapshotKey, &snapshotKey, &latestSummary, nil, now, &now,
+		))
+
+	reviews := &stubWorkerReviewLoops{}
+	latest, reviewReady, err := ensureReadinessReviewLoop(context.Background(), stores, &Services{ReviewLoops: reviews}, session, snapshotKey)
+
+	require.NoError(t, err, "terminal review loop lookup should not fail")
+	require.True(t, reviewReady, "terminal review loops for the target snapshot should be ready for readiness evaluation")
+	require.NotNil(t, latest, "the terminal review loop should be returned as readiness evidence")
+	require.Equal(t, models.ReviewLoopStatusNeedsHumanDecision, latest.Status, "readiness should evaluate the existing non-clean review result")
+	require.Empty(t, reviews.starts, "readiness must not start another review loop after a terminal loop exists for the snapshot")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

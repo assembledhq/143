@@ -18,6 +18,8 @@ import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
 
+const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+
 export default function PullRequestPreviewPage({
   params,
 }: {
@@ -61,6 +63,12 @@ export function PullRequestPreviewContent({
       queryClient.setQueryData(queryKey, response);
     },
   });
+  const startPullRequest = useMutation({
+    mutationFn: () => api.previews.getPullRequest(owner, repo, number, { intent: "open" }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(queryKey, response);
+    },
+  });
   const restart = useMutation({
     mutationFn: (id: string) => api.previews.restart(id),
     onSuccess: (response) => {
@@ -71,25 +79,30 @@ export function PullRequestPreviewContent({
   const preview = previewQuery.data?.data;
   const title = `${owner}/${repo}#${number}`;
   const status = preview?.status ? formatPreviewStatus(preview.status) : "Loading";
-  const canStartLatest = preview?.target_id;
+  const targetId = previewTargetId(preview?.target_id);
   const isExpired = preview?.status === "expired";
   const launch = preview?.launch;
   const launchState = launchStateCopy(preview);
   const launchSessionShouldOpen = launchRequested || launchSessionActive;
   const showStartAction =
-    canStartLatest &&
-    (!launch || launch.action === "start" || launch.action === "start_latest" || launch.action === "resume");
+    launch?.action === "start" ||
+    (Boolean(targetId) && (launch?.action === "start_latest" || launch?.action === "resume"));
   const safePreviewURL = safeExternalUrl(preview?.preview_url);
 
   useEffect(() => {
     if (!preview || !launchSessionShouldOpen || !launch?.auto_open) return;
-    if (startLatest.isPending || restart.isPending) return;
+    if (startLatest.isPending || startPullRequest.isPending || restart.isPending) return;
 
-    if ((launch.action === "start" || launch.action === "start_latest" || launch.action === "resume") && preview.target_id) {
-      const key = `${launch.action}:${preview.target_id}:${preview.latest_commit_sha ?? preview.commit_sha ?? ""}`;
+    if (launch.action === "start" || launch.action === "start_latest" || launch.action === "resume") {
+      const startTargetId = previewTargetId(preview.target_id);
+      const key = `${launch.action}:${startTargetId ?? "pull-request"}:${preview.latest_commit_sha ?? preview.commit_sha ?? ""}`;
       if (autoActionKeyRef.current === key) return;
       autoActionKeyRef.current = key;
-      startLatest.mutate(preview.target_id);
+      if (startTargetId) {
+        startLatest.mutate(startTargetId);
+      } else if (launch.action === "start") {
+        startPullRequest.mutate();
+      }
       return;
     }
 
@@ -106,6 +119,7 @@ export function PullRequestPreviewContent({
     preview,
     restart,
     startLatest,
+    startPullRequest,
   ]);
 
   useEffect(() => {
@@ -132,9 +146,15 @@ export function PullRequestPreviewContent({
   ]);
 
   const handleStartLatest = () => {
-    if (!preview?.target_id) return;
     setLaunchSessionActive(true);
-    startLatest.mutate(preview.target_id);
+    const startTargetId = previewTargetId(preview?.target_id);
+    if (startTargetId) {
+      startLatest.mutate(startTargetId);
+      return;
+    }
+    if (launch?.action === "start") {
+      startPullRequest.mutate();
+    }
   };
 
   const handleRetry = () => {
@@ -298,10 +318,10 @@ export function PullRequestPreviewContent({
                       type="button"
                       variant={launch?.action === "start_latest" || launch?.action === "start" || launch?.action === "resume" ? "default" : "outline"}
                       onClick={handleStartLatest}
-                      disabled={startLatest.isPending}
+                      disabled={startLatest.isPending || startPullRequest.isPending}
                     >
                       <GitBranch className="h-4 w-4" />
-                      {startLatest.isPending ? "Starting..." : launchStartLabel(launch?.action, launch?.primary_label)}
+                      {startLatest.isPending || startPullRequest.isPending ? "Starting..." : launchStartLabel(launch?.action, launch?.primary_label)}
                     </Button>
                   ) : null}
                   {preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" ? (
@@ -324,6 +344,11 @@ export function PullRequestPreviewContent({
       </div>
     </PageContainer>
   );
+}
+
+function previewTargetId(id: string | undefined): string | null {
+  if (!id || id === ZERO_UUID) return null;
+  return id;
 }
 
 function launchStartLabel(action: NonNullable<BranchPreviewResponse["launch"]>["action"] | undefined, label?: string): string {

@@ -11,7 +11,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import {
   Eye,
-  GitPullRequest,
   HelpCircle,
   KeyRound,
   MonitorPlay,
@@ -255,357 +254,98 @@ function AutoPreviewSection() {
   const policies = policiesQuery.data?.data ?? [];
 
   return (
-    <section className="space-y-4" aria-labelledby="auto-preview-heading">
+    <section className="space-y-4" aria-labelledby="previews-heading">
       <div className="space-y-1">
         <h2
-          id="auto-preview-heading"
+          id="previews-heading"
           className="text-sm font-semibold text-foreground"
         >
-          Auto-preview
+          Previews
         </h2>
         <p className="text-xs text-muted-foreground">
-          Build previews for open pull requests. Warm mode hibernates after a
-          successful build so the PR link resumes quickly.
+          For each repository: build previews for open pull requests, then
+          publish their links to GitHub. Warm mode hibernates after a successful
+          build so the PR link resumes quickly.
         </p>
       </div>
 
-      <div className="overflow-hidden rounded-md border border-border">
-        <Table>
-          <TableHeader className="hidden md:table-header-group">
-            <TableRow>
-              <TableHead>Repository</TableHead>
-              <TableHead>Mode</TableHead>
-              <TableHead>Session Prewarm</TableHead>
-              <TableHead>Open PRs</TableHead>
-              <TableHead>Updated</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {policiesQuery.isLoading ? (
-              <TableRow>
-                <TableCell
-                  colSpan={5}
-                  className="py-6 text-sm text-muted-foreground"
-                >
-                  Loading preview policies...
-                </TableCell>
-              </TableRow>
-            ) : policies.length ? (
-              policies.map((policy) => (
-                <TableRow
-                  key={policy.repository_id}
-                  className="block border-b p-3 md:table-row md:p-0"
-                >
-                  <TableCell className="block px-0 py-1 md:table-cell md:px-4 md:py-3">
-                    <div className="flex items-center gap-2 font-medium text-foreground">
-                      <MonitorPlay className="h-4 w-4 text-muted-foreground" />
-                      {policy.repository_full_name}
-                    </div>
-                  </TableCell>
-                  <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
-                    <ToggleGroup
-                      type="single"
-                      value={policy.auto_mode}
-                      onValueChange={(value) => {
-                        if (!value || value === policy.auto_mode) return;
-                        policyMutation.mutate({
-                          repositoryId: policy.repository_id,
-                          body: { auto_mode: value as PreviewPolicySummary["auto_mode"] },
-                        });
-                      }}
-                      className="justify-start"
-                    >
-                      <ToggleGroupItem
-                        value="off"
-                        aria-label={`Turn off auto-preview for ${policy.repository_full_name}`}
-                      >
-                        Off
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value="warm"
-                        aria-label={`Use warm auto-preview for ${policy.repository_full_name}`}
-                      >
-                        Warm
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value="on"
-                        aria-label={`Keep auto-preview on for ${policy.repository_full_name}`}
-                      >
-                        On
-                      </ToggleGroupItem>
-                    </ToggleGroup>
-                  </TableCell>
-                  <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
-                    <ToggleGroup
-                      type="single"
-                      value={policy.session_prewarm_mode}
-                      onValueChange={(value) => {
-                        if (
-                          !value ||
-                          value === policy.session_prewarm_mode ||
-                          !sessionPrewarmEnabled
-                        ) {
-                          return;
+      {policiesQuery.isLoading ? (
+        <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
+          Loading preview policies...
+        </div>
+      ) : policies.length ? (
+        <div className="space-y-3">
+          {policies.map((policy) => (
+            <RepoPreviewCard
+              key={policy.repository_id}
+              policy={policy}
+              sessionPrewarmEnabled={sessionPrewarmEnabled}
+              selectedPreviewConfig={
+                selectedPreviewConfigs[policy.repository_id] ||
+                policy.preview_config_name ||
+                policy.preview_config_default_name ||
+                policy.preview_config_names?.[0] ||
+                ""
+              }
+              onSelectPreviewConfig={(value) => {
+                // Optimistically reflect the choice, then persist it so both
+                // auto-built PR previews and Test preview use this profile.
+                const previous = selectedPreviewConfigs[policy.repository_id];
+                setSelectedPreviewConfigs((current) => ({
+                  ...current,
+                  [policy.repository_id]: value,
+                }));
+                policyMutation.mutate(
+                  {
+                    repositoryId: policy.repository_id,
+                    body: { preview_config_name: value },
+                  },
+                  {
+                    // Revert the optimistic selection if the save fails, so the
+                    // dropdown never shows an unpersisted profile.
+                    onError: () =>
+                      setSelectedPreviewConfigs((current) => {
+                        const next = { ...current };
+                        if (previous === undefined) {
+                          delete next[policy.repository_id];
+                        } else {
+                          next[policy.repository_id] = previous;
                         }
-                        policyMutation.mutate({
-                          repositoryId: policy.repository_id,
-                          body: {
-                            session_prewarm_mode:
-                              value as PreviewPolicySummary["session_prewarm_mode"],
-                          },
-                        });
-                      }}
-                      className="justify-start"
-                      disabled={!sessionPrewarmEnabled}
-                    >
-                      <ToggleGroupItem
-                        value="off"
-                        aria-label={`Turn off session prewarm for ${policy.repository_full_name}`}
-                      >
-                        Off
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value="cache"
-                        aria-label={`Use cache-only session prewarm for ${policy.repository_full_name}`}
-                      >
-                        Cache only
-                      </ToggleGroupItem>
-                      <ToggleGroupItem
-                        value="smart"
-                        aria-label={`Use smart session prewarm for ${policy.repository_full_name}`}
-                      >
-                        Smart
-                      </ToggleGroupItem>
-                    </ToggleGroup>
-                    {!sessionPrewarmEnabled ? (
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Set speculative preview slots above 0 to enable session
-                        prewarm.
-                      </p>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="block px-0 py-1 text-sm md:table-cell md:px-4 md:py-3">
-                    <span className="mr-2 font-medium md:hidden">Open PRs</span>
-                    {policy.open_pr_count}
-                  </TableCell>
-                  <TableCell className="block px-0 py-1 text-sm text-muted-foreground md:table-cell md:px-4 md:py-3">
-                    <span className="mr-2 font-medium text-foreground md:hidden">
-                      Updated
-                    </span>
-                    {policy.updated_at
-                      ? new Date(policy.updated_at).toLocaleDateString()
-                      : "-"}
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : (
-              <TableRow>
-                <TableCell colSpan={5} className="py-6">
-                  <EmptyState
-                    icon={MonitorPlay}
-                    title="No connected repositories"
-                    description="Connect a repository before configuring auto-preview policy."
-                    variant="inline"
-                  />
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-
-      <div className="space-y-3">
-        <div className="space-y-1">
-          <h3 className="text-sm font-medium text-foreground">
-            PR preview links
-          </h3>
-          <p className="text-xs text-muted-foreground">
-            Publish stable 143 preview entry points to GitHub pull requests.
-          </p>
-        </div>
-        <div className="overflow-hidden rounded-md border border-border">
-          <Table>
-            <TableHeader className="hidden md:table-header-group">
-              <TableRow>
-                <TableHead>Repository</TableHead>
-                <TableHead>Links</TableHead>
-                <TableHead>Surfaces</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {policiesQuery.isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={4} className="py-6 text-sm text-muted-foreground">
-                    Loading preview link policies...
-                  </TableCell>
-                </TableRow>
-              ) : policies.length ? (
-                policies.map((policy) => {
-                  const missingPermissions =
-                    (policy.github_pr_comment_enabled &&
-                      !policy.github_pr_comment_permission_ok) ||
-                    (policy.github_commit_status_enabled &&
-                      !policy.github_commit_status_permission_ok);
-                  const showTestPreview =
-                    policy.preview_configured &&
-                    (!policy.preview_success_recorded ||
-                      policy.preview_config_requires_selection);
-                  const selectedPreviewConfig =
-                    selectedPreviewConfigs[policy.repository_id] ||
-                    policy.preview_config_default_name ||
-                    policy.preview_config_names?.[0] ||
-                    "";
-                  const testPreviewDisabled =
-                    (testPreviewMutation.isPending && testPreviewMutation.variables?.repositoryId === policy.repository_id) ||
-                    Boolean(policy.preview_config_requires_selection && !selectedPreviewConfig);
-                  const disabledReason = !policy.preview_ready
-                    ? policy.preview_readiness_missing_reason || "Run a successful test preview before enabling GitHub PR links"
-                    : missingPermissions
-                      ? "GitHub App permissions are missing for one or more selected surfaces"
-                      : "";
-                  const canEnable = policy.preview_ready && !missingPermissions;
-                  return (
-                    <TableRow key={`${policy.repository_id}-links`} className="block border-b p-3 md:table-row md:p-0">
-                      <TableCell className="block px-0 py-1 md:table-cell md:px-4 md:py-3">
-                        <div className="flex items-center gap-2 font-medium text-foreground">
-                          <GitPullRequest className="h-4 w-4 text-muted-foreground" />
-                          {policy.repository_full_name}
-                        </div>
-                        {disabledReason ? (
-                          <p className="mt-1 text-xs text-muted-foreground">{disabledReason}</p>
-                        ) : null}
-                        {policy.preview_config_names?.length ? (
-                          <div className="mt-2 max-w-56">
-                            <Select
-                              value={selectedPreviewConfig}
-                              onValueChange={(value) => {
-                                setSelectedPreviewConfigs((current) => ({
-                                  ...current,
-                                  [policy.repository_id]: value,
-                                }));
-                              }}
-                            >
-                              <SelectTrigger
-                                aria-label={`Select preview config for ${policy.repository_full_name}`}
-                              >
-                                <SelectValue placeholder="Preview config" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {policy.preview_config_names.map((name) => (
-                                  <SelectItem key={name} value={name}>
-                                    {name}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        ) : null}
-                        {showTestPreview ? (
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="mt-2"
-                            disabled={testPreviewDisabled}
-                            onClick={() => {
-                              testPreviewMutation.mutate({
-                                repositoryId: policy.repository_id,
-                                previewConfigName: selectedPreviewConfig || undefined,
-                              });
-                            }}
-                          >
-                            <MonitorPlay className="mr-2 h-4 w-4" />
-                            Test preview
-                          </Button>
-                        ) : null}
-                      </TableCell>
-                      <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
-                        <div className="flex items-center gap-2">
-                          <Switch
-                            aria-label={`Enable PR preview links for ${policy.repository_full_name}`}
-                            checked={policy.pr_preview_surfaces_enabled}
-                            disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
-                            onCheckedChange={(checked) => {
-                              policyMutation.mutate({
-                                repositoryId: policy.repository_id,
-                                body: { pr_preview_surfaces_enabled: checked },
-                              });
-                            }}
-                          />
-                          <span className="text-sm text-muted-foreground">
-                            {policy.pr_preview_surfaces_enabled ? "Enabled" : "Disabled"}
-                          </span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="block px-0 py-2 md:table-cell md:px-4 md:py-3">
-                        <div className="flex flex-wrap gap-3">
-                          <div className="flex items-center gap-2 text-sm">
-                            <Switch
-                              aria-label={`Enable PR comment preview link for ${policy.repository_full_name}`}
-                              checked={policy.github_pr_comment_enabled}
-                              disabled={
-                                !policy.pr_preview_surfaces_enabled ||
-                                !policy.github_pr_comment_permission_ok
-                              }
-                              onCheckedChange={(checked) => {
-                                policyMutation.mutate({
-                                  repositoryId: policy.repository_id,
-                                  body: { github_pr_comment_enabled: checked },
-                                });
-                              }}
-                            />
-                            Comment
-                          </div>
-                          <div className="flex items-center gap-2 text-sm">
-                            <Switch
-                              aria-label={`Enable commit status preview link for ${policy.repository_full_name}`}
-                              checked={policy.github_commit_status_enabled}
-                              disabled={
-                                !policy.pr_preview_surfaces_enabled ||
-                                !policy.github_commit_status_permission_ok
-                              }
-                              onCheckedChange={(checked) => {
-                                policyMutation.mutate({
-                                  repositoryId: policy.repository_id,
-                                  body: { github_commit_status_enabled: checked },
-                                });
-                              }}
-                            />
-                            Status
-                          </div>
-                        </div>
-                      </TableCell>
-                      <TableCell className="block px-0 py-1 text-sm text-muted-foreground md:table-cell md:px-4 md:py-3">
-                        {policy.last_surface_sync_error ? (
-                          <span className="text-destructive">{policy.last_surface_sync_error}</span>
-                        ) : policy.last_surface_sync_at ? (
-                          `Synced ${new Date(policy.last_surface_sync_at).toLocaleDateString()}`
-                        ) : policy.preview_ready ? (
-                          "Ready"
-                        ) : (
-                          "Not ready"
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
+                        return next;
+                      }),
+                  },
+                );
+              }}
+              onUpdatePolicy={(body) =>
+                policyMutation.mutate({
+                  repositoryId: policy.repository_id,
+                  body,
                 })
-              ) : (
-                <TableRow>
-                  <TableCell colSpan={4} className="py-6">
-                    <EmptyState
-                      icon={GitPullRequest}
-                      title="No connected repositories"
-                      description="Connect a repository before configuring PR preview links."
-                      variant="inline"
-                    />
-                  </TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
+              }
+              onTestPreview={(previewConfigName) =>
+                testPreviewMutation.mutate({
+                  repositoryId: policy.repository_id,
+                  previewConfigName,
+                })
+              }
+              testPreviewPending={
+                testPreviewMutation.isPending &&
+                testPreviewMutation.variables?.repositoryId ===
+                  policy.repository_id
+              }
+            />
+          ))}
         </div>
-      </div>
+      ) : (
+        <div className="rounded-md border border-border p-4">
+          <EmptyState
+            icon={MonitorPlay}
+            title="No connected repositories"
+            description="Connect a repository before configuring previews."
+            variant="inline"
+          />
+        </div>
+      )}
 
       <div className="space-y-3 rounded-md border border-border p-4">
         <div className="flex items-center justify-between">
@@ -672,6 +412,301 @@ function AutoPreviewSection() {
         </div>
       </div>
     </section>
+  );
+}
+
+function RepoPreviewCard({
+  policy,
+  sessionPrewarmEnabled,
+  selectedPreviewConfig,
+  onSelectPreviewConfig,
+  onUpdatePolicy,
+  onTestPreview,
+  testPreviewPending,
+}: {
+  policy: PreviewPolicySummary;
+  sessionPrewarmEnabled: boolean;
+  selectedPreviewConfig: string;
+  onSelectPreviewConfig: (value: string) => void;
+  onUpdatePolicy: (
+    body: Parameters<typeof api.previews.policies.update>[1],
+  ) => void;
+  onTestPreview: (previewConfigName?: string) => void;
+  testPreviewPending: boolean;
+}) {
+  const missingPermissions =
+    (policy.github_pr_comment_enabled &&
+      !policy.github_pr_comment_permission_ok) ||
+    (policy.github_commit_status_enabled &&
+      !policy.github_commit_status_permission_ok);
+  const showTestPreview =
+    policy.preview_configured &&
+    (!policy.preview_success_recorded ||
+      policy.preview_config_requires_selection);
+  const testPreviewDisabled =
+    testPreviewPending ||
+    Boolean(policy.preview_config_requires_selection && !selectedPreviewConfig);
+  const disabledReason = !policy.preview_ready
+    ? policy.preview_readiness_missing_reason ||
+      "Run a successful test preview before enabling GitHub PR links"
+    : missingPermissions
+      ? "GitHub App permissions are missing for one or more selected surfaces"
+      : "";
+  const canEnable = policy.preview_ready && !missingPermissions;
+  const configNames = policy.preview_config_names ?? [];
+  const defaultConfigName = policy.preview_config_default_name ?? "";
+
+  const statusBadge = policy.last_surface_sync_error ? (
+    <Badge variant="destructive">Sync failed</Badge>
+  ) : policy.preview_ready ? (
+    <Badge variant="success">
+      {policy.last_surface_sync_at
+        ? `Synced ${new Date(policy.last_surface_sync_at).toLocaleDateString()}`
+        : "Ready"}
+    </Badge>
+  ) : (
+    <Badge variant="secondary">Not ready</Badge>
+  );
+
+  return (
+    <div className="space-y-4 rounded-md border border-border p-4">
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <MonitorPlay className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="truncate font-medium text-foreground">
+            {policy.repository_full_name}
+          </span>
+          <span className="shrink-0 text-xs text-muted-foreground">
+            · {policy.open_pr_count}{" "}
+            {policy.open_pr_count === 1 ? "open PR" : "open PRs"}
+          </span>
+        </div>
+        {statusBadge}
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-3">
+          <div className="text-xs font-medium text-muted-foreground">
+            1 · Auto-build
+          </div>
+          <div className="space-y-1.5">
+            <span className="block text-xs text-muted-foreground">Mode</span>
+            <ToggleGroup
+              type="single"
+              value={policy.auto_mode}
+              onValueChange={(value) => {
+                if (!value || value === policy.auto_mode) return;
+                onUpdatePolicy({
+                  auto_mode: value as PreviewPolicySummary["auto_mode"],
+                });
+              }}
+              className="justify-start"
+            >
+              <ToggleGroupItem
+                value="off"
+                aria-label={`Turn off auto-preview for ${policy.repository_full_name}`}
+              >
+                Off
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="warm"
+                aria-label={`Use warm auto-preview for ${policy.repository_full_name}`}
+              >
+                Warm
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="on"
+                aria-label={`Keep auto-preview on for ${policy.repository_full_name}`}
+              >
+                On
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+          <div className="space-y-1.5">
+            <span className="block text-xs text-muted-foreground">
+              Session prewarm
+            </span>
+            <ToggleGroup
+              type="single"
+              value={policy.session_prewarm_mode}
+              onValueChange={(value) => {
+                if (
+                  !value ||
+                  value === policy.session_prewarm_mode ||
+                  !sessionPrewarmEnabled
+                ) {
+                  return;
+                }
+                onUpdatePolicy({
+                  session_prewarm_mode:
+                    value as PreviewPolicySummary["session_prewarm_mode"],
+                });
+              }}
+              className="justify-start"
+              disabled={!sessionPrewarmEnabled}
+            >
+              <ToggleGroupItem
+                value="off"
+                aria-label={`Turn off session prewarm for ${policy.repository_full_name}`}
+              >
+                Off
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="cache"
+                aria-label={`Use cache-only session prewarm for ${policy.repository_full_name}`}
+              >
+                Cache only
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                value="smart"
+                aria-label={`Use smart session prewarm for ${policy.repository_full_name}`}
+              >
+                Smart
+              </ToggleGroupItem>
+            </ToggleGroup>
+            {!sessionPrewarmEnabled ? (
+              <p className="text-xs text-muted-foreground">
+                Set speculative preview slots above 0 to enable session prewarm.
+              </p>
+            ) : null}
+          </div>
+          <div className="space-y-1.5">
+            <span className="block text-xs text-muted-foreground">Forks</span>
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={policy.session_prewarm_untrusted_fork}
+                disabled={!sessionPrewarmEnabled}
+                aria-label={`Allow session prewarm for untrusted forks in ${policy.repository_full_name}`}
+                onCheckedChange={(checked) => {
+                  if (
+                    checked === policy.session_prewarm_untrusted_fork ||
+                    !sessionPrewarmEnabled
+                  ) {
+                    return;
+                  }
+                  onUpdatePolicy({ session_prewarm_untrusted_fork: checked });
+                }}
+              />
+              <span className="text-xs text-muted-foreground">
+                Untrusted forks
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-3 md:border-l md:border-border md:pl-4">
+          <div className="text-xs font-medium text-muted-foreground">
+            2 · Publish to PRs
+          </div>
+          {disabledReason ? (
+            <div className="flex items-start gap-2 rounded-md bg-muted px-2.5 py-2 text-xs text-muted-foreground">
+              <HelpCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{disabledReason}</span>
+            </div>
+          ) : null}
+          {policy.last_surface_sync_error ? (
+            <p className="text-xs text-destructive">
+              {policy.last_surface_sync_error}
+            </p>
+          ) : null}
+          <div className="flex items-center gap-2">
+            <Switch
+              aria-label={`Enable PR preview links for ${policy.repository_full_name}`}
+              checked={policy.pr_preview_surfaces_enabled}
+              disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
+              onCheckedChange={(checked) =>
+                onUpdatePolicy({ pr_preview_surfaces_enabled: checked })
+              }
+            />
+            <span className="text-xs text-muted-foreground">
+              {policy.pr_preview_surfaces_enabled
+                ? "Links enabled"
+                : "Links disabled"}
+            </span>
+          </div>
+          <div className="space-y-1.5">
+            <span className="block text-xs text-muted-foreground">Surfaces</span>
+            <div className="flex flex-wrap gap-3">
+              <div className="flex items-center gap-2 text-xs">
+                <Switch
+                  aria-label={`Enable PR comment preview link for ${policy.repository_full_name}`}
+                  checked={policy.github_pr_comment_enabled}
+                  disabled={
+                    !policy.pr_preview_surfaces_enabled ||
+                    !policy.github_pr_comment_permission_ok
+                  }
+                  onCheckedChange={(checked) =>
+                    onUpdatePolicy({ github_pr_comment_enabled: checked })
+                  }
+                />
+                Comment
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <Switch
+                  aria-label={`Enable commit status preview link for ${policy.repository_full_name}`}
+                  checked={policy.github_commit_status_enabled}
+                  disabled={
+                    !policy.pr_preview_surfaces_enabled ||
+                    !policy.github_commit_status_permission_ok
+                  }
+                  onCheckedChange={(checked) =>
+                    onUpdatePolicy({ github_commit_status_enabled: checked })
+                  }
+                />
+                Status
+              </div>
+            </div>
+          </div>
+          {showTestPreview ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={testPreviewDisabled}
+              onClick={() => onTestPreview(selectedPreviewConfig || undefined)}
+            >
+              <MonitorPlay className="mr-2 h-4 w-4" />
+              Test preview
+            </Button>
+          ) : null}
+        </div>
+      </div>
+
+      {configNames.length ? (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          <span className="text-xs text-muted-foreground">Build profile</span>
+          {configNames.length > 1 ? (
+            <Select
+              value={selectedPreviewConfig}
+              onValueChange={onSelectPreviewConfig}
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-auto min-w-40"
+                aria-label={`Select build profile for ${policy.repository_full_name}`}
+              >
+                <SelectValue placeholder="Build profile" />
+              </SelectTrigger>
+              <SelectContent>
+                {configNames.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                    {name === defaultConfigName ? " (default)" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="text-xs font-medium text-foreground">
+              {configNames[0]}
+            </span>
+          )}
+          <span className="text-xs text-muted-foreground">
+            from <code className="font-mono text-xs">.143/config.json</code>
+          </span>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

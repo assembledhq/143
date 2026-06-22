@@ -64,6 +64,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},
 		{name: "preview_policy.updated is valid", value: AuditActionPreviewPolicyUpdated},
+		{name: "org.join_token_revealed is valid", value: AuditActionOrgJoinTokenRevealed},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},
 	}

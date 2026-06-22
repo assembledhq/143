@@ -145,12 +145,13 @@ const (
 	AuditActionAuthRegister AuditAction = "auth.register"
 
 	// CLI auth + local agent gateway actions
-	AuditActionAuthCLILogin        AuditAction = "auth.cli_login"
-	AuditActionAuthCLILogout       AuditAction = "auth.cli_logout"
-	AuditActionOrgJoinTokenCreated AuditAction = "org.join_token_created" // #nosec G101 -- audit action name
-	AuditActionOrgJoinTokenRevoked AuditAction = "org.join_token_revoked" // #nosec G101 -- audit action name
-	AuditActionOrgJoinTokenUsed    AuditAction = "org.join_token_used"    // #nosec G101 -- audit action name
-	AuditActionCLIToolInvoked      AuditAction = "cli.tool_invoked"
+	AuditActionAuthCLILogin         AuditAction = "auth.cli_login"
+	AuditActionAuthCLILogout        AuditAction = "auth.cli_logout"
+	AuditActionOrgJoinTokenCreated  AuditAction = "org.join_token_created"  // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenRevealed AuditAction = "org.join_token_revealed" // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenRevoked  AuditAction = "org.join_token_revoked"  // #nosec G101 -- audit action name
+	AuditActionOrgJoinTokenUsed     AuditAction = "org.join_token_used"     // #nosec G101 -- audit action name
+	AuditActionCLIToolInvoked       AuditAction = "cli.tool_invoked"
 
 	// Eval actions
 	AuditActionEvalTaskCreated  AuditAction = "eval_task.created"
@@ -209,7 +210,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewPolicyUpdated,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
-		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
+		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevealed, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
 		AuditActionCLIToolInvoked,
 		AuditActionEvalTaskCreated, AuditActionEvalTaskUpdated, AuditActionEvalTaskArchived,
 		AuditActionEvalRunStarted, AuditActionEvalRunCompleted, AuditActionEvalBatchStarted,

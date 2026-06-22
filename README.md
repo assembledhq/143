@@ -1,8 +1,8 @@
 # 143
 
-Open-source autopilot for coding agents.
+The open-source platform where your whole team builds software together.
 
-143 gives engineering teams one shared place to run coding agents in the cloud, connect them to the tools that hold product context, and turn the result into reviewable GitHub PRs.
+143 gives your whole team one shared place to run coding agents in the cloud, connect them to the tools that hold product context, and turn the result into reviewable GitHub PRs.
 
 [143.dev](https://www.143.dev) · [Getting started](#getting-started) · [Development setup](docs/contributing/development-setup.md) · [Architecture](docs/design/overall.md) · [Self-hosting](docs/self-hosting/README.md)
 
@@ -58,10 +58,10 @@ The backend is Go, Postgres, and a Postgres-backed job queue. The frontend is Ne
 For local development you need:
 
 - Go 1.24+
-- Node.js 18+
+- Node.js 24+
 - PostgreSQL 17
 
-The setup script installs missing dependencies on macOS with Homebrew or on Linux with apt, creates the local database, installs dependencies, copies `.env.example` to `.env`, and runs migrations.
+The setup script installs missing dependencies on macOS with Homebrew or on Linux with apt/NodeSource, creates the local database, installs dependencies, copies `.env.example` to `.env`, and runs migrations.
 
 ```bash
 git clone https://github.com/assembledhq/143.git

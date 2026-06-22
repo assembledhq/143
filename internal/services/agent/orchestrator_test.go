@@ -3573,6 +3573,91 @@ func TestRunAgent_UsesRawTaskPromptStyleForAutomation(t *testing.T) {
 	require.Nil(t, capAdapter.captured.PMContext, "automation sessions should not wrap the goal into PM analysis context")
 }
 
+func TestRunAgent_UsesAnswerOnlyPromptStyleForSlackAnswerOnly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	repoID := uuid.New()
+	pmApproach := "does our slack bot post notifications when a job finishes?"
+	message := "Slack question body"
+
+	run := &models.Session{
+		ID:            runID,
+		OrgID:         orgID,
+		Origin:        models.SessionOriginSlack,
+		AgentType:     "claude_code",
+		Status:        "pending",
+		TokenMode:     "low",
+		RepositoryID:  &repoID,
+		PMApproach:    &pmApproach,
+		InputManifest: json.RawMessage(`{"slack":{"routing_mode":"answer_only","routing_reason":"question asking for information"}}`),
+	}
+
+	mockRuns := &mockSessionStore{}
+	mockRepos := &mockRepositoryStore{repo: models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		CloneURL:       "https://example.com/repo.git",
+		DefaultBranch:  "main",
+		InstallationID: 123,
+	}}
+	mockMessages := &mockSessionMessageStore{messages: []models.SessionMessage{{
+		ID:        1,
+		SessionID: runID,
+		OrgID:     orgID,
+		Role:      models.MessageRoleUser,
+		Content:   message,
+	}}}
+	mockOrgs := &mockOrgStore{org: models.Organization{ID: orgID}}
+	mockJobs := &mockJobStore{}
+	mockLogs := &mockSessionLogStore{}
+	mockQuestions := &mockSessionQuestionStore{}
+	mockDecisions := &mockDecisionLogStore{}
+	mockGH := &mockGitHubTokenProvider{token: "token"}
+	sandboxProvider := testutil.NewMockSandboxProvider()
+
+	capAdapter := &capturingAdapter{name: models.AgentTypeClaudeCode}
+
+	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
+		Provider:         sandboxProvider,
+		Adapters:         map[models.AgentType]agent.AgentAdapter{models.AgentTypeClaudeCode: capAdapter},
+		Sessions:         mockRuns,
+		SessionLogs:      mockLogs,
+		SessionQuestions: mockQuestions,
+		SessionMessages:  mockMessages,
+		DecisionLog:      mockDecisions,
+		Repositories:     mockRepos,
+		Orgs:             mockOrgs,
+		Jobs:             mockJobs,
+		GitHub:           mockGH,
+		Credentials: &mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-answer-only-test"},
+				},
+			},
+		},
+		CodingCredentials: codingCredsFromLegacy(&mockCredentialProvider{
+			byProvider: map[models.ProviderName]*models.DecryptedCredential{
+				models.ProviderAnthropic: {
+					Provider: models.ProviderAnthropic,
+					Config:   models.AnthropicConfig{APIKey: "sk-ant-answer-only-test"},
+				},
+			},
+		}),
+		Logger: zerolog.Nop(),
+	})
+
+	err := orchestrator.RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should succeed for Slack answer-only sessions")
+	require.NotNil(t, capAdapter.captured, "adapter should capture input")
+	require.Equal(t, agent.PromptStyleAnswerOnly, capAdapter.captured.PromptStyle, "Slack answer-only sessions should use answer-only prompt style")
+	require.Equal(t, message, capAdapter.captured.UserMessage, "Slack answer-only sessions should pass through the latest Slack message")
+	require.Nil(t, capAdapter.captured.PMContext, "Slack answer-only sessions should not include PM implementation framing")
+}
+
 func TestRunAgent_LegacySyntheticManualSessionUsesManualModeAndFallbackReferences(t *testing.T) {
 	t.Parallel()
 

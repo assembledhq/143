@@ -1218,11 +1218,21 @@ func (o *Orchestrator) runSandboxGitBootstrap(ctx context.Context, sandbox *Sand
 // best-effort for compatibility. Explicit bootstrap command failures are
 // returned because the workspace is not ready for normal agent work.
 func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
-	if sandbox == nil || workDir == "" {
+	return PrepareSandboxRepository(ctx, o.provider, sandbox, workDir, log)
+}
+
+// PrepareSandboxRepository reads .143/config.json from the sandbox workspace,
+// installs supported platform-managed tools, then runs repo-declared bootstrap
+// commands before lint/test-style commands or agent work starts. Missing or
+// malformed config stays best-effort for compatibility. Explicit bootstrap
+// command failures are returned because the workspace is not ready for normal
+// sandbox work.
+func PrepareSandboxRepository(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, log zerolog.Logger) error {
+	if provider == nil || sandbox == nil || workDir == "" {
 		return nil
 	}
 	cfgPath := path.Join(workDir, repoconfig.ConfigPath)
-	raw, err := o.provider.ReadFile(ctx, sandbox, cfgPath)
+	raw, err := provider.ReadFile(ctx, sandbox, cfgPath)
 	if err != nil {
 		if isSandboxFileMissing(err) {
 			return nil
@@ -1240,18 +1250,18 @@ func (o *Orchestrator) prepareSandboxRepository(ctx context.Context, sandbox *Sa
 	}
 	if len(cfg.Dependencies) > 0 {
 		exec := func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
-			return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+			return provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
 		}
 		sandboxdeps.Apply(ctx, log, exec, cfg.Dependencies)
 	}
-	return o.runSandboxBootstrapCommands(ctx, sandbox, workDir, cfg.Bootstrap.Commands, log)
+	return runSandboxBootstrapCommands(ctx, provider, sandbox, workDir, cfg.Bootstrap.Commands, log)
 }
 
-func (o *Orchestrator) runSandboxBootstrapCommands(ctx context.Context, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
+func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
 	for _, command := range commands {
 		shellCmd := fmt.Sprintf("cd '%s' && %s", shellEscapeSingleQuote(workDir), command)
 		var stderr bytes.Buffer
-		exitCode, execErr := o.provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
+		exitCode, execErr := provider.Exec(ctx, sandbox, shellCmd, io.Discard, &stderr)
 		stderrText := strings.TrimSpace(stderr.String())
 		if execErr != nil || exitCode != 0 {
 			log.Warn().
@@ -1832,6 +1842,39 @@ func hydrateSessionPolicyForExecution(session *models.Session, issue *models.Iss
 	}
 }
 
+func sessionPromptStyle(session *models.Session) PromptStyle {
+	if session == nil {
+		return PromptStyleIssueContext
+	}
+	if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+		return PromptStyleRawTask
+	}
+	if session.Origin == models.SessionOriginSlack {
+		if mode, ok := slackRoutingModeFromSessionInputManifest(session.InputManifest); ok && mode == models.SlackRoutingModeAnswerOnly {
+			return PromptStyleAnswerOnly
+		}
+	}
+	return PromptStyleIssueContext
+}
+
+func slackRoutingModeFromSessionInputManifest(raw json.RawMessage) (models.SlackRoutingMode, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var manifest struct {
+		Slack struct {
+			RoutingMode models.SlackRoutingMode `json:"routing_mode"`
+		} `json:"slack"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return "", false
+	}
+	if manifest.Slack.RoutingMode == "" {
+		return "", false
+	}
+	return manifest.Slack.RoutingMode, true
+}
+
 func primaryLinkedIssue(links []models.SessionIssueLink) *models.SessionIssueLink {
 	for i := range links {
 		if links[i].Role == models.SessionIssueLinkRolePrimary {
@@ -2292,12 +2335,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		Issue:        issue,
 		LinkedIssues: linkedIssues,
 		Manual:       run.Origin == models.SessionOriginManual,
-		PromptStyle: func() PromptStyle {
-			if run.Origin == models.SessionOriginManual || run.AutomationRunID != nil {
-				return PromptStyleRawTask
-			}
-			return PromptStyleIssueContext
-		}(),
+		PromptStyle:  sessionPromptStyle(run),
 		UserMessage: func() string {
 			if latestMsg != nil {
 				return latestMsg.Content
@@ -2344,7 +2382,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 	}
 
-	if run.AutomationRunID == nil && (run.PMApproach != nil || run.PMReasoning != nil) {
+	if run.AutomationRunID == nil && sessionPromptStyle(run) != PromptStyleAnswerOnly && (run.PMApproach != nil || run.PMReasoning != nil) {
 		pmCtx := &PMTaskContext{}
 		if run.PMApproach != nil {
 			pmCtx.Approach = *run.PMApproach
@@ -3985,14 +4023,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				Issue:        promptIssue,
 				LinkedIssues: linkedIssues,
 				Manual:       session.Origin == models.SessionOriginManual,
-				PromptStyle: func() PromptStyle {
-					if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
-						return PromptStyleRawTask
-					}
-					return PromptStyleIssueContext
-				}(),
-				UserMessage: userMessage,
-				Attachments: materializedAttachments,
+				PromptStyle:  sessionPromptStyle(session),
+				UserMessage:  userMessage,
+				Attachments:  materializedAttachments,
 				References: func() []models.SessionInputReference {
 					refs := canonicalReferences(latestMsg)
 					if len(refs) > 0 {
@@ -4111,14 +4144,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Issue:        &issue,
 			LinkedIssues: linkedIssues,
 			Manual:       session.Origin == models.SessionOriginManual,
-			PromptStyle: func() PromptStyle {
-				if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
-					return PromptStyleRawTask
-				}
-				return PromptStyleIssueContext
-			}(),
-			UserMessage: latestMsg.Content,
-			Attachments: materializedAttachments,
+			PromptStyle:  sessionPromptStyle(session),
+			UserMessage:  latestMsg.Content,
+			Attachments:  materializedAttachments,
 			References: func() []models.SessionInputReference {
 				refs := canonicalReferences(latestMsg)
 				if len(refs) > 0 {

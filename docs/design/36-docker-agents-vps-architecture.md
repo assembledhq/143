@@ -672,17 +672,17 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push server image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -691,7 +691,7 @@ jobs:
             ${{ env.SERVER_IMAGE }}:${{ github.sha }}
 
       - name: Build & push agent sandbox image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.agent
@@ -706,7 +706,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Deploy via SSH
         run: |
           chmod +x deploy/scripts/deploy.sh
@@ -2143,7 +2143,7 @@ work.
 **The fix:** Create `Dockerfile.frontend`:
 
 ```dockerfile
-FROM node:22-alpine AS builder
+FROM node:24-alpine AS builder
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./frontend/
 COPY frontend/source.config.ts ./frontend/
@@ -2155,7 +2155,7 @@ ARG BUILD_SHA=dev
 ENV NEXT_PUBLIC_BUILD_SHA=$BUILD_SHA
 RUN npm run build
 
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 COPY --from=builder /app/frontend/.next/standalone ./
 COPY --from=builder /app/frontend/.next/static ./frontend/.next/static

@@ -85,14 +85,15 @@ type StartBranchPreviewJobPayload struct {
 // The job re-attempts the start once capacity is available, retrying with
 // backoff rather than silently dropping the webhook event.
 type AutoPreviewDeferredPayload struct {
-	OrgID        uuid.UUID              `json:"org_id"`
-	UserID       uuid.UUID              `json:"user_id"`
-	RepositoryID uuid.UUID              `json:"repository_id"`
-	PRNumber     int                    `json:"pr_number"`
-	HeadRef      string                 `json:"head_ref"`
-	HeadSHA      string                 `json:"head_sha"`
-	HTMLURL      string                 `json:"html_url"`
-	Mode         models.PreviewAutoMode `json:"mode"`
+	OrgID             uuid.UUID              `json:"org_id"`
+	UserID            uuid.UUID              `json:"user_id"`
+	RepositoryID      uuid.UUID              `json:"repository_id"`
+	PRNumber          int                    `json:"pr_number"`
+	HeadRef           string                 `json:"head_ref"`
+	HeadSHA           string                 `json:"head_sha"`
+	HTMLURL           string                 `json:"html_url"`
+	Mode              models.PreviewAutoMode `json:"mode"`
+	PreviewConfigName string                 `json:"preview_config_name,omitempty"`
 }
 
 type PreviewCachePrewarmSource string
@@ -124,6 +125,7 @@ type SessionPreviewPrewarmClassifyJobPayload struct {
 	SessionID         uuid.UUID `json:"session_id"`
 	RepositoryID      uuid.UUID `json:"repository_id"`
 	WorkspaceRevision int64     `json:"workspace_revision"`
+	ConfigDigest      string    `json:"config_digest,omitempty"`
 	Phase             string    `json:"phase,omitempty"`
 }
 

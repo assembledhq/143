@@ -59,7 +59,7 @@ type PreviewStopper interface {
 // concrete implementation lives in the API/preview layer so this package can
 // own webhook policy decisions without importing the preview package.
 type AutoPreviewStarter interface {
-	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode) error
+	StartAutoPullRequestPreview(ctx context.Context, orgID, userID uuid.UUID, repo models.Repository, prNumber int, headRef, headSHA, htmlURL string, mode models.PreviewAutoMode, previewConfigName string) error
 }
 
 type SyncPRPreviewSurfacesPayload struct {
@@ -342,6 +342,11 @@ const (
 	// and this error fires when even the lease check fails (a true concurrent
 	// write between ls-remote and push).
 	PushRejectedPRMessage = "GitHub rejected the push because the remote branch changed during the attempt. Try again, or delete the branch on GitHub if it was created outside this session."
+	// PushBranchDivergedPRMessage is shown when the push sandbox's checkpoint
+	// does not contain the current PR branch head and also has a different
+	// tree. This blocks a stale or start-over checkpoint from wiping out
+	// someone else's commits through --force-with-lease.
+	PushBranchDivergedPRMessage = "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again."
 	// SandboxAuthUnavailablePRMessage is shown when 143 cannot prepare the
 	// sandbox credential socket needed for git push. Keep it distinct from the
 	// GitHub permissions fallback because these failures are often runtime or
@@ -399,6 +404,12 @@ var ErrNoChanges = errors.New("no changes to push")
 // failures so the worker can surface a targeted user-facing message instead
 // of the catch-all "Check GitHub access or repo permissions" fallback.
 var ErrPushRejected = errors.New("git push rejected by remote")
+
+// ErrPushBranchDiverged is returned when the current remote PR branch contains
+// commits that are not represented in the hydrated session checkpoint. It is
+// intentionally distinct from ErrPushRejected: the lease may be fresh, but the
+// local snapshot is still stale and must not overwrite the remote tree.
+var ErrPushBranchDiverged = errors.New("remote branch diverged from session snapshot")
 
 // ErrSandboxAuthUnavailable is returned when the host cannot prepare the
 // sandbox credential socket used by git-credential. This is a 143 runtime/auth
@@ -1298,6 +1309,12 @@ func (s *PRService) pushSessionBranch(
 		// Continue to HeadSHA parse + snapshot capture below.
 	case pushExitNoChanges:
 		return nil, ErrNoChanges
+	case pushExitBranchDiverged:
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = pushBranchDivergedMessage
+		}
+		return nil, fmt.Errorf("%w: %s", ErrPushBranchDiverged, msg)
 	default:
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -1412,11 +1429,19 @@ func pushCommitMsgPath(homeDir string) string {
 // the remote tracking branch — i.e. there is nothing meaningful to push.
 const pushExitNoChanges = 77
 
+// pushExitBranchDiverged is the sentinel exit code the push script uses when
+// the current remote PR branch is neither an ancestor of HEAD nor tree-equal
+// to HEAD. That combination means --force-with-lease would overwrite remote
+// work with a stale or start-over checkpoint.
+const pushExitBranchDiverged = 78
+
 // pushHeadSHASentinel is a well-known prefix the push script writes to stdout
 // after a successful `git push`. The caller scans stdout for this line and
 // extracts the just-pushed commit SHA. Chosen to be unlikely to collide with
 // any line git itself prints.
 const pushHeadSHASentinel = "__143_HEAD_SHA="
+
+const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
@@ -1448,10 +1473,14 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 const pushScriptTemplate = `set -eu
 cleanup() { rm -f %[1]s; }
 trap cleanup EXIT
+branch=%[7]s
+push_url=%[6]s
+remote_ref="refs/heads/$branch"
+remote_guard_ref="refs/remotes/__143_push_guard/$branch"
 cd %[2]s
 git config user.name %[3]s
 git config user.email %[4]s
-git checkout -B %[7]s
+git checkout -B "$branch"
 git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
@@ -1461,8 +1490,17 @@ if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
         exit %[5]d
     fi
 fi
-remote_sha=$(git ls-remote %[6]s refs/heads/%[7]s | awk 'NR==1 {print $1}')
-git push --force-with-lease=refs/heads/%[7]s:"${remote_sha}" %[6]s HEAD:refs/heads/%[7]s
+remote_sha=$(git ls-remote "$push_url" "$remote_ref" | awk 'NR==1 {print $1}')
+if [ -n "$remote_sha" ]; then
+    git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
+    if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
+        if ! git diff --quiet HEAD "$remote_guard_ref"; then
+            echo "%[9]s" >&2
+            exit %[10]d
+        fi
+    fi
+fi
+git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"
 echo "%[8]s$(git rev-parse HEAD)"
 `
 
@@ -1485,6 +1523,8 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		// interpolated raw — no shellQuote. Anyone who later changes the
 		// sentinel to include shell metacharacters MUST add quoting here.
 		pushHeadSHASentinel,
+		pushBranchDivergedMessage,
+		pushExitBranchDiverged,
 	)
 }
 
@@ -1592,7 +1632,6 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
 }
-
 
 func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo models.Repository, event PullRequestEvent) {
 	if s == nil || s.jobs == nil {
@@ -1711,7 +1750,7 @@ func (s *PRService) handleAutoPreviewEvent(ctx context.Context, event PullReques
 				Msg("failed to update preview group latest sha on pr event")
 		}
 	}
-	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode)
+	return s.autoPreviewStarter.StartAutoPullRequestPreview(ctx, repo.OrgID, policy.UpdatedByUserID, repo, event.Number, event.PR.Head.Ref, event.PR.Head.SHA, event.PR.HTMLURL, policy.AutoMode, policy.PreviewConfigName)
 }
 
 func (s *PRService) repositoryFromPullRequestEvent(ctx context.Context, event PullRequestEvent) (models.Repository, error) {

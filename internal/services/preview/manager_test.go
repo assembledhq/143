@@ -28,18 +28,20 @@ import (
 // =============================================================================
 
 type mockProvider struct {
-	startHandle *PreviewHandle
-	startErr    error
-	startConfig *models.PreviewConfig
-	stopErr     error
-	dialErr     error
-	dialStream  PreviewStream
-	statusSnap  *PreviewStatusSnapshot
-	statusErr   error
+	startHandle   *PreviewHandle
+	startErr      error
+	startConfig   *models.PreviewConfig
+	startObserver ServiceObserver
+	stopErr       error
+	dialErr       error
+	dialStream    PreviewStream
+	statusSnap    *PreviewStatusSnapshot
+	statusErr     error
 }
 
-func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, _ ServiceObserver) (*PreviewHandle, error) {
+func (m *mockProvider) StartPreview(_ context.Context, _ *agent.Sandbox, cfg *models.PreviewConfig, _ StartPreviewOptions, observer ServiceObserver) (*PreviewHandle, error) {
 	m.startConfig = cfg
+	m.startObserver = observer
 	if m.startErr != nil {
 		return nil, m.startErr
 	}
@@ -2521,10 +2523,14 @@ func TestLaunchPreview_Success(t *testing.T) {
 		UserID:    uuid.New(),
 		Sandbox:   &agent.Sandbox{ID: "s-1", Provider: "docker"},
 		Config:    validPreviewConfig(),
+		Initiator: "session_prewarm",
 	})
 	require.NoError(t, err)
 	require.Equal(t, models.PreviewStatusReady, launched.Status)
 	require.Equal(t, "handle-new", launched.PreviewHandle)
+	observer, ok := provider.startObserver.(*managerServiceObserver)
+	require.True(t, ok, "LaunchPreview should pass the manager service observer to the provider")
+	require.Equal(t, "session_prewarm", observer.source, "LaunchPreview should use the initiator as the metrics source when no explicit metrics source is set")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

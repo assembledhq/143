@@ -1,5 +1,6 @@
 ALTER TABLE repository_preview_policies
     ADD COLUMN session_prewarm_mode TEXT NOT NULL DEFAULT 'off',
+    ADD COLUMN session_prewarm_untrusted_fork BOOLEAN NOT NULL DEFAULT false,
     ADD CONSTRAINT repository_preview_policies_session_prewarm_mode_check
         CHECK (session_prewarm_mode IN ('off', 'cache', 'smart'));
 
@@ -39,7 +40,9 @@ CREATE TABLE session_preview_prewarm_runs (
     CONSTRAINT session_preview_prewarm_runs_status_check
         CHECK (status IN ('decided', 'queued', 'running', 'skipped_capacity',
                           'skipped_superseded', 'skipped_user_started',
-                          'skipped_cooldown', 'classifier_timeout',
+	                          'skipped_cooldown', 'skipped_untrusted_fork',
+	                          'skipped_no_lockfiles', 'skipped_no_paths',
+	                          'classifier_timeout',
                           'succeeded', 'failed'))
 );
 

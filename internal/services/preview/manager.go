@@ -215,6 +215,7 @@ type StartPreviewInput struct {
 	ProfileName                string
 	ExpiresAt                  time.Time
 	RequestID                  string
+	Initiator                  string
 	MetricsSource              string
 	MetricsRepositoryFullName  string
 	WorkspaceRevision          int64
@@ -653,7 +654,11 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	// startup checklist sees progress instead of "all starting" until the
 	// whole launch returns. It also writes a preview_logs row with the tail
 	// of stdout/stderr when a service fails, so the user sees why.
-	observer := m.newServiceObserver(input.OrgID, instance.ID, input.MetricsSource, input.MetricsRepositoryFullName)
+	metricsSource := input.MetricsSource
+	if metricsSource == "" {
+		metricsSource = input.Initiator
+	}
+	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName)
 	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,

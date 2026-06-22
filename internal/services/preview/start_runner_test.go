@@ -909,8 +909,8 @@ func TestSessionPreviewPrewarmStatusForCacheStatus(t *testing.T) {
 		{cacheStatus: "failed", expectedStatus: "failed"},
 		{cacheStatus: "skipped_no_install", expectedStatus: "failed"},
 		{cacheStatus: "skipped_disabled", expectedStatus: "failed"},
-		{cacheStatus: "skipped_no_lockfiles", expectedStatus: "failed"},
-		{cacheStatus: "skipped_no_paths", expectedStatus: "failed"},
+		{cacheStatus: "skipped_no_lockfiles", expectedStatus: "skipped_no_lockfiles"},
+		{cacheStatus: "skipped_no_paths", expectedStatus: "skipped_no_paths"},
 		{cacheStatus: "unknown_status_with_error", errMsg: "something went wrong", expectedStatus: "failed"},
 		{cacheStatus: "unknown_status_no_error", expectedStatus: ""},
 	}

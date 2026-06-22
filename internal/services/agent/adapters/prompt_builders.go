@@ -17,6 +17,10 @@ func usesRawTaskPrompt(input *agent.AgentInput) bool {
 	return input != nil && (input.PromptStyle == agent.PromptStyleRawTask || input.Manual || (input.Issue != nil && input.Issue.Source == models.IssueSourceManual))
 }
 
+func usesPassthroughUserPrompt(input *agent.AgentInput) bool {
+	return usesRawTaskPrompt(input) || (input != nil && input.PromptStyle == agent.PromptStyleAnswerOnly)
+}
+
 // composeFreshExecPrompt builds the prompt-file body for the headless
 // fresh-exec path shared by Claude Code and Codex (`claude --print < file`,
 // `codex exec - < file`).
@@ -70,7 +74,13 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 	// Manual sessions skip the bug-fixing template — the user's raw message
 	// is the entire prompt. Only inject repo conventions and integration
 	// skills so the agent knows what tools and patterns are available.
-	if !usesRawTaskPrompt(input) {
+	if input != nil && input.PromptStyle == agent.PromptStyleAnswerOnly {
+		base := prompts.AnswerOnlyPreamble()
+		b.WriteString(base)
+		if !strings.HasSuffix(base, "\n\n") {
+			b.WriteString("\n\n")
+		}
+	} else if !usesRawTaskPrompt(input) {
 		base := prompts.CodingTaskPreamble()
 		b.WriteString(base)
 		if !strings.HasSuffix(base, "\n\n") {
@@ -161,7 +171,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 	}
 
 	// PM context: inject PM guidance when available (never set for manual sessions).
-	if input.PMContext != nil && !usesRawTaskPrompt(input) {
+	if input.PMContext != nil && !usesRawTaskPrompt(input) && input.PromptStyle != agent.PromptStyleAnswerOnly {
 		b.WriteString("## Product Manager Analysis\n\n")
 		if input.PMContext.Reasoning != "" {
 			b.WriteString("**Why this is a priority:** ")
@@ -239,7 +249,7 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 // buildUserPrompt constructs the user prompt with issue-specific details.
 func buildUserPrompt(input *agent.AgentInput) string {
 	// Manual sessions: pass through the user's raw message without any wrapping.
-	if usesRawTaskPrompt(input) {
+	if usesPassthroughUserPrompt(input) {
 		base := input.UserMessage
 		if strings.TrimSpace(base) == "" && input.Issue != nil {
 			base = input.Issue.Title

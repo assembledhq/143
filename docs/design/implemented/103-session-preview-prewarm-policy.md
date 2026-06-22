@@ -1,7 +1,7 @@
 # Design: Session Preview Prewarm Policy
 
-> **Status:** Proposed
-> **Last reviewed:** 2026-06-17
+> **Status:** Implemented
+> **Last reviewed:** 2026-06-19
 
 ## Summary
 
@@ -143,7 +143,7 @@ Add a session-scoped warm build path that behaves like branch auto-preview `warm
 5. Save startup snapshot and build/dependency caches.
 6. Stop the runtime with stopped reason `session_prewarm_policy` — a new distinct value in `PreviewStoppedReason`, separate from `warm_policy`, so the preview index query can use it as a single discriminant.
 7. Update the current preview surface to `warm` only if the session workspace revision still matches the latest durable session revision.
-8. Mark the warmed preview as stale if a newer session snapshot appears before the user opens it.
+8. Retire the warmed preview run if a newer session snapshot appears before the user opens it.
 
 UI state, shown only when user-actionable:
 
@@ -247,6 +247,7 @@ Compose as `SHA256(preview_config_path + ":" + lockfile_paths_sorted + ":" + ins
 ```sql
 ALTER TABLE repository_preview_policies
   ADD COLUMN session_prewarm_mode TEXT NOT NULL DEFAULT 'off',
+  ADD COLUMN session_prewarm_untrusted_fork BOOLEAN NOT NULL DEFAULT false,
   ADD CONSTRAINT repository_preview_policies_session_prewarm_mode_check
     CHECK (session_prewarm_mode IN ('off', 'cache', 'smart'));
 ```
@@ -283,7 +284,8 @@ CREATE TABLE session_preview_prewarm_runs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at TIMESTAMPTZ,
-    completed_at TIMESTAMPTZ
+    completed_at TIMESTAMPTZ,
+    panel_opened_at TIMESTAMPTZ
 );
 ```
 
@@ -296,12 +298,12 @@ CREATE UNIQUE INDEX idx_session_preview_prewarm_runs_scope
 
 Store reason codes, short explanations, IDs, revision/config keys, and capacity snapshots only. No full prompts or issue bodies.
 
-Run statuses: `decided`, `queued`, `running`, `skipped_capacity`, `skipped_superseded`, `skipped_user_started`, `skipped_cooldown`, `classifier_timeout`, `succeeded`, `failed`.
+Run statuses: `decided`, `queued`, `running`, `skipped_capacity`, `skipped_superseded`, `skipped_user_started`, `skipped_cooldown`, `skipped_untrusted_fork`, `skipped_no_lockfiles`, `skipped_no_paths`, `classifier_timeout`, `succeeded`, `failed`.
 
 ### API Surface
 
-- `GET /api/v1/previews/policies` returns `session_prewarm_mode` with each repository policy row.
-- `PUT /api/v1/repositories/{id}/preview-policy` accepts `session_prewarm_mode` alongside `auto_mode`. Verify that `UpdatePolicy()` (`internal/api/handlers/branch_previews.go`) supports partial updates before extending it — sending only `session_prewarm_mode` must not zero out `auto_mode`.
+- `GET /api/v1/previews/policies` returns `session_prewarm_mode` and `session_prewarm_untrusted_fork` with each repository policy row.
+- `PUT /api/v1/repositories/{id}/preview-policy` accepts `session_prewarm_mode` and `session_prewarm_untrusted_fork` alongside `auto_mode`. Partial updates preserve omitted fields — sending only `session_prewarm_mode` must not zero out `auto_mode`.
 - Org settings PATCH accepts `preview_session_prewarm_max_active`.
 
 The session Preview status response includes prewarm state only for user-actionable states. `failed` is returned only when the failure targets the current workspace revision **and** the user has opened the Preview panel.
@@ -309,16 +311,18 @@ The session Preview status response includes prewarm state only for user-actiona
 ```json
 {
   "prewarm": {
-    "state": "warming|warm|stale|failed",
+    "state": "warming|warm|failed",
     "workspace_revision": 12,
-    "resume_estimate_seconds": 30
+    "resume_estimate_seconds": 30,
+    "preview_id": "018f...",
+    "error": "preview install failed before services started"
   }
 }
 ```
 
 Cache-only prewarm does not appear in this response.
 
-State transitions (`warming → warm`, `warming → failed`) should emit through the existing session event stream or websocket. If no stream exists, document the polling interval (recommended: 10–15 seconds while `state = "warming"`).
+State transitions (`warming → warm`, `warming → failed`) should emit through the existing session event stream or websocket. The current implementation uses Preview panel polling every ~12 seconds while `state = "warming"`.
 
 ## Product UX
 
@@ -326,6 +330,7 @@ State transitions (`warming → warm`, `warming → failed`) should emit through
 
 - Add a `Session prewarm` row under Preview settings for each repository.
 - Mode labels: `Off`, `Cache only`, `Smart`. (`Cache only` is clearer than `Cache` for admins scanning without helper copy.)
+- Fork policy: `Untrusted forks`, disabled unless speculative slots are configured. Default is off; enabling it is an explicit repo-level opt-in.
 - Pool setting: `Speculative preview slots`.
 - Helper copy: `Cache only warms dependencies before the user clicks Preview. Smart mode may also prepare a full preview when a session looks likely to need one. Speculative work yields to active sessions and user-started previews.`
 - When `Speculative preview slots = 0`, disable the mode selector with inline text: `Set speculative preview slots above 0 to enable session prewarm.`
@@ -357,7 +362,8 @@ State transitions (`warming → warm`, `warming → failed`) should emit through
 - Never start speculative work when the worker has fewer than 2 free sandbox slots.
 - Use lower job priority than `start_preview`, `run_agent`, `continue_session`, and `pr_auto_preview`.
 - Apply per-org caps and 5-minute per-repo cooldowns after capacity skips or consecutive failures.
-- Cancel or mark stale speculative work when a newer session snapshot supersedes it.
+- Cancel or hide stale speculative work when a newer session snapshot supersedes it.
+- Do not prewarm sessions from untrusted fork content unless the repository policy explicitly allows it.
 - Do not mount preview secrets for cache-only prewarm unless required and explicitly allowed.
 - Prefer live-sandbox reuse when already owned by the worker; otherwise hydrate from durable snapshots.
 - Surface warm state only when user-actionable. Never let speculative state overwrite a newer user-created preview, workspace revision, or branch/PR group state.
@@ -368,9 +374,9 @@ State transitions (`warming → warm`, `warming → failed`) should emit through
 
 - `session_preview_prewarm_decisions_total{mode, decision, source, reason}`
 - `session_preview_prewarm_cost_seconds{decision, phase}` — phase: `session_start` or `post_turn`; decision: `cache` or `warm_build`
-- `session_preview_prewarm_skipped_total{reason}` — `capacity`, `cooldown`, `superseded`, `user_started`
+- `session_preview_prewarm_skipped_total{reason}` — `capacity`, `cooldown`, `superseded`, `user_started`, `untrusted_fork`, `no_lockfiles`, `no_paths`
 - `session_preview_open_after_prewarm_total{decision}`
-- `session_preview_click_to_ready_seconds{path}` — `live_reuse`, `warm_resume`, `prewarm_cache`, `prewarm_warm`, `cold_start`
+- `session_preview_click_to_ready_seconds{path}` — `live_reuse`, `warm_resume`, `prewarm_cache`, `cold_start`
 - `session_preview_speculative_waste_total{reason}`
 - `session_preview_live_minutes_total{initiator=speculative}`
 - `session_preview_classifier_latency_seconds` — p50/p95 to verify the 5-second async budget

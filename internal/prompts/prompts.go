@@ -110,16 +110,17 @@ func SessionPreviewPrewarmClassifierPrompt() string {
 }
 
 type SessionPreviewPrewarmClassifierUserPromptData struct {
-	RepositoryFullName string
-	RepositoryLanguage string
-	SessionSource      string
-	UserPrompt         string
-	IssueLabels        []string
-	IssueType          string
-	PreviewHistory     string
-	CapacitySummary    string
-	Phase              string
-	ChangedFileKinds   []string
+	RepositoryFullName  string
+	RepositoryLanguage  string
+	PreviewConfigDigest string
+	SessionSource       string
+	UserPrompt          string
+	IssueLabels         []string
+	IssueType           string
+	PreviewHistory      string
+	CapacitySummary     string
+	Phase               string
+	ChangedFileKinds    []string
 }
 
 func SessionPreviewPrewarmClassifierUserPrompt(data SessionPreviewPrewarmClassifierUserPromptData) string {
@@ -139,6 +140,18 @@ func ReviewCommentPrompt() string {
 // when a PM agent assigns a task to a coding agent.
 func CodingTaskPreamble() string {
 	return render("coding_task_preamble.template", nil)
+}
+
+// AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent
+// prompts. These runs should answer questions without mutating the repository.
+func AnswerOnlyPreamble() string {
+	return render("answer_only_preamble.template", nil)
+}
+
+// SlackRoutingClassifierPrompt returns the system prompt for classifying
+// Slack mentions into answer-only or start-work sessions.
+func SlackRoutingClassifierPrompt() string {
+	return render("slack_routing_classifier_prompt.template", nil)
 }
 
 // LinkedIssueContextData renders the canonical XML issue-context block used by

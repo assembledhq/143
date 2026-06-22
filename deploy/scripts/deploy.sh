@@ -508,7 +508,7 @@ fi
 # Sync compose file so the remote always runs the latest version. Worker
 # compose can include support-service changes, so stage it until the routine
 # worker fingerprint gate allows promotion.
-if [ "$ROLE" = "worker" ]; then
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
 else
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
@@ -860,7 +860,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # Clean up staged Caddy inputs on any exit path.
   # stage_caddy_*_if_changed normally consumes them (mv or rm), but this
   # guards against a failure between the scp and that call leaving it on disk.
-  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new' EXIT
+  trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new' EXIT
 
   # recreate_other_services SKIP_SVCS — force-recreate every compose service
   # except the space-separated list in SKIP_SVCS. Used to update out-of-band
@@ -884,24 +884,52 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
 
   # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
   # from the currently deployed deploy/Caddyfile, and when it does, promotes
-  # the staged file into place (mv). Returns 1 (and removes the staged file)
-  # when contents match. Used to avoid restarting Caddy on code-only deploys;
-  # Caddy restarts briefly unbind ports 80/443 and surface as 502s through
-  # any upstream proxy (Cloudflare, etc.).
+  # the staged file into place. Returns 1 (and removes the staged file) when
+  # contents match. Used to avoid restarting Caddy on code-only deploys; Caddy
+  # restarts briefly unbind ports 80/443 and surface as 502s through any
+  # upstream proxy (Cloudflare, etc.).
+  #
+  # The promotion MUST overwrite the existing file in place (truncate + rewrite)
+  # rather than `mv` it. docker-compose.app.yml bind-mounts the Caddyfile as a
+  # single file (./deploy/Caddyfile:/etc/caddy/Caddyfile), and Docker pins a
+  # single-file mount to the file's inode at container start. `mv` replaces the
+  # path with a NEW inode, so the running container stays bound to the OLD one
+  # and never sees the change — `caddy reload` reads the frozen inode and logs
+  # "config is unchanged", a silent no-op. Overwriting in place keeps the inode
+  # stable so the bind-mounted file (and reload) reflects the new content. See
+  # the "Caddy bind-mount drift" incident (June 2026, install routes 404'd for
+  # ~10 days). Use a shell redirect, not `mv`: a rename always allocates a new
+  # inode. `cat >` is also preferred over `cp`, whose in-place-truncate vs.
+  # unlink-and-recreate behavior varies across implementations and flags, while
+  # a redirect is unambiguously an in-place truncate+rewrite. That write is
+  # therefore NOT atomic, so the guards below refuse an empty staged file and
+  # treat a failed write as fatal rather than leaving a corrupt live config.
   stage_caddy_config_if_changed() {
     local new_file="/opt/143/deploy/Caddyfile.new"
     local cur_file="/opt/143/deploy/Caddyfile"
     [ -f "$new_file" ] || return 1
-    if [ ! -f "$cur_file" ]; then
-      mv "$new_file" "$cur_file"
-      return 0
+    if [ -f "$cur_file" ] && cmp -s "$new_file" "$cur_file"; then
+      rm -f "$new_file"
+      return 1
     fi
-    if ! cmp -s "$new_file" "$cur_file"; then
-      mv "$new_file" "$cur_file"
-      return 0
+    # The overwrite below truncates cur_file before writing and is not atomic, so
+    # a bad write leaves the LIVE Caddyfile corrupt with no rollback. Refuse an
+    # empty staged file (checked before any truncation), and abort the deploy on
+    # a write failure instead of reporting a silent "unchanged" — shipping a
+    # truncated config would break the next caddy (re)load and can unbind
+    # :80/:443 on container recreate. A valid Caddyfile is never empty.
+    if [ ! -s "$new_file" ]; then
+      echo "ERROR: staged Caddyfile $new_file is empty; refusing to overwrite live config" >&2
+      rm -f "$new_file"
+      exit 1
+    fi
+    if ! cat "$new_file" > "$cur_file"; then
+      echo "ERROR: failed writing $cur_file from staged Caddyfile (live config may be truncated)" >&2
+      rm -f "$new_file"
+      exit 1
     fi
     rm -f "$new_file"
-    return 1
+    return 0
   }
 
   # stage_caddy_dockerfile_if_changed — returns 0 only when Dockerfile.caddy
@@ -921,6 +949,13 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
     rm -f "$new_file"
     return 1
+  }
+
+  promote_staged_app_compose() {
+    local new_file="/opt/143/$COMPOSE_FILE.new"
+    local cur_file="/opt/143/$COMPOSE_FILE"
+    [ -f "$new_file" ] || return 0
+    mv "$new_file" "$cur_file"
   }
 
   caddy_env_from_env_file() {
@@ -991,6 +1026,40 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     fi
   }
 
+  caddy_service_config_fingerprint() {
+    compose_service_fingerprint /opt/143/docker-compose.app.yml caddy
+  }
+
+  caddy_active_service_config_fingerprint() {
+    compose_service_active_fingerprint /opt/143/docker-compose.app.yml caddy
+  }
+
+  caddy_service_config_changed() {
+    local fp_file="/opt/143/.caddy-service.fingerprint"
+    local next current
+    next="$(caddy_service_config_fingerprint)"
+
+    if [ ! -f "$fp_file" ]; then
+      printf '%s\n' "$next" > "$fp_file.new"
+      return 0
+    fi
+    current="$(cat "$fp_file")"
+
+    if [ "$current" != "$next" ]; then
+      printf '%s\n' "$next" > "$fp_file.new"
+      return 0
+    fi
+    rm -f "$fp_file.new"
+    return 1
+  }
+
+  commit_caddy_service_config_fingerprint() {
+    local fp_file="/opt/143/.caddy-service.fingerprint"
+    if [ -f "$fp_file.new" ]; then
+      mv "$fp_file.new" "$fp_file"
+    fi
+  }
+
   # reconcile_caddy_service — applies app-edge Caddy changes with the least
   # disruptive path available:
   #   1. Leave Caddy untouched for routine code-only deploys.
@@ -1004,14 +1073,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       caddy_config_changed=1
     fi
 
-    local old_caddy_id new_caddy_id caddy_env_changed=0 caddy_dockerfile_changed="${CADDY_DOCKERFILE_CHANGED:-0}"
+    local old_caddy_id new_caddy_id caddy_env_changed=0 caddy_dockerfile_changed="${CADDY_DOCKERFILE_CHANGED:-0}" caddy_service_config_changed="${CADDY_SERVICE_CONFIG_CHANGED:-0}"
     old_caddy_id="$(docker compose -f "$COMPOSE_FILE" ps -q caddy | head -1 || true)"
 
     if caddy_env_fingerprint_changed "$old_caddy_id"; then
       caddy_env_changed=1
     fi
 
-    if [ -z "$old_caddy_id" ] || [ "$caddy_dockerfile_changed" -eq 1 ] || [ "$caddy_env_changed" -eq 1 ]; then
+    if [ -z "$old_caddy_id" ] || [ "$caddy_dockerfile_changed" -eq 1 ] || [ "$caddy_env_changed" -eq 1 ] || [ "$caddy_service_config_changed" -eq 1 ]; then
       echo "Reconciling Caddy service..."
       docker compose -f "$COMPOSE_FILE" up -d --no-deps caddy
 
@@ -1022,6 +1091,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       fi
 
       commit_caddy_env_fingerprint
+      commit_caddy_service_config_fingerprint
 
       if [ -z "$old_caddy_id" ]; then
         echo "Caddy started successfully."
@@ -1418,13 +1488,18 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       return 0
     fi
 
-    query="SELECT COUNT(*) FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now();"
+    query="WITH endpoint_blockers AS (
+  SELECT 1 FROM preview_runtimes WHERE endpoint_url = :'endpoint' AND status IN ('starting', 'ready', 'draining') AND lease_expires_at > now()
+  UNION ALL
+  SELECT 1 FROM nodes WHERE metadata->>'preview_internal_base_url' = :'endpoint' AND status IN ('active', 'draining')
+)
+SELECT COUNT(*) FROM endpoint_blockers;"
     if ! count="$(printf '%s\n' "$query" | docker run -i --rm --network host -e PGPASSWORD="$DB_PASSWORD" postgres:16-alpine \
       psql -h "$DB_HOST" -U onefortythree -d onefortythree \
       -v ON_ERROR_STOP=1 \
       -v endpoint="$endpoint" \
       -tA)"; then
-      echo "ERROR: could not verify preview runtime endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
+      echo "ERROR: could not verify preview runtime/node endpoint reuse safety for ${endpoint}; refusing to reuse it." >&2
       return 0
     fi
 
@@ -1512,6 +1587,33 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   compose_service_fingerprint() {
+    local compose_file="$1"
+    shift
+    local read_file="$compose_file"
+    if [ -e "${compose_file}.new" ]; then
+      read_file="${compose_file}.new"
+    fi
+    if [ ! -e "$read_file" ]; then
+      printf 'missing:%s\n' "$compose_file" | sha256sum | awk '{print $1}'
+      return 0
+    fi
+    {
+      local svc
+      for svc in "$@"; do
+        printf -- '--- %s:%s ---\n' "$compose_file" "$svc"
+        awk -v svc="$svc" '
+          /^  [A-Za-z0-9_.-]+:/ {
+            current=$1
+            sub(/:$/, "", current)
+            in_service=(current == svc)
+          }
+          in_service { print }
+        ' "$read_file"
+      done
+    } | sha256sum | awk '{print $1}'
+  }
+
+  compose_service_active_fingerprint() {
     local compose_file="$1"
     shift
     if [ ! -e "$compose_file" ]; then
@@ -2040,6 +2142,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # --ignore-buildable: skip services whose image is built locally (sandbox-dns
   # has both build: and image: 143-sandbox-dns:local in docker-compose.worker.yml,
   # which pull would otherwise treat as a registry reference and fail on).
+  if [ "$ROLE" = "app" ]; then
+    CADDY_SERVICE_CONFIG_CHANGED=0
+    if caddy_service_config_changed; then
+      CADDY_SERVICE_CONFIG_CHANGED=1
+    fi
+    promote_staged_app_compose
+  fi
+
   docker compose -f "$COMPOSE_FILE" pull --ignore-buildable
 
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose

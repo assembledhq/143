@@ -28,6 +28,39 @@ describe("NoReposWarning", () => {
     });
   });
 
+  it("renders nothing while the integrations query is still pending", async () => {
+    let releaseIntegrations: () => void = () => {};
+    const integrationsGate = new Promise<void>((resolve) => {
+      releaseIntegrations = resolve;
+    });
+
+    server.use(
+      http.get("/api/v1/integrations", async () => {
+        await integrationsGate;
+        // No GitHub connected: once resolved this renders the warning, so the
+        // absence of the warning before release proves the loading guard.
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get("/api/v1/repositories", () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    const { container } = renderWithProviders(
+      <NoReposWarning showDisconnectedState />
+    );
+
+    // While integrations is pending the guard returns null — nothing renders.
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(/github setup required/i)).not.toBeInTheDocument();
+
+    // Once the query resolves, the warning appears.
+    releaseIntegrations();
+    await waitFor(() => {
+      expect(screen.getByText(/github setup required/i)).toBeInTheDocument();
+    });
+  });
+
   it("renders nothing when GitHub is connected and repos exist", async () => {
     server.use(
       http.get("/api/v1/integrations", () => {
@@ -85,7 +118,7 @@ describe("NoReposWarning", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/choose repositories in integrations/i)
+        screen.getByText(/no repositories are claimed yet/i)
       ).toBeInTheDocument();
     });
     expect(screen.getByRole("link", { name: /choose repositories/i })).toHaveAttribute("href", "/settings/integrations?select_repos=1");
@@ -140,5 +173,39 @@ describe("NoReposWarning", () => {
         screen.getByText(/github is connected but no repositories are synced/i)
       ).toBeInTheDocument();
     });
+  });
+
+  it("renders as a labeled setup row with asRow", async () => {
+    server.use(
+      http.get("/api/v1/integrations", () => {
+        return HttpResponse.json({
+          data: [{
+            id: "int-1",
+            provider: "github",
+            status: "active",
+            github_app_installed: true,
+            github_repo_selection_required: true,
+          }],
+          meta: {},
+        });
+      }),
+      http.get("/api/v1/repositories", () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.post("/api/v1/integrations/github/sync", () => {
+        return HttpResponse.json({ data: { repos_synced: 0, repos_seen: 2, errors: 0 } });
+      })
+    );
+
+    renderWithProviders(<NoReposWarning asRow />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Repository")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/choose repositories in integrations/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /choose repositories/i })).toHaveAttribute(
+      "href",
+      "/settings/integrations?select_repos=1",
+    );
   });
 });

@@ -63,14 +63,15 @@ func TestMultiTenancyAudit(t *testing.T) {
 	exemptions := []exemption{
 		{"sessions", "where token"},
 		{"sessions", "where user_id"},
-		{"sessions", "where status = 'idle'"},                  // ListStaleIdleSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'pending'"},               // ListStalePendingSessions: system-wide cleanup across all orgs
-		{"sessions", "where status = 'running'"},               // ListStaleRunningSessions: system-wide cleanup across all orgs
-		{"sessions", "where sandbox_state"},                    // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
-		{"sessions", "where pending_snapshot_key is not null"}, // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
-		{"sessions", "where container_id is not null"},         // ListReferencedContainerIDs: worker-local Docker GC must compare host containers against all DB-owned container references
-		{"sessions", "where worker_node_id = @node_id"},        // WorkerDeployStatus: node-scoped deploy drain status
-		{"sessions", "diff_history"},                           // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
+		{"sessions", "where status = 'idle'"},                         // ListStaleIdleSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'pending'"},                      // ListStalePendingSessions: system-wide cleanup across all orgs
+		{"sessions", "where status = 'running'"},                      // ListStaleRunningSessions: system-wide cleanup across all orgs
+		{"sessions", "where sandbox_state"},                           // ListExpiredSnapshots: system-wide snapshot cleanup across all orgs
+		{"sessions", "where pending_snapshot_key is not null"},        // ReapStrandedPendingSnapshots: system-wide cross-org sweep run by leader-elected scheduler; per-org fanout adds no security and would require listing every org each tick
+		{"sessions", "where container_id is not null"},                // ListReferencedContainerIDs: worker-local Docker GC must compare host containers against all DB-owned container references
+		{"sessions", "where worker_node_id = @node_id"},               // WorkerDeployStatus: node-scoped deploy drain status
+		{"sessions", "diff_history"},                                  // UpdateResult/UpdateTurnComplete: org_id is in a concatenated string fragment
+		{"sessions", "exists(select 1 from sessions where id = @id)"}, // SessionLogStore.Create: cross-org check to distinguish org mismatch from missing session
 		{"repositories", "installation_id"},
 		{"integrations", "from integrations"},
 		{"jobs", "where j.status = 'pending' and j.run_at <= now()"},    // ClaimNextRunnable: cross-org worker queue consumer

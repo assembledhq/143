@@ -25,6 +25,7 @@ import {
   Plus,
   Minus,
   Square,
+  Settings2,
   PanelRightOpen,
   PanelRightClose,
   Clock,
@@ -135,7 +136,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, PRReadinessCheck, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -645,6 +646,64 @@ function RuntimeRecoveryNotice({ border = "border-t" }: { border?: "border-t" | 
       </span>
     </div>
   );
+}
+
+function groupReadinessChecks(checks: PRReadinessCheck[]) {
+  return {
+    passed: checks.filter((check) => check.status === "passed"),
+    warnings: checks.filter((check) => check.status === "warning" || (check.status === "failed" && check.enforcement !== "blocking")),
+    blocked: checks.filter((check) => check.status === "failed" && check.enforcement === "blocking"),
+  };
+}
+
+function readinessIsStale(readiness: PRReadinessRun | undefined, session: Session) {
+  return !!readiness && (
+    readiness.evaluated_workspace_revision !== session.workspace_revision ||
+    (readiness.evaluated_snapshot_key ?? "") !== (session.snapshot_key ?? "")
+  );
+}
+
+function ReadinessCheckGroup({ title, checks, empty }: { title: string; checks: PRReadinessCheck[]; empty: string }) {
+  return (
+    <div className="space-y-1">
+      <div className="font-medium text-foreground">{title}</div>
+      {checks.length === 0 ? (
+        <div className="text-muted-foreground">{empty}</div>
+      ) : (
+        <div className="space-y-1">
+          {checks.map((check) => (
+            <div key={check.id || check.check_type} className="flex items-start gap-2 text-muted-foreground">
+              <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+              <span>{check.title}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function readinessStatusLabel(status: PRReadinessRun["status"]) {
+  switch (status) {
+    case "passed":
+      return "Ready";
+    case "warnings":
+      return "Ready with warnings";
+    case "blocked":
+      return "Blocked";
+    case "failed":
+      return "Checks failed";
+    default:
+      return "Checking...";
+  }
+}
+
+function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
+  if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
+  if (!readiness) return <ClipboardList className="h-3.5 w-3.5 text-muted-foreground" />;
+  if (stale || readiness.status === "blocked" || readiness.status === "failed") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
+  if (readiness.status === "warnings") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
+  return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
 function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
@@ -3364,7 +3423,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [mobileReviewComposerOpen, setMobileReviewComposerOpen] = useState(false);
   const [mobileRenameOpen, setMobileRenameOpen] = useState(false);
   const [keyboardHelpOpen, setKeyboardHelpOpen] = useState(false);
-  const [reviewSetupOpen, setReviewSetupOpen] = useState(false);
+  const [reviewConfigOpen, setReviewConfigOpen] = useState(false);
   const [reviewPasses, setReviewPasses] = useState(2);
   const [reviewAgentType, setReviewAgentType] = useState<string>("codex");
   const [reviewFixMode, setReviewFixMode] = useState<ReviewLoopFixMode>("minimal");
@@ -4379,6 +4438,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryFn: () => api.sessions.listReviewLoops(id),
     enabled: !!session,
   });
+  const { data: readinessData } = useQuery({
+    queryKey: queryKeys.sessions.readiness(id),
+    queryFn: () => api.sessions.getReadiness(id),
+    enabled: !!session,
+    refetchInterval: (query) => {
+      const status = query.state.data?.data.latest?.status;
+      return status === "queued" || status === "running" ? pollMs(3000) : false;
+    },
+  });
   const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
@@ -4386,9 +4454,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
-  const hasCleanReviewLoop = hasCleanReviewLoopForSnapshot(reviewLoopsData?.data, session?.snapshot_key);
   const builderRequiresReviewBeforePR = user?.role === "builder" && (orgSettings.builder_permissions?.require_review_before_pr ?? true);
-  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || hasCleanReviewLoop;
+  const latestReadiness = readinessData?.data.latest;
+  const readinessFresh = !!latestReadiness &&
+    latestReadiness.status !== "queued" &&
+    latestReadiness.status !== "running" &&
+    latestReadiness.status !== "blocked" &&
+    latestReadiness.status !== "failed" &&
+    latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
+    (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
+    !(latestReadiness.checks ?? []).some((check) => check.enforcement === "blocking" && check.status === "failed");
+  const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
   const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
   const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
@@ -4494,6 +4570,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const runReadinessMutation = useMutation({
+    mutationFn: () => api.sessions.runReadiness(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      toast.success("Readiness checks started");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Readiness checks could not be started");
+    },
+  });
+
   const startReviewLoopMutation = useMutation({
     mutationFn: () =>
       api.sessions.startReviewLoop(id, {
@@ -4504,7 +4591,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }),
     onSuccess: (response) => {
       toast.success("Review loop started");
-      setReviewSetupOpen(false);
+      setReviewConfigOpen(false);
       const reviewThread = buildReviewLoopThreadPreview(response.data, session);
       if (reviewThread) {
         setPendingThreadPreview(reviewThread);
@@ -4535,6 +4622,21 @@ export function SessionDetailContent({ id }: { id: string }) {
   const reviewActionDisabledReason = startReviewLoopMutation.isPending
     ? "Starting review loop..."
     : reviewUnavailableReason;
+
+  const readinessRunning =
+    latestReadiness?.status === "queued" ||
+    latestReadiness?.status === "running" ||
+    runReadinessMutation.isPending;
+  const readinessStale = !!session && readinessIsStale(latestReadiness, session);
+  const readinessGroups = groupReadinessChecks(latestReadiness?.checks ?? []);
+  const readinessHeadline = !latestReadiness
+    ? "Not reviewed yet"
+    : readinessRunning
+      ? "Checking…"
+      : readinessStale
+        ? "Stale after latest changes"
+        : latestReadiness.summary || readinessStatusLabel(latestReadiness.status);
+  const readinessCheckDisabled = readinessRunning || isRunning;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -4632,14 +4734,34 @@ export function SessionDetailContent({ id }: { id: string }) {
       ? diffError.message
       : "Changes could not be loaded. Retry to fetch the diff again."
     : undefined;
-  const diffTruncationText = useMemo(() => {
+  const diffTruncationNotice = useMemo(() => {
     if (!sessionDiffPayload?.diff_truncated && !sessionDiffPayload?.diff_history_truncated) return undefined;
-    const originalChars = sessionDiffPayload.diff_chars?.toLocaleString();
-    const maxChars = sessionDiffPayload.diff_max_chars?.toLocaleString();
-    if (originalChars && maxChars) {
-      return `This diff is very large, so the viewer is showing the first ${maxChars} of ${originalChars} characters. Diff pass history may be omitted.`;
+    if (sessionDiffPayload.diff_truncated) {
+      const originalCharCount = sessionDiffPayload.diff_chars;
+      const maxCharCount = sessionDiffPayload.diff_max_chars;
+      const historyText = sessionDiffPayload.diff_history_truncated ? " Diff pass history may be omitted." : "";
+      if (
+        typeof originalCharCount === "number"
+        && typeof maxCharCount === "number"
+        && originalCharCount > maxCharCount
+      ) {
+        return {
+          title: "Large diff truncated",
+          text: `This diff is very large, so the viewer is showing the first ${maxCharCount.toLocaleString()} of ${originalCharCount.toLocaleString()} characters.${historyText}`,
+        };
+      }
+      return {
+        title: "Large diff truncated",
+        text: `This diff is very large, so the viewer is showing a bounded preview.${historyText}`,
+      };
     }
-    return "This diff is very large, so the viewer is showing a bounded preview. Diff pass history may be omitted.";
+    if (sessionDiffPayload.diff_history_truncated) {
+      return {
+        title: "Diff pass history truncated",
+        text: "Diff pass history is too large to load for this view, so only the current diff is shown.",
+      };
+    }
+    return undefined;
   }, [sessionDiffPayload?.diff_chars, sessionDiffPayload?.diff_history_truncated, sessionDiffPayload?.diff_max_chars, sessionDiffPayload?.diff_truncated]);
 
   // --- Shared review state (lifted from old ChangesTab) ---
@@ -5896,48 +6018,89 @@ export function SessionDetailContent({ id }: { id: string }) {
           }
           isMobile={isMobileReviewViewport}
           diffLoadErrorText={diffLoadErrorText}
-          diffTruncationText={diffTruncationText}
+          diffTruncationNotice={diffTruncationNotice}
           onRetryDiffLoad={retryDiffLoad}
         />
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
-          {canManageSession && canUseNativeReviewLoop && !hasPR && hasSessionChanges ? (
+          {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
-              <CardContent className="p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0 space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                        <ClipboardList className="h-4 w-4" />
-                      </div>
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">Review work</p>
-                        <p className="text-xs text-muted-foreground">
-                          Review and fix with a selected agent before creating a PR.
-                        </p>
-                      </div>
+              <CardContent className="space-y-3 p-4">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                      {reviewLoopRunning || readinessRunning ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        readinessStatusIcon(latestReadiness, readinessStale, false)
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">
+                        {reviewLoopRunning
+                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`
+                          : "Review before PR"}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {reviewLoopRunning
+                          ? `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`
+                          : readinessHeadline}
+                      </p>
                     </div>
                   </div>
-                  <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                  <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       className="w-full gap-1.5 sm:w-auto"
-                      disabled={reviewActionDisabled}
-                      title={reviewActionDisabledReason}
-                      onClick={() => setReviewSetupOpen(true)}
+                      disabled={readinessCheckDisabled}
+                      onClick={() => runReadinessMutation.mutate()}
                     >
-                      {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                      {readinessRunning ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
-                        <ClipboardList className="h-3.5 w-3.5" />
+                        <RefreshCw className="h-3.5 w-3.5" />
                       )}
-                      Review
+                      {latestReadiness ? "Re-check" : "Check readiness"}
                     </Button>
-                  </DisabledTooltip>
+                    {canUseNativeReviewLoop ? (
+                      <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="w-full gap-1.5 sm:w-auto"
+                          disabled={reviewActionDisabled}
+                          title={reviewActionDisabledReason}
+                          onClick={() => setReviewConfigOpen(true)}
+                        >
+                          {startReviewLoopMutation.isPending || reviewLoopRunning ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Settings2 className="h-3.5 w-3.5" />
+                          )}
+                          Review &amp; fix
+                        </Button>
+                      </DisabledTooltip>
+                    ) : null}
+                  </div>
                 </div>
+                {readinessRunning ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <div>Collecting diff</div>
+                    <div>Running agent review</div>
+                    <div>Checking test evidence</div>
+                    <div>Checking risk signals</div>
+                  </div>
+                ) : null}
+                {!readinessRunning && latestReadiness ? (
+                  <div className="space-y-3 text-xs">
+                    <ReadinessCheckGroup title="Passed" checks={readinessGroups.passed} empty="None" />
+                    <ReadinessCheckGroup title="Warnings" checks={readinessGroups.warnings} empty="None" />
+                    <ReadinessCheckGroup title="Blocked" checks={readinessGroups.blocked} empty="None" />
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
@@ -5969,7 +6132,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
                   title: reviewActionDisabledReason,
-                  onClick: () => setReviewSetupOpen(true),
+                  onClick: () => setReviewConfigOpen(true),
                 } : undefined}
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
@@ -6367,7 +6530,7 @@ export function SessionDetailContent({ id }: { id: string }) {
           {panelTabsEl}
         </SheetContent>
       </Sheet>
-      <Dialog open={reviewSetupOpen} onOpenChange={setReviewSetupOpen}>
+      <Dialog open={reviewConfigOpen} onOpenChange={setReviewConfigOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Review</DialogTitle>
@@ -6488,7 +6651,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               type="button"
               variant="outline"
               disabled={startReviewLoopMutation.isPending}
-              onClick={() => setReviewSetupOpen(false)}
+              onClick={() => setReviewConfigOpen(false)}
             >
               Cancel
             </Button>
