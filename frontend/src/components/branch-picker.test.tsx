@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { BranchPicker } from "./branch-picker";
 
 const mocks = vi.hoisted(() => ({
@@ -19,17 +19,24 @@ describe("BranchPicker", () => {
     mocks.branchesMock.mockReset();
   });
 
-  it("filters existing branches and applies the selected branch", async () => {
+  it("searches branches server-side and applies the selected branch", async () => {
     const user = userEvent.setup();
     const onValueChange = vi.fn();
 
-    mocks.branchesMock.mockResolvedValue({
-      data: [
-        { name: "main", protected: true },
-        { name: "release/2026.04", protected: true },
-        { name: "feature/smart-picker", protected: false },
-      ],
-    });
+    const allBranches = [
+      { name: "main", protected: true },
+      { name: "release/2026.04", protected: true },
+      { name: "feature/smart-picker", protected: false },
+    ];
+    // Mirror the backend: the search query filters server-side, so the picker
+    // only ever renders what the request returned for the current query.
+    mocks.branchesMock.mockImplementation((_id: string, query?: string) =>
+      Promise.resolve({
+        data: query
+          ? allBranches.filter((b) => b.name.includes(query))
+          : allBranches,
+      }),
+    );
 
     renderWithProviders(
       <BranchPicker
@@ -44,10 +51,16 @@ describe("BranchPicker", () => {
     await user.click(screen.getByRole("button", { name: "Base branch" }));
 
     expect(await screen.findByPlaceholderText("Search branches...")).toBeInTheDocument();
+    expect(await screen.findByText("feature/smart-picker")).toBeInTheDocument();
+
     await user.type(screen.getByPlaceholderText("Search branches..."), "release");
 
-    expect(await screen.findByText("release/2026.04")).toBeInTheDocument();
-    expect(screen.queryByText("feature/smart-picker")).not.toBeInTheDocument();
+    // Once the debounced query resolves, the non-matching branch is gone.
+    await waitFor(() =>
+      expect(screen.queryByText("feature/smart-picker")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("release/2026.04")).toBeInTheDocument();
+    expect(mocks.branchesMock).toHaveBeenCalledWith("repo-1", "release");
 
     await user.click(screen.getByText("release/2026.04"));
 
