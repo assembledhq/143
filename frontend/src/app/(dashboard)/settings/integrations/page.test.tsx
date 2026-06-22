@@ -24,6 +24,9 @@ const {
   githubConnectMock,
   currentUserMock,
   ApiErrorMock,
+  routerReplaceMock,
+  notifySuccessMock,
+  navState,
 } = vi.hoisted(() => {
   class MockApiError extends Error {
     constructor(public code: string, message: string, public details?: unknown) {
@@ -59,8 +62,26 @@ const {
       role: "admin",
     },
     ApiErrorMock: MockApiError,
+    routerReplaceMock: vi.fn(),
+    notifySuccessMock: vi.fn(),
+    navState: { params: {} as Record<string, string> },
   };
 });
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: routerReplaceMock, push: vi.fn() }),
+  useSearchParams: () => ({ get: (key: string) => navState.params[key] ?? null }),
+}));
+
+vi.mock("@/lib/notify", () => ({
+  notify: {
+    success: notifySuccessMock,
+    info: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+    dismiss: vi.fn(),
+  },
+}));
 
 vi.mock("@/lib/api", () => ({
   ApiError: ApiErrorMock,
@@ -215,6 +236,9 @@ describe("IntegrationsPage", () => {
     );
     githubConnectMock.mockClear();
     currentUserMock.role = "admin";
+    routerReplaceMock.mockReset();
+    notifySuccessMock.mockReset();
+    navState.params = {};
   });
 
   it("offers a GitHub user-auth connect action when repo claiming requires it", async () => {
@@ -231,6 +255,27 @@ describe("IntegrationsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub account" }));
     expect(githubConnectMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("confirms a returning GitHub account connection and clears the one-shot param", async () => {
+    navState.params = { github_pr: "connected" };
+    renderWithProviders(<IntegrationsPage />);
+
+    await waitFor(() => {
+      expect(notifySuccessMock).toHaveBeenCalledWith(
+        "GitHub account connected",
+        expect.objectContaining({ description: expect.stringContaining("linked") }),
+      );
+    });
+    expect(routerReplaceMock).toHaveBeenCalledWith("/settings/integrations");
+  });
+
+  it("does not fire a connection toast on a normal visit", async () => {
+    renderWithProviders(<IntegrationsPage />);
+
+    await screen.findByText("Integrations");
+    expect(notifySuccessMock).not.toHaveBeenCalled();
+    expect(routerReplaceMock).not.toHaveBeenCalled();
   });
 
   it("keeps GitHub repository claiming controls inside the manage sidesheet", async () => {

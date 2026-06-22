@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
+import { notify } from "@/lib/notify";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CircleHelp, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
@@ -1502,8 +1504,41 @@ function TokenDialog({ open, onOpenChange, title, description, fields, submittin
 
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
+
+  // The GitHub OAuth callbacks redirect back here with a one-shot query param
+  // on success: `github_pr=connected` after linking a personal GitHub account
+  // (the flow started by the "Connect GitHub account" button on a repo claim),
+  // and `github=connected` after installing the org GitHub App. The backend
+  // only adds these on success — failures render an error page instead — so
+  // their presence is the success signal. Confirm it with a toast, refresh the
+  // integration/repository caches so a retried claim sees the new auth, then
+  // strip the param so a refresh doesn't replay the toast.
+  useEffect(() => {
+    const githubPRConnected = searchParams.get("github_pr") === "connected";
+    const githubAppConnected = searchParams.get("github") === "connected";
+    if (!githubPRConnected && !githubAppConnected) {
+      return;
+    }
+    if (githubPRConnected) {
+      notify.success("GitHub account connected", {
+        description: "Your GitHub account is linked. You can now claim or transfer repositories.",
+      });
+      queryClient.invalidateQueries({ queryKey: ["github-status"] });
+      queryClient.invalidateQueries({ queryKey: ["team-github-status"] });
+    } else {
+      notify.success("GitHub connected", {
+        description: "The 143 GitHub App is installed for your organization.",
+      });
+    }
+    queryClient.invalidateQueries({ queryKey: queryKeys.integrations.all });
+    queryClient.invalidateQueries({ queryKey: queryKeys.repositories.all });
+    queryClient.invalidateQueries({ queryKey: ["repositories", "integrations", "include-disconnected"] });
+    router.replace("/settings/integrations");
+  }, [searchParams, router, queryClient]);
   const [selectedIntegration, setSelectedIntegration] = useState<IntegrationKey | null>(null);
   const { data: integrationsResp } = useQuery({
     queryKey: ["integrations"],
