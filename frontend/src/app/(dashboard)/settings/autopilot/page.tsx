@@ -39,7 +39,7 @@ import {
   PM_SCHEDULE_MAX_HOURS,
   clampNumber,
 } from "@/lib/settings-constants";
-import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, RepoSettings, Repository, SingleResponse } from "@/lib/types";
+import type { CodingCredentialSummary, ListResponse, Organization, OrgSettings, Repository, SingleResponse } from "@/lib/types";
 
 export default function AutopilotSettingsPage() {
   const { user } = useAuth();
@@ -74,7 +74,7 @@ export default function AutopilotSettingsPage() {
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const repositories = repositoriesResponse?.data ?? [];
   const reposWithCustomPM = repositories.filter((repository) => {
-    const repoSettings = (repository.settings ?? {}) as RepoSettings;
+    const repoSettings = repository.settings as { pm?: unknown };
     return repoSettings.pm != null;
   });
   const resolvedCredentials = useMemo(
