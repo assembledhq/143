@@ -75,6 +75,18 @@ function listToCsv(value?: string[]) {
   return (value ?? []).join(", ");
 }
 
+// parseThreshold maps a number field's committed text to a non-negative integer,
+// or undefined when blank/invalid so the server default applies (omitempty).
+// Using undefined rather than `|| 25` lets 0 be entered and avoids silently
+// resetting a cleared field to a hard-coded default.
+function parseThreshold(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (trimmed === "") return undefined;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  return Math.floor(parsed);
+}
+
 function toggleRole(roles: string[] | undefined, role: string, enabled: boolean) {
   const set = new Set(roles ?? []);
   if (enabled) set.add(role);
@@ -189,10 +201,14 @@ function PRAuthorshipSettings() {
     const checks = { ...(readinessPolicy.checks ?? defaultReadinessChecks()) };
     for (const checkKey of READINESS_CHECKS) {
       const existing = checks[checkKey]?.enforcement ?? {};
+      const existingEngineer = existing.engineer ?? "off";
       checks[checkKey] = {
         enforcement: {
           builder: existing.builder ?? "advisory",
-          engineer: enabled ? "advisory" : "off",
+          // Enabling only promotes checks that are currently off so it doesn't
+          // overwrite a per-check "blocking" an admin set in the matrix below;
+          // disabling turns engineer enforcement off across the board.
+          engineer: enabled ? (existingEngineer !== "off" ? existingEngineer : "advisory") : "off",
           admin: existing.admin ?? "advisory",
         },
       };
@@ -372,36 +388,36 @@ function PRAuthorshipSettings() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="space-y-1">
                 <Label htmlFor="readiness-large-files">Large diff files</Label>
-                <Input
+                <DebouncedInput
                   id="readiness-large-files"
                   type="number"
-                  value={readinessPolicy.large_diff_file_threshold ?? 25}
-                  onChange={(event) => patchReadinessPolicy({ large_diff_file_threshold: Number(event.target.value) || 25 })}
+                  serverValue={String(readinessPolicy.large_diff_file_threshold ?? 25)}
+                  onCommit={(value) => patchReadinessPolicy({ large_diff_file_threshold: parseThreshold(value) })}
                 />
               </div>
               <div className="space-y-1">
                 <Label htmlFor="readiness-large-lines">Large diff lines</Label>
-                <Input
+                <DebouncedInput
                   id="readiness-large-lines"
                   type="number"
-                  value={readinessPolicy.large_diff_line_threshold ?? 500}
-                  onChange={(event) => patchReadinessPolicy({ large_diff_line_threshold: Number(event.target.value) || 500 })}
+                  serverValue={String(readinessPolicy.large_diff_line_threshold ?? 500)}
+                  onCommit={(value) => patchReadinessPolicy({ large_diff_line_threshold: parseThreshold(value) })}
                 />
               </div>
               <div className="space-y-1">
                 <Label htmlFor="readiness-sensitive-paths">Sensitive paths</Label>
-                <Input
+                <DebouncedInput
                   id="readiness-sensitive-paths"
-                  value={listToCsv(readinessPolicy.sensitive_paths)}
-                  onChange={(event) => patchReadinessPolicy({ sensitive_paths: csvToList(event.target.value) })}
+                  serverValue={listToCsv(readinessPolicy.sensitive_paths)}
+                  onCommit={(value) => patchReadinessPolicy({ sensitive_paths: csvToList(value) })}
                 />
               </div>
               <div className="space-y-1">
                 <Label htmlFor="readiness-generated-allowed">Allowed generated paths</Label>
-                <Input
+                <DebouncedInput
                   id="readiness-generated-allowed"
-                  value={listToCsv(readinessPolicy.generated_file_allowed_paths)}
-                  onChange={(event) => patchReadinessPolicy({ generated_file_allowed_paths: csvToList(event.target.value) })}
+                  serverValue={listToCsv(readinessPolicy.generated_file_allowed_paths)}
+                  onCommit={(value) => patchReadinessPolicy({ generated_file_allowed_paths: csvToList(value) })}
                 />
               </div>
             </div>
@@ -453,13 +469,13 @@ function PRAuthorshipSettings() {
               </div>
               <div className="space-y-1">
                 <Label htmlFor="readiness-non-bypassable">Non-bypassable checks</Label>
-                <Input
+                <DebouncedInput
                   id="readiness-non-bypassable"
-                  value={listToCsv(readinessPolicy.bypass?.non_bypassable_checks)}
-                  onChange={(event) => patchReadinessPolicy({
+                  serverValue={listToCsv(readinessPolicy.bypass?.non_bypassable_checks)}
+                  onCommit={(value) => patchReadinessPolicy({
                     bypass: {
                       ...(readinessPolicy.bypass ?? { enabled: true }),
-                      non_bypassable_checks: csvToList(event.target.value),
+                      non_bypassable_checks: csvToList(value),
                     },
                   })}
                 />

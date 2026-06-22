@@ -5,12 +5,16 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"text/template"
 
 	"github.com/assembledhq/143/internal/models"
 )
 
 const (
 	ConfigPath = ".143/config.json"
+
+	// PRReadinessCheckConfigTypePrompt is the only supported custom-check type today.
+	PRReadinessCheckConfigTypePrompt = "prompt"
 )
 
 type CommandSection struct {
@@ -70,6 +74,9 @@ func Parse(data []byte) (Config, error) {
 var readinessCheckIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
 
 func normalizePRReadiness(cfg *PRReadinessConfig) error {
+	if len(cfg.Checks) > models.MaxPRReadinessCustomChecks {
+		return fmt.Errorf("pr_readiness.checks must not exceed %d entries", models.MaxPRReadinessCustomChecks)
+	}
 	seen := map[string]struct{}{}
 	for i := range cfg.Checks {
 		check := &cfg.Checks[i]
@@ -88,14 +95,31 @@ func normalizePRReadiness(cfg *PRReadinessConfig) error {
 		if check.Name == "" {
 			return fmt.Errorf("%s.name must be a non-empty string", fieldPath)
 		}
-		if check.Type != "prompt" {
-			return fmt.Errorf("%s.type must be %q", fieldPath, "prompt")
+		if len(check.Name) > models.MaxPRReadinessCustomCheckName {
+			return fmt.Errorf("%s.name must not exceed %d characters", fieldPath, models.MaxPRReadinessCustomCheckName)
+		}
+		if check.Type != PRReadinessCheckConfigTypePrompt {
+			return fmt.Errorf("%s.type must be %q", fieldPath, PRReadinessCheckConfigTypePrompt)
 		}
 		if check.Prompt == "" {
 			return fmt.Errorf("%s.prompt must be a non-empty string", fieldPath)
 		}
+		if len(check.Prompt) > models.MaxPRReadinessCustomCheckPrompt {
+			return fmt.Errorf("%s.prompt must not exceed %d characters", fieldPath, models.MaxPRReadinessCustomCheckPrompt)
+		}
+		// The prompt is rendered as a Go text/template at readiness time; reject
+		// templates that don't parse here so authors get a clear config error
+		// instead of a silent per-run check failure later.
+		if _, err := template.New("custom_readiness_prompt").Parse(check.Prompt); err != nil {
+			return fmt.Errorf("%s.prompt is not a valid template: %w", fieldPath, err)
+		}
 		if err := check.Enforcement.Validate(); err != nil {
 			return fmt.Errorf("%s.enforcement: %w", fieldPath, err)
+		}
+		if check.Enforcement.EnforcementFor(models.RoleBuilder) == models.PRReadinessEnforcementOff &&
+			check.Enforcement.EnforcementFor(models.RoleMember) == models.PRReadinessEnforcementOff &&
+			check.Enforcement.EnforcementFor(models.RoleAdmin) == models.PRReadinessEnforcementOff {
+			return fmt.Errorf("%s.enforcement must enable at least one role (advisory or blocking)", fieldPath)
 		}
 		if err := normalizePathFilter(fieldPath+".paths.include", check.Paths.Include); err != nil {
 			return err
@@ -108,11 +132,18 @@ func normalizePRReadiness(cfg *PRReadinessConfig) error {
 }
 
 func normalizePathFilter(fieldPath string, values []string) error {
+	if len(values) > models.MaxPRReadinessPathPatterns {
+		return fmt.Errorf("%s must not exceed %d patterns", fieldPath, models.MaxPRReadinessPathPatterns)
+	}
 	for i, value := range values {
-		if strings.TrimSpace(value) == "" {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
 			return fmt.Errorf("%s[%d] must be a non-empty string", fieldPath, i)
 		}
-		values[i] = strings.TrimSpace(value)
+		if len(trimmed) > models.MaxPRReadinessPathPatternLen {
+			return fmt.Errorf("%s[%d] must not exceed %d characters", fieldPath, i, models.MaxPRReadinessPathPatternLen)
+		}
+		values[i] = trimmed
 	}
 	return nil
 }

@@ -3,7 +3,9 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -93,6 +95,26 @@ func (e PRReadinessEnforcement) Validate() error {
 	}
 }
 
+// PRReadinessProvenance records where a materialized check came from. It backs
+// the CHECK-constrained pr_readiness_checks.provenance column (see
+// chk_pr_readiness_checks_provenance) and is pinned by enum_db_sync_test.go.
+type PRReadinessProvenance string
+
+const (
+	PRReadinessProvenanceBuiltin     PRReadinessProvenance = "builtin"
+	PRReadinessProvenanceOrgSettings PRReadinessProvenance = "org_settings"
+	PRReadinessProvenanceRepoConfig  PRReadinessProvenance = "repo_config"
+)
+
+func (p PRReadinessProvenance) Validate() error {
+	switch p {
+	case PRReadinessProvenanceBuiltin, PRReadinessProvenanceOrgSettings, PRReadinessProvenanceRepoConfig:
+		return nil
+	default:
+		return fmt.Errorf("invalid PRReadinessProvenance: %q", p)
+	}
+}
+
 type PRReadinessPolicy struct {
 	Builder  map[PRReadinessCheckType]PRReadinessEnforcement `json:"builder,omitempty"`
 	Engineer map[PRReadinessCheckType]PRReadinessEnforcement `json:"engineer,omitempty"`
@@ -135,7 +157,7 @@ func normalizePRReadinessEnforcement(value PRReadinessEnforcement) PRReadinessEn
 }
 
 type PRReadinessCheckPolicy struct {
-	Enforcement PRReadinessEnforcementByRole `json:"enforcement,omitempty"`
+	Enforcement PRReadinessEnforcementByRole `json:"enforcement"`
 }
 
 type PRReadinessBypassPolicy struct {
@@ -153,8 +175,8 @@ type PRReadinessAutoRunPolicy struct {
 type PRReadinessPolicyConfig struct {
 	EnabledForBuilders        bool                                            `json:"enabled_for_builders"`
 	Checks                    map[PRReadinessCheckType]PRReadinessCheckPolicy `json:"checks,omitempty"`
-	Bypass                    PRReadinessBypassPolicy                         `json:"bypass,omitempty"`
-	AutoRun                   PRReadinessAutoRunPolicy                        `json:"auto_run,omitempty"`
+	Bypass                    PRReadinessBypassPolicy                         `json:"bypass"`
+	AutoRun                   PRReadinessAutoRunPolicy                        `json:"auto_run"`
 	SensitivePaths            []string                                        `json:"sensitive_paths,omitempty"`
 	GeneratedFileAllowedPaths []string                                        `json:"generated_file_allowed_paths,omitempty"`
 	LargeDiffFileThreshold    int                                             `json:"large_diff_file_threshold,omitempty"`
@@ -503,7 +525,7 @@ type PRReadinessCheck struct {
 	EnforcementEngineer  PRReadinessEnforcement       `db:"enforcement_engineer" json:"-"`
 	EnforcementAdmin     PRReadinessEnforcement       `db:"enforcement_admin" json:"-"`
 	EffectiveEnforcement PRReadinessEnforcement       `db:"-" json:"effective_enforcement,omitempty"`
-	Provenance           string                       `db:"provenance" json:"provenance,omitempty"`
+	Provenance           PRReadinessProvenance        `db:"provenance" json:"provenance,omitempty"`
 	Source               string                       `db:"source" json:"source,omitempty"`
 	Title                string                       `db:"title" json:"title"`
 	Summary              string                       `db:"summary" json:"summary"`
@@ -626,6 +648,80 @@ const (
 	PRReadinessCustomCheckSourceOrgSettings PRReadinessCustomCheckSource = "org_settings"
 	PRReadinessCustomCheckSourceRepoConfig  PRReadinessCustomCheckSource = "repo_config"
 )
+
+func (s PRReadinessCustomCheckSource) Validate() error {
+	switch s {
+	case PRReadinessCustomCheckSourceOrgSettings, PRReadinessCustomCheckSourceRepoConfig:
+		return nil
+	default:
+		return fmt.Errorf("invalid PRReadinessCustomCheckSource: %q", s)
+	}
+}
+
+// Bounds on user-authored custom checks, shared by the API editor and the
+// .143/config.json parser so both reject the same oversized input before it is
+// persisted or fed into an LLM check prompt.
+const (
+	MaxPRReadinessCustomChecks      = 50
+	MaxPRReadinessCustomCheckName   = 200
+	MaxPRReadinessCustomCheckPrompt = 8000
+	MaxPRReadinessPathPatterns      = 100
+	MaxPRReadinessPathPatternLen    = 256
+)
+
+var prReadinessCustomCheckKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{2,63}$`)
+
+// Validate checks a custom check's user-supplied fields. It is the single source
+// of truth for custom-check validation used by both the API and repoconfig.
+func (c PRReadinessCustomCheck) Validate() error {
+	if !prReadinessCustomCheckKeyPattern.MatchString(c.CheckKey) {
+		return fmt.Errorf("check_key must match %s", prReadinessCustomCheckKeyPattern.String())
+	}
+	name := strings.TrimSpace(c.Name)
+	if name == "" {
+		return fmt.Errorf("name must be a non-empty string")
+	}
+	if len(name) > MaxPRReadinessCustomCheckName {
+		return fmt.Errorf("name must not exceed %d characters", MaxPRReadinessCustomCheckName)
+	}
+	prompt := strings.TrimSpace(c.Prompt)
+	if prompt == "" {
+		return fmt.Errorf("prompt must be a non-empty string")
+	}
+	if len(prompt) > MaxPRReadinessCustomCheckPrompt {
+		return fmt.Errorf("prompt must not exceed %d characters", MaxPRReadinessCustomCheckPrompt)
+	}
+	if _, err := template.New("custom_readiness_prompt").Parse(prompt); err != nil {
+		return fmt.Errorf("prompt is not a valid template: %w", err)
+	}
+	if err := c.Enforcement.Validate(); err != nil {
+		return fmt.Errorf("enforcement: %w", err)
+	}
+	if c.Enforcement.EnforcementFor(RoleBuilder) == PRReadinessEnforcementOff &&
+		c.Enforcement.EnforcementFor(RoleMember) == PRReadinessEnforcementOff &&
+		c.Enforcement.EnforcementFor(RoleAdmin) == PRReadinessEnforcementOff {
+		return fmt.Errorf("enforcement must enable at least one role (advisory or blocking)")
+	}
+	if err := validatePRReadinessPatterns("paths.include", c.PathFilters.Include); err != nil {
+		return err
+	}
+	return validatePRReadinessPatterns("paths.exclude", c.PathFilters.Exclude)
+}
+
+func validatePRReadinessPatterns(field string, patterns []string) error {
+	if len(patterns) > MaxPRReadinessPathPatterns {
+		return fmt.Errorf("%s must not exceed %d patterns", field, MaxPRReadinessPathPatterns)
+	}
+	for i, pattern := range patterns {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("%s[%d] must be a non-empty string", field, i)
+		}
+		if len(pattern) > MaxPRReadinessPathPatternLen {
+			return fmt.Errorf("%s[%d] must not exceed %d characters", field, i, MaxPRReadinessPathPatternLen)
+		}
+	}
+	return nil
+}
 
 type PRReadinessCustomCheck struct {
 	ID              uuid.UUID                    `db:"id" json:"id"`

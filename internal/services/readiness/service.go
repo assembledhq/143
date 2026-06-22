@@ -96,7 +96,7 @@ func (e *Evaluator) checkBase(checkType models.PRReadinessCheckType, status mode
 		EnforcementBuilder:  enforcement.Builder,
 		EnforcementEngineer: enforcement.Engineer,
 		EnforcementAdmin:    enforcement.Admin,
-		Provenance:          "builtin",
+		Provenance:          models.PRReadinessProvenanceBuiltin,
 		Title:               title,
 		Summary:             summary,
 		Action:              action,
@@ -125,7 +125,7 @@ func (e *Evaluator) agentReviewCheck(input EvaluationInput) models.PRReadinessCh
 }
 
 func (e *Evaluator) diffCollectedCheck(input EvaluationInput) models.PRReadinessCheck {
-	if len(input.Session.DiffStats) > 0 && string(input.Session.DiffStats) != "null" {
+	if hasDiffStats(input.Session.DiffStats) {
 		return e.checkBase(models.PRReadinessCheckTypeDiffCollected, models.PRReadinessCheckStatusPassed, "Diff collected", "Diff stats are available for this session.", "View changes", nil)
 	}
 	return e.checkBase(models.PRReadinessCheckTypeDiffCollected, models.PRReadinessCheckStatusWarning, "Diff not collected", "No diff stats were available when readiness ran.", "View changes", nil)
@@ -197,12 +197,26 @@ func (e *Evaluator) contextCheck(input EvaluationInput) models.PRReadinessCheck 
 }
 
 func (e *Evaluator) reviewPacketCheck(input EvaluationInput) models.PRReadinessCheck {
-	if len(input.Session.DiffStats) > 0 {
+	if hasDiffStats(input.Session.DiffStats) {
 		return e.checkBase(models.PRReadinessCheckTypeReviewPacketDraftable, models.PRReadinessCheckStatusPassed, "Review packet draftable", "Diff summary and readiness evidence are available.", "View packet", nil)
 	}
 	return e.checkBase(models.PRReadinessCheckTypeReviewPacketDraftable, models.PRReadinessCheckStatusWarning, "Review packet incomplete", "A review packet could not include a grounded diff summary.", "Re-run", nil)
 }
 
+// hasDiffStats reports whether the session carries usable diff stats. Postgres
+// jsonb stores an absent value as the literal "null", so an empty payload and a
+// 4-byte "null" must both count as missing — every readiness consumer of
+// DiffStats uses this so they agree on the empty case.
+func hasDiffStats(diffStats json.RawMessage) bool {
+	return len(diffStats) > 0 && string(diffStats) != "null"
+}
+
+// aggregateStatus computes the run-level status as a role-agnostic worst case: a
+// run is Blocked if any failed/errored check is blocking for ANY role. This is a
+// summary headline only — the actual per-role PR gate is computed separately from
+// PRReadinessRun.UnbypassedBlockingCheckKeys(role), so a check that blocks only
+// admins can show the run as "Blocked" while a builder is in fact unblocked. UI
+// that needs role-accurate blocking must use the per-role enforcement, not this.
 func aggregateStatus(checks []models.PRReadinessCheck) models.PRReadinessRunStatus {
 	hasWarning := false
 	for _, check := range checks {
@@ -244,7 +258,7 @@ func summaryForStatus(status models.PRReadinessRunStatus) string {
 func buildReviewPacket(input EvaluationInput, checks []models.PRReadinessCheck) map[string]any {
 	risk := riskFlags(input)
 	unknowns := make([]string, 0)
-	if len(input.Session.DiffStats) == 0 || string(input.Session.DiffStats) == "null" {
+	if !hasDiffStats(input.Session.DiffStats) {
 		unknowns = append(unknowns, "diff_stats")
 	}
 	if input.LinkedIssueCount == 0 && strings.TrimSpace(input.IssueLessReason) == "" {
@@ -266,9 +280,12 @@ func buildReviewPacket(input EvaluationInput, checks []models.PRReadinessCheck) 
 		"why_changed": whyChanged,
 		"checked_at":  time.Now().UTC().Format(time.RFC3339),
 		"risk_flags":  risk,
-		"bypasses":    []models.PRReadinessBypass{},
-		"unknowns":    unknowns,
-		"checks":      checks,
+		// Always empty here: the packet is built during evaluation, before a
+		// blocked result can be bypassed. Recorded bypasses live on the run's
+		// Bypasses relation, not in the packet snapshot.
+		"bypasses": []models.PRReadinessBypass{},
+		"unknowns": unknowns,
+		"checks":   checks,
 	}
 }
 
@@ -351,7 +368,7 @@ func hasSensitivePath(files []string, policy models.PRReadinessPolicyConfig) boo
 	}
 	for _, file := range files {
 		for _, pattern := range patterns {
-			if matchPathPattern(strings.ToLower(pattern), strings.ToLower(file)) {
+			if MatchPathPattern(pattern, file) {
 				return true
 			}
 		}
@@ -413,7 +430,7 @@ func generatedFiles(files []string, policy models.PRReadinessPolicyConfig) []str
 
 func generatedFileAllowed(file string, allowedPatterns []string) bool {
 	for _, pattern := range allowedPatterns {
-		if matchPathPattern(strings.ToLower(pattern), strings.ToLower(file)) {
+		if MatchPathPattern(pattern, file) {
 			return true
 		}
 	}
@@ -433,21 +450,33 @@ func appendUniqueStrings(values []string, extras ...string) []string {
 	return out
 }
 
-func matchPathPattern(pattern, file string) bool {
-	pattern = strings.TrimSpace(pattern)
-	if pattern == "" {
+// MatchPathPattern reports whether file matches a readiness path pattern. It is
+// the single source of truth for path matching across readiness checks (sensitive
+// paths, generated-file allow-lists, and custom-check include/exclude filters) so
+// the same glob in different places behaves identically. Matching is
+// case-insensitive. Supported forms:
+//
+//	prefix/**   subtree match (file == prefix or under prefix/)
+//	**/suffix   suffix match (file == suffix or ends with /suffix)
+//	a/*/b       '*' is a glob wildcard (crosses path separators), anchored
+//	plain       exact file match, or a path-segment prefix (file under plain/)
+//
+// Unlike the previous implementations it does NOT fall back to an unanchored
+// substring match, which produced false positives like pattern "api" matching
+// "internal/capitalize_apiary.go" or "env" matching "internal/environment/...".
+func MatchPathPattern(pattern, file string) bool {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	file = strings.ToLower(strings.TrimSpace(file))
+	if pattern == "" || file == "" {
 		return false
 	}
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := strings.TrimSuffix(pattern, "/**")
 		return file == prefix || strings.HasPrefix(file, prefix+"/")
 	}
-	if strings.Contains(pattern, "**/") {
+	if strings.HasPrefix(pattern, "**/") {
 		suffix := strings.TrimPrefix(pattern, "**/")
-		return strings.HasSuffix(file, suffix)
-	}
-	if ok, err := path.Match(pattern, file); err == nil && ok {
-		return true
+		return file == suffix || strings.HasSuffix(file, "/"+suffix)
 	}
 	if strings.Contains(pattern, "*") {
 		re := regexp.QuoteMeta(pattern)
@@ -455,7 +484,7 @@ func matchPathPattern(pattern, file string) bool {
 		ok, err := regexp.MatchString("^"+re+"$", file)
 		return err == nil && ok
 	}
-	return file == pattern || strings.Contains(file, pattern)
+	return file == pattern || strings.HasPrefix(file, pattern+"/")
 }
 
 func stringValue(v *string) string {

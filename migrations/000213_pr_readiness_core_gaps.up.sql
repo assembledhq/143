@@ -1,27 +1,34 @@
-ALTER TABLE pr_readiness_checks
-    DROP CONSTRAINT IF EXISTS pr_readiness_checks_status_check;
+-- Rename the inline CHECK constraints created in 000209 to the chk_<table>_<column>
+-- convention so internal/models/enum_db_sync_test.go pins them against the Go enums,
+-- and extend the allowed value sets (status += 'error', check_type += 'custom_prompt').
+ALTER TABLE pr_readiness_runs
+    DROP CONSTRAINT IF EXISTS pr_readiness_runs_status_check,
+    ADD CONSTRAINT chk_pr_readiness_runs_status
+        CHECK (status IN ('queued', 'running', 'passed', 'warnings', 'blocked', 'failed'));
 
 ALTER TABLE pr_readiness_checks
-    DROP CONSTRAINT IF EXISTS pr_readiness_checks_check_type_check;
+    DROP CONSTRAINT IF EXISTS pr_readiness_checks_status_check,
+    DROP CONSTRAINT IF EXISTS pr_readiness_checks_check_type_check,
+    DROP CONSTRAINT IF EXISTS pr_readiness_checks_enforcement_check;
 
 ALTER TABLE pr_readiness_checks
-    ADD CONSTRAINT pr_readiness_checks_status_check
-    CHECK (status IN ('passed', 'warning', 'failed', 'skipped', 'error'));
-
-ALTER TABLE pr_readiness_checks
-    ADD CONSTRAINT pr_readiness_checks_check_type_check
-    CHECK (check_type IN (
-        'freshness',
-        'agent_review_clean',
-        'diff_collected',
-        'test_evidence_present',
-        'risk_flags',
-        'dependency_config_risk',
-        'generated_file_churn',
-        'context_complete',
-        'review_packet_draftable',
-        'custom_prompt'
-    ));
+    ADD CONSTRAINT chk_pr_readiness_checks_status
+        CHECK (status IN ('passed', 'warning', 'failed', 'skipped', 'error')),
+    ADD CONSTRAINT chk_pr_readiness_checks_check_type
+        CHECK (check_type IN (
+            'freshness',
+            'agent_review_clean',
+            'diff_collected',
+            'test_evidence_present',
+            'risk_flags',
+            'dependency_config_risk',
+            'generated_file_churn',
+            'context_complete',
+            'review_packet_draftable',
+            'custom_prompt'
+        )),
+    ADD CONSTRAINT chk_pr_readiness_checks_enforcement
+        CHECK (enforcement IN ('off', 'advisory', 'blocking'));
 
 ALTER TABLE pr_readiness_checks
     ADD COLUMN IF NOT EXISTS check_key text NOT NULL DEFAULT '',
@@ -35,9 +42,18 @@ UPDATE pr_readiness_checks
 SET check_key = check_type
 WHERE check_key = '';
 
+-- Backfill the per-role enforcement columns from the legacy single-value column.
+-- 000209 only stored one enforcement value (applied to builders); engineer/admin
+-- did not exist, so mirror the legacy value across all three roles for historical
+-- rows rather than leaving engineer/admin at 'off'.
 UPDATE pr_readiness_checks
-SET enforcement_builder = enforcement
-WHERE enforcement_builder = 'off' AND enforcement <> 'off';
+SET enforcement_builder = enforcement,
+    enforcement_engineer = enforcement,
+    enforcement_admin = enforcement
+WHERE enforcement <> 'off'
+  AND enforcement_builder = 'off'
+  AND enforcement_engineer = 'off'
+  AND enforcement_admin = 'off';
 
 ALTER TABLE pr_readiness_checks
     DROP CONSTRAINT IF EXISTS pr_readiness_checks_enforcement_builder_check,
@@ -46,13 +62,13 @@ ALTER TABLE pr_readiness_checks
     DROP CONSTRAINT IF EXISTS pr_readiness_checks_provenance_check;
 
 ALTER TABLE pr_readiness_checks
-    ADD CONSTRAINT pr_readiness_checks_enforcement_builder_check
+    ADD CONSTRAINT chk_pr_readiness_checks_enforcement_builder
         CHECK (enforcement_builder IN ('off', 'advisory', 'blocking')),
-    ADD CONSTRAINT pr_readiness_checks_enforcement_engineer_check
+    ADD CONSTRAINT chk_pr_readiness_checks_enforcement_engineer
         CHECK (enforcement_engineer IN ('off', 'advisory', 'blocking')),
-    ADD CONSTRAINT pr_readiness_checks_enforcement_admin_check
+    ADD CONSTRAINT chk_pr_readiness_checks_enforcement_admin
         CHECK (enforcement_admin IN ('off', 'advisory', 'blocking')),
-    ADD CONSTRAINT pr_readiness_checks_provenance_check
+    ADD CONSTRAINT chk_pr_readiness_checks_provenance
         CHECK (provenance IN ('builtin', 'org_settings', 'repo_config'));
 
 CREATE TABLE pr_readiness_policies (
@@ -85,7 +101,7 @@ CREATE TABLE pr_readiness_custom_checks (
     prompt text NOT NULL,
     path_filters jsonb NOT NULL DEFAULT '{}'::jsonb,
     enforcement jsonb NOT NULL DEFAULT '{}'::jsonb,
-    source text NOT NULL CHECK (source IN ('org_settings', 'repo_config')),
+    source text NOT NULL CONSTRAINT chk_pr_readiness_custom_checks_source CHECK (source IN ('org_settings', 'repo_config')),
     active boolean NOT NULL DEFAULT true,
     created_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now()

@@ -137,6 +137,7 @@ const (
 	AuditActionPreviewPolicyUpdated          AuditAction = "preview_policy.updated"
 	AuditActionPRReadinessPolicyUpdated      AuditAction = "pr_readiness_policy.updated"
 	AuditActionPRReadinessCustomCheckUpdated AuditAction = "pr_readiness_custom_check.updated"
+	AuditActionPRReadinessCustomCheckDeleted AuditAction = "pr_readiness_custom_check.deleted"
 	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed"
 
 	// Auth actions
@@ -207,7 +208,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,
 		AuditActionPreviewSecretBundleRevealed, AuditActionPreviewSecretBundleResolved, AuditActionPreviewSecretBundleFailed,
 		AuditActionPreviewPolicyUpdated, AuditActionPRReadinessPolicyUpdated, AuditActionPRReadinessCustomCheckUpdated,
-		AuditActionPRReadinessBypassed,
+		AuditActionPRReadinessCustomCheckDeleted, AuditActionPRReadinessBypassed,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
 		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevealed, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,

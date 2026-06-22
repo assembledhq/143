@@ -44,6 +44,14 @@ import (
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+
+// prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
+// for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
+// non-consuming retries, so without this deadline a review loop that never
+// reaches a clean snapshot would requeue every prePRReviewRetryDelay forever
+// (re-running custom-check LLM calls each time). Past the deadline the run is
+// marked failed instead.
+const prePRReviewMaxWait = 30 * time.Minute
 const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
 
@@ -9723,8 +9731,22 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("load PR readiness run: %w", err)
 		}
+		// Skip runs that already reached a terminal state (e.g. a dead-letter
+		// MarkFailed or a prior completion). MarkRunning is guarded the same way,
+		// so treat its ErrNoRows as "already terminal" rather than a job failure.
+		if run.Status != models.PRReadinessRunStatusQueued && run.Status != models.PRReadinessRunStatusRunning {
+			logger.Info().
+				Str("session_id", sessionID.String()).
+				Str("readiness_id", readinessID.String()).
+				Str("status", string(run.Status)).
+				Msg("PR readiness run already terminal; skipping")
+			return nil
+		}
 		if run.Status != models.PRReadinessRunStatusRunning {
 			if err := stores.PRReadiness.MarkRunning(ctx, orgID, readinessID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
 				return err
 			}
 		}
@@ -9735,6 +9757,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
 			return err
 		} else if loop != nil {
+			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+			}
 			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
 		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
@@ -9746,6 +9771,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			return err
 		}
 		if !reviewReady {
+			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+			}
 			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
 		}
 
@@ -9931,7 +9959,7 @@ func customReadinessCheckResult(check models.PRReadinessCustomCheck, status mode
 		EnforcementEngineer:  enforcement.Engineer,
 		EnforcementAdmin:     enforcement.Admin,
 		EffectiveEnforcement: enforcement.Builder,
-		Provenance:           string(check.Source),
+		Provenance:           models.PRReadinessProvenance(check.Source),
 		Source:               string(check.Source),
 		Title:                title,
 		Summary:              summary,
@@ -9951,7 +9979,7 @@ func customReadinessCheckMatches(check models.PRReadinessCustomCheck, changedFil
 	for _, file := range changedFiles {
 		included := len(check.PathFilters.Include) == 0
 		for _, pattern := range check.PathFilters.Include {
-			if readinessPathPatternMatches(pattern, file) {
+			if readinesssvc.MatchPathPattern(pattern, file) {
 				included = true
 				break
 			}
@@ -9961,7 +9989,7 @@ func customReadinessCheckMatches(check models.PRReadinessCustomCheck, changedFil
 		}
 		excluded := false
 		for _, pattern := range check.PathFilters.Exclude {
-			if readinessPathPatternMatches(pattern, file) {
+			if readinesssvc.MatchPathPattern(pattern, file) {
 				excluded = true
 				break
 			}
@@ -9971,32 +9999,6 @@ func customReadinessCheckMatches(check models.PRReadinessCustomCheck, changedFil
 		}
 	}
 	return false
-}
-
-func readinessPathPatternMatches(pattern, file string) bool {
-	pattern = strings.ToLower(strings.TrimSpace(pattern))
-	file = strings.ToLower(strings.TrimSpace(file))
-	if pattern == "" || file == "" {
-		return false
-	}
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return file == prefix || strings.HasPrefix(file, prefix+"/")
-	}
-	if ok, err := pathMatch(pattern, file); err == nil && ok {
-		return true
-	}
-	if strings.Contains(pattern, "*") {
-		re := regexp.QuoteMeta(pattern)
-		re = strings.ReplaceAll(re, `\*`, ".*")
-		ok, err := regexp.MatchString("^"+re+"$", file)
-		return err == nil && ok
-	}
-	return file == pattern || strings.Contains(file, pattern)
-}
-
-func pathMatch(pattern, name string) (bool, error) {
-	return regexp.MatchString("^"+strings.ReplaceAll(regexp.QuoteMeta(pattern), `\*`, `[^/]*`)+"$", name)
 }
 
 func renderCustomReadinessUserPrompt(check models.PRReadinessCustomCheck, session models.Session, changedFiles []string, logs []models.SessionLog) (string, error) {
@@ -10057,15 +10059,21 @@ func boundedReadinessLogs(logs []models.SessionLog, maxLogs, maxBytes int) []str
 	if len(logs) > maxLogs {
 		logs = logs[len(logs)-maxLogs:]
 	}
+	// Walk newest-first so the most recent (most relevant) logs win the byte
+	// budget, and skip — rather than stop at — an oversized line so one early
+	// giant entry can't drop every newer log. Re-reverse to chronological order.
 	out := make([]string, 0, len(logs))
 	used := 0
-	for _, log := range logs {
-		line := log.Timestamp.UTC().Format(time.RFC3339) + " " + log.Message
+	for i := len(logs) - 1; i >= 0; i-- {
+		line := logs[i].Timestamp.UTC().Format(time.RFC3339) + " " + logs[i].Message
 		if used+len(line) > maxBytes {
-			break
+			continue
 		}
 		used += len(line)
 		out = append(out, line)
+	}
+	for l, r := 0, len(out)-1; l < r; l, r = l+1, r-1 {
+		out[l], out[r] = out[r], out[l]
 	}
 	return out
 }
@@ -10115,6 +10123,22 @@ func retryPRReadinessReviewLoop(logger zerolog.Logger, sessionID, readinessID uu
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
 	}
+}
+
+// failReadinessReviewWaitTimeout terminates a readiness run that has waited past
+// prePRReviewMaxWait for the agent review loop. It marks the run failed and
+// returns nil so the job completes instead of requeuing forever.
+func failReadinessReviewWaitTimeout(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID, sessionID uuid.UUID) error {
+	summary := fmt.Sprintf("Readiness timed out after %s waiting for the agent review loop to finish.", prePRReviewMaxWait)
+	if err := stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, summary); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("mark readiness failed after review wait timeout: %w", err)
+	}
+	logger.Warn().
+		Str("session_id", sessionID.String()).
+		Str("readiness_id", readinessID.String()).
+		Dur("max_wait", prePRReviewMaxWait).
+		Msg("PR readiness review wait timed out; marking run failed")
+	return nil
 }
 
 func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Services, session models.Session, snapshotKey string) (*models.SessionReviewLoop, bool, error) {

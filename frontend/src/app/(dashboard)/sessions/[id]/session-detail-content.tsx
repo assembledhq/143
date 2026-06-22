@@ -4644,7 +4644,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: readinessPolicyResponse } = useQuery({
     queryKey: queryKeys.settings.prReadinessPolicy(session?.repository_id ?? null),
     queryFn: () => api.settings.getPRReadinessPolicy(session?.repository_id ?? undefined),
-    enabled: !!session,
+    enabled: !!session && canManageSession,
   });
   const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
@@ -4890,7 +4890,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const readinessContextQuery = useQuery({
     queryKey: [...queryKeys.sessions.readiness(id), "context"],
     queryFn: () => api.sessions.getReadinessContext(id),
-    enabled: !!session,
+    enabled: !!session && canManageSession && (session?.linked_issues?.length ?? 0) === 0,
   });
   const readinessBypassMutation = useMutation({
     mutationFn: () => api.sessions.createReadinessBypass(id, readinessBypassReason),
@@ -4907,6 +4907,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const readinessContextMutation = useMutation({
     mutationFn: (reason: string) => api.sessions.updateReadinessContext(id, reason),
     onSuccess: () => {
+      // Drop the local override so the field re-syncs from the invalidated query
+      // (and reflects edits made elsewhere) instead of pinning the typed value.
+      setReadinessIssueLessReason(null);
       queryClient.invalidateQueries({ queryKey: [...queryKeys.sessions.readiness(id), "context"] });
       toast.success("Readiness context saved");
     },

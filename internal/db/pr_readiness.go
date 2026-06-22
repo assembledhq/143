@@ -3,12 +3,26 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+)
+
+// Bypass eligibility errors. These let callers (the API layer) distinguish a
+// legitimate policy/eligibility rejection — which should surface as a 409 — from
+// an unexpected internal failure, which should surface as a 500 rather than
+// masquerading as "not allowed".
+var (
+	// ErrBypassNotAllowed means policy forbids the bypass (role not permitted,
+	// scope missing, or the check is configured non-bypassable).
+	ErrBypassNotAllowed = errors.New("PR readiness bypass is not allowed")
+	// ErrBypassNotEligible means the run's current state has nothing bypassable
+	// (still running, not blocked, no eligible blocking checks, or missing reason).
+	ErrBypassNotEligible = errors.New("PR readiness run is not eligible for bypass")
 )
 
 type PRReadinessStore struct {
@@ -61,7 +75,8 @@ func (s *PRReadinessStore) MarkRunning(ctx context.Context, orgID, runID uuid.UU
 	tag, err := s.db.Exec(ctx, `
 		UPDATE pr_readiness_runs
 		SET status = 'running', updated_at = now()
-		WHERE org_id = @org_id AND id = @id`, pgx.NamedArgs{
+		WHERE org_id = @org_id AND id = @id
+		  AND status IN ('queued', 'running')`, pgx.NamedArgs{
 		"org_id": orgID,
 		"id":     runID,
 	})
@@ -115,7 +130,8 @@ func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid
 		    review_packet = @review_packet,
 		    completed_at = now(),
 		    updated_at = now()
-		WHERE org_id = @org_id AND id = @id`, pgx.NamedArgs{
+		WHERE org_id = @org_id AND id = @id
+		  AND status IN ('queued', 'running')`, pgx.NamedArgs{
 		"org_id":        orgID,
 		"id":            runID,
 		"status":        result.Status,
@@ -125,6 +141,8 @@ func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid
 	if err != nil {
 		return fmt.Errorf("update PR readiness run: %w", err)
 	}
+	// 0 rows means the run was already terminal (a concurrent completion or a
+	// dead-letter MarkFailed won). Bail without clobbering its checks.
 	if tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
@@ -161,7 +179,10 @@ func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid
 			check.Enforcement = check.EnforcementByRole.Builder
 		}
 		if check.Provenance == "" {
-			check.Provenance = "builtin"
+			check.Provenance = models.PRReadinessProvenanceBuiltin
+		}
+		if err := check.Provenance.Validate(); err != nil {
+			return err
 		}
 		_, err := tx.Exec(ctx, `
 			INSERT INTO pr_readiness_checks (
@@ -364,20 +385,20 @@ func (s *PRReadinessStore) CreateBypassWithPolicy(ctx context.Context, orgID, ru
 func (s *PRReadinessStore) createBypass(ctx context.Context, orgID, runID, userID uuid.UUID, reason string, role models.Role, policy models.PRReadinessPolicyConfig) (models.PRReadinessBypass, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return models.PRReadinessBypass{}, fmt.Errorf("PR readiness bypass reason is required")
+		return models.PRReadinessBypass{}, fmt.Errorf("%w: reason is required", ErrBypassNotEligible)
 	}
 	if !policy.BypassAllowedFor(role) {
-		return models.PRReadinessBypass{}, fmt.Errorf("PR readiness bypass is not enabled for %s", role)
+		return models.PRReadinessBypass{}, fmt.Errorf("%w: not enabled for %s", ErrBypassNotAllowed, role)
 	}
 	run, err := s.GetRunByID(ctx, orgID, runID)
 	if err != nil {
 		return models.PRReadinessBypass{}, err
 	}
 	if run.Status == models.PRReadinessRunStatusQueued || run.Status == models.PRReadinessRunStatusRunning {
-		return models.PRReadinessBypass{}, fmt.Errorf("PR readiness is still running and cannot be bypassed")
+		return models.PRReadinessBypass{}, fmt.Errorf("%w: readiness is still running", ErrBypassNotEligible)
 	}
 	if run.Status != models.PRReadinessRunStatusBlocked {
-		return models.PRReadinessBypass{}, fmt.Errorf("only completed blocking PR readiness checks can be bypassed")
+		return models.PRReadinessBypass{}, fmt.Errorf("%w: only completed blocking checks can be bypassed", ErrBypassNotEligible)
 	}
 	checks, err := s.ListChecksByRun(ctx, orgID, runID)
 	if err != nil {
@@ -395,13 +416,13 @@ func (s *PRReadinessStore) createBypass(ctx context.Context, orgID, runID, userI
 		if enforcement == models.PRReadinessEnforcementBlocking &&
 			(check.Status == models.PRReadinessCheckStatusFailed || check.Status == models.PRReadinessCheckStatusError) {
 			if policy.IsCheckNonBypassable(check.CheckKey, check.CheckType) {
-				return models.PRReadinessBypass{}, fmt.Errorf("PR readiness check %s cannot be bypassed by policy", check.CheckKey)
+				return models.PRReadinessBypass{}, fmt.Errorf("%w: check %s is non-bypassable by policy", ErrBypassNotAllowed, check.CheckKey)
 			}
 			bypassedChecks = append(bypassedChecks, check.CheckKey)
 		}
 	}
 	if len(bypassedChecks) == 0 {
-		return models.PRReadinessBypass{}, fmt.Errorf("no completed blocking PR readiness checks are eligible for bypass")
+		return models.PRReadinessBypass{}, fmt.Errorf("%w: no completed blocking checks are eligible", ErrBypassNotEligible)
 	}
 	checkBytes, err := json.Marshal(bypassedChecks)
 	if err != nil {

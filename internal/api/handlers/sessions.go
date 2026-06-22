@@ -2066,6 +2066,10 @@ func (h *SessionHandler) UpsertReadinessContext(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
+	if len(req.IssueLessReason) > maxReadinessReasonLength {
+		writeError(w, r, http.StatusBadRequest, "READINESS_REASON_TOO_LONG", fmt.Sprintf("issue_less_reason must not exceed %d characters", maxReadinessReasonLength))
+		return
+	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
@@ -2149,6 +2153,10 @@ func (h *SessionHandler) enqueuePRReadinessRun(ctx context.Context, orgID uuid.U
 	return run, nil
 }
 
+// maxReadinessReasonLength caps free-text reasons (bypass reason, issue-less
+// context) so they can't bloat their text columns under the 1 MB body limit.
+const maxReadinessReasonLength = 2000
+
 func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Request) {
 	if h.readinessStore == nil {
 		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
@@ -2170,6 +2178,10 @@ func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Re
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if len(req.Reason) > maxReadinessReasonLength {
+		writeError(w, r, http.StatusBadRequest, "READINESS_REASON_TOO_LONG", fmt.Sprintf("reason must not exceed %d characters", maxReadinessReasonLength))
 		return
 	}
 	user := middleware.UserFromContext(r.Context())
@@ -2203,7 +2215,14 @@ func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Re
 	role := models.Role(middleware.ActiveRoleFromContext(r.Context()))
 	bypass, err := h.readinessStore.CreateBypassWithPolicy(r.Context(), orgID, run.ID, user.ID, req.Reason, role, policy.Config)
 	if err != nil {
-		writeError(w, r, http.StatusConflict, "READINESS_BYPASS_NOT_ALLOWED", err.Error())
+		switch {
+		case errors.Is(err, db.ErrBypassNotAllowed):
+			writeError(w, r, http.StatusConflict, "READINESS_BYPASS_NOT_ALLOWED", err.Error())
+		case errors.Is(err, db.ErrBypassNotEligible):
+			writeError(w, r, http.StatusConflict, "READINESS_BYPASS_NOT_ELIGIBLE", err.Error())
+		default:
+			writeError(w, r, http.StatusInternalServerError, "READINESS_BYPASS_FAILED", "failed to record PR readiness bypass", err)
+		}
 		return
 	}
 	bypassID := bypass.ID.String()
@@ -2225,6 +2244,9 @@ func (h *SessionHandler) GetReadinessPolicy(w http.ResponseWriter, r *http.Reque
 	orgID := middleware.OrgIDFromContext(r.Context())
 	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
 	if !ok {
+		return
+	}
+	if !h.validateReadinessRepositoryScope(w, r, orgID, repositoryID) {
 		return
 	}
 	legacy := h.legacyRequireReviewBeforePR(r.Context(), orgID)
@@ -2292,6 +2314,9 @@ func (h *SessionHandler) ListReadinessCustomChecks(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
+	if !h.validateReadinessRepositoryScope(w, r, orgID, repositoryID) {
+		return
+	}
 	checks, err := h.readinessStore.ListCustomChecks(r.Context(), orgID, repositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_CUSTOM_CHECKS_LOAD_FAILED", "failed to load PR readiness custom checks", err)
@@ -2330,6 +2355,10 @@ func (h *SessionHandler) saveReadinessCustomCheck(w http.ResponseWriter, r *http
 		req.ID = *id
 	}
 	req.Source = models.PRReadinessCustomCheckSourceOrgSettings
+	if err := req.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "READINESS_CUSTOM_CHECK_INVALID", err.Error())
+		return
+	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
@@ -2378,7 +2407,7 @@ func (h *SessionHandler) DeleteReadinessCustomCheck(w http.ResponseWriter, r *ht
 		return
 	}
 	resourceID := id.String()
-	emitUserAudit(h.audit, r, models.AuditActionPRReadinessCustomCheckUpdated, models.AuditResourcePRReadinessCustomCheck, &resourceID, nil)
+	emitUserAudit(h.audit, r, models.AuditActionPRReadinessCustomCheckDeleted, models.AuditResourcePRReadinessCustomCheck, &resourceID, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 

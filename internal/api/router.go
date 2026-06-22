@@ -1134,8 +1134,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/readiness", sessionHandler.GetReadiness)
 				r.Get("/api/v1/sessions/{id}/pr-readiness-runs/latest", sessionHandler.GetReadiness)
 				r.Get("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.GetReadinessContext)
-				r.Get("/api/v1/pr-readiness-policies", sessionHandler.GetReadinessPolicy)
-				r.Get("/api/v1/pr-readiness-custom-checks", sessionHandler.ListReadinessCustomChecks)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -1292,6 +1290,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/pr-readiness-runs", sessionHandler.RunReadiness)
 				r.Post("/api/v1/sessions/{id}/pr-readiness-bypasses", sessionHandler.CreateReadinessBypass)
 				r.Post("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.UpsertReadinessContext)
+				// Policy reads expose sensitive_paths and aggregated bypass counts,
+				// so keep them out of the viewer-readable group above.
+				r.Get("/api/v1/pr-readiness-policies", sessionHandler.GetReadinessPolicy)
+				r.Get("/api/v1/pr-readiness-custom-checks", sessionHandler.ListReadinessCustomChecks)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/previews", branchPreviewHandler.Create)
 				r.Post("/api/v1/previews/current/{preview_group_id}/stop", branchPreviewHandler.StopCurrent)
