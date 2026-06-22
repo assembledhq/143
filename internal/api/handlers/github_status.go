@@ -76,11 +76,48 @@ func (h *GitHubStatusHandler) SetAppUserAuth(auth githubAppUserAuth) {
 
 // GitHubStatusResponse is the response for GET /api/v1/users/me/github-status.
 type GitHubStatusResponse struct {
-	Connected        bool   `json:"connected"`
-	HasRepoScope     bool   `json:"has_repo_scope"`
-	GitHubLogin      string `json:"github_login,omitempty"`
+	Connected    bool   `json:"connected"`
+	HasRepoScope bool   `json:"has_repo_scope"`
+	GitHubLogin  string `json:"github_login,omitempty"`
+	// PRAuthorshipMode echoes the org's pr_authorship setting.
 	PRAuthorshipMode string `json:"pr_authorship_mode"`
 	PRDraftDefault   bool   `json:"pr_draft_default"`
+	// AccountRequirement tells the UI how to present the per-user "connect
+	// your GitHub account" step, derived from PRAuthorshipMode so the rule
+	// lives server-side: "required" (user_required), "recommended"
+	// (user_preferred), or "optional" (app_only). Note "optional" still
+	// matters — claiming/transferring a repo you personally own needs the
+	// user token regardless of authorship mode — so it is never "not needed".
+	AccountRequirement string `json:"account_requirement"`
+	// NeedsReconnect is true when a credential row exists but is no longer
+	// usable (expired, or a refresh that failed). Distinct from Connected so
+	// the UI can show a "reconnect" prompt instead of a plain "connect" — the
+	// user already authorized once, they just need to re-authorize.
+	NeedsReconnect bool `json:"needs_reconnect"`
+}
+
+// credentialExists reports whether a GitHub App user credential row exists for
+// the user, regardless of whether it is still valid. Used to distinguish
+// "never connected" from "connected but the token is no longer usable".
+func (h *GitHubStatusHandler) credentialExists(ctx context.Context, orgID, userID uuid.UUID) bool {
+	if h.credentials == nil {
+		return false
+	}
+	cred, err := h.credentials.GetForUser(ctx, orgID, userID, models.ProviderGitHubAppUser)
+	return err == nil && cred != nil
+}
+
+// accountRequirement maps the org's PR authorship mode onto how prominently the
+// per-user GitHub account connection should be presented.
+func accountRequirement(mode models.PRAuthorship) string {
+	switch mode {
+	case models.PRAuthorshipUserRequired:
+		return "required"
+	case models.PRAuthorshipAppOnly:
+		return "optional"
+	default: // user_preferred and any unknown/empty value
+		return "recommended"
+	}
 }
 
 // GetStatus returns the user's GitHub connection status and the org's PR authorship mode.
@@ -93,7 +130,8 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 	orgID := middleware.OrgIDFromContext(r.Context())
 
 	resp := GitHubStatusResponse{
-		PRAuthorshipMode: string(models.PRAuthorshipUserPreferred),
+		PRAuthorshipMode:   string(models.PRAuthorshipUserPreferred),
+		AccountRequirement: accountRequirement(models.PRAuthorshipUserPreferred),
 	}
 
 	// Check org settings for PR authorship mode.
@@ -103,6 +141,7 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 		if parseErr == nil {
 			resp.PRAuthorshipMode = string(settings.PRAuthorship)
 			resp.PRDraftDefault = settings.PRDraftDefault
+			resp.AccountRequirement = accountRequirement(settings.PRAuthorship)
 		}
 	}
 
@@ -118,17 +157,25 @@ func (h *GitHubStatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) 
 			if user.GitHubLogin != nil {
 				resp.GitHubLogin = *user.GitHubLogin
 			}
+		} else if h.credentialExists(r.Context(), orgID, user.ID) {
+			// The credential is no longer valid (expired or refresh failed) but
+			// the user did authorize before — prompt a reconnect, not a connect.
+			resp.NeedsReconnect = true
 		}
 	} else {
 		// Fallback for tests/wiring without the refresh-aware auth service.
 		cred, err := h.credentials.GetForUser(r.Context(), orgID, user.ID, models.ProviderGitHubAppUser)
 		if err == nil && cred != nil {
 			cfg, ok := cred.Config.(models.GitHubAppUserConfig)
-			if ok && cfg.AccessToken != "" && !cfg.IsExpired() {
-				resp.Connected = true
-				resp.HasRepoScope = true
-				if user.GitHubLogin != nil {
-					resp.GitHubLogin = *user.GitHubLogin
+			if ok && cfg.AccessToken != "" {
+				if cfg.IsExpired() {
+					resp.NeedsReconnect = true
+				} else {
+					resp.Connected = true
+					resp.HasRepoScope = true
+					if user.GitHubLogin != nil {
+						resp.GitHubLogin = *user.GitHubLogin
+					}
 				}
 			}
 		}

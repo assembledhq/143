@@ -783,7 +783,7 @@ describe('SessionDetailPage PR health and merge', () => {
 
     expect(await screen.findByText('Merge this pull request as yourself?')).toBeInTheDocument();
     expect(screen.getByText('Connect your GitHub account to merge this pull request as yourself.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Connect your GitHub account' })).toBeInTheDocument();
   });
 
   it('toasts the API error message when the merge call fails', async () => {

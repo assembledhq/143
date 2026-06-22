@@ -77,7 +77,7 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
 type ReadOnlyProps = { readOnly?: boolean };
 
 type AllIntegrationCardsProps =
-  SourceControlIntegrationCardProps & AdditionalIntegrationCardsPropsWithReadOnly;
+  SourceControlIntegrationCardProps & AdditionalIntegrationCardsPropsWithReadOnly & GitHubAccountProps;
 
 type AdditionalIntegrationCardsPropsWithReadOnly =
   AdditionalIntegrationCardsProps & ReadOnlyProps;
@@ -455,11 +455,180 @@ export function AdditionalIntegrationCards(props: AdditionalIntegrationCardsProp
   );
 }
 
+// GitHubAccountProps describes the per-user "connect your GitHub account" row
+// that sits directly beneath the org-wide GitHub App row. This is a distinct
+// auth from the App install: the App grants 143 access to the org's repos, while
+// the account lets 143 act *as the signed-in user* (author PRs under their name,
+// transfer repos they personally own). It is per-user, so it stays actionable
+// even for non-admins (readOnly only gates the org-wide integrations).
+export type GitHubAccountRequirement = "required" | "recommended" | "optional";
+
+export type GitHubAccountProps = {
+  githubAccountConnected: boolean;
+  githubAccountLogin?: string;
+  // True when a credential exists but is no longer usable (e.g. token expired):
+  // connected === true but has_repo_scope === false on the status endpoint.
+  githubAccountNeedsReconnect?: boolean;
+  githubAccountRequirement: GitHubAccountRequirement;
+  onConnectGitHubAccount: () => void;
+  onDisconnectGitHubAccount?: () => void;
+  githubAccountDisconnecting?: boolean;
+};
+
+const ACCOUNT_REQUIREMENT_BADGE: Record<
+  GitHubAccountRequirement,
+  { label: string; variant: "outline" | "secondary" }
+> = {
+  required: { label: "Required", variant: "outline" },
+  recommended: { label: "Recommended", variant: "secondary" },
+  optional: { label: "Optional", variant: "secondary" },
+};
+
+function GitHubAccountAction({
+  connected,
+  needsReconnect,
+  login,
+  disconnecting,
+  onConnect,
+  onDisconnect,
+}: {
+  connected: boolean;
+  needsReconnect: boolean;
+  login?: string;
+  disconnecting?: boolean;
+  onConnect: () => void;
+  onDisconnect?: () => void;
+}) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  if (needsReconnect) {
+    return (
+      <Button size="sm" variant="default" onClick={onConnect} aria-label="Reconnect GitHub account">
+        Reconnect account
+      </Button>
+    );
+  }
+
+  if (connected) {
+    return (
+      <>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">{login ? `@${login}` : "Connected"}</span>
+          {onDisconnect ? (
+            <Button
+              size="sm"
+              variant="outline"
+              loading={disconnecting}
+              disabled={disconnecting}
+              onClick={() => setConfirmOpen(true)}
+              aria-label="Disconnect GitHub account"
+            >
+              {disconnecting ? "Disconnecting..." : "Disconnect"}
+            </Button>
+          ) : null}
+        </div>
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Disconnect your GitHub account</AlertDialogTitle>
+              <AlertDialogDescription>
+                143 will stop acting as you on GitHub: PRs will be authored by the 143 app instead,
+                and you&rsquo;ll need to reconnect to transfer repos you personally own. This only
+                affects your account &mdash; the org&rsquo;s GitHub App stays connected.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmOpen(false);
+                  onDisconnect?.();
+                }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Disconnect
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </>
+    );
+  }
+
+  return (
+    <Button size="sm" onClick={onConnect} aria-label="Connect GitHub account">
+      Connect account
+    </Button>
+  );
+}
+
+function buildGitHubAccountItem(p: GitHubAccountProps) {
+  const github = getIntegrationByKey("github");
+  const requirement = ACCOUNT_REQUIREMENT_BADGE[p.githubAccountRequirement];
+  const connected = p.githubAccountConnected && !p.githubAccountNeedsReconnect;
+
+  let summary: ReactNode;
+  if (p.githubAccountNeedsReconnect) {
+    summary = (
+      <p className="mt-1.5 text-xs text-warning">
+        Your GitHub authorization expired &mdash; reconnect to keep authoring PRs as yourself.
+      </p>
+    );
+  } else if (connected) {
+    summary = (
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        {p.githubAccountLogin ? `Connected as @${p.githubAccountLogin}` : "Connected"}
+      </p>
+    );
+  } else if (p.githubAccountRequirement === "optional") {
+    summary = (
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        PRs are authored by the 143 app. Connect only to author PRs as yourself or transfer repos you personally own.
+      </p>
+    );
+  } else if (p.githubAccountRequirement === "required") {
+    summary = (
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        Required by your org&rsquo;s PR authorship setting &mdash; PRs must be created as you.
+      </p>
+    );
+  } else {
+    summary = (
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        Recommended so PRs are authored under your name instead of the 143 app.
+      </p>
+    );
+  }
+
+  return {
+    id: "github-account",
+    title: "Your GitHub account",
+    description: "Lets 143 act as you — author PRs under your name and transfer repos you own.",
+    logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
+    badge: (
+      <Badge variant={requirement.variant} className="text-xs">
+        {requirement.label}
+      </Badge>
+    ),
+    summary,
+    action: (
+      <GitHubAccountAction
+        connected={connected}
+        needsReconnect={Boolean(p.githubAccountNeedsReconnect)}
+        login={p.githubAccountLogin}
+        disconnecting={p.githubAccountDisconnecting}
+        onConnect={p.onConnectGitHubAccount}
+        onDisconnect={p.onDisconnectGitHubAccount}
+      />
+    ),
+  };
+}
+
 export function AllIntegrationCards(props: AllIntegrationCardsProps) {
   const github = getIntegrationByKey("github");
   const githubItem = {
     id: github.key,
-    title: github.name,
+    title: "GitHub App",
     description: github.description,
     logo: <IntegrationLogo name={github.name} src={github.logoSrc} />,
     badge: <Badge variant="outline" className="text-xs">Required</Badge>,
@@ -485,6 +654,12 @@ export function AllIntegrationCards(props: AllIntegrationCardsProps) {
     ),
   };
   return (
-    <IntegrationsCard items={[githubItem, ...buildOptionalIntegrationItems(optionalDescriptorsFromProps(props), props)]} />
+    <IntegrationsCard
+      items={[
+        githubItem,
+        buildGitHubAccountItem(props),
+        ...buildOptionalIntegrationItems(optionalDescriptorsFromProps(props), props),
+      ]}
+    />
   );
 }
