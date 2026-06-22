@@ -3894,6 +3894,26 @@ func TestPreviewStore_ListActivePreviewRuntimesForReachability(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_HeartbeatPreviewRuntimesByWorkerSkipsTerminalPreviews(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	leaseExpiresAt := time.Now().UTC().Add(90 * time.Second)
+
+	mock.ExpectExec("UPDATE preview_runtimes pr[\\s\\S]+FROM preview_instances pi[\\s\\S]+pi.status IN \\('starting', 'ready', 'partially_ready', 'unhealthy'\\)").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 3))
+
+	updated, err := store.HeartbeatPreviewRuntimesByWorker(context.Background(), "worker-1", leaseExpiresAt)
+	require.NoError(t, err, "HeartbeatPreviewRuntimesByWorker should extend active preview runtime leases")
+	require.Equal(t, int64(3), updated, "HeartbeatPreviewRuntimesByWorker should report updated runtime rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_MarkActivePreviewRuntimesLostByWorkerMarksPreviewUnavailable(t *testing.T) {
 	t.Parallel()
 

@@ -158,10 +158,14 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
   useEffect(() => {
     if (!shouldStartForLaunch || !launchTargetId) return;
-    if (launchStartAttemptedRef.current === launchTargetId) return;
-    launchStartAttemptedRef.current = launchTargetId;
+    // Dedupe on the stable route id, not launchTargetId: start-latest mints a
+    // fresh preview_id, so keying on launchTargetId lets a failed preview slip
+    // past the guard and auto-restart forever, hiding the error behind
+    // "Opening when ready". One auto-start per page load; failures stick.
+    if (launchStartAttemptedRef.current === id) return;
+    launchStartAttemptedRef.current = id;
     restartPreview.mutate({ previewId: launchTargetId, latest: true });
-  }, [launchTargetId, restartPreview, shouldStartForLaunch]);
+  }, [id, launchTargetId, restartPreview, shouldStartForLaunch]);
 
   useEffect(() => {
     if (!launchMode || !previewOrigin || !previewUrl || !preview?.preview_id || !isReady) return;
@@ -222,7 +226,10 @@ export function PreviewLandingContent({ id }: { id: string }) {
 
   const startLatest = () => {
     if (!launchTargetId) return;
-    launchStartAttemptedRef.current = null;
+    // Manual retry starts the preview directly, so mark auto-start as done for
+    // this page rather than re-arming it — otherwise a second failure would
+    // trip the auto-restart loop again.
+    launchStartAttemptedRef.current = id;
     restartPreview.mutate({ previewId: launchTargetId, latest: true });
   };
 

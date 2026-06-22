@@ -1,11 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useAuth } from "@/hooks/use-auth";
-import { Badge } from "@/components/ui/badge";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { RepoPMSettingsEditor } from "@/components/repo-pm-settings";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -73,10 +73,28 @@ export default function AutopilotSettingsPage() {
 
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const repositories = repositoriesResponse?.data ?? [];
-  const reposWithCustomPM = repositories.filter((repository) => {
-    const repoSettings = repository.settings as { pm?: unknown };
-    return repoSettings.pm != null;
+  const [selectedRepositoryID, setSelectedRepositoryID] = useState("");
+  const firstRepositoryID = repositories[0]?.id ?? "";
+  const effectiveSelectedRepositoryID =
+    repositories.some((repository) => repository.id === selectedRepositoryID)
+      ? selectedRepositoryID
+      : firstRepositoryID;
+  const selectedRepositoryFromList = repositories.find(
+    (repository) => repository.id === effectiveSelectedRepositoryID,
+  );
+  const { data: selectedRepositoryResponse } = useQuery<SingleResponse<Repository>>({
+    queryKey: ["repository", effectiveSelectedRepositoryID],
+    queryFn: () => api.repositories.get(effectiveSelectedRepositoryID),
+    enabled: isAdmin && effectiveSelectedRepositoryID !== "",
+    initialData: selectedRepositoryFromList
+      ? { data: selectedRepositoryFromList }
+      : undefined,
+    // Prevent a mount-time background refetch from overwriting the optimistic
+    // update applied when the user clicks "Customize". The cache is refreshed
+    // explicitly after each autosave mutation via query invalidation.
+    staleTime: Infinity,
   });
+  const selectedRepository = selectedRepositoryResponse?.data ?? selectedRepositoryFromList;
   const resolvedCredentials = useMemo(
     () => resolvedCredsResponse?.data ?? [],
     [resolvedCredsResponse],
@@ -326,17 +344,36 @@ export default function AutopilotSettingsPage() {
         <section className="space-y-3">
           <h2 className="text-xs font-medium text-foreground">Repository overrides</h2>
           <p className="text-xs text-muted-foreground">
-            Individual repositories can override Autopilot settings from their repository settings page.
+            Edit repository-specific Autopilot behavior here, or keep a repository on organization defaults.
           </p>
-          {reposWithCustomPM.length === 0 ? (
-            <p className="text-xs text-muted-foreground italic">No repository overrides yet.</p>
+          {repositories.length === 0 ? (
+            <p className="text-xs text-muted-foreground italic">No repositories connected yet.</p>
           ) : (
-            <div className="flex flex-wrap gap-2">
-              {reposWithCustomPM.map((repository) => (
-                <Badge key={repository.id} variant="secondary">
-                  {repository.full_name}
-                </Badge>
-              ))}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="autopilot-repository-override">Repository</Label>
+                <Select
+                  value={effectiveSelectedRepositoryID}
+                  onValueChange={setSelectedRepositoryID}
+                >
+                  <SelectTrigger id="autopilot-repository-override" aria-label="Repository">
+                    <SelectValue placeholder="Select a repository" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {repositories.map((repository) => (
+                      <SelectItem key={repository.id} value={repository.id}>
+                        {repository.full_name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {selectedRepository && (
+                <RepoPMSettingsEditor
+                  key={selectedRepository.id}
+                  repository={selectedRepository}
+                />
+              )}
             </div>
           )}
         </section>
