@@ -206,9 +206,10 @@ const defaultServiceBuildTimeout = 30 * time.Minute
 // defaultServiceReadinessTimeout is how long a service has to pass its
 // readiness probe when the config does not set ready.timeout_seconds. With the
 // build phase compiling artifacts ahead of start, services should bind quickly;
-// the default still leaves generous headroom for first-request warmup. Configs
-// with unusually slow boots should set ready.timeout_seconds explicitly.
-const defaultServiceReadinessTimeout = 300 * time.Second
+// the default still leaves generous headroom for first-request warmup while
+// failing a genuinely broken service reasonably fast. Configs with unusually
+// slow boots should set ready.timeout_seconds explicitly.
+const defaultServiceReadinessTimeout = 180 * time.Second
 
 // serviceExitTailLines is the number of trailing non-blank stdout/stderr
 // lines folded into the user-visible exit error from formatServiceExitError.
@@ -400,15 +401,14 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		// Phase 4.6: Run per-service build commands. This is deliberately before
 		// runtime secret files (so build steps cannot read app secrets) and
 		// before services start (so compilation happens off the readiness-probe
-		// hot path). The home build cache is checkpointed synchronously here so
-		// an expensive cold compile warms subsequent launches even if this one
-		// later fails to become ready.
+		// hot path). On success the home build cache is saved asynchronously
+		// after readiness (see below); on any failure from here on it is flushed
+		// synchronously before cleanup, so an expensive cold compile warms
+		// subsequent launches even when this launch fails.
 		if err := d.runServiceBuilds(ctx, state, cfg, opts, observer); err != nil {
-			d.savePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
 			phaseErr = fmt.Errorf("%w: %v", preview.ErrServiceBuildFailed, err)
 			return phaseErr
 		}
-		d.savePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
 
 		// Phase 5: Write generated runtime secret files after install so install
 		// hooks cannot read preview-runtime app secrets.
@@ -429,6 +429,9 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		svcEnvs = d.buildServiceEnvs(cfg, infraCreds, opts.ExtraEnv)
 		return nil
 	}(); err != nil {
+		// A build-phase failure reaches here after `go build` may have populated
+		// GOCACHE; flush so even a failed compile warms the next launch.
+		d.flushBuildCachesBeforeCleanup(svcCtx, state, cfg.Install, opts, observer)
 		d.cleanupState(handle)
 		return nil, err
 	}
@@ -544,8 +547,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 					cancel()
 				}
 				// All services finished their readiness window: boot-time
-				// builds are done, so capture the build cache now.
+				// builds are done, so capture the build caches now. Both saves
+				// are async; the launch is already reported ready.
 				d.savePreviewBuildCache(svcCtx, state, cfg.Install, opts, observer)
+				d.savePreviewBuildCacheHome(svcCtx, state, cfg.Install, opts, observer)
 			}()
 			return nil
 		}
@@ -581,8 +586,10 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 			}
 		}
 		// All services are ready: boot-time builds are done, so capture the
-		// build cache now.
+		// build caches now. Both saves are async so a large GOCACHE upload does
+		// not delay returning the ready preview.
 		d.savePreviewBuildCache(svcCtx, state, cfg.Install, opts, observer)
+		d.savePreviewBuildCacheHome(svcCtx, state, cfg.Install, opts, observer)
 		return nil
 	}(); err != nil {
 		// Readiness failed, but boot-time builds may have populated their
@@ -1812,12 +1819,12 @@ func (d *DockerPreviewProvider) savePreviewBuildCache(ctx context.Context, state
 }
 
 // savePreviewBuildCacheHome archives the home-rooted build-artifact paths (Go's
-// GOCACHE/GOMODCACHE) at the build checkpoint. Unlike the workdir save this is
-// synchronous: it is the only point at which a (potentially multi-minute) cold
-// compile is durably captured, and running it before the build phase returns
-// guarantees the cache survives even if the launch later fails its readiness
-// probe or the sandbox is torn down. SkipIfChecksum keeps a warm, incremental
-// build's save to a near no-op.
+// GOCACHE/GOMODCACHE) populated by the build phase, on the SUCCESS path once
+// services are ready. It runs asynchronously so a large GOCACHE upload never
+// blocks the launch hot path — the prebuilt binary has already started. Failure
+// paths persist the same set synchronously via flushBuildCachesBeforeCleanup
+// (the sync.Once makes the two mutually exclusive). SkipIfChecksum keeps a warm,
+// incremental build's save to a near no-op.
 func (d *DockerPreviewProvider) savePreviewBuildCacheHome(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
 	state.buildCacheHomeSaveOnce.Do(func() {
 		// No home build cache configured for this launch (no Go lockfile): stay
@@ -1825,16 +1832,16 @@ func (d *DockerPreviewProvider) savePreviewBuildCacheHome(ctx context.Context, s
 		if state.buildCacheHomeKey == "" {
 			return
 		}
-		d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
+		go d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
 	})
 }
 
 // flushBuildCachesBeforeCleanup synchronously persists any not-yet-saved build
-// caches on a failure path, before the sandbox is torn down. The home set is
-// usually already saved at the build checkpoint (its sync.Once short-circuits
-// here); the workdir set, which would otherwise only save after readiness, is
-// captured here so a launch that compiled and booted but missed its readiness
-// deadline still warms the next launch instead of repeating cold work.
+// caches on a failure path, before the sandbox is torn down. Both sets are saved
+// synchronously here (not via a goroutine that would race teardown): a launch
+// that compiled in the build phase and/or populated boot-time caches but then
+// failed still warms the next launch instead of repeating cold work. The home
+// set's sync.Once short-circuits if a success-path save already ran.
 func (d *DockerPreviewProvider) flushBuildCachesBeforeCleanup(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
 	state.buildCacheHomeSaveOnce.Do(func() {
 		if state.buildCacheHomeKey == "" {
@@ -2276,6 +2283,13 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		return nil
 	}
 
+	// When home build caching is active (a Go project), pin GOCACHE/GOMODCACHE
+	// to the default $HOME locations the platform archives, so a base image that
+	// overrides them can't silently send the build's output somewhere the cache
+	// never captures. These are defaults: a service that sets them explicitly in
+	// its own Env still wins.
+	_, pinGoCacheEnv := preview.ResolvePreviewBuildCacheHomePaths(cfg.Install)
+
 	notifyPhaseStart(observer, "service_build")
 	phaseStarted := time.Now()
 	for _, name := range previewServiceBuildOrder(cfg) {
@@ -2287,6 +2301,16 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		var cmdParts []string
 		if svcCfg.Cwd != "" {
 			cmdParts = append(cmdParts, "cd", shellEscape(svcCfg.Cwd), "&&")
+		}
+		if pinGoCacheEnv {
+			// Raw (unescaped) so $HOME expands in the shell. Only set when the
+			// service hasn't already chosen a location.
+			if _, ok := svcCfg.Env["GOCACHE"]; !ok {
+				cmdParts = append(cmdParts, `GOCACHE="$HOME/.cache/go-build"`)
+			}
+			if _, ok := svcCfg.Env["GOMODCACHE"]; !ok {
+				cmdParts = append(cmdParts, `GOMODCACHE="$HOME/go/pkg/mod"`)
+			}
 		}
 		envKeys := make([]string, 0, len(svcCfg.Env))
 		for k := range svcCfg.Env {
