@@ -77,6 +77,23 @@ describe("Agent settings page", () => {
     expect(screen.queryByLabelText("Agent tab tools")).not.toBeInTheDocument();
   });
 
+  it("aligns the personal auths link with the organization auths description", async () => {
+    installHandlers();
+
+    renderWithProviders(<AgentPage />);
+
+    const description = screen.getByText(
+      "Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom. Move the auth you want to prefer higher in the list.",
+    );
+    const descriptionRow = description.closest("[data-testid='org-auths-description-row']");
+
+    expect(descriptionRow, "description should be wrapped in an action row").not.toBeNull();
+    expect(within(descriptionRow as HTMLElement).getByRole("link", { name: "View personal auths" })).toHaveAttribute(
+      "href",
+      "/settings/account",
+    );
+  });
+
   it("shows auth resolution notice in read-only view for non-admin users", async () => {
     mockUseAuth.mockReturnValueOnce({
       user: { id: "user-2", org_id: "org-1", role: "member", email: "member@example.com", name: "Member", created_at: "", role_display: "member" },
