@@ -312,7 +312,7 @@ Safety and product constraints:
 
 ### Phase 2: PR preflight
 
-- Implemented for the web UI. Builders are blocked by backend enforcement; engineers/admins get a localStorage-keyed one-time advisory for the same session/revision/warning signature.
+- Implemented for the web UI. Builders are blocked by backend enforcement. Engineers/admins can create PRs directly; advisory readiness findings remain visible in the readiness card instead of opening a pre-creation modal.
 
 ### Phase 3: Automatic run options
 
