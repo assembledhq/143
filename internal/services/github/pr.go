@@ -2460,6 +2460,52 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 	return respBody, nil
 }
 
+// doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
+// returns the raw response body. GraphQL returns HTTP 200 even for query-level
+// errors (surfaced in the response's `errors` array), so callers must inspect
+// the decoded body — a nil error here only means the transport succeeded.
+//
+// The endpoint is derived as baseURL+"/graphql", which is correct for
+// github.com (REST base https://api.github.com → https://api.github.com/graphql).
+// GitHub Enterprise Server splits these differently (REST at /api/v3, GraphQL at
+// /api/graphql); revisit this if 143 ever targets a GHES base URL.
+func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, variables map[string]any) ([]byte, error) {
+	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.baseURL+"/graphql", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub GraphQL endpoint from config
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, &GitHubAPIError{
+			Method:     http.MethodPost,
+			Path:       "/graphql",
+			StatusCode: resp.StatusCode,
+			Body:       respBody,
+		}
+	}
+
+	return respBody, nil
+}
+
 // GitHubAPIError wraps a non-2xx response from the GitHub REST API so callers
 // can inspect the status and parsed error details with errors.As rather than
 // matching on prose.
@@ -2580,27 +2626,75 @@ type GitHubTreeEntry struct {
 	Type string `json:"type"`
 }
 
-// ListBranches returns the branches for a repository from the GitHub API.
-func (s *PRService) ListBranches(ctx context.Context, token, owner, repo string) ([]GitHubBranch, error) {
-	var all []GitHubBranch
-	page := 1
-	for {
-		path := fmt.Sprintf("/repos/%s/%s/branches?per_page=100&page=%d", owner, repo, page)
-		body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
-		if err != nil {
-			return nil, fmt.Errorf("list branches: %w", err)
-		}
-		var branches []GitHubBranch
-		if err := json.Unmarshal(body, &branches); err != nil {
-			return nil, fmt.Errorf("decode branches: %w", err)
-		}
-		all = append(all, branches...)
-		if len(branches) < 100 || page >= 10 {
-			break
-		}
-		page++
+// maxBranchResults caps how many branches the branch picker fetches in one
+// request. GitHub's GraphQL refs connection allows up to 100 per page; we never
+// page past the first because the picker relies on server-side search (an empty
+// query shows the most-recently-committed branches, a typed query narrows the
+// set), so a single page of matches is always enough to surface the target.
+const maxBranchResults = 100
+
+// branchSearchQuery searches a repository's branches by name. The refs `query`
+// argument does a server-side contains-match against branch names, so repos
+// with thousands of branches can still find an arbitrary branch without
+// downloading the entire list. Ordering by commit date keeps the unfiltered
+// (empty-query) view focused on recently-active branches.
+const branchSearchQuery = `query($owner:String!,$name:String!,$query:String,$limit:Int!){
+  repository(owner:$owner,name:$name){
+    refs(refPrefix:"refs/heads/",query:$query,first:$limit,orderBy:{field:TAG_COMMIT_DATE,direction:DESC}){
+      nodes{ name }
+    }
+  }
+}`
+
+// SearchBranches returns up to maxBranchResults branches for a repository,
+// filtered by a server-side name search via the GitHub GraphQL API. An empty
+// query returns the most-recently-committed branches. This replaces the old
+// REST pagination over /branches, which could not search and silently truncated
+// repos with more than ~1000 branches.
+func (s *PRService) SearchBranches(ctx context.Context, token, owner, repo, query string) ([]GitHubBranch, error) {
+	variables := map[string]any{
+		"owner": owner,
+		"name":  repo,
+		"limit": maxBranchResults,
+		// A nil query tells GitHub to return all refs (ordered); a non-empty
+		// string filters by contains-match.
+		"query": nil,
 	}
-	return all, nil
+	if query != "" {
+		variables["query"] = query
+	}
+
+	body, err := s.doGitHubGraphQL(ctx, token, branchSearchQuery, variables)
+	if err != nil {
+		return nil, fmt.Errorf("search branches: %w", err)
+	}
+
+	var result struct {
+		Data struct {
+			Repository struct {
+				Refs struct {
+					Nodes []struct {
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"refs"`
+			} `json:"repository"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("decode branches: %w", err)
+	}
+	if len(result.Errors) > 0 {
+		return nil, fmt.Errorf("search branches: %s", result.Errors[0].Message)
+	}
+
+	branches := make([]GitHubBranch, 0, len(result.Data.Repository.Refs.Nodes))
+	for _, n := range result.Data.Repository.Refs.Nodes {
+		branches = append(branches, GitHubBranch{Name: n.Name})
+	}
+	return branches, nil
 }
 
 // ResolveBranchHead returns the current commit SHA for a branch.
