@@ -59,6 +59,7 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "pm.plan_created is valid", value: AuditActionPMPlanCreated},
 		{name: "issue.created is valid", value: AuditActionIssueCreated},
 		{name: "integration.connected is valid", value: AuditActionIntegrationConnected},
+		{name: "integration.writeback is valid", value: AuditActionIntegrationWriteback},
 		{name: "preview_secret_bundle.updated is valid", value: AuditActionPreviewSecretBundleUpdated},
 		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},

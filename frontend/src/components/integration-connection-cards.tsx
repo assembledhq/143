@@ -62,6 +62,8 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   circleciLoading?: boolean;
   mezmoConnected: boolean;
   mezmoLoading?: boolean;
+  pagerdutyConnected?: boolean;
+  pagerdutyLoading?: boolean;
   summaries?: Partial<Record<IntegrationKey, ReactNode>>;
   onConnectSentry: () => void;
   onConnectLinear: () => void;
@@ -69,6 +71,7 @@ type AdditionalIntegrationCardsProps = IntegrationCallbacks & {
   onConnectNotion: () => void;
   onConnectCircleCI: () => void;
   onConnectMezmo: () => void;
+  onConnectPagerDuty?: () => void;
 };
 
 // readOnly hides connect/disconnect buttons on every card and the per-repo
@@ -186,7 +189,10 @@ const DISCONNECT_DESCRIPTIONS: Record<IntegrationKey, string> = {
   notion: "This will disconnect Notion from your organization. Product docs will no longer sync.",
   circleci: "This will disconnect CircleCI from your organization. Flaky-test data will no longer be available to agents.",
   mezmo: "This will disconnect Mezmo from your organization. Production log queries will no longer be available to agents.",
+  pagerduty: "This will disconnect PagerDuty from your organization. Incident webhooks will stop triggering automation.",
 };
+
+const noopConnect = () => undefined;
 
 function IntegrationAction({
   connected,
@@ -446,6 +452,7 @@ function optionalDescriptorsFromProps(
     { key: "notion", connected: p.notionConnected, loading: p.notionLoading, summary: p.summaries?.notion, onConnect: p.onConnectNotion },
     { key: "circleci", connected: p.circleciConnected, loading: p.circleciLoading, summary: p.summaries?.circleci, onConnect: p.onConnectCircleCI },
     { key: "mezmo", connected: p.mezmoConnected, loading: p.mezmoLoading, summary: p.summaries?.mezmo, onConnect: p.onConnectMezmo },
+    { key: "pagerduty", connected: p.pagerdutyConnected ?? false, loading: p.pagerdutyLoading, summary: p.summaries?.pagerduty, onConnect: p.onConnectPagerDuty ?? noopConnect },
   ];
 }
 

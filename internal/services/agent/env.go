@@ -92,6 +92,7 @@ type AgentEnv struct {
 	orgSettingsCache  *OrgSettingsCache
 	codexAuth         CodexAuthProvider
 	claudeCodeAuth    ClaudeCodeAuthProvider
+	pagerDutySettings pagerDutyWritebackSettingsReader
 	// linearTokens, when set, supplies the LINEAR_ACCESS_TOKEN env var via a
 	// refresh-aware resolver. Without it, the sandbox falls back to reading
 	// the raw credential row (legacy path; the access token may have aged
@@ -99,8 +100,13 @@ type AgentEnv struct {
 	// to *linear.Service so the orchestrator gets the same refresh-on-expiry
 	// guarantee that worker handlers do.
 	linearTokens LinearTokenResolver
-	provider     SandboxProvider
-	logger       zerolog.Logger
+	// pagerDutyTokens, when set, proactively refreshes a near-expiry PagerDuty
+	// OAuth access token before injecting PAGERDUTY_ACCESS_TOKEN, mirroring the
+	// Linear refresh-on-expiry guarantee. Without it the sandbox uses the raw
+	// credential row, which can be expired for scoped OAuth installs.
+	pagerDutyTokens PagerDutyTokenRefresher
+	provider        SandboxProvider
+	logger          zerolog.Logger
 
 	// recentPicks remembers the credential id chosen for each (orgID, userID,
 	// provider) tuple by the most recent pickFromCodingProvider call. It feeds
@@ -183,12 +189,13 @@ const codexSubscriptionRefreshWindow = 5 * time.Minute
 // models.AgentEnvConfig, which is a per-org override map consumed by this
 // helper.
 type AgentEnvDeps struct {
-	Credentials       CredentialProvider
-	CodingCredentials CodingCredentialProvider // preferred — unified resolver. Reads `coding_credentials` and is the source of truth post-migration.
-	Orgs              OrgStore                 // optional — enables agent_config overrides
-	OrgSettingsCache  *OrgSettingsCache        // optional — caches agent_config lookups
-	CodexAuth         CodexAuthProvider        // optional — enables ChatGPT OAuth for Codex
-	ClaudeCodeAuth    ClaudeCodeAuthProvider   // optional — enables Claude subscription OAuth for Claude Code
+	Credentials           CredentialProvider
+	CodingCredentials     CodingCredentialProvider         // preferred — unified resolver. Reads `coding_credentials` and is the source of truth post-migration.
+	Orgs                  OrgStore                         // optional — enables agent_config overrides
+	OrgSettingsCache      *OrgSettingsCache                // optional — caches agent_config lookups
+	CodexAuth             CodexAuthProvider                // optional — enables ChatGPT OAuth for Codex
+	ClaudeCodeAuth        ClaudeCodeAuthProvider           // optional — enables Claude subscription OAuth for Claude Code
+	PagerDutyIntegrations pagerDutyWritebackSettingsReader // optional — enables PagerDuty agent write-tool gating from integration settings
 	// LinearTokens optionally supplies a refresh-aware Linear access token
 	// for the sandbox env. When set, the orchestrator injects the result of
 	// GetValidAccessToken (rotating expired tokens transparently). Without
@@ -196,8 +203,21 @@ type AgentEnvDeps struct {
 	// tests and pre-refresh-flow installs, but those env vars can be stale
 	// for any session that starts within refreshWindow of expiry.
 	LinearTokens LinearTokenResolver
-	Provider     SandboxProvider // required for sandbox credential file injection
-	Logger       zerolog.Logger
+	// PagerDutyTokens optionally supplies a refresh-aware PagerDuty access token
+	// for the sandbox. When set, the resolver rotates a near-expiry token (and
+	// persists the rotation) before injection. Without it, the sandbox uses the
+	// raw credential read — fine for tests and classic tokens, but scoped OAuth
+	// tokens can be expired for sessions starting after the access-token TTL.
+	PagerDutyTokens PagerDutyTokenRefresher
+	Provider        SandboxProvider // required for sandbox credential file injection
+	Logger          zerolog.Logger
+}
+
+// PagerDutyTokenRefresher is the narrow surface AgentEnv needs to refresh a
+// near-expiry PagerDuty OAuth token for a specific credential. Implemented by
+// *pagerduty.TokenService.
+type PagerDutyTokenRefresher interface {
+	EnsureFresh(ctx context.Context, orgID, credentialID uuid.UUID, observed models.PagerDutyConfig) (models.PagerDutyConfig, error)
 }
 
 // LinearTokenResolver is the narrow surface AgentEnv needs from the Linear
@@ -207,6 +227,14 @@ type AgentEnvDeps struct {
 // it failed" without importing Linear-specific sentinels.
 type LinearTokenResolver interface {
 	GetValidAccessToken(ctx context.Context, orgID uuid.UUID) (string, error)
+}
+
+type pagerDutyWritebackSettingsReader interface {
+	ListManageable(ctx context.Context, orgID uuid.UUID) ([]models.PagerDutyIntegration, error)
+}
+
+type pagerDutyCredentialByIDReader interface {
+	GetByID(ctx context.Context, orgID uuid.UUID, id uuid.UUID) (*models.DecryptedCredential, error)
 }
 
 // NewAgentEnv constructs an AgentEnv. The Provider is required; all other
@@ -221,7 +249,9 @@ func NewAgentEnv(deps AgentEnvDeps) *AgentEnv {
 		orgSettingsCache:  deps.OrgSettingsCache,
 		codexAuth:         deps.CodexAuth,
 		claudeCodeAuth:    deps.ClaudeCodeAuth,
+		pagerDutySettings: deps.PagerDutyIntegrations,
 		linearTokens:      deps.LinearTokens,
+		pagerDutyTokens:   deps.PagerDutyTokens,
 		provider:          deps.Provider,
 		logger:            deps.Logger,
 		recentPicks:       make(map[pickKey]pickRecord),
@@ -241,6 +271,15 @@ func (e *AgentEnv) SetLinearTokens(r LinearTokenResolver) {
 		return
 	}
 	e.linearTokens = r
+}
+
+// SetPagerDutyTokens installs (or replaces) the PagerDuty refresh-aware token
+// resolver after construction, mirroring SetLinearTokens. Safe to call with nil.
+func (e *AgentEnv) SetPagerDutyTokens(r PagerDutyTokenRefresher) {
+	if e == nil {
+		return
+	}
+	e.pagerDutyTokens = r
 }
 
 // CodingCredentialShedder is the subset of CodingCredentialStore the agent
@@ -518,14 +557,14 @@ func (e *AgentEnv) ShedAuthRejectedWithContext(ctx context.Context, orgID uuid.U
 	shedder.MarkAuthRejected(rec.credID)
 }
 
-// integrationCredentials holds the resolved Sentry, Linear, Notion, CircleCI,
-// and Mezmo configs for an org.
+// integrationCredentials holds the resolved integration configs for an org.
 type integrationCredentials struct {
-	Sentry   *models.SentryConfig
-	Linear   *models.LinearConfig
-	Notion   *models.NotionConfig
-	CircleCI *models.CircleCIConfig
-	Mezmo    *models.MezmoConfig
+	Sentry    *models.SentryConfig
+	Linear    *models.LinearConfig
+	PagerDuty *models.PagerDutyConfig
+	Notion    *models.NotionConfig
+	CircleCI  *models.CircleCIConfig
+	Mezmo     *models.MezmoConfig
 }
 
 type integrationCredentialProvider interface {
@@ -535,6 +574,7 @@ type integrationCredentialProvider interface {
 var integrationProviderNames = []models.ProviderName{
 	models.ProviderSentry,
 	models.ProviderLinear,
+	models.ProviderPagerDuty,
 	models.ProviderNotion,
 	models.ProviderCircleCI,
 	models.ProviderMezmo,
@@ -585,6 +625,11 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 			ic.Linear = &cfg
 		}
 	}
+	if cred := creds[models.ProviderPagerDuty]; cred != nil {
+		if cfg, ok := cred.Config.(models.PagerDutyConfig); ok {
+			ic.PagerDuty = &cfg
+		}
+	}
 	if cred := creds[models.ProviderNotion]; cred != nil {
 		if cfg, ok := cred.Config.(models.NotionConfig); ok {
 			ic.Notion = &cfg
@@ -600,6 +645,121 @@ func (ic *integrationCredentials) apply(creds map[models.ProviderName]*models.De
 			ic.Mezmo = &cfg
 		}
 	}
+}
+
+// pagerDutyWritebackEnabled resolves the writeback flag for the singleton-credential
+// fallback path, where we did not source the token from a specific integration.
+// Writeback is only enabled when the attribution is unambiguous: exactly one
+// manageable (active/degraded) integration exists. With multiple integrations we
+// cannot tell which one the singleton token belongs to, so we fail closed rather
+// than risk enabling writes against an account where the operator disabled them.
+func (e *AgentEnv) pagerDutyWritebackEnabled(ctx context.Context, orgID uuid.UUID) bool {
+	if e == nil || e.pagerDutySettings == nil {
+		return false
+	}
+	integrations, err := e.pagerDutySettings.ListManageable(ctx, orgID)
+	if err != nil {
+		e.logger.Warn().Err(err).
+			Str("org_id", orgID.String()).
+			Msg("env: PagerDuty integration settings lookup failed; sandbox write tools will be disabled")
+		return false
+	}
+	var manageable []models.PagerDutyIntegration
+	for _, integration := range integrations {
+		if integration.Status == models.PagerDutyIntegrationStatusActive ||
+			integration.Status == models.PagerDutyIntegrationStatusDegraded {
+			manageable = append(manageable, integration)
+		}
+	}
+	if len(manageable) != 1 {
+		if len(manageable) > 1 {
+			e.logger.Warn().
+				Str("org_id", orgID.String()).
+				Int("manageable_integrations", len(manageable)).
+				Msg("env: multiple PagerDuty integrations present; disabling sandbox writeback on the singleton-credential fallback path to avoid mis-attribution")
+		}
+		return false
+	}
+	return manageable[0].WritebackEnabled
+}
+
+func (e *AgentEnv) resolvePagerDutyEnvConfig(ctx context.Context, orgID uuid.UUID, fallback *models.PagerDutyConfig) (*models.PagerDutyConfig, bool) {
+	if e != nil && e.pagerDutySettings != nil {
+		if reader, ok := e.credentials.(pagerDutyCredentialByIDReader); ok {
+			integrations, err := e.pagerDutySettings.ListManageable(ctx, orgID)
+			if err != nil {
+				e.logger.Warn().Err(err).
+					Str("org_id", orgID.String()).
+					Msg("env: PagerDuty integration settings lookup failed; sandbox will fall back to singleton PagerDuty credential")
+			} else {
+				for _, integration := range integrations {
+					credentialID, err := pagerDutyCredentialIDFromRef(integration.CredentialRef)
+					if err != nil {
+						e.logger.Warn().Err(err).
+							Str("org_id", orgID.String()).
+							Str("pagerduty_integration_id", integration.ID.String()).
+							Msg("env: PagerDuty credential reference is invalid")
+						continue
+					}
+					credential, err := reader.GetByID(ctx, orgID, credentialID)
+					if err != nil {
+						e.logger.Warn().Err(err).
+							Str("org_id", orgID.String()).
+							Str("pagerduty_integration_id", integration.ID.String()).
+							Str("credential_id", credentialID.String()).
+							Msg("env: failed to load PagerDuty credential by integration reference")
+						continue
+					}
+					cfg, ok := credential.Config.(models.PagerDutyConfig)
+					if !ok {
+						e.logger.Warn().
+							Str("org_id", orgID.String()).
+							Str("pagerduty_integration_id", integration.ID.String()).
+							Str("credential_id", credentialID.String()).
+							Msg("env: referenced PagerDuty credential has unexpected config type")
+						continue
+					}
+					// The integration row is the source of truth for region; the
+					// credential config may be stale or unset. This keeps the
+					// sandbox PAGERDUTY_API_URL consistent with the integration.
+					if region := strings.TrimSpace(integration.ServiceRegion); region != "" {
+						cfg.ServiceRegion = region
+					}
+					// Proactively refresh a near-expiry scoped OAuth token so the
+					// sandbox doesn't start with an access token that expires
+					// mid-session. Falls back to the observed token on failure.
+					if e.pagerDutyTokens != nil {
+						refreshed, err := e.pagerDutyTokens.EnsureFresh(ctx, orgID, credentialID, cfg)
+						if err != nil {
+							e.logger.Warn().Err(err).
+								Str("org_id", orgID.String()).
+								Str("pagerduty_integration_id", integration.ID.String()).
+								Msg("env: PagerDuty token refresh failed; using existing token")
+						} else {
+							cfg = refreshed
+						}
+					}
+					return &cfg, integration.WritebackEnabled
+				}
+			}
+		}
+	}
+	if fallback == nil {
+		return nil, false
+	}
+	return fallback, e.pagerDutyWritebackEnabled(ctx, orgID)
+}
+
+func pagerDutyCredentialIDFromRef(ref string) (uuid.UUID, error) {
+	value, ok := strings.CutPrefix(strings.TrimSpace(ref), "org_credential:")
+	if !ok {
+		return uuid.Nil, fmt.Errorf("unsupported PagerDuty credential ref %q", ref)
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return id, nil
 }
 
 // Resolve builds the sandbox env vars for the given agent type. It checks
@@ -726,6 +886,22 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 		}
 	case ic.Linear != nil && ic.Linear.AccessToken != "":
 		merged["LINEAR_ACCESS_TOKEN"] = ic.Linear.AccessToken
+	}
+	pagerDutyConfig, pagerDutyWritebackEnabled := e.resolvePagerDutyEnvConfig(ctx, orgID, ic.PagerDuty)
+	if pagerDutyConfig != nil {
+		if pagerDutyConfig.AccessToken != "" {
+			merged["PAGERDUTY_ACCESS_TOKEN"] = pagerDutyConfig.AccessToken
+			// Pin the region-correct API base URL so the in-sandbox provider
+			// (registry_builder reads PAGERDUTY_API_URL) talks to the right
+			// PagerDuty domain. Without this, EU-region tokens hit the US
+			// endpoint and every incident tool call fails.
+			merged["PAGERDUTY_API_URL"] = pagerDutyConfig.APIBaseURL()
+			if pagerDutyWritebackEnabled {
+				merged["PAGERDUTY_WRITEBACK_ENABLED"] = "true"
+			} else {
+				merged["PAGERDUTY_WRITEBACK_ENABLED"] = "false"
+			}
+		}
 	}
 	if ic.Notion != nil {
 		if ic.Notion.AccessToken != "" {

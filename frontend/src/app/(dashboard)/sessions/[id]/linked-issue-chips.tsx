@@ -5,10 +5,37 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { Session } from "@/lib/types";
 
+type LinkedIssue = NonNullable<Session["linked_issues"]>[number];
+
 function linearIssueURL(externalID: string, workspaceSlug?: string): string {
   return workspaceSlug
     ? `https://linear.app/${encodeURIComponent(workspaceSlug)}/issue/${encodeURIComponent(externalID)}`
     : `https://linear.app/issue/${encodeURIComponent(externalID)}`;
+}
+
+function safeHTTPURL(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pagerDutyChipLabel(link: LinkedIssue): string {
+  if (link.pagerduty_incident_number) {
+    return `PagerDuty #${link.pagerduty_incident_number}`;
+  }
+  return link.pagerduty_incident_id ?? link.external_id ?? "PagerDuty incident";
+}
+
+function pagerDutyTooltip(link: LinkedIssue, baseTooltip: string): string {
+  const details = [baseTooltip];
+  if (link.pagerduty_service_name || link.pagerduty_service_id) {
+    details.push(link.pagerduty_service_name ?? link.pagerduty_service_id ?? "");
+  }
+  return details.filter(Boolean).join(" · ");
 }
 
 function linearSkipReasonDetail(reason: string): string {
@@ -126,6 +153,7 @@ export function LinkedIssueChips({ session }: { session: Session }) {
         )}
         {links.map((link) => {
           const isLinear = link.issue_source === "linear";
+          const isPagerDuty = link.issue_source === "pagerduty";
           const isPrimary = link.role === "primary";
           // Linear links must always carry an external_id (the Linear key
           // like "ACS-1234"). Falling back to a UUID slice would surface a
@@ -136,16 +164,25 @@ export function LinkedIssueChips({ session }: { session: Session }) {
           // confuses users and isn't a stable identifier they can search.
           const ident = isLinear
             ? (link.external_id ?? "Linear (no key)")
-            : (link.external_id ?? "Issue (no key)");
-          const tooltip =
+            : isPagerDuty
+              ? pagerDutyChipLabel(link)
+              : (link.external_id ?? "Issue (no key)");
+          const baseTooltip =
             (link.issue_title ?? "") +
             (isPrimary ? " (primary)" : " (related)") +
             (link.issue_status ? ` · ${link.issue_status}` : "");
+          const tooltip = isPagerDuty
+            ? pagerDutyTooltip(link, baseTooltip)
+            : baseTooltip;
 
           const chipClasses = isLinear
             ? isPrimary
               ? "bg-muted/80 text-foreground border-border/70 [a&]:hover:bg-accent/80"
               : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-accent/70 [a&]:hover:text-foreground"
+            : isPagerDuty
+              ? isPrimary
+                ? "bg-destructive/10 text-destructive border-destructive/30 [a&]:hover:bg-destructive/15"
+                : "bg-muted/60 text-muted-foreground border-border/60 [a&]:hover:bg-accent/70 [a&]:hover:text-foreground"
             : isPrimary
               ? "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/30"
               : "bg-muted text-muted-foreground border-border";
@@ -201,6 +238,30 @@ export function LinkedIssueChips({ session }: { session: Session }) {
                 )}
               </div>
             );
+          }
+
+          if (isPagerDuty) {
+            const url = safeHTTPURL(link.pagerduty_incident_url);
+            if (url) {
+              return (
+                <div key={link.id} className="inline-flex items-center gap-1">
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge asChild variant="secondary" className={chipClasses}>
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {chipContent}
+                        </a>
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent sideOffset={6}>{tooltip}</TooltipContent>
+                  </Tooltip>
+                </div>
+              );
+            }
           }
 
           // Non-interactive chip: most screen readers ignore `title` on

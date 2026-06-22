@@ -29,9 +29,13 @@ import (
 type stubRepoLookup struct {
 	err    error
 	status models.RepositoryStatus
+	orgID  uuid.UUID
+	repoID uuid.UUID
 }
 
-func (s *stubRepoLookup) GetByID(_ context.Context, _, repoID uuid.UUID) (models.Repository, error) {
+func (s *stubRepoLookup) GetByID(_ context.Context, orgID, repoID uuid.UUID) (models.Repository, error) {
+	s.orgID = orgID
+	s.repoID = repoID
 	if s.err != nil {
 		return models.Repository{}, s.err
 	}
@@ -58,7 +62,8 @@ func automationTestColumns() []string {
 func automationRunTestColumns() []string {
 	return []string{
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider",
+		"provider_event_id", "trigger_context", "goal_snapshot", "config_snapshot",
 		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
 	}
 }
@@ -284,10 +289,63 @@ func TestAutomationHandler_Get_OK(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 
+func TestAutomationHandler_Get_EmbedsEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	triggerID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "pagerduty triage", Goal: "investigate incidents",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+
+	triggerStore := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           triggerID,
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered)},
+		Filter:       json.RawMessage(`{"service_ids":["PSVC1"]}`),
+		Enabled:      true,
+	}}}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(triggerStore)
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+automationID.String(), nil, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.Get(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Get should return a successful response")
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Get response should decode")
+	require.Equal(t, orgID, triggerStore.listOrgID, "Get should scope event trigger hydration by org")
+	require.Equal(t, automationID, triggerStore.listAutomationID, "Get should hydrate triggers for the requested automation")
+	require.Equal(t, []models.AutomationEventTrigger{{
+		ID:           triggerID,
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered)},
+		Filter:       json.RawMessage(`{"service_ids":["PSVC1"]}`),
+		Enabled:      true,
+	}}, resp.Data.EventTriggers, "Get should embed persisted generic event triggers")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestAutomationHandler_Get_InvalidID(t *testing.T) {
 	t.Parallel()
 
-	h := NewAutomationHandler(nil, nil)
+	h := NewAutomationHandler(db.NewAutomationStore(nil), nil)
 	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/bad", nil, uuid.New(), uuid.New(), map[string]string{"id": "not-a-uuid"})
 	rr := httptest.NewRecorder()
 	h.Get(rr, req)
@@ -368,7 +426,7 @@ func TestAutomationHandler_Create_ValidationErrors(t *testing.T) {
 func TestAutomationHandler_Create_BadJSON(t *testing.T) {
 	t.Parallel()
 
-	h := NewAutomationHandler(nil, nil)
+	h := NewAutomationHandler(db.NewAutomationStore(nil), nil)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/automations", bytes.NewBufferString("{not json"))
 	req.Header.Set("Content-Type", "application/json")
 	ctx := middleware.WithOrgID(req.Context(), uuid.New())
@@ -1345,7 +1403,7 @@ func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(testAnyArgs(9)...).
+		WithArgs(testAnyArgs(13)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -1365,6 +1423,75 @@ func TestAutomationHandler_RunNow_HappyPath(t *testing.T) {
 	h.RunNow(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationHandler_RunNow_ProviderEventRequest(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	id := uuid.New()
+	triggerID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now()
+	a := models.Automation{
+		ID: id, OrgID: orgID, Name: "a", Goal: "g",
+		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
+		ScheduleType: "interval", Timezone: "UTC", Enabled: true,
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id = .+ FOR UPDATE").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, a))
+	mock.ExpectQuery("SELECT count.+FROM automation_runs").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO automation_runs").
+		WithArgs(testAnyArgs(13)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
+				AddRow(runID, now, now, now),
+		)
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(testAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	mock.ExpectCommit()
+	mock.ExpectRollback()
+
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetJobStore(db.NewJobStore(mock))
+	h.SetPool(mock)
+
+	body := map[string]any{
+		"triggered_by":      "provider_event",
+		"trigger_id":        triggerID.String(),
+		"provider":          "pagerduty",
+		"provider_event_id": "evt-123",
+		"trigger_context":   map[string]any{"incident_id": "PABC123", "repository_source": "service_mapping"},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations/"+id.String()+"/run", body, orgID, uuid.New(), map[string]string{"id": id.String()})
+	rr := httptest.NewRecorder()
+
+	h.RunNow(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "RunNow should accept provider-originated run requests")
+	var resp models.SingleResponse[models.AutomationRun]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "RunNow response should be valid JSON")
+	require.Equal(t, models.AutomationTriggeredByProviderEvent, resp.Data.TriggeredBy, "provider requests should preserve triggered_by")
+	require.NotNil(t, resp.Data.TriggerID, "provider requests should preserve trigger_id")
+	require.Equal(t, triggerID, *resp.Data.TriggerID, "provider requests should set trigger_id")
+	require.NotNil(t, resp.Data.Provider, "provider requests should preserve provider")
+	require.Equal(t, models.AutomationEventProviderPagerDuty, *resp.Data.Provider, "provider requests should set PagerDuty provider")
+	require.NotNil(t, resp.Data.ProviderEventID, "provider requests should preserve provider_event_id")
+	require.Equal(t, "evt-123", *resp.Data.ProviderEventID, "provider requests should set provider_event_id")
+	require.JSONEq(t, `{"incident_id":"PABC123","repository_source":"service_mapping"}`, string(resp.Data.TriggerContext), "provider requests should preserve trigger context")
+	require.NoError(t, mock.ExpectationsWereMet(), "all provider run expectations should be met")
 }
 
 func TestAutomationHandler_RunNow_Paused(t *testing.T) {
@@ -1467,7 +1594,7 @@ func TestAutomationHandler_RunNow_EnqueueFailureRollsBack(t *testing.T) {
 		WithArgs(testAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(testAnyArgs(9)...).
+		WithArgs(testAnyArgs(13)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -1687,7 +1814,7 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(db.AutomationRunListColumns).AddRow(
 				uuid.New(), id, orgID, now, models.AutomationTriggeredBySchedule,
-				nil, nil, "goal",
+				nil, nil, nil, nil, nil, []byte(`{}`), "goal",
 				models.AutomationRunStatusCompleted, nil, nil, now, now,
 				&sessionID, &title, &sessionStatus,
 				[]byte(`{"added":12,"removed":3}`),
@@ -1764,7 +1891,7 @@ func TestAutomationHandler_GetRun_OK(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(automationRunTestColumns()).AddRow(
 				runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-				nil, nil, "goal", []byte(`{}`),
+				nil, nil, nil, nil, nil, []byte(`{}`), "goal", []byte(`{}`),
 				models.AutomationRunStatusPending, nil, nil, nil, now, now,
 			),
 		)
@@ -1985,6 +2112,59 @@ func TestAutomationHandler_Create_EventOnlyAutomation(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestAutomationHandler_Create_EventOnlyPagerDutyAutomation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	newID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("INSERT INTO automations").
+		WithArgs(testAnyArgs(28)...).
+		WillReturnRows(
+			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(newID, now, now),
+		)
+
+	triggerStore := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           uuid.New(),
+		OrgID:        orgID,
+		AutomationID: newID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered)},
+		Filter:       json.RawMessage(`{"service_ids":["PSVC1"],"urgencies":["high"]}`),
+		Enabled:      true,
+	}}}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(triggerStore)
+	body := map[string]any{
+		"name":          "PagerDuty incidents",
+		"goal":          "Investigate PagerDuty incidents",
+		"schedule_type": "none",
+		"event_triggers": []map[string]any{{
+			"provider":    "pagerduty",
+			"event_types": []string{"incident.triggered"},
+			"filter":      map[string]any{"service_ids": []string{"PSVC1"}, "urgencies": []string{"high"}},
+		}},
+	}
+	req := newAutomationRequest(t, http.MethodPost, "/api/v1/automations", body, orgID, uuid.New(), nil)
+	rr := httptest.NewRecorder()
+
+	h.Create(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "PagerDuty event-only automations should be created")
+	require.Equal(t, orgID, triggerStore.replaceOrgID, "event triggers should be scoped by org")
+	require.Equal(t, newID, triggerStore.replaceAutomationID, "event triggers should be written for the created automation")
+	require.Len(t, triggerStore.replaced, 1, "one PagerDuty event trigger should be stored")
+	require.Equal(t, models.AutomationEventProviderPagerDuty, triggerStore.replaced[0].Provider, "stored trigger should use PagerDuty provider")
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Create response should decode")
+	require.Equal(t, triggerStore.list, resp.Data.EventTriggers, "Create response should include persisted event trigger rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestAutomationHandler_Create_RejectsEventOnlyAutomationWithoutTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -2139,6 +2319,258 @@ func TestAutomationHandler_Update_RejectsInvalidGitHubEventTrigger(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "no UPDATE should be attempted after trigger validation fails")
 }
 
+func TestAutomationHandler_Update_PagerDutyOnlyAutomationAllowsEdits(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "old", Goal: "g",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+	mock.ExpectExec("UPDATE automations SET").
+		WithArgs(testAnyArgs(30)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	triggerStore := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           uuid.New(),
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered)},
+		Filter:       json.RawMessage(`{}`),
+		Enabled:      true,
+	}}}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(triggerStore)
+	body := map[string]any{"name": "new"}
+	req := newAutomationRequest(t, http.MethodPatch, "/api/v1/automations/"+automationID.String(), body, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.Update(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "PagerDuty-only event automations should allow ordinary edits")
+	require.Equal(t, orgID, triggerStore.listOrgID, "Update should check generic triggers under the request org")
+	require.Equal(t, automationID, triggerStore.listAutomationID, "Update should check generic triggers for the automation")
+	var resp models.SingleResponse[models.Automation]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "Update response should decode")
+	require.Equal(t, triggerStore.list, resp.Data.EventTriggers, "Update response should include persisted event trigger rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAutomationHandler_ReplaceEventTriggers_WithPagerDutyTrigger(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "incident automation", Goal: "fix incidents",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+
+	store := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           uuid.New(),
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered), string(models.PagerDutyEventIncidentReopened)},
+		Filter:       json.RawMessage(`{"service_ids":["PSVC1"],"urgencies":["high"],"title_contains":"database"}`),
+		RepositoryID: &repoID,
+		Enabled:      true,
+	}}}
+	repos := &stubRepoLookup{}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(store)
+	h.SetRepositoryStore(repos)
+	body := []map[string]any{{
+		"provider":      "pagerduty",
+		"event_types":   []string{"incident.triggered", "incident.triggered", "incident.reopened"},
+		"filter":        map[string]any{"service_ids": []string{" PSVC1 ", ""}, "urgencies": []string{"HIGH"}, "title_contains": " database ", "cooldown_minutes": 15},
+		"repository_id": repoID.String(),
+		"enabled":       true,
+	}}
+	req := newAutomationRequest(t, http.MethodPut, "/api/v1/automations/"+automationID.String()+"/event-triggers", body, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.ReplaceEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ReplaceEventTriggers should save a valid PagerDuty trigger")
+	require.Equal(t, orgID, store.replaceOrgID, "ReplaceEventTriggers should scope replacement by org")
+	require.Equal(t, automationID, store.replaceAutomationID, "ReplaceEventTriggers should scope replacement by automation")
+	require.Len(t, store.replaced, 1, "ReplaceEventTriggers should replace one trigger")
+	require.Equal(t, []string{"incident.triggered", "incident.reopened"}, store.replaced[0].EventTypes, "ReplaceEventTriggers should deduplicate event types")
+	require.JSONEq(t, `{"service_ids":["PSVC1"],"urgencies":["high"],"title_contains":"database","cooldown_minutes":15}`, string(store.replaced[0].Filter), "ReplaceEventTriggers should normalize PagerDuty filters")
+	require.Equal(t, &repoID, store.replaced[0].RepositoryID, "ReplaceEventTriggers should preserve repository override")
+	require.Equal(t, orgID, repos.orgID, "ReplaceEventTriggers should validate repository overrides under the request org")
+	require.Equal(t, repoID, repos.repoID, "ReplaceEventTriggers should validate the requested repository override")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestAutomationHandler_ReplaceEventTriggers_RejectsRepositoryOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "incident automation", Goal: "fix incidents",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+
+	store := &stubAutomationEventTriggerStore{}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(store)
+	h.SetRepositoryStore(&stubRepoLookup{err: pgx.ErrNoRows})
+	body := []map[string]any{{
+		"provider":      "pagerduty",
+		"event_types":   []string{"incident.triggered"},
+		"filter":        map[string]any{"service_ids": []string{"PSVC1"}, "urgencies": []string{"high"}},
+		"repository_id": repoID.String(),
+		"enabled":       true,
+	}}
+	req := newAutomationRequest(t, http.MethodPut, "/api/v1/automations/"+automationID.String()+"/event-triggers", body, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.ReplaceEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "ReplaceEventTriggers should reject repository overrides that are not visible to the org")
+	require.Empty(t, store.replaced, "ReplaceEventTriggers should not persist invalid repository overrides")
+	require.Contains(t, rr.Body.String(), "INVALID_REPOSITORY_ID", "response should identify the repository validation failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation lookup should be scoped and no trigger replacement should run")
+}
+
+func TestAutomationHandler_ReplaceEventTriggers_RejectsInvalidPagerDutyEvent(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(db.NewAutomationStore(nil), nil)
+	h.SetEventTriggerStore(&stubAutomationEventTriggerStore{})
+	body := []map[string]any{{
+		"provider":    "pagerduty",
+		"event_types": []string{"incident.exploded"},
+	}}
+	req := newAutomationRequest(t, http.MethodPut, "/api/v1/automations/"+uuid.New().String()+"/event-triggers", body, uuid.New(), uuid.New(), map[string]string{"id": uuid.New().String()})
+	rr := httptest.NewRecorder()
+
+	h.ReplaceEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "invalid PagerDuty event types should be rejected")
+	require.Contains(t, rr.Body.String(), "INVALID_EVENT_TRIGGER", "response should identify event trigger validation failures")
+}
+
+func TestAutomationHandler_ReplaceEventTriggers_RejectsBroadPagerDutyTrigger(t *testing.T) {
+	t.Parallel()
+
+	h := NewAutomationHandler(db.NewAutomationStore(nil), nil)
+	h.SetEventTriggerStore(&stubAutomationEventTriggerStore{})
+	body := []map[string]any{{
+		"provider":    "pagerduty",
+		"event_types": []string{"incident.triggered"},
+		"filter":      map[string]any{"service_ids": []string{"PSVC1"}},
+	}}
+	req := newAutomationRequest(t, http.MethodPut, "/api/v1/automations/"+uuid.New().String()+"/event-triggers", body, uuid.New(), uuid.New(), map[string]string{"id": uuid.New().String()})
+	rr := httptest.NewRecorder()
+
+	h.ReplaceEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "PagerDuty triggers without urgency or priority should be rejected")
+	require.Contains(t, rr.Body.String(), "INVALID_EVENT_TRIGGER", "response should identify event trigger validation failures")
+}
+
+func TestAutomationHandler_ListEventTriggers_ScopesByAutomation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "incident automation", Goal: "fix incidents",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+
+	triggerID := uuid.New()
+	store := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           triggerID,
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderPagerDuty,
+		EventTypes:   []string{string(models.PagerDutyEventIncidentTriggered)},
+		Filter:       json.RawMessage(`{}`),
+		Enabled:      true,
+	}}}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(store)
+	req := newAutomationRequest(t, http.MethodGet, "/api/v1/automations/"+automationID.String()+"/event-triggers", nil, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.ListEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ListEventTriggers should return configured event triggers")
+	require.Equal(t, orgID, store.listOrgID, "ListEventTriggers should scope list by org")
+	require.Equal(t, automationID, store.listAutomationID, "ListEventTriggers should scope list by automation")
+	var resp models.ListResponse[models.AutomationEventTrigger]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp), "ListEventTriggers response should decode")
+	require.Equal(t, triggerID, resp.Data[0].ID, "ListEventTriggers should return the stored trigger")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type stubAutomationEventTriggerStore struct {
+	replaceOrgID        uuid.UUID
+	replaceAutomationID uuid.UUID
+	listOrgID           uuid.UUID
+	listAutomationID    uuid.UUID
+	replaced            []models.AutomationEventTrigger
+	list                []models.AutomationEventTrigger
+}
+
+func (s *stubAutomationEventTriggerStore) ReplaceForAutomation(_ context.Context, orgID, automationID uuid.UUID, triggers []models.AutomationEventTrigger) error {
+	s.replaceOrgID = orgID
+	s.replaceAutomationID = automationID
+	s.replaced = append([]models.AutomationEventTrigger(nil), triggers...)
+	return nil
+}
+
+func (s *stubAutomationEventTriggerStore) ListByAutomation(_ context.Context, orgID, automationID uuid.UUID) ([]models.AutomationEventTrigger, error) {
+	s.listOrgID = orgID
+	s.listAutomationID = automationID
+	return s.list, nil
+}
+
 // --- Setters ---
 
 func TestAutomationHandler_Setters(t *testing.T) {
@@ -2149,6 +2581,7 @@ func TestAutomationHandler_Setters(t *testing.T) {
 	h.SetAuditEmitter(nil)
 	h.SetRepositoryStore(&stubRepoLookup{})
 	h.SetPool(nil)
+	h.SetEventTriggerStore(&stubAutomationEventTriggerStore{})
 	// No assertions: exercising the setters to bump coverage; they're trivial stores.
 	require.NotNil(t, h)
 }

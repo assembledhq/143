@@ -11,6 +11,7 @@ describe("INTEGRATIONS", () => {
     "notion",
     "circleci",
     "mezmo",
+    "pagerduty",
   ] as const satisfies readonly IntegrationKey[];
 
   it("contains the expected integrations", () => {
@@ -41,6 +42,7 @@ describe("getIntegrationByKey", () => {
     "notion",
     "circleci",
     "mezmo",
+    "pagerduty",
   ] as IntegrationKey[])(
     "returns the correct integration for %s",
     (key) => {

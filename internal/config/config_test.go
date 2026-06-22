@@ -63,6 +63,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, 15*time.Minute, cfg.PreviewCachePrewarmTimeout, "Load should default preview cache prewarm timeout")
 	require.Equal(t, -50, cfg.PreviewCachePrewarmPriority, "Load should default preview cache prewarm to low priority")
 	require.Equal(t, 30*time.Minute, cfg.PreviewIdleTimeout, "Load should default preview idle retention to thirty minutes")
+	require.True(t, cfg.PagerDutyIntegrationEnabled, "Load should enable PagerDuty integration by default")
 }
 
 func TestResolvePreviewDependencyCacheLocalDir(t *testing.T) {
@@ -134,6 +135,9 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("PR_PREVIEW_SURFACES_ENABLED", "false")
 	t.Setenv("GITHUB_APP_ID", "12345")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "registry.example.com/health/busybox:1.36.1")
+	t.Setenv("PAGERDUTY_OAUTH_CLIENT_ID", "pd-client")
+	t.Setenv("PAGERDUTY_OAUTH_CLIENT_SECRET", "pd-secret")
+	t.Setenv("PAGERDUTY_INTEGRATION_ENABLED", "false")
 
 	cfg := Load()
 
@@ -153,6 +157,9 @@ func TestLoad_UsesEnvironmentOverrides(t *testing.T) {
 	require.Equal(t, 45*time.Minute, cfg.PreviewIdleTimeout, "Load should read PREVIEW_IDLE_TIMEOUT from the environment")
 	require.False(t, cfg.PRPreviewSurfacesEnabled, "Load should read PR_PREVIEW_SURFACES_ENABLED from the environment")
 	require.Equal(t, "registry.example.com/health/busybox:1.36.1", cfg.SandboxHealthCheckImage, "Load should read SANDBOX_HEALTH_CHECK_IMAGE from the environment")
+	require.Equal(t, "pd-client", cfg.PagerDutyOAuthClientID, "Load should read PAGERDUTY_OAUTH_CLIENT_ID from the environment")
+	require.Equal(t, "pd-secret", cfg.PagerDutyOAuthClientSecret, "Load should read PAGERDUTY_OAUTH_CLIENT_SECRET from the environment")
+	require.False(t, cfg.PagerDutyIntegrationEnabled, "Load should read PAGERDUTY_INTEGRATION_ENABLED from the environment")
 }
 
 //nolint:paralleltest // uses t.Setenv

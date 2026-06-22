@@ -47,9 +47,14 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"CLIDistributionHandler.Version":        "public version endpoint",
 
 		// Webhook routes — signature-verified, not session-authenticated.
-		"WebhookHandler.HandleGitHub":          "external webhook, signature auth",
-		"IngestionWebhookHandler.HandleSentry": "external webhook, signature auth",
-		"IngestionWebhookHandler.HandleLinear": "external webhook, signature auth",
+		"WebhookHandler.HandleGitHub":                      "external webhook, signature auth",
+		"IngestionWebhookHandler.HandleSentry":             "external webhook, signature auth",
+		"IngestionWebhookHandler.HandleLinear":             "external webhook, signature auth",
+		"PagerDutyWebhookHandler.Handle":                   "external webhook, signature/shared-secret auth; org resolves from integration_id",
+		"PagerDutyWebhookHandler.HandleStartSessionAction": "external PagerDuty custom incident action, signature/shared-secret auth; org resolves from integration_id",
+
+		// OAuth routes — org is encoded in signed OAuth state rather than request org context.
+		"PagerDutyIntegrationHandler.StartOAuth": "PagerDuty OAuth start; org comes from signed OAuth state and session context",
 
 		// Internal API routes — use claims.OrgID from internal JWT, not middleware.
 		"InternalIssueHandler.Create":                       "internal API, uses claims.OrgID",

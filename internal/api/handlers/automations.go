@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ type AutomationHandler struct {
 	capabilityStore       *db.AgentCapabilityPolicyStore
 	capabilityService     *agentcapabilities.Service
 	goalImprovement       *automationservice.GoalImprovementService
+	eventTriggerStore     automationEventTriggerStore
 	canceller             SessionCanceller
 	audit                 *db.AuditEmitter
 	pool                  db.TxStarter // needed for transactional RunNow
@@ -68,6 +70,11 @@ type automationOrgLookup interface {
 
 type automationCodingCredentialLookup interface {
 	ListByScope(ctx context.Context, scope models.Scope) ([]models.DecryptedCodingCredential, error)
+}
+
+type automationEventTriggerStore interface {
+	ListByAutomation(ctx context.Context, orgID, automationID uuid.UUID) ([]models.AutomationEventTrigger, error)
+	ReplaceForAutomation(ctx context.Context, orgID, automationID uuid.UUID, triggers []models.AutomationEventTrigger) error
 }
 
 func NewAutomationHandler(automationStore *db.AutomationStore, automationRunStore *db.AutomationRunStore) *AutomationHandler {
@@ -89,6 +96,10 @@ func (h *AutomationHandler) SetCapabilityDependencies(store *db.AgentCapabilityP
 
 func (h *AutomationHandler) SetGoalImprovementService(service *automationservice.GoalImprovementService) {
 	h.goalImprovement = service
+}
+
+func (h *AutomationHandler) SetEventTriggerStore(store automationEventTriggerStore) {
+	h.eventTriggerStore = store
 }
 
 func (h *AutomationHandler) SetCanceller(canceller SessionCanceller) {
@@ -125,6 +136,33 @@ func (h *AutomationHandler) SetPool(pool db.TxStarter) {
 // recomputed).
 func (h *AutomationHandler) SetLogger(logger zerolog.Logger) {
 	h.logger = logger
+}
+
+func (h *AutomationHandler) hydrateAutomationEventTriggers(ctx context.Context, orgID uuid.UUID, automation *models.Automation) error {
+	if h == nil || h.eventTriggerStore == nil || automation == nil || automation.ID == uuid.Nil {
+		return nil
+	}
+	triggers, err := h.eventTriggerStore.ListByAutomation(ctx, orgID, automation.ID)
+	if err != nil {
+		return err
+	}
+	if triggers == nil {
+		triggers = []models.AutomationEventTrigger{}
+	}
+	automation.EventTriggers = triggers
+	return nil
+}
+
+func (h *AutomationHandler) hydrateAutomationListEventTriggers(ctx context.Context, orgID uuid.UUID, automations []models.Automation) error {
+	if h == nil || h.eventTriggerStore == nil {
+		return nil
+	}
+	for i := range automations {
+		if err := h.hydrateAutomationEventTriggers(ctx, orgID, &automations[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func userIDPtr(user *models.User) *uuid.UUID {
@@ -187,6 +225,10 @@ func (h *AutomationHandler) List(w http.ResponseWriter, r *http.Request) {
 	if automations == nil {
 		automations = []models.Automation{}
 	}
+	if err := h.hydrateAutomationListEventTriggers(r.Context(), orgID, automations); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
+		return
+	}
 
 	var nextCursor string
 	if len(automations) > 0 && len(automations) == filters.Limit {
@@ -212,8 +254,87 @@ func (h *AutomationHandler) Get(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
 		return
 	}
+	if err := h.hydrateAutomationEventTriggers(r.Context(), orgID, &automation); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Automation]{Data: automation})
+}
+
+func (h *AutomationHandler) ListEventTriggers(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h == nil || h.automationStore == nil || h.eventTriggerStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "AUTOMATION_EVENT_TRIGGERS_UNAVAILABLE", "automation event triggers are not configured")
+		return
+	}
+	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
+		return
+	}
+	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+	triggers, err := h.eventTriggerStore.ListByAutomation(r.Context(), orgID, automationID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
+		return
+	}
+	if triggers == nil {
+		triggers = []models.AutomationEventTrigger{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.AutomationEventTrigger]{Data: triggers})
+}
+
+func (h *AutomationHandler) ReplaceEventTriggers(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if h == nil || h.automationStore == nil || h.eventTriggerStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "AUTOMATION_EVENT_TRIGGERS_UNAVAILABLE", "automation event triggers are not configured")
+		return
+	}
+	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
+		return
+	}
+	var req []automationEventTriggerInput
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	triggers, err := validateAutomationEventTriggerInputs(req)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_EVENT_TRIGGER", err.Error())
+		return
+	}
+	automation, err := h.automationStore.GetByID(r.Context(), orgID, automationID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+	if automation.ScheduleType == models.AutomationScheduleNone && len(automation.GitHubEventTriggers) == 0 && len(triggers) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one event trigger")
+		return
+	}
+	if err := h.validateAutomationEventTriggerRepositories(r.Context(), orgID, triggers); err != nil {
+		writeAutomationEventTriggerRepositoryError(w, r, err)
+		return
+	}
+	if err := h.eventTriggerStore.ReplaceForAutomation(r.Context(), orgID, automationID, triggers); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "REPLACE_EVENT_TRIGGERS_FAILED", "failed to replace automation event triggers", err)
+		return
+	}
+	stored, err := h.eventTriggerStore.ListByAutomation(r.Context(), orgID, automationID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
+		return
+	}
+	if stored == nil {
+		stored = []models.AutomationEventTrigger{}
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.AutomationEventTrigger]{Data: stored})
 }
 
 func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +364,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		ProductTriggers     []models.AutomationProductTrigger         `json:"triggers"`
 		GitHubEventTriggers []models.AutomationGitHubEvent            `json:"github_event_triggers"`
 		GitHubEventFilters  json.RawMessage                           `json:"github_event_filters"`
+		EventTriggers       []automationEventTriggerInput             `json:"event_triggers"`
 		Metadata            json.RawMessage                           `json:"metadata"`
 		Priority            *int                                      `json:"priority"`
 		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
@@ -466,8 +588,21 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_GITHUB_EVENT_FILTERS", err.Error())
 		return
 	}
-	if scheduleType == models.AutomationScheduleNone && len(githubEventTriggers) == 0 {
-		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one GitHub event trigger")
+	eventTriggers, err := validateAutomationEventTriggerInputs(req.EventTriggers)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_EVENT_TRIGGER", err.Error())
+		return
+	}
+	if err := h.validateAutomationEventTriggerRepositories(r.Context(), orgID, eventTriggers); err != nil {
+		writeAutomationEventTriggerRepositoryError(w, r, err)
+		return
+	}
+	if len(eventTriggers) > 0 && h.eventTriggerStore == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "AUTOMATION_EVENT_TRIGGERS_UNAVAILABLE", "automation event triggers are not configured")
+		return
+	}
+	if scheduleType == models.AutomationScheduleNone && len(githubEventTriggers) == 0 && len(eventTriggers) == 0 {
+		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one event trigger")
 		return
 	}
 
@@ -517,6 +652,22 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.automationStore.Create(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create automation", err)
+		return
+	}
+	if len(eventTriggers) > 0 {
+		if err := h.eventTriggerStore.ReplaceForAutomation(r.Context(), orgID, automation.ID, eventTriggers); err != nil {
+			if delErr := h.automationStore.SoftDelete(r.Context(), orgID, automation.ID); delErr != nil {
+				h.logger.Error().Err(delErr).Str("automation_id", automation.ID.String()).Msg("failed to soft-delete automation after event trigger write failure")
+			}
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_EVENT_TRIGGERS_FAILED", "failed to update automation event triggers", err)
+			return
+		}
+	}
+	if err := h.hydrateAutomationEventTriggers(r.Context(), orgID, &automation); err != nil {
+		if delErr := h.automationStore.SoftDelete(r.Context(), orgID, automation.ID); delErr != nil {
+			h.logger.Error().Err(delErr).Str("automation_id", automation.ID.String()).Msg("failed to soft-delete automation after event trigger hydration failure")
+		}
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
 		return
 	}
 	if req.Capabilities != nil {
@@ -648,6 +799,285 @@ func resolveAutomationIcon(iconType models.AutomationIconType, iconValue string)
 		return "", "", fmt.Errorf("icon_value must be at most 16 characters")
 	}
 	return resolvedType, resolvedValue, nil
+}
+
+type automationEventTriggerInput struct {
+	Provider     models.AutomationEventProvider `json:"provider"`
+	EventTypes   []string                       `json:"event_types"`
+	Filter       json.RawMessage                `json:"filter"`
+	RepositoryID *uuid.UUID                     `json:"repository_id"`
+	Enabled      *bool                          `json:"enabled"`
+}
+
+func validateAutomationEventTriggerInputs(inputs []automationEventTriggerInput) ([]models.AutomationEventTrigger, error) {
+	triggers := make([]models.AutomationEventTrigger, 0, len(inputs))
+	for idx, input := range inputs {
+		provider := input.Provider
+		if err := provider.Validate(); err != nil {
+			return nil, fmt.Errorf("trigger %d: %w", idx+1, err)
+		}
+		if provider != models.AutomationEventProviderPagerDuty {
+			return nil, fmt.Errorf("trigger %d: provider %q is not supported for generic event triggers", idx+1, provider)
+		}
+		eventTypes, err := normalizeAutomationEventTypes(provider, input.EventTypes)
+		if err != nil {
+			return nil, fmt.Errorf("trigger %d: %w", idx+1, err)
+		}
+		filter, err := normalizeAutomationEventFilter(provider, input.Filter)
+		if err != nil {
+			return nil, fmt.Errorf("trigger %d: %w", idx+1, err)
+		}
+		enabled := true
+		if input.Enabled != nil {
+			enabled = *input.Enabled
+		}
+		if provider == models.AutomationEventProviderPagerDuty && enabled {
+			if err := validatePagerDutyEventTriggerFilter(filter); err != nil {
+				return nil, fmt.Errorf("trigger %d: %w", idx+1, err)
+			}
+		}
+		triggers = append(triggers, models.AutomationEventTrigger{
+			Provider:     provider,
+			EventTypes:   eventTypes,
+			Filter:       filter,
+			RepositoryID: input.RepositoryID,
+			Enabled:      enabled,
+		})
+	}
+	return triggers, nil
+}
+
+func (h *AutomationHandler) validateAutomationEventTriggerRepositories(ctx context.Context, orgID uuid.UUID, triggers []models.AutomationEventTrigger) error {
+	for _, trigger := range triggers {
+		if trigger.RepositoryID == nil || *trigger.RepositoryID == uuid.Nil {
+			continue
+		}
+		if _, err := requireActiveRepo(ctx, h.repoStore, orgID, *trigger.RepositoryID); err != nil {
+			switch {
+			case errors.Is(err, errRepoDisconnected):
+				return errRepoDisconnected
+			case errors.Is(err, errRepoStoreUnconfigured):
+				return fmt.Errorf("repository lookup not configured")
+			default:
+				return fmt.Errorf("repository not found in this org")
+			}
+		}
+	}
+	return nil
+}
+
+func writeAutomationEventTriggerRepositoryError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, errRepoDisconnected) {
+		writeError(w, r, http.StatusBadRequest, "REPO_DISCONNECTED", "repository is disconnected; reconnect it to assign event triggers")
+		return
+	}
+	if strings.Contains(err.Error(), "repository lookup not configured") {
+		writeError(w, r, http.StatusServiceUnavailable, "REPOSITORY_LOOKUP_UNAVAILABLE", "repository validation is not configured")
+		return
+	}
+	writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", err.Error())
+}
+
+func normalizeAutomationEventTypes(provider models.AutomationEventProvider, raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("event_types must contain at least one event")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, eventType := range raw {
+		eventType = strings.TrimSpace(eventType)
+		if eventType == "" {
+			continue
+		}
+		if provider == models.AutomationEventProviderPagerDuty {
+			if err := models.PagerDutyEventType(eventType).Validate(); err != nil {
+				return nil, err
+			}
+		}
+		if _, ok := seen[eventType]; ok {
+			continue
+		}
+		seen[eventType] = struct{}{}
+		out = append(out, eventType)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("event_types must contain at least one event")
+	}
+	return out, nil
+}
+
+func normalizeAutomationEventFilter(provider models.AutomationEventProvider, raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return json.RawMessage(`{}`), nil
+	}
+	if provider != models.AutomationEventProviderPagerDuty {
+		return raw, nil
+	}
+	var in map[string]any
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("filter must be a JSON object")
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		switch key {
+		case "service_ids", "team_ids", "priority_names", "incident_types":
+			values, err := normalizeStringArrayFilter(value, false)
+			if err != nil {
+				return nil, fmt.Errorf("%s must be an array of strings", key)
+			}
+			if len(values) > 0 {
+				out[key] = values
+			}
+		case "statuses":
+			values, err := normalizeStringArrayFilter(value, true)
+			if err != nil {
+				return nil, fmt.Errorf("statuses must be an array of strings")
+			}
+			for _, status := range values {
+				switch status {
+				case "triggered", "acknowledged", "resolved":
+				default:
+					return nil, fmt.Errorf("unsupported PagerDuty status %q", status)
+				}
+			}
+			if len(values) > 0 {
+				out[key] = values
+			}
+		case "urgencies":
+			values, err := normalizeStringArrayFilter(value, true)
+			if err != nil {
+				return nil, fmt.Errorf("urgencies must be an array of strings")
+			}
+			for _, urgency := range values {
+				switch urgency {
+				case "high", "low":
+				default:
+					return nil, fmt.Errorf("unsupported PagerDuty urgency %q", urgency)
+				}
+			}
+			if len(values) > 0 {
+				out[key] = values
+			}
+		case "title_contains":
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("title_contains must be a string")
+			}
+			text = strings.TrimSpace(text)
+			if text != "" {
+				out[key] = text
+			}
+		case "custom_fields":
+			values, err := normalizeCustomFieldsFilter(value)
+			if err != nil {
+				return nil, err
+			}
+			if len(values) == 0 {
+				continue
+			}
+			out[key] = values
+		case "cooldown_minutes":
+			minutes, err := normalizeCooldownMinutesFilter(value)
+			if err != nil {
+				return nil, err
+			}
+			if minutes > 0 {
+				out[key] = minutes
+			}
+		default:
+			return nil, fmt.Errorf("unsupported PagerDuty filter field %q", key)
+		}
+	}
+	if len(out) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	normalized, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("filter could not be encoded")
+	}
+	return normalized, nil
+}
+
+func validatePagerDutyEventTriggerFilter(raw json.RawMessage) error {
+	var filter struct {
+		ServiceIDs    []string `json:"service_ids"`
+		Urgencies     []string `json:"urgencies"`
+		PriorityNames []string `json:"priority_names"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &filter); err != nil {
+			return fmt.Errorf("filter must be a JSON object")
+		}
+	}
+	if len(filter.ServiceIDs) == 0 {
+		return fmt.Errorf("PagerDuty triggers require at least one service_id")
+	}
+	if len(filter.Urgencies) == 0 && len(filter.PriorityNames) == 0 {
+		return fmt.Errorf("PagerDuty triggers require urgency or priority filter")
+	}
+	return nil
+}
+
+func normalizeCustomFieldsFilter(value any) (map[string][]string, error) {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("custom_fields must be a JSON object")
+	}
+	out := make(map[string][]string, len(raw))
+	for key, value := range raw {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		values, err := normalizeStringArrayFilter(value, false)
+		if err != nil {
+			return nil, fmt.Errorf("custom_fields must be a JSON object")
+		}
+		if len(values) > 0 {
+			out[key] = values
+		}
+	}
+	return out, nil
+}
+
+func normalizeCooldownMinutesFilter(value any) (int, error) {
+	number, ok := value.(float64)
+	if !ok || math.Trunc(number) != number {
+		return 0, fmt.Errorf("cooldown_minutes must be an integer")
+	}
+	if number < 0 || number > 10080 {
+		return 0, fmt.Errorf("cooldown_minutes must be between 0 and 10080")
+	}
+	return int(number), nil
+}
+
+func normalizeStringArrayFilter(value any, lower bool) ([]string, error) {
+	raw, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("not an array")
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		value, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("not a string")
+		}
+		value = strings.TrimSpace(value)
+		if lower {
+			value = strings.ToLower(value)
+		}
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out, nil
 }
 
 func validateAutomationGitHubEventTriggers(events []models.AutomationGitHubEvent) ([]models.AutomationGitHubEvent, error) {
@@ -782,6 +1212,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		ProductTriggers     *[]models.AutomationProductTrigger        `json:"triggers"`
 		GitHubEventTriggers *[]models.AutomationGitHubEvent           `json:"github_event_triggers"`
 		GitHubEventFilters  *json.RawMessage                          `json:"github_event_filters"`
+		EventTriggers       *[]automationEventTriggerInput            `json:"event_triggers"`
 		Priority            *int                                      `json:"priority"`
 		PrePRReviewLoops    *int                                      `json:"pre_pr_review_loops"`
 		Capabilities        *[]models.AgentCapabilityPolicyGrantInput `json:"capabilities"`
@@ -973,6 +1404,23 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		automation.GitHubEventFilters = githubEventFilters
 	}
+	var eventTriggers []models.AutomationEventTrigger
+	if req.EventTriggers != nil {
+		var err error
+		eventTriggers, err = validateAutomationEventTriggerInputs(*req.EventTriggers)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_EVENT_TRIGGER", err.Error())
+			return
+		}
+		if err := h.validateAutomationEventTriggerRepositories(r.Context(), orgID, eventTriggers); err != nil {
+			writeAutomationEventTriggerRepositoryError(w, r, err)
+			return
+		}
+		if h.eventTriggerStore == nil {
+			writeError(w, r, http.StatusServiceUnavailable, "AUTOMATION_EVENT_TRIGGERS_UNAVAILABLE", "automation event triggers are not configured")
+			return
+		}
+	}
 	if req.Priority != nil {
 		if *req.Priority < 0 || *req.Priority > 100 {
 			writeError(w, r, http.StatusBadRequest, "INVALID_PRIORITY", "priority must be between 0 and 100")
@@ -1010,8 +1458,21 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if effectiveScheduleType == models.AutomationScheduleNone && len(automation.GitHubEventTriggers) == 0 {
-		writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one GitHub event trigger")
-		return
+		hasGenericTrigger := false
+		if req.EventTriggers != nil {
+			hasGenericTrigger = len(eventTriggers) > 0
+		} else if h.eventTriggerStore != nil {
+			existing, err := h.eventTriggerStore.ListByAutomation(r.Context(), orgID, automationID)
+			if err != nil {
+				writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
+				return
+			}
+			hasGenericTrigger = len(existing) > 0
+		}
+		if !hasGenericTrigger {
+			writeError(w, r, http.StatusBadRequest, "MISSING_TRIGGER", "event-only automations require at least one event trigger")
+			return
+		}
 	}
 
 	if req.ScheduleType != nil {
@@ -1130,6 +1591,16 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.automationStore.Update(r.Context(), &automation); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update automation", err)
+		return
+	}
+	if req.EventTriggers != nil {
+		if err := h.eventTriggerStore.ReplaceForAutomation(r.Context(), orgID, automation.ID, eventTriggers); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "UPDATE_EVENT_TRIGGERS_FAILED", "failed to update automation event triggers", err)
+			return
+		}
+	}
+	if err := h.hydrateAutomationEventTriggers(r.Context(), orgID, &automation); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_EVENT_TRIGGERS_FAILED", "failed to list automation event triggers", err)
 		return
 	}
 	if req.Capabilities != nil {
@@ -1296,6 +1767,11 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
 		return
 	}
+	runReq, err := decodeAutomationRunNowRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_RUN_REQUEST", err.Error(), err)
+		return
+	}
 
 	tx, err := h.pool.Begin(r.Context())
 	if err != nil {
@@ -1338,14 +1814,18 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	run := models.AutomationRun{
-		AutomationID:   automation.ID,
-		OrgID:          automation.OrgID,
-		TriggeredBy:    models.AutomationTriggeredByManual,
-		GoalSnapshot:   automation.Goal,
-		ConfigSnapshot: configSnapshot,
-		Status:         models.AutomationRunStatusPending,
+		AutomationID:    automation.ID,
+		OrgID:           automation.OrgID,
+		TriggeredBy:     runReq.TriggeredBy,
+		TriggerID:       runReq.TriggerID,
+		Provider:        runReq.Provider,
+		ProviderEventID: runReq.ProviderEventID,
+		TriggerContext:  runReq.TriggerContext,
+		GoalSnapshot:    automation.Goal,
+		ConfigSnapshot:  configSnapshot,
+		Status:          models.AutomationRunStatusPending,
 	}
-	if user != nil {
+	if user != nil && run.TriggeredBy == models.AutomationTriggeredByManual {
 		run.TriggeredByUserID = &user.ID
 	}
 	if h.capabilityService != nil {
@@ -1399,11 +1879,93 @@ func (h *AutomationHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	details := map[string]any{
 		"name":              automation.Name,
 		"automation_run_id": run.ID.String(),
-		"via":               "manual",
+		"via":               string(run.TriggeredBy),
+	}
+	if run.Provider != nil {
+		details["provider"] = string(*run.Provider)
 	}
 	emitUserAuditWithSession(h.audit, r, models.AuditActionAutomationRunTriggered, models.AuditResourceAutomation, &idStr, nil, nil,
 		marshalAuditDetails(h.logger, details))
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationRun]{Data: run})
+}
+
+type automationRunNowRequest struct {
+	TriggeredBy     models.AutomationTriggeredBy
+	TriggerID       *uuid.UUID
+	Provider        *models.AutomationEventProvider
+	ProviderEventID *string
+	TriggerContext  json.RawMessage
+}
+
+func decodeAutomationRunNowRequest(r *http.Request) (automationRunNowRequest, error) {
+	out := automationRunNowRequest{
+		TriggeredBy:    models.AutomationTriggeredByManual,
+		TriggerContext: json.RawMessage(`{}`),
+	}
+	if r.Body == nil {
+		return out, nil
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return automationRunNowRequest{}, fmt.Errorf("read request body: %w", err)
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return out, nil
+	}
+	var req struct {
+		TriggeredBy     models.AutomationTriggeredBy    `json:"triggered_by"`
+		TriggerID       *uuid.UUID                      `json:"trigger_id"`
+		Provider        *models.AutomationEventProvider `json:"provider"`
+		ProviderEventID string                          `json:"provider_event_id"`
+		TriggerContext  json.RawMessage                 `json:"trigger_context"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return automationRunNowRequest{}, fmt.Errorf("invalid request body")
+	}
+	if req.TriggeredBy == "" {
+		req.TriggeredBy = models.AutomationTriggeredByManual
+	}
+	if err := req.TriggeredBy.Validate(); err != nil {
+		return automationRunNowRequest{}, err
+	}
+	switch req.TriggeredBy {
+	case models.AutomationTriggeredByManual:
+		if req.Provider != nil || strings.TrimSpace(req.ProviderEventID) != "" || len(req.TriggerContext) > 0 || req.TriggerID != nil {
+			return automationRunNowRequest{}, fmt.Errorf("manual runs must not include provider fields")
+		}
+	case models.AutomationTriggeredByProviderEvent:
+		if req.Provider == nil {
+			return automationRunNowRequest{}, fmt.Errorf("provider is required for provider_event runs")
+		}
+		if err := req.Provider.Validate(); err != nil {
+			return automationRunNowRequest{}, err
+		}
+		providerEventID := strings.TrimSpace(req.ProviderEventID)
+		if providerEventID == "" {
+			return automationRunNowRequest{}, fmt.Errorf("provider_event_id is required for provider_event runs")
+		}
+		context := req.TriggerContext
+		if len(context) == 0 || string(bytes.TrimSpace(context)) == "null" {
+			context = json.RawMessage(`{}`)
+		}
+		if !jsonObject(context) {
+			return automationRunNowRequest{}, fmt.Errorf("trigger_context must be a JSON object")
+		}
+		out.TriggeredBy = req.TriggeredBy
+		out.TriggerID = req.TriggerID
+		out.Provider = req.Provider
+		out.ProviderEventID = &providerEventID
+		out.TriggerContext = context
+	default:
+		return automationRunNowRequest{}, fmt.Errorf("run now only supports manual and provider_event triggers")
+	}
+	return out, nil
+}
+
+func jsonObject(raw json.RawMessage) bool {
+	var decoded map[string]any
+	return json.Unmarshal(raw, &decoded) == nil
 }
 
 // BulkCronFixupFailure is the wire representation of a cron row that was

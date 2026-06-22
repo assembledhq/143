@@ -57,6 +57,100 @@ type ErrorFilter struct {
 	Limit        int       // max results; 0 = provider default
 }
 
+// --------------------------------------------------------------------------
+// IncidentProvider — PagerDuty, Opsgenie, etc.
+// --------------------------------------------------------------------------
+
+// IncidentProvider provides access to live operational incidents.
+type IncidentProvider interface {
+	Name() string
+	ListIncidents(ctx context.Context, filter IncidentFilter) ([]IncidentSummary, error)
+	GetIncident(ctx context.Context, incidentID string) (*IncidentDetail, error)
+	AddIncidentNote(ctx context.Context, incidentID, note string) (string, error)
+	ListIncidentNotes(ctx context.Context, incidentID string, limit int) ([]IncidentNote, error)
+	ListIncidentLogEntries(ctx context.Context, incidentID string, limit int) ([]IncidentLogEntry, error)
+	GetService(ctx context.Context, serviceID string) (*IncidentService, error)
+	ListOnCalls(ctx context.Context, filter OnCallFilter) ([]OnCall, error)
+	FindRelatedIncidents(ctx context.Context, incidentID string, days int) ([]IncidentSummary, error)
+	CreateIncidentStatusUpdate(ctx context.Context, incidentID, body string) error
+}
+
+type IncidentFilter struct {
+	Statuses []string
+	Urgency  string
+	Service  string
+	Since    time.Time
+	Limit    int
+}
+
+type IncidentSummary struct {
+	ID          string    `json:"id"`
+	Number      int64     `json:"number,omitempty"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	Urgency     string    `json:"urgency,omitempty"`
+	Priority    string    `json:"priority,omitempty"`
+	ServiceID   string    `json:"service_id,omitempty"`
+	ServiceName string    `json:"service_name,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	WebURL      string    `json:"web_url,omitempty"`
+}
+
+type IncidentDetail struct {
+	IncidentSummary
+	Description         string            `json:"description,omitempty"`
+	EscalationPolicy    string            `json:"escalation_policy,omitempty"`
+	AssignedUserNames   []string          `json:"assigned_user_names,omitempty"`
+	Teams               []string          `json:"teams,omitempty"`
+	LatestNote          string            `json:"latest_note,omitempty"`
+	ProviderRawMetadata map[string]string `json:"provider_raw_metadata,omitempty"`
+}
+
+type IncidentNote struct {
+	ID         string    `json:"id,omitempty"`
+	IncidentID string    `json:"incident_id,omitempty"`
+	Content    string    `json:"content"`
+	UserID     string    `json:"user_id,omitempty"`
+	UserName   string    `json:"user_name,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+}
+
+type IncidentLogEntry struct {
+	ID         string    `json:"id"`
+	IncidentID string    `json:"incident_id,omitempty"`
+	Type       string    `json:"type,omitempty"`
+	Summary    string    `json:"summary,omitempty"`
+	AgentID    string    `json:"agent_id,omitempty"`
+	AgentName  string    `json:"agent_name,omitempty"`
+	CreatedAt  time.Time `json:"created_at,omitempty"`
+}
+
+type IncidentService struct {
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description,omitempty"`
+	HTMLURL          string   `json:"html_url,omitempty"`
+	EscalationPolicy string   `json:"escalation_policy,omitempty"`
+	TeamIDs          []string `json:"team_ids,omitempty"`
+}
+
+type OnCallFilter struct {
+	ScheduleID string
+	Limit      int
+}
+
+type OnCall struct {
+	UserID               string    `json:"user_id,omitempty"`
+	UserName             string    `json:"user_name,omitempty"`
+	ScheduleID           string    `json:"schedule_id,omitempty"`
+	ScheduleName         string    `json:"schedule_name,omitempty"`
+	EscalationPolicyID   string    `json:"escalation_policy_id,omitempty"`
+	EscalationPolicyName string    `json:"escalation_policy_name,omitempty"`
+	Start                time.Time `json:"start,omitempty"`
+	End                  time.Time `json:"end,omitempty"`
+}
+
 // ErrorSummary is a compact representation of an error for list views and
 // PM-level reasoning. It contains enough to prioritize without fetching details.
 type ErrorSummary struct {

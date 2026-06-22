@@ -17,6 +17,7 @@ type fakeAutomationRunStore struct {
 	calls        []fakeTransitionCall
 	err          error
 	transitioned bool // what TransitionStatusIf returns for the bool result
+	run          models.AutomationRun
 }
 
 type fakeTransitionCall struct {
@@ -38,6 +39,13 @@ func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, ru
 		resultSummary: resultSummary,
 	})
 	return f.transitioned, f.err
+}
+
+func (f *fakeAutomationRunStore) GetByRunID(_ context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
+	if f.run.OrgID != orgID || f.run.ID != runID {
+		return models.AutomationRun{}, errors.New("unexpected automation run lookup")
+	}
+	return f.run, nil
 }
 
 func TestAutomationHooks_OnSessionComplete_NoAutomationRunID_NoOp(t *testing.T) {
@@ -79,6 +87,40 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 	require.NotNil(t, call.completedAt)
 	require.NotNil(t, call.resultSummary)
 	require.Equal(t, summary, *call.resultSummary)
+}
+
+func TestAutomationHooks_OnSessionComplete_WritebackAfterTransition(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	orgID := uuid.New()
+	provider := models.AutomationEventProviderPagerDuty
+	summary := "fixed checkout"
+	store := &fakeAutomationRunStore{
+		transitioned: true,
+		run: models.AutomationRun{
+			ID:       runID,
+			OrgID:    orgID,
+			Provider: &provider,
+		},
+	}
+	writebacks := &fakePagerDutyAutomationWritebacker{}
+	h := NewAutomationHooks(store, zerolog.Nop())
+	h.SetPagerDutyWritebacker(writebacks)
+	session := &models.Session{
+		ID:              uuid.New(),
+		OrgID:           orgID,
+		AutomationRunID: &runID,
+		ResultSummary:   &summary,
+	}
+
+	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
+
+	require.NoError(t, err, "OnSessionComplete should not fail when writeback succeeds")
+	require.Equal(t, session.ID, writebacks.sessionID, "writeback should receive the completed session")
+	require.Equal(t, runID, writebacks.automationRun.ID, "writeback should receive the automation run context")
+	require.Equal(t, models.SessionStatusCompleted, writebacks.status, "writeback should receive terminal status")
+	require.Equal(t, summary, writebacks.summary, "writeback should receive result summary")
 }
 
 func TestAutomationHooks_OnSessionComplete_FailedPrefersErrorWhenNoSummary(t *testing.T) {
@@ -174,6 +216,21 @@ func TestAutomationHooks_OnSessionComplete_AlreadyTerminalIsSafeNoOp(t *testing.
 	require.NoError(t, err, "a lost-race transition must not surface as an error")
 	require.Len(t, store.calls, 1, "the hook still attempts the conditional transition")
 	require.Equal(t, models.AutomationRunStatusRunning, store.calls[0].fromStatus)
+}
+
+type fakePagerDutyAutomationWritebacker struct {
+	sessionID     uuid.UUID
+	automationRun models.AutomationRun
+	status        models.SessionStatus
+	summary       string
+}
+
+func (f *fakePagerDutyAutomationWritebacker) OnAutomationSessionComplete(_ context.Context, session models.Session, automationRun models.AutomationRun, status models.SessionStatus, summary string) error {
+	f.sessionID = session.ID
+	f.automationRun = automationRun
+	f.status = status
+	f.summary = summary
+	return nil
 }
 
 func TestAutomationHooks_OnSessionComplete_TransitionErrorWraps(t *testing.T) {

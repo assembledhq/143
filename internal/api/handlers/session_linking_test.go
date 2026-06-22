@@ -28,6 +28,11 @@ var sessionIssueLinkHandlerColumns = []string{
 	"issue_workspace_slug",
 	"linear_last_skipped_reason",
 	"linear_primary_snapshot",
+	"pagerduty_incident_id",
+	"pagerduty_incident_number",
+	"pagerduty_incident_url",
+	"pagerduty_service_id",
+	"pagerduty_service_name",
 }
 
 func TestSessionHandler_EnrichSessionLinks(t *testing.T) {
@@ -63,6 +68,11 @@ func TestSessionHandler_EnrichSessionLinks(t *testing.T) {
 					nil, // issue_workspace_slug — not set on legacy fixtures
 					nil, // linear_last_skipped_reason
 					nil, // linear_primary_snapshot
+					nil, // pagerduty_incident_id
+					nil, // pagerduty_incident_number
+					nil, // pagerduty_incident_url
+					nil, // pagerduty_service_id
+					nil, // pagerduty_service_name
 				),
 			)
 
@@ -293,6 +303,11 @@ func TestSessionHandler_RetrySession_EnrichesLinks(t *testing.T) {
 				nil, // issue_workspace_slug
 				nil, // linear_last_skipped_reason
 				nil, // linear_primary_snapshot
+				nil, // pagerduty_incident_id
+				nil, // pagerduty_incident_number
+				nil, // pagerduty_incident_url
+				nil, // pagerduty_service_id
+				nil, // pagerduty_service_name
 			),
 		)
 

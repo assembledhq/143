@@ -645,16 +645,23 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 }
 
 const automationRunColumns = `id, automation_id, org_id, triggered_at, triggered_by,
-	triggered_by_user_id, scheduled_time, goal_snapshot, config_snapshot,
+	triggered_by_user_id, scheduled_time, trigger_id, provider, provider_event_id, trigger_context,
+	goal_snapshot, config_snapshot,
 	status, capability_snapshot, completed_at, result_summary, created_at, updated_at`
 
 func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	var r models.AutomationRun
+	var provider *string
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
-		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot, &r.ConfigSnapshot,
+		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext,
+		&r.GoalSnapshot, &r.ConfigSnapshot,
 		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 	)
+	if provider != nil {
+		p := models.AutomationEventProvider(*provider)
+		r.Provider = &p
+	}
 	return r, err
 }
 
@@ -669,13 +676,14 @@ type runInserter interface {
 const createAutomationRunSQL = `
 	INSERT INTO automation_runs (
 		automation_id, org_id, triggered_by, triggered_by_user_id, scheduled_time,
+		trigger_id, provider, provider_event_id, trigger_context,
 		goal_snapshot, config_snapshot, status, capability_snapshot
 	) VALUES (
 		@automation_id, @org_id, @triggered_by, @triggered_by_user_id, @scheduled_time,
+		@trigger_id, @provider, @provider_event_id, @trigger_context,
 		@goal_snapshot, @config_snapshot, @status, @capability_snapshot
 	)
-	ON CONFLICT (automation_id, scheduled_time) WHERE scheduled_time IS NOT NULL
-	DO NOTHING
+	ON CONFLICT DO NOTHING
 	RETURNING id, triggered_at, created_at, updated_at`
 
 // insertRun runs the shared INSERT for automation_runs against either a pool
@@ -690,6 +698,15 @@ func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (boo
 	if err != nil {
 		return false, fmt.Errorf("marshal config snapshot: %w", err)
 	}
+	triggerContext := r.TriggerContext
+	if len(triggerContext) == 0 {
+		triggerContext = json.RawMessage(`{}`)
+	}
+	var provider *string
+	if r.Provider != nil {
+		p := string(*r.Provider)
+		provider = &p
+	}
 
 	row := q.QueryRow(ctx, createAutomationRunSQL, pgx.NamedArgs{
 		"automation_id":        r.AutomationID,
@@ -697,6 +714,10 @@ func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (boo
 		"triggered_by":         r.TriggeredBy,
 		"triggered_by_user_id": r.TriggeredByUserID,
 		"scheduled_time":       r.ScheduledTime,
+		"trigger_id":           r.TriggerID,
+		"provider":             provider,
+		"provider_event_id":    r.ProviderEventID,
+		"trigger_context":      triggerContext,
 		"goal_snapshot":        r.GoalSnapshot,
 		"config_snapshot":      configJSON,
 		"status":               r.Status,
@@ -718,6 +739,30 @@ func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.Automation
 // CreateRunInTx inserts a new automation run inside an existing transaction.
 func (s *AutomationRunStore) CreateRunInTx(ctx context.Context, tx pgx.Tx, r *models.AutomationRun) (bool, error) {
 	return insertRun(ctx, tx, r)
+}
+
+func (s *AutomationRunStore) CountRecentProviderTriggerRuns(ctx context.Context, tx pgx.Tx, orgID, automationID, triggerID uuid.UUID, provider models.AutomationEventProvider, since time.Time) (int, error) {
+	var count int
+	err := tx.QueryRow(ctx, `
+		SELECT count(*) FROM automation_runs
+		WHERE org_id = @org_id
+			AND automation_id = @automation_id
+			AND trigger_id = @trigger_id
+			AND provider = @provider
+			AND triggered_at >= @since
+			AND status IN ('pending', 'running', 'completed', 'completed_noop', 'failed')`,
+		pgx.NamedArgs{
+			"org_id":        orgID,
+			"automation_id": automationID,
+			"trigger_id":    triggerID,
+			"provider":      provider,
+			"since":         since,
+		},
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count recent provider trigger runs: %w", err)
+	}
+	return count, nil
 }
 
 func (s *AutomationRunStore) ClaimTriggerDedupe(ctx context.Context, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error) {
@@ -816,7 +861,8 @@ type AutomationRunFilters struct {
 // in lockstep.
 var AutomationRunListColumns = []string{
 	"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-	"triggered_by_user_id", "scheduled_time", "goal_snapshot",
+	"triggered_by_user_id", "scheduled_time", "trigger_id", "provider",
+	"provider_event_id", "trigger_context", "goal_snapshot",
 	"status", "completed_at", "result_summary", "created_at", "updated_at",
 	"session_id", "session_title", "session_status",
 	"session_diff_stats",
@@ -837,7 +883,8 @@ var AutomationRunListColumns = []string{
 // config_snapshot blob are intentionally excluded — this query runs on a
 // 10s poll for the open automation page, so the row stays small.
 const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.triggered_at, ar.triggered_by,
-	ar.triggered_by_user_id, ar.scheduled_time, ar.goal_snapshot,
+	ar.triggered_by_user_id, ar.scheduled_time, ar.trigger_id, ar.provider,
+	ar.provider_event_id, ar.trigger_context, ar.goal_snapshot,
 	ar.status, ar.completed_at, ar.result_summary, ar.created_at, ar.updated_at,
 	s.id AS session_id, s.title AS session_title, s.status AS session_status,
 	s.diff_stats AS session_diff_stats,
@@ -931,7 +978,8 @@ func scanAutomationRunsWithSession(rows pgx.Rows) ([]models.AutomationRun, error
 
 func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 	var (
-		r models.AutomationRun
+		r        models.AutomationRun
+		provider *string
 
 		// Session columns. All nullable because the LEFT JOIN may produce
 		// NULL for runs that haven't spawned a session yet (pending,
@@ -956,7 +1004,7 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
-		&r.TriggeredByUserID, &r.ScheduledTime, &r.GoalSnapshot,
+		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext, &r.GoalSnapshot,
 		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 		&sessionID, &sessionTitle, &sessionStatus,
 		&sessionDiffStats,
@@ -969,6 +1017,10 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 	)
 	if err != nil {
 		return r, err
+	}
+	if provider != nil {
+		p := models.AutomationEventProvider(*provider)
+		r.Provider = &p
 	}
 
 	if sessionID != nil {
