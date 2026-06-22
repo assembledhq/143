@@ -910,7 +910,7 @@ export const api = {
     disconnectAll: () => post<import('./types').SingleResponse<{ disconnected: boolean }>>('/api/v1/settings/claude-code-auth/disconnect'),
   },
   githubStatus: {
-    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean }>('/api/v1/users/me/github-status'),
+    get: () => get<{ connected: boolean; has_repo_scope: boolean; github_login?: string; pr_authorship_mode: string; pr_draft_default: boolean; account_requirement: 'required' | 'recommended' | 'optional'; needs_reconnect: boolean }>('/api/v1/users/me/github-status'),
     connect: (resumeToken?: string) => {
       const searchParams = new URLSearchParams();
       if (resumeToken) searchParams.set('resume_token', resumeToken);

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -156,11 +157,31 @@ function PRAuthorshipSettings() {
     queryFn: () => api.repositories.list(),
   });
 
+  const { data: githubAccountStatus } = useQuery({
+    queryKey: ["github-status"],
+    queryFn: () => api.githubStatus.get(),
+  });
+
   const settings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? false;
   const requireBuilderReview = settings.builder_permissions?.require_review_before_pr ?? true;
+
+  const accountConnected = githubAccountStatus?.connected ?? false;
+  const accountNeedsReconnect = githubAccountStatus?.needs_reconnect ?? false;
+  // Contextual hint tying this org-level setting to the per-user account
+  // connection it implies, so the relationship is visible from both pages.
+  const authorshipAccountHint =
+    currentAuthorship === "app_only"
+      ? "PRs are authored by the 143 app — connecting your GitHub account is optional."
+      : accountNeedsReconnect
+        ? "Your GitHub authorization expired — reconnect it so PRs are authored as you."
+        : accountConnected
+          ? "Your GitHub account is connected, so PRs can be authored as you."
+          : currentAuthorship === "user_required"
+            ? "You haven't connected your GitHub account — it's required for this mode."
+            : "You haven't connected your GitHub account — connect it so PRs are authored as you.";
 
   const { save, status } = useOrgSettingsAutosave();
   const readinessPolicy = readinessPolicyResponse?.data.config ?? defaultReadinessPolicyConfig();
@@ -269,6 +290,12 @@ function PRAuthorshipSettings() {
                 </label>
               ))}
             </div>
+            <p className="text-xs text-muted-foreground">
+              {authorshipAccountHint}{" "}
+              <Link href="/settings/integrations" className="underline">
+                Manage on Integrations
+              </Link>
+            </p>
           </div>
           <div className="flex items-center gap-2">
             <input

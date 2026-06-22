@@ -7420,7 +7420,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 api.githubStatus.connect(resumeToken || undefined);
               }}
             >
-              Continue with GitHub
+              Connect your GitHub account
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
