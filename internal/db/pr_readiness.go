@@ -289,7 +289,7 @@ func (s *PRReadinessStore) ListChecksByRun(ctx context.Context, orgID, runID uui
 	return checks, nil
 }
 
-func (s *PRReadinessStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, legacyRequireReviewBeforePR *bool) (models.PRReadinessResolvedPolicy, error) {
+func (s *PRReadinessStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.PRReadinessResolvedPolicy, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, repository_id, config, active, created_by_user_id, created_at
 		FROM pr_readiness_policies
@@ -305,7 +305,7 @@ func (s *PRReadinessStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, r
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return models.PRReadinessResolvedPolicy{
-				Config: models.ResolvePRReadinessPolicyConfig(nil, nil, legacyRequireReviewBeforePR),
+				Config: models.ResolvePRReadinessPolicyConfig(nil, nil),
 				Source: "default",
 			}, nil
 		}
@@ -323,7 +323,7 @@ func (s *PRReadinessStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, r
 }
 
 func (s *PRReadinessStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.PRReadinessPolicyConfig, createdByUserID *uuid.UUID) (models.PRReadinessPolicyRecord, error) {
-	config = models.ResolvePRReadinessPolicyConfig(&config, nil, nil)
+	config = models.ResolvePRReadinessPolicyConfig(&config, nil)
 	if err := config.Validate(); err != nil {
 		return models.PRReadinessPolicyRecord{}, err
 	}
@@ -880,7 +880,7 @@ func collectOnePRReadinessPolicy(rows pgx.Rows) (models.PRReadinessPolicyRecord,
 	if err := json.Unmarshal(configBytes, &record.Config); err != nil {
 		return models.PRReadinessPolicyRecord{}, fmt.Errorf("decode PR readiness policy config: %w", err)
 	}
-	record.Config = models.ResolvePRReadinessPolicyConfig(&record.Config, nil, nil)
+	record.Config = models.ResolvePRReadinessPolicyConfig(&record.Config, nil)
 	return record, nil
 }
 

@@ -34,15 +34,14 @@ func TestPRReadinessPolicyConfigResolution(t *testing.T) {
 	}
 	repoPolicy.AutoRun.OnCreatePR = true
 
-	resolved := ResolvePRReadinessPolicyConfig(&orgPolicy, &repoPolicy, nil)
+	resolved := ResolvePRReadinessPolicyConfig(&orgPolicy, &repoPolicy)
 	require.Equal(t, PRReadinessEnforcementBlocking, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeRiskFlags), "repository policy should override org policy for the same repository")
 	require.Equal(t, PRReadinessEnforcementAdvisory, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeTestEvidencePresent), "repository policy should replace org check overrides rather than merge stale org settings")
 	require.True(t, resolved.AutoRun.OnCreatePR, "repository policy should carry repository auto-run settings")
 
-	legacyDisabled := false
-	resolved = ResolvePRReadinessPolicyConfig(nil, nil, &legacyDisabled)
-	require.False(t, resolved.EnabledForBuilders, "legacy builder review disable setting should keep builder blocking off until an explicit readiness policy exists")
-	require.Equal(t, PRReadinessEnforcementOff, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeAgentReviewClean), "disabled legacy compatibility should make builder checks advisory/off for enforcement")
+	resolved = ResolvePRReadinessPolicyConfig(nil, nil)
+	require.True(t, resolved.EnabledForBuilders, "default readiness policy should enable builder checks")
+	require.Equal(t, PRReadinessEnforcementBlocking, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeAgentReviewClean), "default readiness policy should block builders on failed agent review")
 }
 
 func TestPRReadinessCheckEffectiveEnforcement(t *testing.T) {
@@ -107,11 +106,6 @@ func TestPRReadinessPolicyConfigRequiresRoleReadiness(t *testing.T) {
 	require.True(t, cfg.RequiresRoleReadiness(RoleBuilder), "default builder policy should require readiness because at least one builder check blocks")
 	require.True(t, cfg.RequiresRoleReadiness(RoleMember), "engineers should still have advisory readiness by default")
 
-	legacyDisabled := false
-	cfg = ResolvePRReadinessPolicyConfig(nil, nil, &legacyDisabled)
-	require.False(t, cfg.RequiresRoleReadiness(RoleBuilder), "legacy-disabled builder policy should not require a readiness run")
-	require.True(t, cfg.RequiresRoleReadiness(RoleMember), "legacy builder compatibility should not disable engineer advisory readiness")
-
 	cfg = DefaultPRReadinessPolicyConfig()
 	for checkType, check := range cfg.Checks {
 		check.Enforcement.Builder = PRReadinessEnforcementOff
@@ -150,7 +144,7 @@ func TestPRReadinessPolicyConfigExplicitBypassDisableSurvivesDefaults(t *testing
 	var cfg PRReadinessPolicyConfig
 	require.NoError(t, json.Unmarshal([]byte(`{"enabled_for_builders":true,"bypass":{"enabled":false}}`), &cfg), "policy config should decode explicit bypass disable")
 
-	resolved := ResolvePRReadinessPolicyConfig(&cfg, nil, nil)
+	resolved := ResolvePRReadinessPolicyConfig(&cfg, nil)
 
 	require.False(t, resolved.Bypass.Enabled, "explicit bypass disable should not be replaced by default enabled bypass settings")
 	require.False(t, resolved.BypassAllowedFor(RoleAdmin), "explicit bypass disable should deny bypass even when no roles/scopes are supplied")

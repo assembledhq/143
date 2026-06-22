@@ -2206,8 +2206,7 @@ func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Stale readiness cannot be bypassed; re-run checks first")
 		return
 	}
-	legacy := h.legacyRequireReviewBeforePR(r.Context(), orgID)
-	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID, legacy)
+	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_LOAD_FAILED", "failed to load PR readiness policy", err)
 		return
@@ -2249,8 +2248,7 @@ func (h *SessionHandler) GetReadinessPolicy(w http.ResponseWriter, r *http.Reque
 	if !h.validateReadinessRepositoryScope(w, r, orgID, repositoryID) {
 		return
 	}
-	legacy := h.legacyRequireReviewBeforePR(r.Context(), orgID)
-	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, repositoryID, legacy)
+	policy, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, repositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_LOAD_FAILED", "failed to load PR readiness policy", err)
 		return
@@ -2411,21 +2409,6 @@ func (h *SessionHandler) DeleteReadinessCustomCheck(w http.ResponseWriter, r *ht
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *SessionHandler) legacyRequireReviewBeforePR(ctx context.Context, orgID uuid.UUID) *bool {
-	if h.orgStore == nil {
-		return nil
-	}
-	org, err := h.orgStore.GetByID(ctx, orgID)
-	if err != nil {
-		return nil
-	}
-	settings, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return nil
-	}
-	return settings.BuilderPermissions.RequireReviewBeforePR
-}
-
 func (h *SessionHandler) validateReadinessRepositoryScope(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, repositoryID *uuid.UUID) bool {
 	if repositoryID == nil {
 		return true
@@ -2457,9 +2440,9 @@ func parseOptionalUUIDQuery(w http.ResponseWriter, r *http.Request, key string) 
 	return &id, true
 }
 
-func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseWriter, r *http.Request, settings models.OrgSettings, orgID, sessionID uuid.UUID, snapshotKey string) bool {
+func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseWriter, r *http.Request, orgID, sessionID uuid.UUID, snapshotKey string) bool {
 	role := middleware.ActiveRoleFromContext(r.Context())
-	if role != string(models.RoleBuilder) || !settings.BuilderPermissions.EffectiveRequireReviewBeforePR() {
+	if role != string(models.RoleBuilder) {
 		return true
 	}
 	if h.reviewLoopStore == nil {
@@ -2480,18 +2463,15 @@ func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseW
 	return false
 }
 
-func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *http.Request, settings models.OrgSettings, orgID uuid.UUID, session models.Session) bool {
+func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session) bool {
 	role := middleware.ActiveRoleFromContext(r.Context())
 	if role != string(models.RoleBuilder) {
 		return true
 	}
 	if h.readinessStore == nil {
-		if !settings.BuilderPermissions.EffectiveRequireReviewBeforePR() {
-			return true
-		}
-		return h.requireBuilderReviewForCurrentSnapshot(w, r, settings, orgID, session.ID, stringPtrValue(session.SnapshotKey))
+		return h.requireBuilderReviewForCurrentSnapshot(w, r, orgID, session.ID, stringPtrValue(session.SnapshotKey))
 	}
-	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID, settings.BuilderPermissions.RequireReviewBeforePR)
+	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_CHECK_FAILED", "failed to check PR readiness policy", err)
 		return false
@@ -2615,11 +2595,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.maybeAutoRunPRReadinessOnCreatePR(w, r, orgSettings, orgID, session) {
+	if h.maybeAutoRunPRReadinessOnCreatePR(w, r, orgID, session) {
 		return
 	}
 
-	if !h.requirePRReadinessForBuilder(w, r, orgSettings, orgID, session) {
+	if !h.requirePRReadinessForBuilder(w, r, orgID, session) {
 		return
 	}
 
@@ -2700,11 +2680,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
-func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, settings models.OrgSettings, orgID uuid.UUID, session models.Session) bool {
+func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session) bool {
 	if h.readinessStore == nil || h.jobStore == nil {
 		return false
 	}
-	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID, settings.BuilderPermissions.RequireReviewBeforePR)
+	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_POLICY_CHECK_FAILED", "failed to check PR readiness policy", err)
 		return true
@@ -2933,7 +2913,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if !h.requirePRReadinessForBuilder(w, r, orgSettings, orgID, session) {
+	if !h.requirePRReadinessForBuilder(w, r, orgID, session) {
 		return
 	}
 

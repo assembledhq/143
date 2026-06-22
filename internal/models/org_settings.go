@@ -251,7 +251,6 @@ type OrgSettings struct {
 	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
 	AutoArchiveOnPRClose       *bool                  `json:"auto_archive_on_pr_close,omitempty"`
 	DefaultWorkRepositoryID    *uuid.UUID             `json:"default_work_repository_id,omitempty"`
-	BuilderPermissions         BuilderPermissions     `json:"builder_permissions,omitempty"`
 	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
 	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
 	// 143-tools to view/create/message tabs in their current session. Pointer
@@ -365,20 +364,6 @@ func (s OrgSettings) EffectiveAutoArchiveOnPRClose() bool {
 		return true
 	}
 	return *s.AutoArchiveOnPRClose
-}
-
-// BuilderPermissions controls the narrower builder role's access to
-// publishing actions. Pointer fields preserve absent-vs-explicit-false.
-type BuilderPermissions struct {
-	RequireReviewBeforePR *bool `json:"require_review_before_pr,omitempty"`
-}
-
-// EffectiveRequireReviewBeforePR applies the default builder guardrail.
-func (p BuilderPermissions) EffectiveRequireReviewBeforePR() bool {
-	if p.RequireReviewBeforePR == nil {
-		return true
-	}
-	return *p.RequireReviewBeforePR
 }
 
 // LinearAutomationSettings captures org-level defaults plus per-team

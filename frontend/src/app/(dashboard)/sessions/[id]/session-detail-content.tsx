@@ -141,7 +141,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, Organization, OrgSettings, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -4634,22 +4634,16 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(err instanceof Error ? err.message : "Readiness checks could not be queued");
     },
   });
-  const { data: orgSettingsResponse } = useQuery<SingleResponse<Organization>>({
-    queryKey: queryKeys.settings.all,
-    queryFn: () => api.settings.get(),
-    enabled: user?.role === "builder",
-  });
   const { data: readinessPolicyResponse } = useQuery({
     queryKey: queryKeys.settings.prReadinessPolicy(session?.repository_id ?? null),
     queryFn: () => api.settings.getPRReadinessPolicy(session?.repository_id ?? undefined),
     enabled: !!session && canManageSession,
   });
-  const orgSettings = (orgSettingsResponse?.data?.settings ?? {}) as OrgSettings;
   const latestReviewLoop = reviewLoopsData?.data?.[0] ?? null;
   const builderRequiresReviewBeforePR = user?.role === "builder" && (
     readinessPolicyResponse?.data.config
       ? policyRequiresRoleReadiness(readinessPolicyResponse.data.config, "builder")
-      : (orgSettings.builder_permissions?.require_review_before_pr ?? true)
+      : true
   );
   const latestReadiness = readinessData?.data.latest;
   const latestReadinessStale = !!latestReadiness && (
