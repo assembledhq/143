@@ -658,7 +658,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if metricsSource == "" {
 		metricsSource = input.Initiator
 	}
-	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName)
+	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName, input.Config.Primary, instance.MemoryLimitMB)
 	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,
@@ -860,18 +860,20 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // callbacks fired after StartPreview returns (progressive support services,
 // the startService goroutine catching a non-zero exit) still land in the DB
 // even if the request context has already been canceled.
-func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) *managerServiceObserver {
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo, primaryService string, memoryLimitMB int) *managerServiceObserver {
 	observer := &managerServiceObserver{
-		manager:       m,
-		orgID:         orgID,
-		previewID:     previewID,
-		source:        strings.TrimSpace(metricsSource),
-		repository:    strings.TrimSpace(metricsRepo),
-		phaseStarts:   make(map[string]time.Time),
-		outputCh:      make(chan previewServiceOutput, serviceOutputBufferSize),
-		outputDone:    make(chan struct{}),
-		lifecycleCh:   make(chan previewLifecycleLog, lifecycleLogBufferSize),
-		lifecycleDone: make(chan struct{}),
+		manager:        m,
+		orgID:          orgID,
+		previewID:      previewID,
+		source:         strings.TrimSpace(metricsSource),
+		repository:     strings.TrimSpace(metricsRepo),
+		primaryService: strings.TrimSpace(primaryService),
+		memoryLimitMB:  memoryLimitMB,
+		phaseStarts:    make(map[string]time.Time),
+		outputCh:       make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone:     make(chan struct{}),
+		lifecycleCh:    make(chan previewLifecycleLog, lifecycleLogBufferSize),
+		lifecycleDone:  make(chan struct{}),
 	}
 	go observer.runServiceOutputWriter()
 	go observer.runLifecycleLogWriter()
@@ -879,11 +881,20 @@ func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, 
 }
 
 type managerServiceObserver struct {
-	manager       *Manager
-	orgID         uuid.UUID
-	previewID     uuid.UUID
-	source        string
-	repository    string
+	manager    *Manager
+	orgID      uuid.UUID
+	previewID  uuid.UUID
+	source     string
+	repository string
+	// primaryService is the name of the config's primary service. When that
+	// service dies, the whole preview can no longer serve, so OnServiceFailed
+	// demotes the instance to "unhealthy" (see below). Empty for flows that
+	// don't supply it (the demotion is then skipped).
+	primaryService string
+	// memoryLimitMB is the preview's cgroup memory cap, surfaced in OOM
+	// failure messages so the cause is obvious without decoding exit codes.
+	// 0 when unknown (the cap is then omitted from the message).
+	memoryLimitMB int
 	phaseMu       sync.Mutex
 	phaseStarts   map[string]time.Time
 	outputCh      chan previewServiceOutput
@@ -1112,13 +1123,20 @@ func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
 func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()
-	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, errMsg); err != nil {
+
+	// Annotate OOM kills (exit 137 etc.) with a plain-English explanation and
+	// the memory cap, so the per-service error, the preview log, and the
+	// instance error all make the cause obvious instead of leaving a bare
+	// "exited with code 137" for the user to decode.
+	detail := annotatePreviewFailure(errMsg, o.memoryLimitMB)
+
+	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, detail); err != nil {
 		o.manager.logger.Warn().Err(err).
 			Str("preview_id", o.previewID.String()).
 			Str("service", name).
 			Msg("observer: failed to mark service failed")
 	}
-	msg := fmt.Sprintf("service %q failed: %s", name, errMsg)
+	msg := fmt.Sprintf("service %q failed: %s", name, detail)
 	if len(tail) > 0 {
 		msg += "\n--- last output ---\n" + strings.Join(tail, "\n")
 	}
@@ -1135,6 +1153,63 @@ func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []str
 			Str("service", name).
 			Msg("observer: failed to write preview log")
 	}
+
+	// When the primary service dies the preview can no longer serve, but the
+	// instance row is left at whatever status it last reached (typically
+	// "ready"). A crash *after* readiness — e.g. an OOM kill at serve time —
+	// otherwise leaves the instance stuck at "ready" forever, so the launch
+	// page renders the iframe against a dead process and spins indefinitely.
+	// Demote the instance to "unhealthy" so consumers (the launch page, the
+	// gateway, listings) can surface the failure and offer a restart.
+	// UpdatePreviewStatusIfActive only transitions non-terminal rows, so this
+	// never clobbers a concurrent stop/expire and stays reversible: a later
+	// readiness write can promote it back to ready/partially_ready.
+	if o.primaryService != "" && name == o.primaryService {
+		demoteErr := fmt.Sprintf("primary service %q failed and the preview can no longer serve: %s", name, detail)
+		if _, err := o.manager.store.UpdatePreviewStatusIfActive(
+			ctx, o.orgID, o.previewID, models.PreviewStatusUnhealthy, demoteErr,
+		); err != nil {
+			o.manager.logger.Warn().Err(err).
+				Str("preview_id", o.previewID.String()).
+				Str("service", name).
+				Msg("observer: failed to demote preview to unhealthy after primary service failure")
+		}
+	}
+}
+
+// looksLikeOOMFailure reports whether a service/exit failure message carries
+// the signature of an out-of-memory kill. Exit code 137 is 128+SIGKILL(9),
+// which inside a memory-capped preview container is almost always the kernel
+// OOM killer; Docker also reports "OOMKilled" in container state, and runtimes
+// print "out of memory" / "cannot allocate memory" on heap exhaustion.
+func looksLikeOOMFailure(errMsg string) bool {
+	m := strings.ToLower(errMsg)
+	return strings.Contains(m, "code 137") ||
+		strings.Contains(m, "signal: killed") ||
+		strings.Contains(m, "oomkilled") ||
+		strings.Contains(m, "out of memory") ||
+		strings.Contains(m, "cannot allocate memory")
+}
+
+// annotatePreviewFailure prefixes OOM failures with a plain-English
+// explanation (and the memory cap, when known) so preview errors are
+// debuggable without decoding exit codes. Non-OOM messages pass through
+// unchanged. memoryLimitMB <= 0 omits the cap.
+func annotatePreviewFailure(errMsg string, memoryLimitMB int) string {
+	if !looksLikeOOMFailure(errMsg) {
+		return errMsg
+	}
+	capText := ""
+	if memoryLimitMB > 0 {
+		capText = fmt.Sprintf(" The preview is capped at %d MiB of memory.", memoryLimitMB)
+	}
+	return fmt.Sprintf(
+		"ran out of memory and was killed (OOM, exit code 137 / SIGKILL).%s "+
+			"Reduce the workload's memory use — e.g. run fewer concurrent build "+
+			"steps, or serve a production build instead of a dev server. "+
+			"Original failure: %s",
+		capText, errMsg,
+	)
 }
 
 func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
@@ -1903,7 +1978,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("warm resume: failed to revoke access sessions")
 	}
 
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService, instance.MemoryLimitMB)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
@@ -2098,7 +2173,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService, instance.MemoryLimitMB)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
