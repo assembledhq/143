@@ -29,7 +29,7 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
-import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
@@ -858,10 +858,9 @@ export default function SettingsPage() {
 
         {user?.role === "admin" && <PRAuthorshipSettings />}
 
-        <AuditLogTrigger
-          filters={{ resource_type: "settings" }}
+        <SettingsLastActivity
+          scopes={{ resource_type: "settings" }}
           title="Settings activity"
-          variant="footer"
         />
       </div>
     </PageContainer>

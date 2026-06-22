@@ -23,6 +23,7 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -179,6 +180,14 @@ export default function PreviewSettingsPage() {
             <PreviewSecretsSection />
           </TabsContent>
         </Tabs>
+        <SettingsLastActivity
+          scopes={[
+            { resource_type: "settings" },
+            { resource_type: "preview_policy" },
+            { resource_type: "preview_secret_bundle" },
+          ]}
+          title="Preview settings activity"
+        />
       </div>
     </PageContainer>
   );

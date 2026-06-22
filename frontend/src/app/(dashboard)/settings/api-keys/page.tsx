@@ -8,6 +8,7 @@ import { Copy, KeyRound, Pencil, Plus, Shield, Trash2 } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -402,6 +403,11 @@ export default function APIKeysSettingsPage() {
             )}
           </div>
         )}
+
+        <SettingsLastActivity
+          scopes={[{ resource_type: "api_client" }, { resource_type: "api_token" }]}
+          title="API key activity"
+        />
       </div>
 
       <Dialog open={dialog != null} onOpenChange={(open) => !open && setDialog(null)}>

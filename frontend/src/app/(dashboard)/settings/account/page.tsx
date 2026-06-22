@@ -15,6 +15,7 @@ import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -570,6 +571,11 @@ export default function AccountPage() {
             <ThemeSelect />
           </CardContent>
         </Card>
+
+        <SettingsLastActivity
+          scopes={[{ resource_type: "credential" }, { resource_type: "user" }]}
+          title="Account settings activity"
+        />
       </div>
 
       <CodingAuthDialog
