@@ -113,6 +113,47 @@ func TestGitHubStatusHandler_GetStatus_Connected(t *testing.T) {
 	require.True(t, resp.HasRepoScope, "app-user credential should be treated as PR-capable")
 	require.Equal(t, "testuser", resp.GitHubLogin, "response should include the user's GitHub login")
 	require.Equal(t, "user_preferred", resp.PRAuthorshipMode, "response should echo org PR authorship mode")
+	require.Equal(t, "recommended", resp.AccountRequirement, "user_preferred should make the account connection recommended")
+}
+
+func TestGitHubStatusHandler_GetStatus_AccountRequirementByMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		mode string
+		want string
+	}{
+		{"user_required", "required"},
+		{"user_preferred", "recommended"},
+		{"app_only", "optional"},
+		{"", "recommended"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Parallel()
+			orgID := uuid.New()
+			userID := uuid.New()
+			orgReader := &stubGHOrgReader{
+				org: models.Organization{
+					Settings: json.RawMessage(`{"pr_authorship":"` + tc.mode + `"}`),
+				},
+			}
+			handler := NewGitHubStatusHandler(&stubGHCredentialStore{err: context.DeadlineExceeded}, orgReader, "", "", "", "")
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+			ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+			ctx = middleware.WithOrgID(ctx, orgID)
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+			handler.GetStatus(rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code)
+			var resp GitHubStatusResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+			require.Equal(t, tc.want, resp.AccountRequirement, "account requirement should follow authorship mode")
+		})
+	}
 }
 
 func TestGitHubStatusHandler_GetStatus_NotConnected(t *testing.T) {
@@ -190,6 +231,69 @@ func TestGitHubStatusHandler_GetStatus_IgnoresExpiredCredential(t *testing.T) {
 	require.False(t, resp.Connected, "expired app-user credential should not be treated as connected")
 	require.False(t, resp.HasRepoScope, "expired app-user credential should not be treated as PR-capable")
 	require.Empty(t, resp.GitHubLogin, "disconnected response should not promise authorship as the user")
+	require.True(t, resp.NeedsReconnect, "an expired-but-present credential should prompt a reconnect, not a fresh connect")
+}
+
+func TestGitHubStatusHandler_GetStatus_NeedsReconnectWhenAppAuthInvalid(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	// A credential row exists, but the refresh-aware service reports it as no
+	// longer valid (e.g. the refresh token was revoked). The user authorized
+	// before, so the UI should prompt a reconnect rather than a first connect.
+	credStore := &stubGHCredentialStore{
+		cred: &models.DecryptedUserCredential{Config: models.GitHubAppUserConfig{AccessToken: "ghu_test"}},
+	}
+	handler := NewGitHubStatusHandler(credStore, &stubGHOrgReader{}, "", "", "", "")
+	handler.appUserAuth = &stubGitHubAppUserAuthService{
+		hasValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			return false, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp GitHubStatusResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.False(t, resp.Connected, "invalid credential should not report connected")
+	require.True(t, resp.NeedsReconnect, "invalid-but-present credential should prompt a reconnect")
+}
+
+func TestGitHubStatusHandler_GetStatus_NoReconnectWhenNeverConnected(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	// No credential row at all → not connected and no reconnect prompt.
+	credStore := &stubGHCredentialStore{err: context.DeadlineExceeded}
+	handler := NewGitHubStatusHandler(credStore, &stubGHOrgReader{}, "", "", "", "")
+	handler.appUserAuth = &stubGitHubAppUserAuthService{
+		hasValidCredentialFunc: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+			return false, nil
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/github-status", nil)
+	ctx := middleware.WithUser(req.Context(), &models.User{ID: userID, OrgID: orgID})
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+	handler.GetStatus(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp GitHubStatusResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.False(t, resp.Connected, "no credential should report not connected")
+	require.False(t, resp.NeedsReconnect, "never-connected user should see connect, not reconnect")
 }
 
 func TestGitHubStatusHandler_StartConnect_NotConfigured(t *testing.T) {

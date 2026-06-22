@@ -1091,7 +1091,7 @@ describe('SessionDetailPage PR creation', () => {
     await userEvent.keyboard('pc');
 
     expect(await screen.findByText('Open this pull request as yourself?')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Continue with GitHub' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Connect your GitHub account' })).toBeInTheDocument();
   });
 
   it('auto-resumes PR creation after GitHub auth callback', async () => {
