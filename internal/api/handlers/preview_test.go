@@ -3089,12 +3089,13 @@ func TestClassifyLaunchError(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name         string
-		err          error
-		wantCode     string
-		wantStatus   int
-		mustContain  string
-		mustContain2 string
+		name          string
+		err           error
+		memoryLimitMB int
+		wantCode      string
+		wantStatus    int
+		mustContain   string
+		mustContain2  string
 	}{
 		{
 			name:        "image unavailable",
@@ -3132,6 +3133,15 @@ func TestClassifyLaunchError(t *testing.T) {
 			mustContain: "port 3000",
 		},
 		{
+			name:          "oom at boot names the cause and the memory cap",
+			err:           fmt.Errorf("%w: primary service %q exited with code 137", preview.ErrServiceNotReady, "app"),
+			memoryLimitMB: 8192,
+			wantCode:      "PREVIEW_SERVICE_NOT_READY",
+			wantStatus:    http.StatusUnprocessableEntity,
+			mustContain:   "ran out of memory",
+			mustContain2:  "8192 MiB",
+		},
+		{
 			name:        "unclassified surfaces underlying cause",
 			err:         errors.New("provider start preview: something weird happened"),
 			wantCode:    "PREVIEW_START_FAILED",
@@ -3143,16 +3153,19 @@ func TestClassifyLaunchError(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := classifyLaunchError(tc.err)
+			got := classifyLaunchError(tc.err, tc.memoryLimitMB)
 			require.NotNil(t, got)
 			require.Equal(t, tc.wantStatus, got.status)
 			require.Equal(t, tc.wantCode, got.code)
 			require.Contains(t, got.message, tc.mustContain, "user-visible message must surface the underlying cause")
+			if tc.mustContain2 != "" {
+				require.Contains(t, got.message, tc.mustContain2)
+			}
 			require.NotEqual(t, "failed to start preview", got.message, "must not regress to the opaque generic message")
 		})
 	}
 
-	require.Nil(t, classifyLaunchError(nil), "nil error must not produce a response")
+	require.Nil(t, classifyLaunchError(nil, 0), "nil error must not produce a response")
 }
 
 func TestPreviewHandler_SetAuditEmitter(t *testing.T) {

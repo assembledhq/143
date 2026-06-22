@@ -348,7 +348,7 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	})
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
-		classified := ClassifyLaunchFailure(err)
+		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
 		r.abort(ctx, reservation, sb.ID, classified.Message)
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
@@ -1041,7 +1041,7 @@ func (r *StartRunner) StartReservedPreview(ctx context.Context, payload StartPre
 	})
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
-		classified := ClassifyLaunchFailure(err)
+		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
 		r.abort(ctx, reservation, hydratedID, classified.Message)
 		r.logger.Warn().Err(err).Str("session_id", payload.SessionID.String()).Msg("preview launch failed")
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
@@ -1161,7 +1161,7 @@ func (r *StartRunner) WarmSessionPreview(ctx context.Context, payload SessionPre
 	liveStarted := time.Now()
 	launched, err := r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
-		classified := ClassifyLaunchFailure(err)
+		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
 		r.manager.AbortReservation(ctx, reservation, hydratedID, classified.Message)
 		failRun(classified.Message)
 		return fmt.Errorf("%s: %s: %w", classified.Code, classified.Message, err)
@@ -1300,7 +1300,10 @@ type StartFailure struct {
 	Message string
 }
 
-func ClassifyLaunchFailure(err error) StartFailure {
+// ClassifyLaunchFailure maps a launch error to a stable code + user-facing
+// message. memoryLimitMB is the preview's memory cap (0 when unknown), surfaced
+// in the message when the failure looks like an OOM.
+func ClassifyLaunchFailure(err error, memoryLimitMB int) StartFailure {
 	if err == nil {
 		return StartFailure{}
 	}
@@ -1308,12 +1311,11 @@ func ClassifyLaunchFailure(err error) StartFailure {
 	out := classifyLaunchFailureCode(err, cause)
 	// A service that OOM-kills at boot surfaces here (typically as
 	// ErrServiceNotReady) with a bare "exited with code 137" cause. Prepend a
-	// plain-English OOM explanation so the launch page and instance error make
-	// the cause obvious instead of leaving the exit code to be decoded.
+	// plain-English OOM explanation (with the cap, matching the runtime path in
+	// manager.go) so the launch page and instance error make the cause obvious
+	// instead of leaving the exit code to be decoded.
 	if looksLikeOOMFailure(cause) {
-		out.Message = "the preview ran out of memory and was killed (OOM, exit code 137 / SIGKILL). " +
-			"Reduce the workload's memory use — e.g. run fewer concurrent build steps, or serve a " +
-			"production build instead of a dev server. " + out.Message
+		out.Message = "the preview " + oomFailureExplanation(memoryLimitMB) + " " + out.Message
 	}
 	return out
 }
