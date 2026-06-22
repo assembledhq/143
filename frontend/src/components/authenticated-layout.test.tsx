@@ -268,7 +268,6 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "App LLM" })).toHaveAttribute("href", "/settings/llm");
     expect(screen.getAllByRole("link", { name: "Autopilot" }).find((link) => link.getAttribute("href") === "/settings/autopilot")).toBeDefined();
     expect(screen.getByRole("link", { name: "Sandboxes" })).toHaveAttribute("href", "/settings/runtime");
-    expect(screen.getByRole("link", { name: "Evals" })).toHaveAttribute("href", "/settings/evals");
     expect(screen.getByRole("link", { name: "Team" })).toHaveAttribute("href", "/settings/team");
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
   });
@@ -306,11 +305,10 @@ describe("AuthenticatedLayout", () => {
     // Expand the settings section
     await user.click(screen.getByRole("button", { name: /Settings/ }));
 
-    // Members can see Team and the read-only pages (Integrations, Coding agents, Evals).
+    // Members can see Team and the read-only pages (Integrations, Coding agents).
     expect(screen.getByRole("link", { name: "Team" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Integrations" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Coding agents" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Evals" })).toBeInTheDocument();
 
     // Admin-only entries are hidden.
     expect(screen.queryByRole("link", { name: "General" })).not.toBeInTheDocument();
