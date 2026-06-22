@@ -1,14 +1,26 @@
 # Design: PR Readiness Checks
 
-> **Status:** Implemented v1 | **Last reviewed:** 2026-06-19
+> **Status:** Implemented | **Last reviewed:** 2026-06-20
 
 ## Summary
 
 PR Readiness Checks are an automatic pre-PR quality layer for 143 sessions. They answer: "Is this change ready for live review, or will it waste reviewer time?"
 
-The first version exposes a one-click **Run readiness checks** action in session Overview. Builders can be blocked from PR creation when required automatic checks fail or are stale. Engineers and admins see the same checks in advisory mode by default, so the system catches slop without taking over engineering judgment.
+The shipped implementation exposes a one-click **Run readiness checks** action in session Overview, persists runs/checks/bypasses/policies, and gates builder PR creation on current, unbypassed blocking checks. Engineers and admins see the same checks in advisory mode by default and get a one-time Create PR preflight for missing, stale, or warning readiness with the concrete findings listed.
 
 This is not a human approval system. Readiness must come from platform-observed evidence: session snapshots, diffs, agent review-loop results, command output, repository metadata, and GitHub/provider state. A person can click a button to trigger checks, but "a person said this is fine" is not readiness evidence.
+
+Implemented core behavior:
+
+- `pr_readiness_runs`, `pr_readiness_checks`, `pr_readiness_policies`, `pr_readiness_custom_checks`, `pr_readiness_bypasses`, and `pr_readiness_contexts` persist readiness state with `org_id` tenancy.
+- Policies resolve as repository override -> org policy -> default policy. The legacy `builder_permissions.require_review_before_pr=false` setting disables builder blocking only until an explicit readiness policy exists.
+- Checks store factual status separately from role-specific enforcement (`builder`, `engineer`, `admin`) and expose effective enforcement to the UI.
+- Builders are blocked only by current-revision, non-bypassed blocking `failed`/`error` checks. Queued/running, missing, and stale readiness cannot be bypassed.
+- The Overview card groups checks, shows per-check next actions and expandable evidence, and derives a visible stale blocker when the stored run no longer matches the session revision/snapshot.
+- Built-ins include freshness, agent review, diff collection, test evidence after the current workspace revision timestamp, expanded risk flags, dependency/config risk, generated-file churn outside configured allowed paths, context completeness, and review-packet draftability.
+- The review packet captures changed files, diff stats, context, risk flags, unknowns, timestamps, revision, checks, and bypass state. Newly created PR bodies get a short `143 readiness` footer when readiness data is available.
+- Admins can manage prompt-based custom checks in settings. `.143/config.json` can declare `pr_readiness.checks`; the agent repo-prep path validates and materializes those definitions for the repository, including deactivating stale repo-config checks when the list becomes empty.
+- Custom prompt checks use bounded context, Go-template prompt rendering, a central system prompt template, and structured JSON responses. Execution failures surface as `error` checks and inherit the check's configured enforcement.
 
 Detailed intent:
 
@@ -111,7 +123,7 @@ Design recommendation:
 
 - Ship a button-driven Overview card first.
 - If someone clicks `Create PR` with missing/stale/advisory readiness, use a lightweight confirmation that points back to the card; do not make preflight the primary readiness surface.
-- Defer background auto-runs until the card is trusted and check cost is understood.
+- Keep auto-runs optional and default off. The shipped policy can auto-run after session completion with a diff, or when Create PR is clicked with missing/stale/running readiness; manual `Run` / `Re-run` remains the primary control.
 
 ## Enforcement Model
 
@@ -134,9 +146,9 @@ Recommendation:
 - Builders can bypass their own blockers when the builder bypass setting is enabled.
 - Some checks can be marked non-bypassable by policy, especially future security/secret checks.
 - Bypass requires a short reason and shows the exact blockers being bypassed.
-- Bypass creates an audit event, increments org/repo/user bypass counters, and is attached to the readiness run and PR record.
+- Bypass creates an audit event, increments org/repo/user/check bypass counters, and is attached to the readiness run and PR record.
 - The PR footer/session review packet should state that readiness was bypassed and include the reason summary.
-- Settings should expose bypass counts by repo and user so repeated bypassing becomes visible.
+- Settings should expose bypass counts by repo, user, and check so repeated bypassing becomes visible.
 
 This is a good idea if the product treats bypasses as operational debt, not as a normal workflow. It is a bad idea if bypass becomes the easiest path; then checks lose trust. The UI should make `Run checks` / `Fix with agent` / `Re-run` easier than bypass, and bypass should sit behind a secondary action such as `More -> Bypass readiness`.
 
@@ -165,7 +177,7 @@ Every built-in check should be independently configurable by an admin as `off`, 
 | Context complete | Linked issue/attribution or explicit issue-less marker | Helps reviewers understand why the PR exists. |
 | Review packet draftable | Session summary, diff summary, linked context, risk flags, and readiness results generated before PR creation | Makes the future PR description and reviewer handoff possible before the PR exists. |
 
-Freshness is still mandatory, but it is a backend invariant rather than a user-facing check. Every readiness result must be tied to the workspace revision or snapshot ID it evaluated, and stale results must not satisfy builder blockers.
+Freshness is both a visible built-in check and a backend invariant. Every readiness result is tied to the workspace revision and snapshot key it evaluated; stale, queued/running, or missing results cannot satisfy builder blockers and cannot be bypassed.
 
 Do not count these as checks:
 
@@ -217,35 +229,35 @@ Example:
 
 ## Settings
 
-Add:
+Implemented:
 
 ```text
 Settings -> Pull requests -> PR readiness
 ```
 
-Keep v1 settings narrow:
+The Pull requests settings surface includes:
 
 - Enable readiness checks for builders.
 - Enable advisory checks for engineers.
 - Configure every built-in check as `off`, `advisory`, or `blocking`.
 - Configure separate builder and engineer enforcement per check.
 - Configure whether bypass is disabled, limited to specific roles, or enabled for all PR-capable roles.
-- View bypass counts by repository, user, and check type.
+- Show configured custom checks and their provenance (`org settings`, `repo settings`, or `.143/config.json`). Bypass rows are persisted for audit/reporting, and settings expose aggregate bypass counts by repository, check, and user for the selected org/repository scope.
 - Require clean agent review for builders by default.
 - Treat stale readiness as blocking for builders through backend enforcement.
-- Configure test/sensitive-path/migration/large-diff checks without editing code.
+- Configure test/sensitive-path/migration/large-diff checks and generated-file allowed paths without editing code.
 - Configure repository overrides.
 
-Avoid a fully generic policy engine in v1. Use typed first-party checks with clear explanations.
+The implementation intentionally avoids arbitrary code execution. Built-ins are typed first-party checks; custom checks are prompt-only.
 
 ## Custom Repo Checks
 
-Admins should be able to add repo-specific checks after the built-in set is stable. Custom checks should be automatic prompt checks, not arbitrary unreviewed code execution.
+Admins can add repo-specific checks. Custom checks are automatic prompt checks, not arbitrary unreviewed code execution.
 
 Two authoring paths should feed the same stored model:
 
-1. **Settings UI prompt checks.** An admin creates a check in `Settings -> Pull requests -> PR readiness`, chooses repositories, writes a short prompt, and sets enforcement defaults. 143 stores the active check definition in the database with version history.
-2. **Repo config checks.** A repository can define checks in the existing `.143/config.json` file under a `pr_readiness` key. This keeps readiness policy with the same repo-owned config surface used for previews and sandbox setup instead of introducing a second `.143` config file. 143 reads the config at session start/readiness time, validates it, and materializes the active definitions for that repository. Config-file changes are reviewable in GitHub like any other repo policy.
+1. **Settings UI prompt checks.** An admin creates a check in `Settings -> Pull requests`, writes a prompt, and sets enforcement defaults. 143 stores the active check definition in the database with insert-only history.
+2. **Repo config checks.** A repository can define checks in the existing `.143/config.json` file under a `pr_readiness` key. The agent repository-prep path reads the config after clone/auth setup, validates it, and materializes active definitions for that repository. Config-file changes are reviewable in GitHub like any other repo policy.
 
 Example config:
 
@@ -271,57 +283,48 @@ Example config:
 }
 ```
 
-Prompt checks should receive a bounded readiness context: diff summary, changed file list, relevant hunks, linked issue context, existing readiness results, and repo conventions. They should return structured output:
+Prompt checks receive bounded readiness context: changed file list, diff stats, workspace revision, and recent logs. They return structured output:
 
 ```json
 {
-  "status": "passed | warning | blocked",
-  "message": "short reviewer-facing explanation",
-  "evidence": ["path/to/file.ts:42"],
-  "confidence": "low | medium | high"
+  "status": "passed | warning | failed",
+  "summary": "short reviewer-facing explanation",
+  "details": {},
+  "action": "optional next action"
 }
 ```
 
 Safety and product constraints:
 
 - Only admins can create or enable settings-defined prompt checks.
-- Repo config checks are accepted only from the checked-out repository and should be validated against a schema.
-- Custom checks can be turned `off`, `advisory`, or `blocking` like built-in checks.
+- Repo config checks are accepted only from the checked-out repository and are validated before materialization. An empty `pr_readiness.checks` list deactivates previously materialized repo-config checks for that repository.
+- Custom checks can be turned `off`, `advisory`, or `blocking` like built-in checks. Checks configured `off` for every role are not evaluated.
 - The UI should show whether a check came from org settings, repo settings, or `.143/config.json`.
 - Prompt checks should be bounded and evidence-seeking; they should not become broad "review the whole PR again" prompts.
 - Failed custom-check execution should surface as `error`; admins decide whether check errors block builders or degrade to advisory.
+- Built-in generated-file churn uses policy-level `generated_file_allowed_paths` as exceptions for generated/build artifacts that are intentionally committed.
 
 ## Execution Roadmap
 
 ### Phase 1: Button-driven readiness
 
-- Add `Run readiness checks`.
-- Persist readiness runs against session ID and workspace revision.
-- Gate builder PR creation on required non-stale results.
-- Show advisory warnings for engineers.
+- Implemented.
 
 ### Phase 2: PR preflight
 
-- When `Create PR` is clicked, detect missing/stale readiness.
-- Builders are routed to `Run readiness checks`.
-- Engineers get a one-time advisory dialog for the current revision.
+- Implemented for the web UI. Builders are blocked by backend enforcement; engineers/admins get a localStorage-keyed one-time advisory for the same session/revision/warning signature.
 
 ### Phase 3: Automatic run options
 
-- Admin setting to auto-run after a session reaches idle/completed with a diff.
-- Optional auto-run when a user clicks `Create PR`.
-- Manual `Re-run` remains available because users need a clear recovery path.
+- Implemented. Policy settings default off. When enabled, readiness can run after session completion with a diff, or when Create PR is clicked with missing/stale/running readiness. Manual `Re-run` remains the primary recovery path.
 
 ### Phase 4: Custom checks
 
-- Add settings-defined prompt checks.
-- Add `.143/config.json` `pr_readiness` ingestion.
-- Show custom check provenance and enforcement in the readiness card.
-- Keep custom checks behind admin-controlled enablement until latency and false-positive behavior are understood.
+- Implemented as prompt-only checks with admin-managed settings definitions and materialized repo-config definitions. The readiness card shows provenance.
 
 ## Backend Shape
 
-Suggested tables:
+Implemented tables:
 
 ```text
 pr_readiness_policies
@@ -330,13 +333,15 @@ pr_readiness_policies
 
 pr_readiness_runs
 - id, org_id, session_id, repository_id
-- workspace_revision, snapshot_id nullable
-- status, triggered_by, triggered_by_user_id nullable
-- started_at, completed_at nullable, summary jsonb
+- evaluated_workspace_revision, evaluated_snapshot_key nullable
+- status, triggered_by_user_id nullable
+- started_at, completed_at nullable, summary, review_packet jsonb
 
-pr_readiness_check_results
-- id, org_id, readiness_run_id
-- check_type, status, enforcement, evidence jsonb, message
+pr_readiness_checks
+- id, org_id, run_id, session_id
+- check_key, check_type, status
+- enforcement plus enforcement_builder/engineer/admin
+- provenance, source, title, summary, details jsonb, action
 
 pr_readiness_custom_checks
 - id, org_id, repository_id nullable, active
@@ -344,33 +349,48 @@ pr_readiness_custom_checks
 - created_by_user_id nullable, created_at
 
 pr_readiness_bypasses
-- id, org_id, readiness_run_id, session_id, repository_id
+- id, org_id, readiness_run_id, session_id, repository_id, pull_request_id nullable
 - bypassed_by_user_id, reason, bypassed_checks jsonb
 - created_at
+
+pr_readiness_contexts
+- org_id, session_id
+- issue_less_reason, created_by_user_id, updated_by_user_id
+- created_at, updated_at
 ```
 
-Suggested API:
+Implemented API:
 
 ```text
 POST /api/v1/sessions/{id}/pr-readiness-runs
 GET  /api/v1/sessions/{id}/pr-readiness-runs/latest
 POST /api/v1/sessions/{id}/pr-readiness-bypasses
+GET  /api/v1/sessions/{id}/pr-readiness-context
+POST /api/v1/sessions/{id}/pr-readiness-context
 GET  /api/v1/pr-readiness-policies
 PUT  /api/v1/pr-readiness-policies
 GET  /api/v1/pr-readiness-custom-checks
-POST /api/v1/pr-readiness-custom-checks
-PATCH /api/v1/pr-readiness-custom-checks/{id}
+POST   /api/v1/pr-readiness-custom-checks
+PUT    /api/v1/pr-readiness-custom-checks/{id}
+DELETE /api/v1/pr-readiness-custom-checks/{id}
+
+Compatibility aliases remain:
+
+```text
+GET  /api/v1/sessions/{id}/readiness
+POST /api/v1/sessions/{id}/readiness/run
 ```
 
 Use SSE/polling to update the readiness card while a run is queued/running. If a check requires sandbox work, enqueue it as a durable job rather than blocking the request.
 
-## Open Questions
+## Remaining Future Work
 
 - Should `Run readiness checks` always run agent review, or should expensive checks be selectable later?
 - How should expected test commands be inferred when a repo has no `.143` config?
 - Should branch-only publish be allowed when PR readiness is blocked?
 - Which risk flags belong in the PR footer versus only in the session?
 - If org settings and `.143/config.json` define the same custom check key, should repo config override settings, merge with it, or be rejected as ambiguous?
+- Richer reporting dashboards for bypass trends by repo/user/check type beyond the settings counters.
 
 ## Recommendation
 
