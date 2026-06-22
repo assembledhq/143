@@ -30,8 +30,32 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
 	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
 	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
+	require.True(t, s.EffectiveAutoArchiveOnPRClose(), "auto-archive on PR close should default on")
 	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
 	require.False(t, s.SandboxNetwork.StaticEgressEnabled, "static egress should be disabled by default")
+}
+
+func TestOrgSettings_EffectiveAutoArchiveOnPRClose(t *testing.T) {
+	t.Parallel()
+
+	f := false
+	tVal := true
+	tests := []struct {
+		name     string
+		settings OrgSettings
+		expected bool
+	}{
+		{name: "missing defaults on", settings: OrgSettings{}, expected: true},
+		{name: "explicit false disables", settings: OrgSettings{AutoArchiveOnPRClose: &f}, expected: false},
+		{name: "explicit true enables", settings: OrgSettings{AutoArchiveOnPRClose: &tVal}, expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, tt.settings.EffectiveAutoArchiveOnPRClose(), "effective auto-archive setting should match expected value")
+		})
+	}
 }
 
 func TestOrgSettings_EffectiveCodingAgentTabToolsEnabled(t *testing.T) {

@@ -1260,7 +1260,7 @@ func TestHandlePullRequestEvent_AutoArchiveOnCloseWhenEnabled(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(organizationColumns).
-				AddRow(orgID, "Test Org", json.RawMessage(`{"auto_archive_on_pr_close": true}`), now, now),
+				AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
 		)
 	sessionMock.ExpectExec("UPDATE sessions SET archived_at = now\\(\\), archived_by_user_id = NULL").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1313,7 +1313,7 @@ func TestHandlePullRequestEvent_AutoArchiveSkippedWhenDisabled(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(organizationColumns).
-				AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
+				AddRow(orgID, "Test Org", json.RawMessage(`{"auto_archive_on_pr_close": false}`), now, now),
 		)
 	// No session archive expected — pgxmock.ExpectationsWereMet passes only if
 	// no unmocked calls were made, but it does not fail on un-called expectations
