@@ -7410,11 +7410,11 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
 		},
 		{
-			name:           "allows builder when org disables requirement",
+			name:           "ignores legacy disabled setting and still requires review",
 			settings:       json.RawMessage(`{"builder_permissions":{"require_review_before_pr":false}}`),
-			expectedStatus: http.StatusAccepted,
-			expectedBody:   `"status":"queued"`,
-			expectEnqueue:  true,
+			reviewRows:     pgxmock.NewRows(reviewLoopColumns),
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
 		},
 	}
 
@@ -9034,11 +9034,11 @@ func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrent
 			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
 		},
 		{
-			name:           "allows builder when org disables requirement",
+			name:           "ignores legacy disabled setting and still requires review",
 			settings:       json.RawMessage(`{"builder_permissions":{"require_review_before_pr":false}}`),
-			expectedStatus: http.StatusAccepted,
-			expectedBody:   `"status":"queued"`,
-			expectEnqueue:  true,
+			reviewRows:     pgxmock.NewRows(reviewLoopColumns),
+			expectedStatus: http.StatusConflict,
+			expectedBody:   "REVIEW_REQUIRED_BEFORE_PR",
 		},
 	}
 

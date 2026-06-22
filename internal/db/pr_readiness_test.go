@@ -166,7 +166,7 @@ func TestPRReadinessStore_ResolvePolicyPrefersRepositoryOverride(t *testing.T) {
 			"id", "org_id", "repository_id", "config", "active", "created_by_user_id", "created_at",
 		}).AddRow(uuid.New(), orgID, &repoID, configBytes, true, nil, now))
 
-	policy, err := NewPRReadinessStore(mock).ResolvePolicy(context.Background(), orgID, &repoID, nil)
+	policy, err := NewPRReadinessStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
 	require.NoError(t, err, "ResolvePolicy should load the active repository override")
 	require.Equal(t, models.PRReadinessEnforcementBlocking, policy.Config.EffectivePolicy().EnforcementFor(models.RoleBuilder, models.PRReadinessCheckTypeRiskFlags), "repository override should control effective builder enforcement")
 	require.Equal(t, "repository", policy.Source, "ResolvePolicy should expose repository override provenance")

@@ -274,7 +274,6 @@ function PRAuthorshipSettings() {
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? true;
-  const requireBuilderReview = settings.builder_permissions?.require_review_before_pr ?? true;
 
   const accountConnected = githubAccountStatus?.connected ?? false;
   const accountNeedsReconnect = githubAccountStatus?.needs_reconnect ?? false;
@@ -443,22 +442,6 @@ function PRAuthorshipSettings() {
             <p className="text-xs text-muted-foreground pl-6">
               Automatically archive sessions when their associated pull request is merged or closed.
             </p>
-          </div>
-          <div className="flex items-start justify-between gap-4 border-t border-border pt-4">
-            <div className="space-y-1">
-              <Label htmlFor="builder-review-before-pr">Legacy builder review compatibility</Label>
-              <p className="text-xs text-muted-foreground">
-                Kept for older clients. Explicit readiness policy controls below take precedence.
-              </p>
-            </div>
-            <Switch
-              id="builder-review-before-pr"
-              checked={requireBuilderReview}
-              onCheckedChange={(checked) =>
-                save({ settings: { builder_permissions: { require_review_before_pr: checked } } })
-              }
-              aria-label="Require builder review before PR"
-            />
           </div>
           <div className="space-y-3 border-t border-border pt-4">
             <div className="flex items-start justify-between gap-4">

@@ -28,7 +28,6 @@ func TestParseOrgSettings_Defaults(t *testing.T) {
 	require.Equal(t, DefaultPMScheduleHours, s.PMScheduleHours, "should default pm_schedule_hours")
 	require.Equal(t, DefaultPMModel, s.PMModel, "should default pm_model")
 	require.Nil(t, s.ProductContext, "should default product_context to nil")
-	require.True(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "builders should require review before PR by default")
 	require.True(t, s.EffectiveCodingAgentTabToolsEnabled(), "agent tab tools should default on")
 	require.True(t, s.EffectiveAutoArchiveOnPRClose(), "auto-archive on PR close should default on")
 	require.Equal(t, DefaultPreviewMaxPreviewsPerUser, s.PreviewMaxPreviewsPerUser, "should default per-user preview capacity")
@@ -128,9 +127,6 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 			"recency": 0.15,
 			"revenue_risk": 0.15
 		},
-		"builder_permissions": {
-			"require_review_before_pr": false
-		},
 		"sandbox_network": {
 			"static_egress_enabled": true
 		}
@@ -157,7 +153,6 @@ func TestParseOrgSettings_OverrideValues(t *testing.T) {
 	require.Equal(t, 0.30, s.PriorityWeights.Severity, "should override severity")
 	require.Equal(t, 0.15, s.PriorityWeights.Recency, "should override recency")
 	require.Equal(t, 0.15, s.PriorityWeights.RevenueRisk, "should override revenue_risk")
-	require.False(t, s.BuilderPermissions.EffectiveRequireReviewBeforePR(), "should allow admins to disable builder review requirement")
 	require.True(t, s.SandboxNetwork.StaticEgressEnabled, "should parse sandbox_network.static_egress_enabled")
 }
 

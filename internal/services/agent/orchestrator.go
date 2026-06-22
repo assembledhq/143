@@ -337,7 +337,7 @@ type UserLookup interface {
 
 type PRReadinessStore interface {
 	MaterializeRepoConfigChecks(ctx context.Context, orgID, repositoryID uuid.UUID, checks []models.PRReadinessCustomCheck) error
-	ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, legacyRequireReviewBeforePR *bool) (models.PRReadinessResolvedPolicy, error)
+	ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.PRReadinessResolvedPolicy, error)
 	GetLatestBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PRReadinessRun, error)
 	CreateRun(ctx context.Context, run *models.PRReadinessRun) error
 }
@@ -1323,7 +1323,7 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if run.RepositoryID == nil || strings.TrimSpace(snapshotKey) == "" || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
 		return
 	}
-	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID, o.legacyPRReadinessBuilderSetting(ctx, run.OrgID))
+	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to resolve PR readiness policy for completion auto-run")
 		return
@@ -1364,21 +1364,6 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Str("readiness_id", readinessRun.ID.String()).Msg("failed to enqueue completion PR readiness run")
 	}
-}
-
-func (o *Orchestrator) legacyPRReadinessBuilderSetting(ctx context.Context, orgID uuid.UUID) *bool {
-	if o == nil || o.orgs == nil {
-		return nil
-	}
-	org, err := o.orgs.GetByID(ctx, orgID)
-	if err != nil {
-		return nil
-	}
-	settings, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return nil
-	}
-	return settings.BuilderPermissions.RequireReviewBeforePR
 }
 
 func runSandboxBootstrapCommands(ctx context.Context, provider SandboxProvider, sandbox *Sandbox, workDir string, commands []string, log zerolog.Logger) error {
