@@ -2152,6 +2152,78 @@ func TestResolvePreviewBuildCachePaths(t *testing.T) {
 	}
 }
 
+func TestResolvePreviewBuildCacheHomePaths(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	tests := []struct {
+		name    string
+		install *models.PreviewInstallConfig
+		want    []string
+		enabled bool
+	}{
+		{
+			name:    "nil install disables home build caching",
+			install: nil,
+			enabled: false,
+		},
+		{
+			name: "no go lockfile infers no home paths",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+			},
+			enabled: false,
+		},
+		{
+			name: "go.mod lockfile enables go build/module caches",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+			},
+			want:    []string{".cache/go-build", "go/pkg/mod"},
+			enabled: true,
+		},
+		{
+			name: "go.sum alongside javascript lockfile still enables go caches",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json", "go.sum"},
+			},
+			want:    []string{".cache/go-build", "go/pkg/mod"},
+			enabled: true,
+		},
+		{
+			name: "cache disabled flag disables home build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+				Cache:     &models.PreviewInstallCacheConfig{Enabled: &disabled},
+			},
+			enabled: false,
+		},
+		{
+			name: "build disabled flag disables home build caching",
+			install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"go.mod"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{Enabled: &disabled},
+				},
+			},
+			enabled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, enabled := ResolvePreviewBuildCacheHomePaths(tt.install)
+			require.Equal(t, tt.enabled, enabled, "enabled flag should match")
+			if tt.enabled {
+				require.Equal(t, tt.want, got, "effective home build cache paths should match")
+			} else {
+				require.Empty(t, got, "disabled home build caching should resolve no paths")
+			}
+		})
+	}
+}
+
 func TestCacheRestorablePreviewInstallVerifyPaths(t *testing.T) {
 	t.Parallel()
 

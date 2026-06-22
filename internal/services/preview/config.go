@@ -230,7 +230,7 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 		if svcName == "" {
 			svcName = "app"
 		}
-		ready := models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 90}
+		ready := models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 300}
 		if raw.Ready != nil {
 			ready = *raw.Ready
 		}
@@ -575,6 +575,11 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 				if strings.TrimSpace(part) == "" {
 					errs = append(errs, fmt.Sprintf("service %q: command[%d] must not be blank", name, i))
 				}
+			}
+		}
+		for i, part := range svc.Build {
+			if strings.TrimSpace(part) == "" {
+				errs = append(errs, fmt.Sprintf("service %q: build[%d] must not be blank", name, i))
 			}
 		}
 		if svc.Port < MinPort || svc.Port > MaxPort {
@@ -984,6 +989,47 @@ func ResolvePreviewBuildCachePaths(install *models.PreviewInstallConfig) ([]stri
 	}
 	sort.Strings(paths)
 	return paths, len(paths) > 0
+}
+
+// ResolvePreviewBuildCacheHomePaths returns the effective HOME-rooted build
+// cache paths and whether home-rooted build caching is enabled. Unlike the
+// workdir build cache (which captures workspace-relative build-tool caches such
+// as Turborepo's), this captures compiled-artifact caches that live under $HOME
+// and are populated by a service's build step — most importantly Go's build
+// cache (.cache/go-build) and module cache (go/pkg/mod). These are home-rooted
+// because that is where Go places GOCACHE/GOMODCACHE by default in the sandbox,
+// matching the package-manager cache's "go" defaults. Both Go caches are
+// content/version-addressed, so a latest-wins blob shared across commits is
+// safe and degrades to a partial (incremental) build rather than wrong output.
+//
+// Inference is gated on a Go lockfile (go.mod/go.sum) being declared in
+// preview.install.lockfiles, the same signal the package-manager cache uses to
+// enable Go caching. Build caching must also not be explicitly disabled.
+func ResolvePreviewBuildCacheHomePaths(install *models.PreviewInstallConfig) ([]string, bool) {
+	if install == nil || len(install.Lockfiles) == 0 {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Enabled != nil && !*install.Cache.Enabled {
+		return nil, false
+	}
+	if install.Cache != nil && install.Cache.Build != nil && install.Cache.Build.Enabled != nil && !*install.Cache.Build.Enabled {
+		return nil, false
+	}
+	hasGoLockfile := false
+	for _, lockfile := range install.Lockfiles {
+		if manager, ok := inferPreviewPackageManagerFromLockfile(lockfile); ok && manager == "go" {
+			hasGoLockfile = true
+			break
+		}
+	}
+	if !hasGoLockfile {
+		return nil, false
+	}
+	// Both are home-rooted: GOCACHE defaults to ~/.cache/go-build (compiled
+	// objects — the dominant cold-compile cost) and GOMODCACHE to ~/go/pkg/mod
+	// (downloaded modules). Capturing both after the build phase means a launch
+	// that compiled cold still warms every subsequent launch.
+	return []string{".cache/go-build", "go/pkg/mod"}, true
 }
 
 // CacheRestorablePreviewInstallVerifyPaths returns the verify paths that can
