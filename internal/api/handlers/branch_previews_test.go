@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,12 @@ var branchPreviewInstanceTestCols = []string{
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+}
+
+var branchPreviewRuntimeTestCols = []string{
+	"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+	"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+	"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
 }
 
 var branchPreviewStartupCacheTestCols = []string{
@@ -1040,6 +1047,130 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 	handler.StartLatest(rr, req)
 
 	require.Equal(t, http.StatusForbidden, rr.Code, "StartLatest should reject preview API tokens without create scope")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConflicts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	integrationID := uuid.New()
+	targetID := uuid.New()
+	oldPreviewID := uuid.New()
+	newPreviewID := uuid.New()
+	runtimeID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	workerID := "worker-1"
+	workerBaseURL := "http://worker-1.internal:8080"
+	workerMetadata := []byte(`{"preview_capable":true,"preview_rpc_auth_check":true,"preview_internal_base_url":"` + workerBaseURL + `"}`)
+	repoCols := []string{"id", "org_id", "integration_id", "github_id", "full_name", "default_branch", "private", "language", "description", "clone_url", "installation_id", "status", "last_synced_at", "context_quality", "settings", "created_at", "updated_at"}
+
+	store := db.NewPreviewStore(mock)
+	manager := preview.NewManager(preview.ManagerConfig{
+		Store:        store,
+		Provider:     &mockPreviewProvider{},
+		Logger:       zerolog.Nop(),
+		MaxPerWorker: 3,
+	})
+	handler := NewBranchPreviewHandler(
+		store,
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHub{token: "ghs_test", head: head},
+		manager,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+	handler.SetWorkerRuntime(db.NewJobStore(mock), preview.NewWorkerSelectorWithMaxPerWorker(db.NewNodeStore(mock), store, 3))
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			oldPreviewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusFailed,
+			"docker", workerID, "", "webserver", 0,
+			"sha256:old", head, now, now.Add(30*time.Minute), &now,
+			"", 0, 0, 10240, nil, nil, "failed", nil, "build failed", now, now, now, nil,
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
+			false,
+		))
+	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewTargetTestCols).AddRow(
+			targetID, orgID, repoID, "feature/previews", head, "", "", "manual", "", "", userID, nil, nil, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories WHERE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(repoCols).AddRow(
+			repoID, orgID, integrationID, int64(123), "acme/app", "main", true, nil, nil,
+			"https://github.com/acme/app.git", int64(456), "active", nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectQuery("INSERT INTO preview_links").
+		WithArgs(branchPreviewAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewLinkTestCols).AddRow(
+			linkID, orgID, targetID, "target", targetID.String(), &repoID, (*int)(nil), now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+		WillReturnRows(pgxmock.NewRows(branchPreviewNodeTestCols).AddRow(
+			workerID, models.NodeModeWorker, "worker-1.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata, now, now, nil, nil, "", "",
+		))
+	mock.ExpectQuery("SELECT worker_node_id, COUNT").
+		WithArgs(branchPreviewAnyArgs(1)...).
+		WillReturnRows(pgxmock.NewRows([]string{"worker_node_id", "count"}))
+	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
+		WithArgs(branchPreviewAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"user_standalone", "org_standalone", "worker_total"}).AddRow(0, 0, 0))
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
+	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
+		WithArgs(branchPreviewAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"user_standalone", "org_standalone", "worker_total"}).AddRow(0, 0, 0))
+	mock.ExpectQuery("INSERT INTO preview_instances").
+		WithArgs(branchPreviewAnyArgs(22)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols).AddRow(
+			newPreviewID, uuid.Nil, &targetID, orgID, userID, models.PreviewProfileBootstrap, "app", models.PreviewStatusStarting,
+			"docker", workerID, "", "app", 0,
+			"sha256:reservation", head, now, now.Add(30*time.Minute), nil,
+			"/", 1024, 500, 10*1024, nil, nil, "reserved", nil, "", now, now, nil, nil,
+			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
+			false,
+		))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(branchPreviewAnyArgs(9)...).
+		WillReturnRows(pgxmock.NewRows(branchPreviewRuntimeTestCols).AddRow(
+			runtimeID, orgID, newPreviewID, 1, workerID,
+			workerBaseURL, "", 0, models.PreviewRuntimeStatusStarting, now.Add(90*time.Second),
+			nil, nil, nil, "", "", now, now,
+		))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(branchPreviewAnyArgs(7)...).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectRollback()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/previews/"+oldPreviewID.String()+"/start-latest", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("preview_id", oldPreviewID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.StartLatest(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, "StartLatest should reject a deduped enqueue after reservation")
+	require.Contains(t, rr.Body.String(), "PREVIEW_START_IN_PROGRESS", "StartLatest should expose a retryable startup-in-progress error")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
