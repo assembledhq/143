@@ -41,20 +41,21 @@ type Automation struct {
 	// Migration 93 dropped the chk_automations_timezone_interval DB CHECK so
 	// interval rows can now carry non-UTC zones; writers must still set
 	// timezone='UTC' only when meaningful.
-	Timezone            string                  `db:"timezone"        json:"timezone"`
-	GitHubEventTriggers []AutomationGitHubEvent `db:"github_event_triggers" json:"github_event_triggers,omitempty"`
-	GitHubEventFilters  json.RawMessage         `db:"github_event_filters" json:"github_event_filters,omitempty"`
-	NextRunAt           *time.Time              `db:"next_run_at"     json:"next_run_at,omitempty"`
-	LastRunAt           *time.Time              `db:"last_run_at"     json:"last_run_at,omitempty"`
-	Enabled             bool                    `db:"enabled"         json:"enabled"`
-	CreatedBy           *uuid.UUID              `db:"created_by"      json:"created_by,omitempty"`
-	PausedBy            *uuid.UUID              `db:"paused_by"       json:"paused_by,omitempty"`
-	PausedAt            *time.Time              `db:"paused_at"       json:"paused_at,omitempty"`
-	Priority            int                     `db:"priority"        json:"priority"`
-	ExternalMetadata    json.RawMessage         `db:"external_metadata" json:"metadata,omitempty"`
-	CreatedAt           time.Time               `db:"created_at"      json:"created_at"`
-	UpdatedAt           time.Time               `db:"updated_at"      json:"updated_at"`
-	DeletedAt           *time.Time              `db:"deleted_at"      json:"-"`
+	Timezone            string                   `db:"timezone"        json:"timezone"`
+	GitHubEventTriggers []AutomationGitHubEvent  `db:"github_event_triggers" json:"github_event_triggers,omitempty"`
+	GitHubEventFilters  json.RawMessage          `db:"github_event_filters" json:"github_event_filters,omitempty"`
+	EventTriggers       []AutomationEventTrigger `json:"event_triggers,omitempty"`
+	NextRunAt           *time.Time               `db:"next_run_at"     json:"next_run_at,omitempty"`
+	LastRunAt           *time.Time               `db:"last_run_at"     json:"last_run_at,omitempty"`
+	Enabled             bool                     `db:"enabled"         json:"enabled"`
+	CreatedBy           *uuid.UUID               `db:"created_by"      json:"created_by,omitempty"`
+	PausedBy            *uuid.UUID               `db:"paused_by"       json:"paused_by,omitempty"`
+	PausedAt            *time.Time               `db:"paused_at"       json:"paused_at,omitempty"`
+	Priority            int                      `db:"priority"        json:"priority"`
+	ExternalMetadata    json.RawMessage          `db:"external_metadata" json:"metadata,omitempty"`
+	CreatedAt           time.Time                `db:"created_at"      json:"created_at"`
+	UpdatedAt           time.Time                `db:"updated_at"      json:"updated_at"`
+	DeletedAt           *time.Time               `db:"deleted_at"      json:"-"`
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
@@ -66,6 +67,10 @@ type AutomationRun struct {
 	TriggeredBy        AutomationTriggeredBy         `db:"triggered_by"          json:"triggered_by"`
 	TriggeredByUserID  *uuid.UUID                    `db:"triggered_by_user_id"  json:"triggered_by_user_id,omitempty"`
 	ScheduledTime      *time.Time                    `db:"scheduled_time"        json:"scheduled_time,omitempty"`
+	TriggerID          *uuid.UUID                    `db:"trigger_id"            json:"trigger_id,omitempty"`
+	Provider           *AutomationEventProvider      `db:"provider"              json:"provider,omitempty"`
+	ProviderEventID    *string                       `db:"provider_event_id"     json:"provider_event_id,omitempty"`
+	TriggerContext     json.RawMessage               `db:"trigger_context"       json:"trigger_context,omitempty"`
 	GoalSnapshot       string                        `db:"goal_snapshot"         json:"goal_snapshot"`
 	ConfigSnapshot     json.RawMessage               `db:"config_snapshot"       json:"config_snapshot,omitempty"`
 	Status             AutomationRunStatus           `db:"status"                json:"status"`
@@ -211,14 +216,15 @@ const (
 type AutomationTriggeredBy string
 
 const (
-	AutomationTriggeredBySchedule AutomationTriggeredBy = "schedule"
-	AutomationTriggeredByManual   AutomationTriggeredBy = "manual"
-	AutomationTriggeredByGitHub   AutomationTriggeredBy = "github"
+	AutomationTriggeredBySchedule      AutomationTriggeredBy = "schedule"
+	AutomationTriggeredByManual        AutomationTriggeredBy = "manual"
+	AutomationTriggeredByGitHub        AutomationTriggeredBy = "github"
+	AutomationTriggeredByProviderEvent AutomationTriggeredBy = "provider_event"
 )
 
 func (t AutomationTriggeredBy) Validate() error {
 	switch t {
-	case AutomationTriggeredBySchedule, AutomationTriggeredByManual, AutomationTriggeredByGitHub:
+	case AutomationTriggeredBySchedule, AutomationTriggeredByManual, AutomationTriggeredByGitHub, AutomationTriggeredByProviderEvent:
 		return nil
 	default:
 		return fmt.Errorf("invalid automation triggered_by: %q", t)

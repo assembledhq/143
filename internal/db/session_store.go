@@ -641,6 +641,67 @@ func (s *SessionStore) CreateInTx(ctx context.Context, tx pgx.Tx, run *models.Se
 	return createSessionRows(ctx, tx, run)
 }
 
+// CreateForIncident creates a session for an incident-derived issue while
+// guarding against duplicate concurrent starts. It holds a per-issue advisory
+// lock for the duration of the transaction, re-checks (inside the lock) for a
+// session that is either still active or was created within the cooldown
+// window, and only inserts when none is found. This makes the PagerDuty session
+// starter's previously racy read-then-write dedup atomic: concurrent webhook
+// deliveries for the same incident can no longer each spawn a session, and a
+// flapping incident cannot restart a session within the cooldown. When a
+// blocking session already exists it is returned with created=false.
+func (s *SessionStore) CreateForIncident(ctx context.Context, orgID, issueID uuid.UUID, cooldown time.Duration, run *models.Session) (created bool, existing models.Session, err error) {
+	tx, err := s.Begin(ctx)
+	if err != nil {
+		return false, models.Session{}, fmt.Errorf("begin incident session transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	lockKey := "pagerduty_incident_session:" + orgID.String() + ":" + issueID.String()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(@lock_key, 0))`, pgx.NamedArgs{"lock_key": lockKey}); err != nil {
+		return false, models.Session{}, fmt.Errorf("acquire incident session lock: %w", err)
+	}
+
+	activeStatuses := make([]string, len(models.ActiveStatuses))
+	for i, st := range models.ActiveStatuses {
+		activeStatuses[i] = string(st)
+	}
+	query := `
+		SELECT ` + sessionListColumns + `
+		FROM sessions
+		WHERE org_id = @org_id AND deleted_at IS NULL AND EXISTS (
+			SELECT 1 FROM session_issue_links sil
+			WHERE sil.org_id = sessions.org_id AND sil.session_id = sessions.id AND sil.issue_id = @issue_id
+		) AND (status = ANY(@active_statuses) OR created_at >= @cooldown_cutoff)
+		ORDER BY created_at DESC
+		LIMIT 1`
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"issue_id":        issueID,
+		"active_statuses": activeStatuses,
+		"cooldown_cutoff": time.Now().Add(-cooldown),
+	})
+	if err != nil {
+		return false, models.Session{}, fmt.Errorf("check existing incident sessions: %w", err)
+	}
+	found, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return false, models.Session{}, fmt.Errorf("scan existing incident sessions: %w", err)
+	}
+	if len(found) > 0 {
+		hydrateSessionPolicy(&found[0])
+		return false, found[0], nil
+	}
+
+	if err := createSessionRows(ctx, tx, run); err != nil {
+		return false, models.Session{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, models.Session{}, fmt.Errorf("commit incident session transaction: %w", err)
+	}
+	return true, models.Session{}, nil
+}
+
 func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.Origin == "" {
 		run.Origin = models.SessionOriginIssueTrigger

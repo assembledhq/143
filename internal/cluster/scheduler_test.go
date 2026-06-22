@@ -193,6 +193,28 @@ func TestScheduler_SchedulePullRequestReconciliation(t *testing.T) {
 	require.Contains(t, jobs.dedupeKeys[0], "reconcile_pull_request_state:"+orgIDs[0].String()+":20260423220", "dedupe key should include the org and UTC ten-minute bucket")
 }
 
+func TestScheduler_SchedulePagerDutySync(t *testing.T) {
+	t.Parallel()
+
+	orgIDs := []uuid.UUID{uuid.New(), uuid.New()}
+	jobs := &trackingJobs{}
+	s := &Scheduler{
+		jobs:   jobs,
+		logger: zerolog.Nop(),
+	}
+
+	s.schedulePagerDutySync(context.Background(), orgIDs, time.Date(2026, 6, 19, 18, 27, 0, 0, time.UTC))
+
+	require.Equal(t, []string{models.JobTypePagerDutySync, models.JobTypePagerDutySync}, jobs.enqueued, "should enqueue one PagerDuty sync job per org")
+	require.Equal(t, []string{"default", "default"}, jobs.queues, "PagerDuty sync should use the default integration worker queue")
+	require.Len(t, jobs.payloads, 2, "should record a payload for each PagerDuty sync job")
+	firstPayload, ok := jobs.payloads[0].(map[string]any)
+	require.True(t, ok, "scheduler should enqueue PagerDuty sync payloads as maps")
+	require.Equal(t, orgIDs[0].String(), firstPayload["org_id"], "scheduler should include the target org ID")
+	require.Len(t, jobs.dedupeKeys, 2, "should compute one dedupe key per PagerDuty sync job")
+	require.Contains(t, jobs.dedupeKeys[0], "pagerduty_sync:"+orgIDs[0].String()+":20260619182", "dedupe key should include org and UTC ten-minute bucket")
+}
+
 func TestScheduler_ScheduleGitHubOrgRosterSyncs(t *testing.T) {
 	t.Parallel()
 

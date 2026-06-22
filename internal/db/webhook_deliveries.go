@@ -182,6 +182,30 @@ func (s *WebhookDeliveryStore) ListRecentFailures(ctx context.Context, orgID uui
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.WebhookDelivery])
 }
 
+func (s *WebhookDeliveryStore) SummarizeRecentFailuresForIntegration(ctx context.Context, orgID, integrationID uuid.UUID, provider string, since time.Time) (models.PagerDutyWebhookFailureSummary, error) {
+	var summary models.PagerDutyWebhookFailureSummary
+	err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*)::int,
+		       (ARRAY_AGG(error ORDER BY received_at DESC))[1] AS latest_error,
+		       MAX(received_at) AS latest_failure_at
+		FROM webhook_deliveries
+		WHERE org_id = @org_id
+		  AND integration_id = @integration_id
+		  AND provider = @provider
+		  AND status = 'failed'
+		  AND received_at >= @since`,
+		pgx.NamedArgs{
+			"org_id":         orgID,
+			"integration_id": integrationID,
+			"provider":       provider,
+			"since":          since,
+		}).Scan(&summary.Count, &summary.LatestError, &summary.LatestFailureAt)
+	if err != nil {
+		return models.PagerDutyWebhookFailureSummary{}, fmt.Errorf("summarize recent webhook failures: %w", err)
+	}
+	return summary, nil
+}
+
 // DeleteExpired removes webhook deliveries older than the given number of days.
 // lint:allow-no-orgid reason="cross-org retention cleanup across all orgs"
 func (s *WebhookDeliveryStore) DeleteExpired(ctx context.Context, retentionDays int) (int64, error) {

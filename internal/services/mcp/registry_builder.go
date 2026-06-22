@@ -39,6 +39,16 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 		fmt.Fprintln(logger, "143-tools: registered linear")
 	}
 
+	if token := os.Getenv("PAGERDUTY_ACCESS_TOKEN"); token != "" {
+		provider := integration.NewPagerDutyIncidentProvider(integration.PagerDutyProviderConfig{
+			AccessToken:      token,
+			BaseURL:          os.Getenv("PAGERDUTY_API_URL"),
+			WritebackEnabled: os.Getenv("PAGERDUTY_WRITEBACK_ENABLED") == "true",
+		})
+		reg.RegisterIncidentProvider(provider)
+		fmt.Fprintln(logger, "143-tools: registered pagerduty")
+	}
+
 	if token := os.Getenv("NOTION_ACCESS_TOKEN"); token != "" {
 		store := integration.NewNotionDocumentStore(integration.NotionDocumentStoreConfig{
 			AuthToken: token,

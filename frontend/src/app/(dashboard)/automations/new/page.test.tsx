@@ -311,6 +311,132 @@ describe("NewAutomationPage", () => {
     expect(requestBody).not.toHaveProperty("interval_run_at");
   });
 
+  it("submits an event-only PagerDuty incident automation", async () => {
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | undefined;
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.get("/api/v1/integrations/pagerduty", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "pd-1",
+              org_id: "org-1",
+              integration_id: "int-pd",
+              status: "active",
+              account_subdomain: "acme",
+              default_repository_id: "repo-1",
+              writeback_enabled: true,
+              connected_at: "2026-06-01T00:00:00Z",
+              created_at: "2026-06-01T00:00:00Z",
+              updated_at: "2026-06-01T00:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("/api/v1/automations", async ({ request }) => {
+        requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            data: {
+              id: "automation-1",
+              org_id: "org-1",
+              repository_id: "repo-1",
+              name: requestBody.name,
+              goal: requestBody.goal,
+              icon_type: "emoji",
+              icon_value: "⚙️",
+              execution_mode: "sequential",
+              max_concurrent: 1,
+              base_branch: "main",
+              identity_scope: "org",
+              pre_pr_review_loops: 1,
+              schedule_type: requestBody.schedule_type,
+              github_event_triggers: [],
+              timezone: "UTC",
+              enabled: true,
+              priority: 50,
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await user.clear(await screen.findByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "PagerDuty responder");
+    await user.clear(screen.getByLabelText("Goal"));
+    await user.type(
+      screen.getByLabelText("Goal"),
+      "Investigate triggered PagerDuty incidents.",
+    );
+    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("PagerDuty incidents"));
+    await user.click(screen.getByLabelText("PagerDuty annotated events"));
+    await user.type(screen.getByLabelText("PagerDuty service IDs"), "P123, P456");
+    await user.type(screen.getByLabelText("PagerDuty team IDs"), "TEAM1");
+    await user.type(screen.getByLabelText("PagerDuty statuses"), "triggered, acknowledged");
+    await user.type(screen.getByLabelText("PagerDuty priority names"), "P1, Sev 1");
+    await user.type(screen.getByLabelText("PagerDuty title contains"), "checkout");
+    await user.clear(screen.getByLabelText("PagerDuty cooldown minutes"));
+    await user.type(screen.getByLabelText("PagerDuty cooldown minutes"), "30");
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/automations/automation-1");
+    });
+    expect(requestBody).toMatchObject({
+      schedule_type: "none",
+      event_triggers: [
+        {
+          provider: "pagerduty",
+          event_types: ["incident.triggered", "incident.annotated"],
+          filter: {
+            service_ids: ["P123", "P456"],
+            team_ids: ["TEAM1"],
+            statuses: ["triggered", "acknowledged"],
+            urgencies: ["high"],
+            priority_names: ["P1", "Sev 1"],
+            title_contains: "checkout",
+            cooldown_minutes: 30,
+          },
+          repository_id: "repo-1",
+          enabled: true,
+        },
+      ],
+    });
+    expect(requestBody).not.toHaveProperty("interval_value");
+    expect(requestBody).not.toHaveProperty("interval_unit");
+    expect(requestBody).not.toHaveProperty("interval_run_at");
+  });
+
   it("prefills the form from the selected template and links to the full library", async () => {
     server.use(
       http.get("/api/v1/repositories", () =>

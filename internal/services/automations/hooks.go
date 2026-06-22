@@ -20,17 +20,27 @@ import (
 // don't have to stand up a Postgres pool.
 type automationRunStore interface {
 	TransitionStatusIf(ctx context.Context, orgID, runID uuid.UUID, fromStatus, toStatus models.AutomationRunStatus, completedAt *time.Time, resultSummary *string) (bool, error)
+	GetByRunID(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error)
+}
+
+type pagerDutyAutomationWritebacker interface {
+	OnAutomationSessionComplete(ctx context.Context, session models.Session, automationRun models.AutomationRun, status models.SessionStatus, summary string) error
 }
 
 // AutomationHooks implements agent.AutomationRunUpdater by mapping a session's
 // terminal status back onto its owning automation_runs row.
 type AutomationHooks struct {
-	runs   automationRunStore
-	logger zerolog.Logger
+	runs                 automationRunStore
+	pagerDutyWritebacker pagerDutyAutomationWritebacker
+	logger               zerolog.Logger
 }
 
 func NewAutomationHooks(runs automationRunStore, logger zerolog.Logger) *AutomationHooks {
 	return &AutomationHooks{runs: runs, logger: logger}
+}
+
+func (h *AutomationHooks) SetPagerDutyWritebacker(writebacker pagerDutyAutomationWritebacker) {
+	h.pagerDutyWritebacker = writebacker
 }
 
 // OnSessionComplete maps a session's terminal status to the automation_run
@@ -79,6 +89,20 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 			Str("attempted_status", string(runStatus)).
 			Msg("automation run already non-running; hook update skipped")
 	}
+	if transitioned && h.pagerDutyWritebacker != nil {
+		automationRun, lookupErr := h.runs.GetByRunID(ctx, run.OrgID, *run.AutomationRunID)
+		if lookupErr != nil {
+			h.logger.Warn().
+				Err(lookupErr).
+				Str("automation_run_id", run.AutomationRunID.String()).
+				Msg("failed to load automation run for PagerDuty writeback")
+		} else if writeErr := h.pagerDutyWritebacker.OnAutomationSessionComplete(ctx, *run, automationRun, status, valueOrEmpty(summary)); writeErr != nil {
+			h.logger.Warn().
+				Err(writeErr).
+				Str("automation_run_id", run.AutomationRunID.String()).
+				Msg("failed to write PagerDuty automation session completion note")
+		}
+	}
 	return nil
 }
 
@@ -108,4 +132,11 @@ func deriveSummary(run *models.Session, status models.SessionStatus) *string {
 		s = fmt.Sprintf("Agent session ended with status %q.", status)
 	}
 	return &s
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

@@ -18,10 +18,12 @@ import (
 
 type envCredentialProvider struct {
 	creds     map[models.ProviderName]*models.DecryptedCredential
+	byID      map[uuid.UUID]*models.DecryptedCredential
 	listCreds map[models.ProviderName][]models.DecryptedCredential
 	errs      map[models.ProviderName]error
 	listErrs  map[models.ProviderName]error
 	getCalls  []models.ProviderName
+	getByID   uuid.UUID
 	batch     []models.ProviderName
 	batchErr  error
 }
@@ -65,6 +67,14 @@ func (m *envCredentialProvider) Get(_ context.Context, _ uuid.UUID, provider mod
 	return nil, nil
 }
 
+func (m *envCredentialProvider) GetByID(_ context.Context, _ uuid.UUID, id uuid.UUID) (*models.DecryptedCredential, error) {
+	m.getByID = id
+	if cred, ok := m.byID[id]; ok {
+		return m.defaultActiveStatus(cred), nil
+	}
+	return nil, errEnvCredentialNotFound
+}
+
 func (m *envCredentialProvider) GetAllIntegrations(_ context.Context, _ uuid.UUID, providers []models.ProviderName) (map[models.ProviderName]*models.DecryptedCredential, error) {
 	m.batch = append([]models.ProviderName(nil), providers...)
 	if m.batchErr != nil {
@@ -91,6 +101,22 @@ func (m *envCredentialProvider) ListByProvider(_ context.Context, _ uuid.UUID, p
 		return []models.DecryptedCredential{*c}, nil
 	}
 	return nil, nil
+}
+
+var errEnvCredentialNotFound = errors.New("credential not found")
+
+type envPagerDutyIntegrationStore struct {
+	orgID        uuid.UUID
+	integrations []models.PagerDutyIntegration
+	err          error
+}
+
+func (m *envPagerDutyIntegrationStore) ListManageable(_ context.Context, orgID uuid.UUID) ([]models.PagerDutyIntegration, error) {
+	m.orgID = orgID
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.integrations, nil
 }
 
 type envCodingCredentialProvider struct {
@@ -385,20 +411,24 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 				creds: map[models.ProviderName]*models.DecryptedCredential{
 					models.ProviderSentry: {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
 					models.ProviderLinear: {Config: models.LinearConfig{AccessToken: "linear-token"}},
+					models.ProviderPagerDuty: {
+						Config: models.PagerDutyConfig{AccessToken: "pagerduty-token"},
+					},
 					models.ProviderNotion: {Config: models.NotionConfig{AccessToken: "notion-token"}},
 					models.ProviderMezmo:  {Config: models.MezmoConfig{APIKey: "mezmo-key", BaseURL: "https://logs.example.com", Dataset: "prod"}},
 				},
 			},
 			expected: map[string]string{
-				"ANTHROPIC_API_KEY":   "sk-ant",
-				"ANTHROPIC_BASE_URL":  "https://anthropic.example",
-				"SENTRY_AUTH_TOKEN":   "sentry-token",
-				"SENTRY_ORG_SLUG":     "assembled",
-				"LINEAR_ACCESS_TOKEN": "linear-token",
-				"NOTION_ACCESS_TOKEN": "notion-token",
-				"MEZMO_API_KEY":       "mezmo-key",
-				"MEZMO_BASE_URL":      "https://logs.example.com",
-				"MEZMO_DATASET":       "prod",
+				"ANTHROPIC_API_KEY":      "sk-ant",
+				"ANTHROPIC_BASE_URL":     "https://anthropic.example",
+				"SENTRY_AUTH_TOKEN":      "sentry-token",
+				"SENTRY_ORG_SLUG":        "assembled",
+				"LINEAR_ACCESS_TOKEN":    "linear-token",
+				"PAGERDUTY_ACCESS_TOKEN": "pagerduty-token",
+				"NOTION_ACCESS_TOKEN":    "notion-token",
+				"MEZMO_API_KEY":          "mezmo-key",
+				"MEZMO_BASE_URL":         "https://logs.example.com",
+				"MEZMO_DATASET":          "prod",
 			},
 		},
 		{
@@ -496,6 +526,72 @@ func TestAgentEnvResolveExportsCredentialsAndIntegrations(t *testing.T) {
 	}
 }
 
+func TestAgentEnvResolveExportsPagerDutyWritebackSetting(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	pagerDutyIntegrationID := uuid.New()
+	settings := &envPagerDutyIntegrationStore{integrations: []models.PagerDutyIntegration{{
+		ID:               pagerDutyIntegrationID,
+		OrgID:            orgID,
+		Status:           models.PagerDutyIntegrationStatusActive,
+		WritebackEnabled: true,
+	}}}
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials: &envCredentialProvider{creds: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderPagerDuty: {Config: models.PagerDutyConfig{AccessToken: "pagerduty-token"}},
+		}},
+		PagerDutyIntegrations: settings,
+		Provider:              &envSandboxProvider{},
+		Logger:                zerolog.Nop(),
+	})
+
+	got := env.Resolve(ctx, orgID, models.AgentTypeCodex, nil)
+
+	require.Equal(t, orgID, settings.orgID, "Resolve should read PagerDuty settings for the request org")
+	require.Equal(t, "pagerduty-token", got["PAGERDUTY_ACCESS_TOKEN"], "Resolve should still expose PagerDuty token for read-only tools")
+	require.Equal(t, "true", got["PAGERDUTY_WRITEBACK_ENABLED"], "Resolve should enable PagerDuty write tools when integration writeback is enabled")
+}
+
+func TestAgentEnvResolveExportsPagerDutyCredentialFromIntegrationRef(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	pagerDutyIntegrationID := uuid.New()
+	credentialID := uuid.New()
+	credentials := &envCredentialProvider{
+		byID: map[uuid.UUID]*models.DecryptedCredential{
+			credentialID: {
+				ID:       credentialID,
+				OrgID:    orgID,
+				Provider: models.ProviderPagerDuty,
+				Config:   models.PagerDutyConfig{AccessToken: "labeled-pagerduty-token"},
+			},
+		},
+	}
+	settings := &envPagerDutyIntegrationStore{integrations: []models.PagerDutyIntegration{{
+		ID:               pagerDutyIntegrationID,
+		OrgID:            orgID,
+		CredentialRef:    "org_credential:" + credentialID.String(),
+		Status:           models.PagerDutyIntegrationStatusActive,
+		WritebackEnabled: true,
+	}}}
+	env := NewAgentEnv(AgentEnvDeps{
+		Credentials:           credentials,
+		PagerDutyIntegrations: settings,
+		Provider:              &envSandboxProvider{},
+		Logger:                zerolog.Nop(),
+	})
+
+	got := env.Resolve(ctx, orgID, models.AgentTypeCodex, nil)
+
+	require.Equal(t, credentialID, credentials.getByID, "Resolve should load the PagerDuty credential referenced by the provider integration")
+	require.Equal(t, "labeled-pagerduty-token", got["PAGERDUTY_ACCESS_TOKEN"], "Resolve should expose the labeled PagerDuty OAuth token")
+	require.Equal(t, "true", got["PAGERDUTY_WRITEBACK_ENABLED"], "Resolve should use the selected integration writeback setting")
+}
+
 func TestOpenCodeRuntimeConfigContent_ReferencesSelectedProviderEnv(t *testing.T) {
 	t.Parallel()
 
@@ -550,11 +646,12 @@ func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 
 	orgCreds := &envCredentialProvider{
 		creds: map[models.ProviderName]*models.DecryptedCredential{
-			models.ProviderSentry:   {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
-			models.ProviderLinear:   {Config: models.LinearConfig{AccessToken: "linear-token"}},
-			models.ProviderNotion:   {Config: models.NotionConfig{AccessToken: "notion-token"}},
-			models.ProviderCircleCI: {Config: models.CircleCIConfig{AuthToken: "circle-token", ProjectSlug: "gh/acme/repo"}},
-			models.ProviderMezmo:    {Config: models.MezmoConfig{APIKey: "mezmo-key"}},
+			models.ProviderSentry:    {Config: models.SentryConfig{AccessToken: "sentry-token", OrgSlug: "assembled"}},
+			models.ProviderLinear:    {Config: models.LinearConfig{AccessToken: "linear-token"}},
+			models.ProviderPagerDuty: {Config: models.PagerDutyConfig{AccessToken: "pagerduty-token"}},
+			models.ProviderNotion:    {Config: models.NotionConfig{AccessToken: "notion-token"}},
+			models.ProviderCircleCI:  {Config: models.CircleCIConfig{AuthToken: "circle-token", ProjectSlug: "gh/acme/repo"}},
+			models.ProviderMezmo:     {Config: models.MezmoConfig{APIKey: "mezmo-key"}},
 		},
 	}
 	env := NewAgentEnv(AgentEnvDeps{
@@ -567,6 +664,7 @@ func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 	require.Equal(t, []models.ProviderName{
 		models.ProviderSentry,
 		models.ProviderLinear,
+		models.ProviderPagerDuty,
 		models.ProviderNotion,
 		models.ProviderCircleCI,
 		models.ProviderMezmo,
@@ -574,6 +672,7 @@ func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 	require.Empty(t, orgCreds.getCalls, "fetchIntegrationCredentials should not issue per-provider Get calls")
 	require.NotNil(t, creds.Sentry, "fetchIntegrationCredentials should decode Sentry from batch results")
 	require.NotNil(t, creds.Linear, "fetchIntegrationCredentials should decode Linear from batch results")
+	require.NotNil(t, creds.PagerDuty, "fetchIntegrationCredentials should decode PagerDuty from batch results")
 	require.NotNil(t, creds.Notion, "fetchIntegrationCredentials should decode Notion from batch results")
 	require.NotNil(t, creds.CircleCI, "fetchIntegrationCredentials should decode CircleCI from batch results")
 	require.NotNil(t, creds.Mezmo, "fetchIntegrationCredentials should decode Mezmo from batch results")

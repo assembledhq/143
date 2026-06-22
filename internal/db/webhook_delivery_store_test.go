@@ -264,6 +264,40 @@ func TestWebhookDeliveryStore_MarkProcessed(t *testing.T) {
 	}
 }
 
+func TestWebhookDeliveryStore_SummarizeRecentFailuresForIntegration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	integrationID := uuid.New()
+	since := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	latestAt := time.Date(2026, 6, 20, 11, 0, 0, 0, time.UTC)
+	latestErr := "signature mismatch"
+	mock.ExpectQuery("SELECT COUNT").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count", "latest_error", "latest_failure_at"}).
+			AddRow(3, &latestErr, &latestAt))
+
+	summary, err := NewWebhookDeliveryStore(mock).SummarizeRecentFailuresForIntegration(
+		context.Background(),
+		orgID,
+		integrationID,
+		"pagerduty",
+		since,
+	)
+
+	require.NoError(t, err, "summary query should not fail")
+	require.Equal(t, models.PagerDutyWebhookFailureSummary{
+		Count:           3,
+		LatestError:     &latestErr,
+		LatestFailureAt: &latestAt,
+	}, summary, "summary should include the exact recent failure count and latest failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestWebhookDeliveryStore_MarkIgnored(t *testing.T) {
 	t.Parallel()
 

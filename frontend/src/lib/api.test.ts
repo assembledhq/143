@@ -823,6 +823,371 @@ describe('api client', () => {
       expect(result.data[0].provider).toBe('github');
       expect(result.data[1].provider).toBe('sentry');
     });
+
+    it('connects PagerDuty and manages service repository mappings', async () => {
+      let connectBody: Record<string, unknown> | undefined;
+      let mappingBody: Record<string, unknown> | undefined;
+      let sessionStartBody: Record<string, unknown> | undefined;
+      let webhookSetupBody: Record<string, unknown> | undefined;
+
+      server.use(
+        http.get('/api/v1/integrations/pagerduty', () => {
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'pd-1',
+                org_id: 'org-1',
+                integration_id: 'int-pd',
+                status: 'active',
+                account_subdomain: 'acme',
+                default_repository_id: 'repo-1',
+                writeback_enabled: true,
+                connected_at: '2026-06-01T00:00:00Z',
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          });
+        }),
+        http.post('/api/v1/integrations/pagerduty/connect', async ({ request }) => {
+          connectBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json({
+            data: {
+              id: 'pd-1',
+              org_id: 'org-1',
+              integration_id: 'int-pd',
+              status: 'active',
+              account_subdomain: 'acme',
+              default_repository_id: 'repo-1',
+              writeback_enabled: true,
+              connected_at: '2026-06-01T00:00:00Z',
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+        http.post('/api/v1/integrations/pagerduty/test', ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('id')).toBe('pd-1');
+          return HttpResponse.json({
+            data: {
+              integration: {
+                id: 'pd-1',
+                org_id: 'org-1',
+                integration_id: 'int-pd',
+                status: 'active',
+                writeback_enabled: true,
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+              credential_configured: true,
+              auth_ok: true,
+              webhook_secret_configured: true,
+              symptoms: [],
+            },
+          });
+        }),
+        http.get('/api/v1/integrations/pagerduty/services', ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('id')).toBe('pd-1');
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'P123',
+                summary: 'API',
+                html_url: 'https://acme.pagerduty.com/service-directory/P123',
+                escalation_policy: 'Core',
+                team_ids: ['T1'],
+              },
+            ],
+            meta: {},
+          });
+        }),
+        http.get('/api/v1/integrations/pagerduty/webhook-setup', ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('id')).toBe('pd-1');
+          return HttpResponse.json({
+            data: {
+              pagerduty_integration_id: 'pd-1',
+              integration_id: 'int-pd',
+              webhook_url:
+                'https://api.143.dev/api/v1/webhooks/pagerduty?integration_id=int-pd&pagerduty_integration_id=pd-1',
+              webhook_secret_configured: true,
+            },
+          });
+        }),
+        http.post('/api/v1/integrations/pagerduty/webhook-setup', async ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('id')).toBe('pd-1');
+          webhookSetupBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json(
+            {
+              data: {
+                pagerduty_integration_id: 'pd-1',
+                integration_id: 'int-pd',
+                webhook_url:
+                  'https://api.143.dev/api/v1/webhooks/pagerduty?integration_id=int-pd&pagerduty_integration_id=pd-1',
+                webhook_secret_configured: true,
+                webhook_subscription_id: 'PWEBHOOK',
+                service_id: 'P123',
+                events: ['incident.triggered', 'incident.resolved'],
+              },
+            },
+            { status: 201 },
+          );
+        }),
+        http.get('/api/v1/integrations/pagerduty/mappings', ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('integration_id')).toBe('pd-1');
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'mapping-1',
+                org_id: 'org-1',
+                pagerduty_integration_id: 'pd-1',
+                pagerduty_service_id: 'P123',
+                pagerduty_service_name: 'API',
+                repository_id: 'repo-1',
+                base_branch: 'main',
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          });
+        }),
+        http.post('/api/v1/integrations/pagerduty/mappings', async ({ request }) => {
+          mappingBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json({
+            data: {
+              id: 'mapping-1',
+              org_id: 'org-1',
+              pagerduty_integration_id: 'pd-1',
+              pagerduty_service_id: 'P123',
+              pagerduty_service_name: 'API',
+              repository_id: 'repo-1',
+              base_branch: 'main',
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+        http.get('/api/v1/integrations/pagerduty/incidents', ({ request }) => {
+          const url = new URL(request.url);
+          expect(url.searchParams.get('integration_id')).toBe('pd-1');
+          expect(url.searchParams.get('status')).toBe('triggered');
+          expect(url.searchParams.get('service_id')).toBe('P123');
+          expect(url.searchParams.get('limit')).toBe('10');
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'mirror-1',
+                org_id: 'org-1',
+                pagerduty_integration_id: 'pd-1',
+                incident_id: 'PINCIDENT',
+                title: 'API latency',
+                status: 'triggered',
+                assigned_user_ids: [],
+                team_ids: ['T1'],
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          });
+        }),
+        http.get('/api/v1/integrations/pagerduty/incidents/:incidentId', ({ params }) => {
+          expect(params.incidentId).toBe('PINCIDENT');
+          return HttpResponse.json({
+            data: {
+              id: 'mirror-1',
+              org_id: 'org-1',
+              pagerduty_integration_id: 'pd-1',
+              incident_id: 'PINCIDENT',
+              title: 'API latency',
+              status: 'triggered',
+              assigned_user_ids: [],
+              team_ids: ['T1'],
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+        http.post('/api/v1/integrations/pagerduty/incidents/:incidentId/session', async ({ params, request }) => {
+          expect(params.incidentId).toBe('PINCIDENT');
+          sessionStartBody = (await request.json()) as Record<string, unknown>;
+          return HttpResponse.json({
+            data: {
+              id: 'session-1',
+              org_id: 'org-1',
+              status: 'pending',
+              created_at: '2026-06-01T00:00:00Z',
+              updated_at: '2026-06-01T00:00:00Z',
+            },
+          });
+        }),
+      );
+
+      const listResult = await api.integrations.listPagerDuty();
+      expect(listResult.data[0].account_subdomain).toBe('acme');
+
+      await api.integrations.connectPagerDuty({
+        access_token: 'pd-token',
+        webhook_secret: 'webhook-secret',
+        account_subdomain: 'acme',
+        oauth_mode: 'scoped',
+        default_repository_id: 'repo-1',
+        writeback_enabled: true,
+      });
+      expect(connectBody).toMatchObject({
+        access_token: 'pd-token',
+        webhook_secret: 'webhook-secret',
+        account_subdomain: 'acme',
+        oauth_mode: 'scoped',
+        default_repository_id: 'repo-1',
+        writeback_enabled: true,
+      });
+
+      const mappings = await api.integrations.listPagerDutyMappings('pd-1');
+      expect(mappings.data[0].pagerduty_service_id).toBe('P123');
+
+      const health = await api.integrations.testPagerDuty('pd-1');
+      expect(health.data.auth_ok).toBe(true);
+
+      const services = await api.integrations.listPagerDutyServices('pd-1');
+      expect(services.data[0].id).toBe('P123');
+
+      const setup = await api.integrations.getPagerDutyWebhookSetup('pd-1');
+      expect(setup.data.webhook_secret_configured).toBe(true);
+
+      const createdSetup = await api.integrations.createPagerDutyWebhookSetup(
+        {
+          service_id: 'P123',
+          description: '143 API incidents',
+          events: ['incident.triggered', 'incident.resolved'],
+        },
+        'pd-1',
+      );
+      expect(createdSetup.data.webhook_subscription_id).toBe('PWEBHOOK');
+      expect(webhookSetupBody).toMatchObject({
+        service_id: 'P123',
+        description: '143 API incidents',
+        events: ['incident.triggered', 'incident.resolved'],
+      });
+
+      await api.integrations.upsertPagerDutyMapping({
+        pagerduty_integration_id: 'pd-1',
+        pagerduty_service_id: 'P123',
+        pagerduty_service_name: 'API',
+        repository_id: 'repo-1',
+        base_branch: 'main',
+      });
+
+      const incidents = await api.integrations.listPagerDutyIncidents({
+        integration_id: 'pd-1',
+        status: 'triggered',
+        service_id: 'P123',
+        limit: 10,
+      });
+      expect(incidents.data[0].incident_id).toBe('PINCIDENT');
+
+      const incident = await api.integrations.getPagerDutyIncident('PINCIDENT', 'pd-1');
+      expect(incident.data.title).toBe('API latency');
+
+      const session = await api.integrations.startPagerDutyIncidentSession('PINCIDENT', {
+        pagerduty_integration_id: 'pd-1',
+        repository_id: 'repo-1',
+        base_branch: 'main',
+        message: 'Investigate',
+      });
+      expect(session.data.id).toBe('session-1');
+      expect(sessionStartBody).toMatchObject({
+        pagerduty_integration_id: 'pd-1',
+        repository_id: 'repo-1',
+        base_branch: 'main',
+        message: 'Investigate',
+      });
+      expect(mappingBody).toMatchObject({
+        pagerduty_integration_id: 'pd-1',
+        pagerduty_service_id: 'P123',
+        pagerduty_service_name: 'API',
+        repository_id: 'repo-1',
+        base_branch: 'main',
+      });
+    });
+  });
+
+  describe('automations', () => {
+    it('lists and replaces generic event triggers', async () => {
+      let replaceBody: unknown;
+
+      server.use(
+        http.get('/api/v1/automations/:id/event-triggers', ({ params }) => {
+          expect(params.id).toBe('automation-1');
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'trigger-1',
+                org_id: 'org-1',
+                automation_id: 'automation-1',
+                provider: 'pagerduty',
+                event_types: ['incident.triggered'],
+                filter: { service_ids: ['P123'] },
+                repository_id: 'repo-1',
+                enabled: true,
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          });
+        }),
+        http.put('/api/v1/automations/:id/event-triggers', async ({ params, request }) => {
+          expect(params.id).toBe('automation-1');
+          replaceBody = await request.json();
+          return HttpResponse.json({
+            data: [
+              {
+                id: 'trigger-1',
+                org_id: 'org-1',
+                automation_id: 'automation-1',
+                provider: 'pagerduty',
+                event_types: ['incident.triggered'],
+                filter: { service_ids: ['P123'] },
+                repository_id: 'repo-1',
+                enabled: true,
+                created_at: '2026-06-01T00:00:00Z',
+                updated_at: '2026-06-01T00:00:00Z',
+              },
+            ],
+            meta: {},
+          });
+        }),
+      );
+
+      const triggers = await api.automations.listEventTriggers('automation-1');
+      expect(triggers.data[0].provider).toBe('pagerduty');
+
+      await api.automations.replaceEventTriggers('automation-1', [
+        {
+          provider: 'pagerduty',
+          event_types: ['incident.triggered'],
+          filter: { service_ids: ['P123'] },
+          repository_id: 'repo-1',
+          enabled: true,
+        },
+      ]);
+      expect(replaceBody).toEqual([
+        {
+          provider: 'pagerduty',
+          event_types: ['incident.triggered'],
+          filter: { service_ids: ['P123'] },
+          repository_id: 'repo-1',
+          enabled: true,
+        },
+      ]);
+    });
   });
 
   describe('memories', () => {

@@ -1,6 +1,6 @@
 # Design: PagerDuty Integration
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-19
+> **Status:** Implemented V1 | **Last reviewed:** 2026-06-20
 
 ## Summary
 
@@ -8,6 +8,24 @@ PagerDuty should become a first-class incident source and automation trigger for
 143. The integration should turn PagerDuty incidents into normalized 143 issues,
 allow teams to start coding sessions from an incident, and let automations run
 when selected incident conditions are met.
+
+## Implementation Status
+
+The v1 path is implemented: PagerDuty integration records and encrypted
+credentials, OAuth/connect flows, service discovery, service-to-repository
+mappings, webhook subscription setup, signed/shared-secret webhook ingress,
+inbound event durability, incident-to-issue normalization,
+`pagerduty_incidents` mirroring, periodic reconciliation polling, authenticated
+and PagerDuty-side manual session start, PagerDuty event-triggered automation
+runs, settings UI with OAuth install/reauthorize and PagerDuty setup endpoints,
+automation composer UI, the sandbox `143-tools pagerduty` namespace with
+write tools gated by the integration writeback setting, audit/metrics coverage,
+health surfacing for webhook/writeback failures, and concise writebacks for
+session start, non-no-op automation completion/failure, and PR creation.
+
+Remaining work is product polish rather than a design gap: richer dedicated
+incident dashboards, service-mapping suggestions, configurable annotation
+commands, and broader PagerDuty-side mutation policies.
 
 The product shape should be:
 
@@ -133,7 +151,7 @@ governed than a personal IDE-level trigger.
 ### PagerDuty incidents become issues
 
 PagerDuty should plug into the existing ingestion model from
-[04-ingestion.md](../implemented/04-ingestion.md). A PagerDuty incident is a
+[04-ingestion.md](04-ingestion.md). A PagerDuty incident is a
 source issue with:
 
 - `source = "pagerduty"`
@@ -596,10 +614,7 @@ POST   /api/v1/integrations/pagerduty/incidents/{incident_id}/session
 {
   "repository_id": "00000000-0000-0000-0000-000000000000",
   "base_branch": "main",
-  "goal": "Investigate the incident, identify likely root cause, and open a PR if a small safe fix is available.",
-  "agent_type": "codex",
-  "model_override": null,
-  "writeback_to_pagerduty": true
+  "message": "Investigate the incident, identify likely root cause, and open a PR if a small safe fix is available."
 }
 ```
 
@@ -608,45 +623,67 @@ Response:
 ```json
 {
   "data": {
-    "session_id": "00000000-0000-0000-0000-000000000000",
-    "issue_id": "00000000-0000-0000-0000-000000000001",
-    "incident_id": "PABC123",
-    "status": "created"
+    "id": "00000000-0000-0000-0000-000000000000",
+    "org_id": "00000000-0000-0000-0000-000000000001",
+    "primary_issue_id": "00000000-0000-0000-0000-000000000002",
+    "status": "pending",
+    "origin": "manual"
   }
 }
 ```
 
 Errors:
 
-- `404 PAGERDUTY_INCIDENT_NOT_FOUND`
+- `404 NOT_FOUND`
 - `409 PAGERDUTY_SESSION_ALREADY_RUNNING`
-- `422 PAGERDUTY_REPOSITORY_UNMAPPED`
+- `400 REPOSITORY_UNMAPPED`
 - `503 PAGERDUTY_UNAVAILABLE`
 
 ### Webhook endpoint
 
 ```http
-POST /api/v1/webhooks/pagerduty?integration_id=<uuid>
+POST /api/v1/webhooks/pagerduty?integration_id=<generic-integration-uuid>&pagerduty_integration_id=<pagerduty-install-uuid>
 ```
 
 Behavior:
 
-- Verify PagerDuty webhook signature if available. If using Custom Incident
-  Actions or Web API workflows, verify the configured shared header secret.
+- Verify PagerDuty webhook signature or the configured shared header secret.
+- Resolve `pagerduty_integration_id` to the exact PagerDuty install and verify
+  against that install's credential; generic-only URLs remain supported for
+  legacy single-account installs.
 - Persist `webhook_deliveries` and `pagerduty_inbound_events`.
 - Ack quickly with `200` after persistence and enqueue.
 - Return `401` for invalid signatures/secrets.
 - Return `500` only when persistence/enqueue fails so PagerDuty retries.
 
+### PagerDuty Custom Incident Action endpoint
+
+```http
+POST /api/v1/webhooks/pagerduty/start-session?integration_id=<generic-integration-uuid>&pagerduty_integration_id=<pagerduty-install-uuid>
+```
+
+Behavior:
+
+- Verify the same PagerDuty HMAC/shared-header secret before payload parsing.
+- Accept a root `incident_id`, a root `incident.id`, or a normal PagerDuty event
+  payload and resolve the mirrored incident by PagerDuty incident ID.
+- Resolve the repository in this order: explicit `repository_id`, service
+  mapping, then the PagerDuty integration default repository.
+- Start through the same session starter as the authenticated 143 action, so
+  duplicate active sessions return `409 PAGERDUTY_SESSION_ALREADY_RUNNING` and
+  successful starts run the normal PagerDuty start writeback hook.
+- Return `404 NOT_FOUND` when the incident has not been ingested yet and
+  `400 REPOSITORY_UNMAPPED` when no repository can be resolved.
+
 ### Automation trigger API changes
 
-Extend automation create/update/read payloads with `triggers`.
+Extend automation create/update/read payloads with `event_triggers`.
 
 Create/update request fragment:
 
 ```json
 {
-  "triggers": [
+  "event_triggers": [
     {
       "provider": "pagerduty",
       "event_types": ["incident.triggered", "incident.priority_updated"],
@@ -660,15 +697,21 @@ Create/update request fragment:
 }
 ```
 
-Read response includes persisted trigger IDs:
+Read responses embed persisted trigger rows with IDs:
 
 ```json
 {
   "id": "00000000-0000-0000-0000-000000000000",
-  "provider": "pagerduty",
-  "event_types": ["incident.triggered"],
-  "filter": {"service_ids": ["P123"]},
-  "enabled": true
+  "name": "P1 PagerDuty triage",
+  "event_triggers": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "provider": "pagerduty",
+      "event_types": ["incident.triggered"],
+      "filter": {"service_ids": ["P123"]},
+      "enabled": true
+    }
+  ]
 }
 ```
 
@@ -786,8 +829,8 @@ Writeback should be concise and configurable:
 - On session start: add a note with the 143 session URL.
 - On PR opened: add a note with PR URL and summary.
 - On session failure: add a note with failure summary and 143 session URL.
-- On no-op completion: add a note only if the session was manually started from
-  PagerDuty or the automation setting requests no-op writeback.
+- On no-op automation completion: skip PagerDuty writeback by default. Manual
+  PagerDuty-started sessions still write terminal session status.
 
 Do not stream raw agent logs into PagerDuty. Use 143 as the transcript.
 
@@ -859,8 +902,9 @@ The goal editor should insert a structured starter prompt for incident work.
   a job, and avoid starting a session with only a partial incident snapshot
   unless the trigger explicitly allows partial context.
 - **Writeback failure:** Never fail a session or automation run because a
-  PagerDuty note/status update failed. Log and surface the writeback failure on
-  integration health.
+  PagerDuty note/status update failed. Log, audit, mark the integration
+  degraded, and surface the writeback failure on integration health. A later
+  successful writeback clears the degraded health state.
 - **OAuth revoked or scopes reduced:** Mark the integration degraded, stop
   polling and writeback, keep accepting signed webhooks if verification still
   works, and show a re-authorize action in settings.
@@ -882,18 +926,26 @@ Logs should include `org_id`, `integration_id`, `incident_id`,
 Health should show recent webhook failures from `webhook_deliveries`, credential
 health, last sync time, and writeback failures.
 
-## Rollout Plan
+## Implementation Record
 
-1. **Read and ingest.** Add PagerDuty integration setup, webhook verification,
-   incident mirror, issue normalization, polling reconciliation, and issue UI.
-2. **Manual start.** Add `Start session` from 143 and PagerDuty Custom Incident
-   Action support, including optional start/finish writeback notes.
-3. **Event triggers.** Add `automation_event_triggers`, PagerDuty trigger
-   matching, run context snapshots, and composer UI.
-4. **Agent tools.** Add read-only `143-tools pagerduty` commands and inject the
-   compact namespace help into sandbox agent context.
-5. **Writeback and polish.** Add PR/failure/no-op writebacks, health dashboard,
-   service mapping suggestions, and docs.
+1. **Read and ingest.** PagerDuty integration setup, webhook verification,
+   durable inbound events, incident mirrors, issue normalization, and polling
+   reconciliation are implemented.
+2. **Manual start.** Both authenticated 143 start-session and signed
+   PagerDuty Custom Incident Action start-session paths are implemented with
+   duplicate active-session protection and start writeback notes.
+3. **Event triggers.** PagerDuty automation trigger matching, run context
+   snapshots, repository resolution, cooldown/max-concurrency behavior, and
+   composer UI are implemented.
+4. **Agent tools.** The `143-tools pagerduty` namespace is implemented for
+   incident, note, log-entry, service, on-call, related-incident, and bounded
+   writeback commands. Read tools require the PagerDuty token; write tools also
+   require `PAGERDUTY_WRITEBACK_ENABLED=true`, derived from the org integration
+   setting.
+5. **Writeback and observability.** Session start, non-no-op automation
+   terminal status, and PR-open writebacks are implemented with PagerDuty-
+   specific metrics, audit events, degraded-health updates on failure, and
+   recovery health clearing on later success.
 
 ## Open Questions
 
