@@ -2143,6 +2143,45 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 		}
 	}
 
+	// Guard against recycling onto a sandbox container that no longer exists.
+	// Recycle reuses the sandbox recorded at first launch (input.Sandbox); if
+	// that container was removed out-of-band (OOM, crash, prune) after the
+	// preview went ready, reusing it fails deep inside provisionInfra with a
+	// confusing "No such container" error and hard-fails the preview. Probe
+	// liveness first — the same guard the launch-time reuse path applies — and
+	// only recycle in place when the container is definitively alive.
+	if m.sandboxProvider != nil && input.Sandbox != nil && input.Sandbox.ID != "" {
+		alive, aliveErr := m.sandboxProvider.IsAlive(ctx, input.Sandbox)
+		switch {
+		case aliveErr != nil:
+			// Indeterminate — the container may well be healthy. Don't disturb
+			// a possibly-running preview; the scheduled-recycle marker persists
+			// so the next recycler sweep retries the probe.
+			m.logger.Warn().Err(aliveErr).
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox liveness probe failed; skipping this sweep")
+			return nil
+		case !alive:
+			// Definitively gone. The preview's workspace died with the
+			// container, so there is nothing to recycle in place. Fail with an
+			// actionable message; relaunching cold-starts a fresh sandbox.
+			const deadSandboxReason = "preview sandbox was removed; relaunch to recreate it"
+			m.logger.Warn().
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox container no longer exists; failing preview so it can be relaunched")
+			if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, deadSandboxReason); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Str("preview_id", previewID.String()).Msg("recycle: failed to set failed status after dead sandbox")
+			}
+			if schedErr := m.store.ClearRecycleSchedule(ctx, orgID, previewID); schedErr != nil {
+				m.logger.Warn().Err(schedErr).Str("preview_id", previewID.String()).Msg("recycle: failed to clear recycle schedule after dead sandbox")
+			}
+			m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
+			return fmt.Errorf("recycle: sandbox container %s no longer exists", input.Sandbox.ID)
+		}
+	}
+
 	m.logger.Info().Str("preview_id", previewID.String()).Msg("recycling preview")
 
 	// Stop any running poll goroutine before recycling, so it cannot race
