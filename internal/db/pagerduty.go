@@ -366,28 +366,33 @@ func (s *PagerDutyIncidentStore) Upsert(ctx context.Context, incident *models.Pa
 		)
 		ON CONFLICT (org_id, pagerduty_integration_id, incident_id) DO UPDATE
 		SET issue_id = COALESCE(EXCLUDED.issue_id, pagerduty_incidents.issue_id),
-			incident_number = EXCLUDED.incident_number,
-			html_url = EXCLUDED.html_url,
-			title = EXCLUDED.title,
-			status = EXCLUDED.status,
-			urgency = EXCLUDED.urgency,
-			priority_id = EXCLUDED.priority_id,
-			priority_name = EXCLUDED.priority_name,
-			service_id = EXCLUDED.service_id,
-			service_name = EXCLUDED.service_name,
-			escalation_policy_id = EXCLUDED.escalation_policy_id,
-			escalation_policy_name = EXCLUDED.escalation_policy_name,
-			incident_type = EXCLUDED.incident_type,
-			assigned_user_ids = EXCLUDED.assigned_user_ids,
-			team_ids = EXCLUDED.team_ids,
-			latest_note = EXCLUDED.latest_note,
-			raw_data = EXCLUDED.raw_data,
+			-- Latest-state columns only advance when the incoming event is at
+			-- least as recent as the stored one. PagerDuty webhooks are
+			-- at-least-once and may arrive out of order; without this guard a
+			-- delayed incident.triggered redelivered after incident.resolved
+			-- would clobber status back to 'triggered'.
+			incident_number = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.incident_number ELSE pagerduty_incidents.incident_number END,
+			html_url = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.html_url ELSE pagerduty_incidents.html_url END,
+			title = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.title ELSE pagerduty_incidents.title END,
+			status = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.status ELSE pagerduty_incidents.status END,
+			urgency = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.urgency ELSE pagerduty_incidents.urgency END,
+			priority_id = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.priority_id ELSE pagerduty_incidents.priority_id END,
+			priority_name = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.priority_name ELSE pagerduty_incidents.priority_name END,
+			service_id = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.service_id ELSE pagerduty_incidents.service_id END,
+			service_name = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.service_name ELSE pagerduty_incidents.service_name END,
+			escalation_policy_id = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.escalation_policy_id ELSE pagerduty_incidents.escalation_policy_id END,
+			escalation_policy_name = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.escalation_policy_name ELSE pagerduty_incidents.escalation_policy_name END,
+			incident_type = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.incident_type ELSE pagerduty_incidents.incident_type END,
+			assigned_user_ids = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.assigned_user_ids ELSE pagerduty_incidents.assigned_user_ids END,
+			team_ids = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.team_ids ELSE pagerduty_incidents.team_ids END,
+			latest_note = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.latest_note ELSE pagerduty_incidents.latest_note END,
+			raw_data = CASE WHEN COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz) >= COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz) THEN EXCLUDED.raw_data ELSE pagerduty_incidents.raw_data END,
 			triggered_at = COALESCE(EXCLUDED.triggered_at, pagerduty_incidents.triggered_at),
 			acknowledged_at = COALESCE(EXCLUDED.acknowledged_at, pagerduty_incidents.acknowledged_at),
 			resolved_at = COALESCE(EXCLUDED.resolved_at, pagerduty_incidents.resolved_at),
 			last_event_at = GREATEST(COALESCE(pagerduty_incidents.last_event_at, '-infinity'::timestamptz), COALESCE(EXCLUDED.last_event_at, '-infinity'::timestamptz)),
 			updated_at = now()
-		RETURNING id, created_at, updated_at`,
+		RETURNING id, status, last_event_at, created_at, updated_at`,
 		pgx.NamedArgs{
 			"org_id":                   incident.OrgID,
 			"pagerduty_integration_id": incident.PagerDutyIntegrationID,
@@ -414,7 +419,7 @@ func (s *PagerDutyIncidentStore) Upsert(ctx context.Context, incident *models.Pa
 			"resolved_at":              incident.ResolvedAt,
 			"last_event_at":            incident.LastEventAt,
 		})
-	if err := row.Scan(&incident.ID, &incident.CreatedAt, &incident.UpdatedAt); err != nil {
+	if err := row.Scan(&incident.ID, &incident.Status, &incident.LastEventAt, &incident.CreatedAt, &incident.UpdatedAt); err != nil {
 		return fmt.Errorf("upsert pagerduty incident: %w", err)
 	}
 	return nil
@@ -428,20 +433,27 @@ func (s *PagerDutyIncidentStore) List(ctx context.Context, orgID uuid.UUID, filt
 	if limit > 100 {
 		limit = 100
 	}
-	where := []string{"org_id = @org_id"}
+	// org_id is inlined (not threaded through the dynamic `where` slice) so the
+	// org scoping is self-evident in the SQL literal and the multi-tenancy lint
+	// can verify it statically.
+	var filters []string
 	if filter.IntegrationID != nil {
-		where = append(where, "pagerduty_integration_id = @integration_id")
+		filters = append(filters, "pagerduty_integration_id = @integration_id")
 	}
 	if filter.Status != "" {
-		where = append(where, "status = @status")
+		filters = append(filters, "status = @status")
 	}
 	if filter.ServiceID != "" {
-		where = append(where, "service_id = @service_id")
+		filters = append(filters, "service_id = @service_id")
+	}
+	filterClause := ""
+	if len(filters) > 0 {
+		filterClause = " AND " + strings.Join(filters, " AND ")
 	}
 	query := fmt.Sprintf(`SELECT %s FROM pagerduty_incidents
-		WHERE %s
+		WHERE org_id = @org_id%s
 		ORDER BY COALESCE(last_event_at, updated_at, created_at) DESC, id DESC
-		LIMIT @limit`, pagerDutyIncidentColumns, strings.Join(where, " AND "))
+		LIMIT @limit`, pagerDutyIncidentColumns, filterClause)
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":         orgID,
 		"integration_id": filter.IntegrationID,

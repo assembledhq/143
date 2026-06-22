@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -13,6 +14,17 @@ import (
 )
 
 var ErrPagerDutySessionAlreadyRunning = errors.New("pagerduty session already running")
+
+// pagerDutyIncidentSessionCooldown is the minimum time between incident-triggered
+// sessions for the same issue. It prevents a flapping incident from repeatedly
+// spawning fresh sessions once a prior session has finished.
+const pagerDutyIncidentSessionCooldown = 10 * time.Minute
+
+// lockedIncidentSessionStore is the optional atomic-create capability used to
+// dedup concurrent incident sessions. *db.SessionStore implements it.
+type lockedIncidentSessionStore interface {
+	CreateForIncident(ctx context.Context, orgID, issueID uuid.UUID, cooldown time.Duration, session *models.Session) (created bool, existing models.Session, err error)
+}
 
 type StartSessionInput struct {
 	OrgID           uuid.UUID
@@ -79,18 +91,6 @@ func (s *SessionStarter) StartSession(ctx context.Context, input StartSessionInp
 	if input.RepositoryID == uuid.Nil {
 		return models.Session{}, fmt.Errorf("repository_id is required")
 	}
-	if input.Incident.IssueID != nil && *input.Incident.IssueID != uuid.Nil {
-		sessions, err := s.sessions.ListByIssue(ctx, input.OrgID, *input.Incident.IssueID)
-		if err != nil {
-			return models.Session{}, fmt.Errorf("list existing PagerDuty incident sessions: %w", err)
-		}
-		for _, session := range sessions {
-			if sessionActiveForPagerDutyIncident(session.Status) {
-				return session, ErrPagerDutySessionAlreadyRunning
-			}
-		}
-	}
-
 	message := strings.TrimSpace(input.Message)
 	if message == "" {
 		message = BuildIncidentSessionPrompt(input.Incident)
@@ -112,8 +112,42 @@ func (s *SessionStarter) StartSession(ctx context.Context, input StartSessionInp
 		TargetBranch:      input.BaseBranch,
 		RepositoryID:      &input.RepositoryID,
 	}
-	if err := s.sessions.Create(ctx, session); err != nil {
-		return models.Session{}, fmt.Errorf("create PagerDuty incident session: %w", err)
+
+	hasIssue := input.Incident.IssueID != nil && *input.Incident.IssueID != uuid.Nil
+	switch {
+	case hasIssue:
+		// Prefer the atomic, advisory-locked create when the store supports it
+		// (production *db.SessionStore). This closes the read-then-write race
+		// where two concurrent webhook deliveries for the same incident each
+		// spawn a session, and enforces a restart cooldown for flapping
+		// incidents. Test fakes that don't implement it fall back to the
+		// best-effort check below.
+		if locker, ok := s.sessions.(lockedIncidentSessionStore); ok {
+			created, existing, err := locker.CreateForIncident(ctx, input.OrgID, *input.Incident.IssueID, pagerDutyIncidentSessionCooldown, session)
+			if err != nil {
+				return models.Session{}, fmt.Errorf("create PagerDuty incident session: %w", err)
+			}
+			if !created {
+				return existing, ErrPagerDutySessionAlreadyRunning
+			}
+		} else {
+			existingSessions, err := s.sessions.ListByIssue(ctx, input.OrgID, *input.Incident.IssueID)
+			if err != nil {
+				return models.Session{}, fmt.Errorf("list existing PagerDuty incident sessions: %w", err)
+			}
+			for _, existing := range existingSessions {
+				if sessionActiveForPagerDutyIncident(existing.Status) {
+					return existing, ErrPagerDutySessionAlreadyRunning
+				}
+			}
+			if err := s.sessions.Create(ctx, session); err != nil {
+				return models.Session{}, fmt.Errorf("create PagerDuty incident session: %w", err)
+			}
+		}
+	default:
+		if err := s.sessions.Create(ctx, session); err != nil {
+			return models.Session{}, fmt.Errorf("create PagerDuty incident session: %w", err)
+		}
 	}
 	if s.providerState != nil && input.Incident.IssueID != nil && *input.Incident.IssueID != uuid.Nil {
 		state := pagerDutyProviderStateFromIncident(input.Incident, input.ProviderEventID)

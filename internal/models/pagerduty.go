@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -262,6 +263,40 @@ func (c PagerDutyConfig) Validate() error {
 		return fmt.Errorf("access_token or webhook_secret is required")
 	}
 	return nil
+}
+
+// IsExpired reports whether the access token's known expiry is in the past.
+// Rows with no recorded expiry (legacy/classic tokens) are never expired.
+func (c PagerDutyConfig) IsExpired() bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().After(c.ExpiresAt)
+}
+
+// NeedsRefresh reports whether the access token expires within the given
+// window. Rows with no recorded expiry (legacy/classic tokens) do not
+// proactively refresh.
+func (c PagerDutyConfig) NeedsRefresh(window time.Duration) bool {
+	if c.ExpiresAt.IsZero() {
+		return false
+	}
+	return time.Now().Add(window).After(c.ExpiresAt)
+}
+
+// PagerDutyAPIBaseURL returns the REST API base URL for a service region.
+// PagerDuty hosts EU accounts on a separate domain; using the US endpoint with
+// an EU token fails authentication.
+func PagerDutyAPIBaseURL(serviceRegion string) string {
+	if strings.EqualFold(strings.TrimSpace(serviceRegion), "eu") {
+		return "https://api.eu.pagerduty.com"
+	}
+	return "https://api.pagerduty.com"
+}
+
+// APIBaseURL returns the REST API base URL for this credential's region.
+func (c PagerDutyConfig) APIBaseURL() string {
+	return PagerDutyAPIBaseURL(c.ServiceRegion)
 }
 
 func (c PagerDutyConfig) MaskedSummary() CredentialSummary {

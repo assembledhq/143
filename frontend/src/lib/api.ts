@@ -815,16 +815,24 @@ export const api = {
     },
     connectPagerDuty: (body: import('./types').PagerDutyConnectRequest) =>
       post<import('./types').SingleResponse<import('./types').PagerDutyIntegration>>('/api/v1/integrations/pagerduty/connect', body),
-    updatePagerDuty: (body: {
-      default_repository_id?: string | null;
-      writeback_enabled?: boolean;
-      auto_create_webhook?: boolean;
-      status?: import('./types').PagerDutyIntegrationStatus;
-    }) =>
-      request<import('./types').SingleResponse<import('./types').PagerDutyIntegration>>('/api/v1/integrations/pagerduty', {
-        method: 'PATCH',
-        body: JSON.stringify(body),
-      }),
+    updatePagerDuty: (
+      body: {
+        default_repository_id?: string | null;
+        writeback_enabled?: boolean;
+        auto_create_webhook?: boolean;
+        status?: import('./types').PagerDutyIntegrationStatus;
+      },
+      integrationId?: string,
+    ) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return request<import('./types').SingleResponse<import('./types').PagerDutyIntegration>>(
+        `/api/v1/integrations/pagerduty${qs}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        },
+      );
+    },
     testPagerDuty: (integrationId?: string) => {
       const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
       return post<import('./types').SingleResponse<import('./types').PagerDutyHealth>>(`/api/v1/integrations/pagerduty/test${qs}`);

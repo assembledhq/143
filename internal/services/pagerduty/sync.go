@@ -169,7 +169,7 @@ func (s *Syncer) syncIncident(ctx context.Context, orgID uuid.UUID, integration 
 		rawPayload = json.RawMessage(`{}`)
 	}
 	parsed := ParsedEvent{
-		ProviderEventID: "pagerduty_sync:" + incident.ID,
+		ProviderEventID: pagerDutySyncEventIDPrefix + incident.ID,
 		EventType:       eventTypeForPolledIncident(incident),
 		OccurredAt:      occurredAt,
 		Incident:        incident,
@@ -186,12 +186,15 @@ func (s *Syncer) syncIncident(ctx context.Context, orgID uuid.UUID, integration 
 	if issue == nil || issue.ID == uuid.Nil {
 		return errors.New("ingest polled pagerduty incident returned no issue id")
 	}
-	if err := s.deps.Issues.UpdateStatus(ctx, orgID, issue.ID, normalized.IssueStatus); err != nil {
-		return fmt.Errorf("update polled pagerduty issue status: %w", err)
-	}
+	// Upsert first so the incident row holds the authoritative, recency-guarded
+	// status, then derive the issue status from it (out-of-order safety; same
+	// rationale as the webhook processor).
 	normalized.Incident.IssueID = &issue.ID
 	if err := s.deps.Incidents.Upsert(ctx, &normalized.Incident); err != nil {
 		return fmt.Errorf("upsert polled pagerduty incident: %w", err)
+	}
+	if err := s.deps.Issues.UpdateStatus(ctx, orgID, issue.ID, IssueStatusForIncidentStatus(normalized.Incident.Status)); err != nil {
+		return fmt.Errorf("update polled pagerduty issue status: %w", err)
 	}
 	return nil
 }

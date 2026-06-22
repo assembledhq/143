@@ -44,6 +44,12 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"eval_bootstrap_runs",
 		"organization_memberships",
 		"coding_credentials",
+		"pagerduty_integrations",
+		"pagerduty_service_repo_mappings",
+		"pagerduty_incidents",
+		"pagerduty_inbound_events",
+		"automation_event_triggers",
+		"session_issue_link_provider_state",
 	}
 
 	// Tables exempt from org_id requirement (global or no org_id column)

@@ -425,13 +425,9 @@ func (c RESTWritebackClient) recordAPIRequest(ctx context.Context, endpoint stri
 }
 
 func pagerDutyProviderForConfig(cfg models.PagerDutyConfig) *integration.PagerDutyIncidentProvider {
-	baseURL := "https://api.pagerduty.com"
-	if strings.EqualFold(cfg.ServiceRegion, "eu") {
-		baseURL = "https://api.eu.pagerduty.com"
-	}
 	return integration.NewPagerDutyIncidentProvider(integration.PagerDutyProviderConfig{
 		AccessToken:      cfg.AccessToken,
-		BaseURL:          baseURL,
+		BaseURL:          cfg.APIBaseURL(),
 		WritebackEnabled: true,
 	})
 }

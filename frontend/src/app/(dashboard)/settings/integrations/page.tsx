@@ -1256,7 +1256,7 @@ function PagerDutyRoutingSettings({
     staleTime: 60_000,
   });
   const { data: incidentsResp, isLoading: incidentsLoading } = useQuery({
-    queryKey: ["integrations", "pagerduty", "incidents", integrationID],
+    queryKey: queryKeys.integrations.pagerDutyIncidents(integrationID),
     queryFn: () =>
       api.integrations.listPagerDutyIncidents({
         integration_id: integrationID,
@@ -1273,7 +1273,7 @@ function PagerDutyRoutingSettings({
       default_repository_id?: string | null;
       writeback_enabled?: boolean;
       auto_create_webhook?: boolean;
-    }) => api.integrations.updatePagerDuty(body),
+    }) => api.integrations.updatePagerDuty(body, integrationID),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.integrations.pagerDuty });
       queryClient.invalidateQueries({ queryKey: ["integrations"] });
@@ -1286,7 +1286,7 @@ function PagerDutyRoutingSettings({
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({
-        queryKey: ["integrations", "pagerduty", "incidents", integrationID],
+        queryKey: queryKeys.integrations.pagerDutyIncidents(integrationID),
       });
     },
   });
@@ -1477,7 +1477,10 @@ function PagerDutyRoutingSettings({
                   activeRepositories,
                   integration.default_repository_id,
                 )}
-                starting={startIncidentSession.isPending}
+                starting={
+                  startIncidentSession.isPending &&
+                  startIncidentSession.variables?.incident_id === incident.incident_id
+                }
                 onStart={() => startIncidentSession.mutate(incident)}
               />
             ))}
@@ -1605,6 +1608,22 @@ function PagerDutyHealthResult({ health }: { health: PagerDutyHealth }) {
   );
 }
 
+// safeHttpUrl returns the input only when it parses as an http(s) URL, so
+// untrusted values (e.g. a poisoned PagerDuty html_url) cannot inject a
+// javascript:/data: href. Returns undefined for anything else.
+function safeHttpUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return value;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function PagerDutyIncidentRow({
   incident,
   repositoryName,
@@ -1619,6 +1638,10 @@ function PagerDutyIncidentRow({
   const serviceLabel = incident.service_name || incident.service_id || "Unknown service";
   const repositoryMapped = repositoryName !== "Unmapped";
   const teams = incident.team_ids?.filter(Boolean) ?? [];
+  // incident.html_url originates from PagerDuty (stored, then echoed back).
+  // React does not block javascript:/data: hrefs, so validate the scheme
+  // before rendering it as a link.
+  const incidentUrl = safeHttpUrl(incident.html_url);
   return (
     <div className="grid gap-3 rounded-md border border-border px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
       <div className="min-w-0 space-y-2">
@@ -1638,9 +1661,9 @@ function PagerDutyIncidentRow({
         </div>
       </div>
       <div className="flex flex-wrap gap-2 sm:justify-end">
-        {incident.html_url ? (
+        {incidentUrl ? (
           <Button asChild size="sm" variant="ghost">
-            <a href={incident.html_url} target="_blank" rel="noreferrer" aria-label="Open incident in PagerDuty">
+            <a href={incidentUrl} target="_blank" rel="noreferrer" aria-label="Open incident in PagerDuty">
               <ExternalLink aria-hidden="true" />
               Open
             </a>

@@ -688,13 +688,13 @@ describe("IntegrationsPage", () => {
 
     await user.click(within(sheet).getByRole("switch", { name: "PagerDuty writeback" }));
     await waitFor(() => {
-      expect(updatePagerDutyMock).toHaveBeenCalledWith({ writeback_enabled: false });
+      expect(updatePagerDutyMock).toHaveBeenCalledWith({ writeback_enabled: false }, "pd-1");
     });
 
     await user.click(within(sheet).getByRole("combobox", { name: "Default PagerDuty repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/web" }));
     await waitFor(() => {
-      expect(updatePagerDutyMock).toHaveBeenCalledWith({ default_repository_id: "repo-2" });
+      expect(updatePagerDutyMock).toHaveBeenCalledWith({ default_repository_id: "repo-2" }, "pd-1");
     });
 
     await user.click(within(sheet).getByRole("button", { name: "Start session for Checkout outage" }));

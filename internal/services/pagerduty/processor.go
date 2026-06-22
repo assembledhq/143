@@ -122,16 +122,24 @@ func (p *Processor) ProcessInboundEvent(ctx context.Context, orgID, eventID uuid
 	if issue == nil || issue.ID == uuid.Nil {
 		return p.failEvent(ctx, orgID, eventID, errors.New("ingest pagerduty issue returned no issue id"))
 	}
-	if err := p.deps.Issues.UpdateStatus(ctx, orgID, issue.ID, normalized.IssueStatus); err != nil {
-		return p.failEvent(ctx, orgID, eventID, fmt.Errorf("update pagerduty issue status: %w", err))
-	}
 
+	// Upsert the incident first so its row reflects the authoritative,
+	// recency-guarded status (the DB upsert only advances latest-state columns
+	// for events that are at least as recent as what is stored). We then derive
+	// the issue status from that merged incident status rather than from this
+	// event in isolation — otherwise a delayed/redelivered incident.triggered
+	// arriving after incident.resolved would reopen an already-fixed issue.
 	normalized.Incident.IssueID = &issue.ID
 	if err := p.deps.Incidents.Upsert(ctx, &normalized.Incident); err != nil {
 		return p.failEvent(ctx, orgID, eventID, fmt.Errorf("upsert pagerduty incident: %w", err))
 	}
 
-	if p.deps.Triggers != nil {
+	issueStatus := IssueStatusForIncidentStatus(normalized.Incident.Status)
+	if err := p.deps.Issues.UpdateStatus(ctx, orgID, issue.ID, issueStatus); err != nil {
+		return p.failEvent(ctx, orgID, eventID, fmt.Errorf("update pagerduty issue status: %w", err))
+	}
+
+	if p.deps.Triggers != nil && eventCanTriggerAutomations(parsed.EventType) {
 		if err := p.deps.Triggers.TriggerPagerDutyEvent(ctx, EventTriggerRequest{
 			OrgID:           orgID,
 			PagerDuty:       integration,

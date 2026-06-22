@@ -66,8 +66,14 @@ func ParseEvent(payload json.RawMessage) (ParsedEvent, error) {
 	if len(payload) == 0 {
 		return ParsedEvent{}, errors.New("pagerduty payload is empty")
 	}
+	// Decode with UseNumber so large integer fields (e.g. incident_number)
+	// retain full precision and parse identically to the REST sync path
+	// (parseAPIIncident). A plain json.Unmarshal would decode every number as
+	// float64, truncating values past 2^53 and diverging from sync.
 	var root any
-	if err := json.Unmarshal(payload, &root); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&root); err != nil {
 		return ParsedEvent{}, fmt.Errorf("decode pagerduty payload: %w", err)
 	}
 	rootMap, ok := root.(map[string]any)
@@ -214,13 +220,18 @@ func NormalizeEvent(orgID uuid.UUID, integration models.PagerDutyIntegration, pa
 	applyEventTimestamps(parsed.EventType, parsed.OccurredAt, &incident)
 
 	issue := ingestion.NormalizedIssue{
-		ExternalID:            parsed.Incident.ID,
-		Source:                models.IssueSourcePagerDuty,
-		SourceIntegrationID:   *integration.IntegrationID,
-		Title:                 title,
-		Description:           incidentDescription(parsed),
-		Severity:              issueSeverity(parsed.Incident),
-		OccurrenceCount:       1,
+		ExternalID:          parsed.Incident.ID,
+		Source:              models.IssueSourcePagerDuty,
+		SourceIntegrationID: *integration.IntegrationID,
+		Title:               title,
+		Description:         incidentDescription(parsed),
+		Severity:            issueSeverity(parsed.Incident),
+		// The issue upsert ADDS EXCLUDED.occurrence_count on conflict. For
+		// PagerDuty one incident maps to one issue, so only a genuine
+		// incident.triggered counts as a new occurrence; acknowledged/resolved/
+		// status-update re-deliveries and periodic syncs must contribute 0 or
+		// they would inflate the count without bound.
+		OccurrenceCount:       occurrenceCountForEvent(parsed.EventType, parsed.ProviderEventID),
 		AffectedCustomerCount: 0,
 		Tags:                  incidentTags(parsed.Incident),
 		FirstSeenAt:           firstSeen,
@@ -384,14 +395,31 @@ func pagerDutySensitiveKey(key string) bool {
 }
 
 func looksLikeSensitivePagerDutyString(value string) bool {
-	lower := strings.ToLower(strings.TrimSpace(value))
+	trimmed := strings.TrimSpace(value)
+	lower := strings.ToLower(trimmed)
 	if strings.HasPrefix(lower, "bearer ") || strings.HasPrefix(lower, "token ") {
 		return true
 	}
-	if strings.Contains(lower, "@") && strings.Contains(lower, ".") {
-		return true
+	// Only redact values that are themselves an email address. Requiring the
+	// whole token to be a single, space-free address avoids nuking free-text
+	// notes/descriptions (which the agent needs to triage) just because they
+	// happen to mention an email or contain an "@".
+	return looksLikeEmail(trimmed)
+}
+
+// looksLikeEmail reports whether s is a bare email address: no whitespace,
+// exactly one "@", non-empty local part, and a dotted domain.
+func looksLikeEmail(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\r\n") {
+		return false
 	}
-	return false
+	at := strings.IndexByte(s, '@')
+	if at <= 0 || at != strings.LastIndexByte(s, '@') {
+		return false
+	}
+	domain := s[at+1:]
+	dot := strings.IndexByte(domain, '.')
+	return dot > 0 && dot < len(domain)-1
 }
 
 func firstMap(m map[string]any, keys ...string) map[string]any {
@@ -536,8 +564,49 @@ func parseLatestNote(m map[string]any) *string {
 	return nil
 }
 
+// pagerDutySyncEventIDPrefix marks a ParsedEvent that originated from the
+// reconciliation sync rather than a live webhook. Sync events must not count as
+// new occurrences (they re-observe existing incidents on every poll).
+const pagerDutySyncEventIDPrefix = "pagerduty_sync:"
+
+// eventCanTriggerAutomations reports whether an inbound event type may fan out
+// to automation runs. incident.annotated and incident.status_update_published
+// are excluded because our own writeback (notes and status updates) generates
+// exactly those event types — letting them trigger automations would create a
+// writeback → webhook → automation → writeback feedback loop.
+func eventCanTriggerAutomations(eventType models.PagerDutyEventType) bool {
+	switch eventType {
+	case models.PagerDutyEventIncidentAnnotated, models.PagerDutyEventIncidentStatusUpdatePublished:
+		return false
+	default:
+		return true
+	}
+}
+
+// occurrenceCountForEvent returns the occurrence increment for an event. Only a
+// genuine incident.triggered webhook represents a new occurrence; every other
+// event type, and any reconciliation-sync event, returns 0 so the running
+// occurrence_count is not inflated by status churn or periodic polling.
+func occurrenceCountForEvent(eventType models.PagerDutyEventType, providerEventID string) int {
+	if eventType == models.PagerDutyEventIncidentTriggered && !strings.HasPrefix(providerEventID, pagerDutySyncEventIDPrefix) {
+		return 1
+	}
+	return 0
+}
+
 func issueStatusForIncident(eventType models.PagerDutyEventType, status string) models.IssueStatus {
 	if eventType == models.PagerDutyEventIncidentResolved || strings.EqualFold(status, "resolved") {
+		return models.IssueStatusFixed
+	}
+	return models.IssueStatusOpen
+}
+
+// IssueStatusForIncidentStatus maps the authoritative (recency-merged) incident
+// status to an issue status. Callers should prefer this over deriving status
+// from a single event so that out-of-order webhook deliveries cannot reopen a
+// resolved issue.
+func IssueStatusForIncidentStatus(status string) models.IssueStatus {
+	if strings.EqualFold(strings.TrimSpace(status), "resolved") {
 		return models.IssueStatusFixed
 	}
 	return models.IssueStatusOpen

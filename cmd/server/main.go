@@ -1646,6 +1646,19 @@ func buildServices(
 	// ordering is deterministic.
 	agentEnv.SetLinearTokens(linearService)
 
+	// PAGERDUTY_ACCESS_TOKEN is resolved through a refresh-aware service so a
+	// scoped OAuth token nearing expiry is rotated (and persisted) before the
+	// sandbox starts, rather than 401-ing mid-session ~24h after connect.
+	agentEnv.SetPagerDutyTokens(pagerdutysvc.NewTokenService(
+		credentialStore,
+		credentialStore,
+		pagerdutysvc.PagerDutyOAuthClientCreds{
+			ClientID:     cfg.PagerDutyOAuthClientID,
+			ClientSecret: cfg.PagerDutyOAuthClientSecret,
+		},
+		logger,
+	))
+
 	// Runtime resource sampler. Optional capability — only providers that
 	// implement RuntimeStatsProvider produce samples. Disabled when the
 	// interval is non-positive (operators can switch this off if the OTel

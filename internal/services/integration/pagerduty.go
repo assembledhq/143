@@ -8,9 +8,21 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// pagerDutyMaxAttempts bounds how many times do() will retry a single request on
+// rate-limit (429) or transient 5xx/network failures before giving up.
+const pagerDutyMaxAttempts = 3
+
+// pagerDutyBaseBackoff is the first backoff delay; subsequent retries double it.
+const pagerDutyBaseBackoff = 500 * time.Millisecond
+
+// pagerDutyMaxBackoff caps a single backoff sleep so a large Retry-After can't
+// wedge a sandbox tool call for an unbounded time.
+const pagerDutyMaxBackoff = 10 * time.Second
 
 type PagerDutyIncidentProvider struct {
 	httpClient       *http.Client
@@ -48,6 +60,12 @@ func (p *PagerDutyIncidentProvider) ListIncidents(ctx context.Context, filter In
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 25
+	}
+	// Cap the page size. This endpoint is reachable by the in-sandbox agent via
+	// an MCP tool, whose input schema does not bound `limit`; clamp here so a
+	// large value can't trigger an unbounded fetch from PagerDuty.
+	if limit > 100 {
+		limit = 100
 	}
 	values := url.Values{}
 	values.Set("limit", fmt.Sprintf("%d", limit))
@@ -299,39 +317,115 @@ func (p *PagerDutyIncidentProvider) requireWritebackEnabled() error {
 }
 
 func (p *PagerDutyIncidentProvider) do(ctx context.Context, method, endpoint string, body any, out any) error {
-	var reader io.Reader
+	var rawBody []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
+		marshaled, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		reader = bytes.NewReader(raw)
+		rawBody = marshaled
 	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/vnd.pagerduty+json;version=2")
-	req.Header.Set("Authorization", "Bearer "+p.authToken)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if len(raw) > 0 {
-			return fmt.Errorf("pagerduty API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+
+	var lastErr error
+	for attempt := 0; attempt < pagerDutyMaxAttempts; attempt++ {
+		var reader io.Reader
+		if rawBody != nil {
+			reader = bytes.NewReader(rawBody)
 		}
-		return fmt.Errorf("pagerduty API returned %d", resp.StatusCode)
+		req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/vnd.pagerduty+json;version=2")
+		req.Header.Set("Authorization", "Bearer "+p.authToken)
+		if rawBody != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			// Network/transport error: back off and retry the remaining attempts.
+			lastErr = err
+			if attempt < pagerDutyMaxAttempts-1 {
+				if sleepErr := sleepWithContext(ctx, pagerDutyBackoff(attempt+1, 0)); sleepErr != nil {
+					return sleepErr
+				}
+			}
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			lastErr = fmt.Errorf("pagerduty API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+			if attempt < pagerDutyMaxAttempts-1 {
+				if sleepErr := sleepWithContext(ctx, pagerDutyBackoff(attempt+1, retryAfter)); sleepErr != nil {
+					return sleepErr
+				}
+			}
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			if len(raw) > 0 {
+				return fmt.Errorf("pagerduty API returned %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+			}
+			return fmt.Errorf("pagerduty API returned %d", resp.StatusCode)
+		}
+
+		defer resp.Body.Close()
+		if out == nil {
+			return nil
+		}
+		return json.NewDecoder(resp.Body).Decode(out)
 	}
-	if out == nil {
+	if lastErr == nil {
+		lastErr = fmt.Errorf("pagerduty API request failed after %d attempts", pagerDutyMaxAttempts)
+	}
+	return lastErr
+}
+
+// pagerDutyBackoff returns the delay before the given retry attempt (1-based),
+// preferring the server's Retry-After hint when present, capped at
+// pagerDutyMaxBackoff.
+func pagerDutyBackoff(attempt int, retryAfter time.Duration) time.Duration {
+	delay := retryAfter
+	if delay <= 0 {
+		delay = pagerDutyBaseBackoff * (1 << (attempt - 1))
+	}
+	if delay > pagerDutyMaxBackoff {
+		delay = pagerDutyMaxBackoff
+	}
+	return delay
+}
+
+// parseRetryAfter parses a Retry-After header expressed in delta-seconds.
+func parseRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(value); err == nil && secs >= 0 {
+		return time.Duration(secs) * time.Second
+	}
+	return 0
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type pagerDutyAPIIncident struct {

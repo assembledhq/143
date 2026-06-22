@@ -3,8 +3,6 @@ package handlers
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -172,14 +170,29 @@ func (h *PagerDutyWebhookHandler) Handle(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !pagerDutyWebhookStatusAcceptsInbound(pagerDutyIntegration.Status) {
-		result = "inactive"
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "PagerDuty integration is inactive")
+		// The integration is disabled. Acknowledge with 200 so PagerDuty drops
+		// the event rather than retrying (and eventually auto-disabling the
+		// subscription); a 4xx here would make a temporarily-paused integration
+		// permanently lose events.
+		result = "inactive_ignored"
+		h.logger.Info().
+			Str("org_id", integration.OrgID.String()).
+			Str("pagerduty_integration_id", pagerDutyIntegration.ID.String()).
+			Str("status", string(pagerDutyIntegration.Status)).
+			Msg("dropping PagerDuty webhook for inactive integration")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "inactive_ignored"})
 		return
 	}
 
-	if err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, body, r.Header); err != nil {
+	signatureValid, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, r.Header)
+	if err != nil {
 		result = "signature_failed"
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+		// Do not echo the specific verification failure to an unauthenticated
+		// caller (it reveals whether a secret is configured, missing, or wrong).
+		h.logger.Warn().Err(err).
+			Str("org_id", integration.OrgID.String()).
+			Msg("PagerDuty webhook signature verification failed")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "PagerDuty webhook authentication failed")
 		return
 	}
 
@@ -197,7 +210,6 @@ func (h *PagerDutyWebhookHandler) Handle(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusBadRequest, "HEADERS_INVALID", "failed to encode request headers", err)
 		return
 	}
-	signatureValid := true
 	delivery := &models.WebhookDelivery{
 		OrgID:          integration.OrgID,
 		IntegrationID:  integration.ID,
@@ -332,8 +344,11 @@ func (h *PagerDutyWebhookHandler) HandleStartSessionAction(w http.ResponseWriter
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "PagerDuty integration is inactive")
 		return
 	}
-	if err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, body, r.Header); err != nil {
-		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", err.Error())
+	if _, err := h.verifySignature(r.Context(), integration.OrgID, pagerDutyIntegration, r.Header); err != nil {
+		h.logger.Warn().Err(err).
+			Str("org_id", integration.OrgID.String()).
+			Msg("PagerDuty start-session action signature verification failed")
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "PagerDuty webhook authentication failed")
 		return
 	}
 	actionReq, err := parsePagerDutyStartSessionActionRequest(body)
@@ -679,34 +694,33 @@ func (h *PagerDutyWebhookHandler) emitStartSessionActionAudit(r *http.Request, o
 	})
 }
 
-func (h *PagerDutyWebhookHandler) verifySignature(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration, body []byte, headers http.Header) error {
+// verifySignature authenticates an inbound webhook. We register subscriptions
+// with PagerDuty using a custom header (X-143-PagerDuty-Secret) carrying a
+// per-integration shared secret (see CreateWebhookSubscription), so that header
+// is the authentication mechanism — there is no PagerDuty-native HMAC signature
+// to validate. It returns whether the request was actually verified; (false,
+// nil) means verification was intentionally skipped (no secret configured in a
+// non-production environment) and is recorded as such for audit.
+func (h *PagerDutyWebhookHandler) verifySignature(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration, headers http.Header) (bool, error) {
 	secret, err := h.resolveSecret(ctx, orgID, integration)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if secret == "" {
 		if h.requireSecret {
-			return errors.New("PagerDuty webhook secret is empty")
+			return false, errors.New("PagerDuty webhook secret is empty")
 		}
-		return nil
+		// No secret configured outside production: accept but flag as unverified.
+		return false, nil
 	}
-	if provided := strings.TrimSpace(headers.Get("X-143-PagerDuty-Secret")); provided != "" {
-		if hmac.Equal([]byte(provided), []byte(secret)) {
-			return nil
-		}
-		return errors.New("invalid PagerDuty webhook secret")
+	provided := strings.TrimSpace(headers.Get("X-143-PagerDuty-Secret"))
+	if provided == "" {
+		return false, errors.New("missing PagerDuty webhook secret header")
 	}
-	for _, header := range []string{"X-PagerDuty-Signature", "X-PagerDuty-Webhook-Signature", "X-PagerDuty-Hmac-SHA256"} {
-		signature := strings.TrimSpace(headers.Get(header))
-		if signature == "" {
-			continue
-		}
-		if verifyPagerDutyHMAC(secret, body, signature) {
-			return nil
-		}
-		return errors.New("invalid PagerDuty webhook signature")
+	if !hmac.Equal([]byte(provided), []byte(secret)) {
+		return false, errors.New("invalid PagerDuty webhook secret")
 	}
-	return errors.New("missing PagerDuty webhook signature")
+	return true, nil
 }
 
 func (h *PagerDutyWebhookHandler) resolveSecret(ctx context.Context, orgID uuid.UUID, integration models.PagerDutyIntegration) (string, error) {
@@ -749,17 +763,6 @@ func (h *PagerDutyWebhookHandler) validatePagerDutyRepository(w http.ResponseWri
 	return true
 }
 
-func verifyPagerDutyHMAC(secret string, body []byte, signature string) bool {
-	signature = strings.TrimPrefix(signature, "sha256=")
-	sig, err := hex.DecodeString(signature)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(body)
-	return hmac.Equal(sig, mac.Sum(nil))
-}
-
 func sanitizedPagerDutyWebhookHeaders(headers http.Header) http.Header {
 	sanitized := make(http.Header, len(headers))
 	for name, values := range headers {
@@ -793,7 +796,13 @@ func pagerDutyWebhookStatusAcceptsInbound(status models.PagerDutyIntegrationStat
 }
 
 func pagerDutyDeliveryID(headers http.Header) *string {
-	for _, header := range []string{"X-PagerDuty-Webhook-Delivery-ID", "X-PagerDuty-Request-ID", "X-Request-ID"} {
+	// Only trust PagerDuty's own delivery-id header. The webhook_deliveries
+	// idempotency index is keyed on (provider, delivery_id) globally (not per
+	// org), so accepting client-spoofable headers such as X-Request-ID would let
+	// one tenant suppress another tenant's webhook by squatting an id. When the
+	// trusted header is absent we return nil; the partial unique index does not
+	// apply and dedup falls back to the org-scoped inbound-event provider_event_id.
+	for _, header := range []string{"X-PagerDuty-Webhook-Delivery-ID"} {
 		value := strings.TrimSpace(headers.Get(header))
 		if value != "" {
 			return &value

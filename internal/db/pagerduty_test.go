@@ -76,7 +76,7 @@ func TestPagerDutyIncidentStore_UpsertFiltersByOrgAndIntegration(t *testing.T) {
 			"resolved_at":              (*time.Time)(nil),
 			"last_event_at":            &now,
 		}).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(incidentRowID, now, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "status", "last_event_at", "created_at", "updated_at"}).AddRow(incidentRowID, "triggered", &now, now, now))
 
 	store := NewPagerDutyIncidentStore(mock)
 	err = store.Upsert(ctx, incident)

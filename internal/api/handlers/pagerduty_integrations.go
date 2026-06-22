@@ -547,6 +547,14 @@ func (h *PagerDutyIntegrationHandler) Patch(w http.ResponseWriter, r *http.Reque
 	}
 	updated, err := h.pagerDutyIntegrations.UpdateSettings(r.Context(), orgID, settings)
 	if err != nil {
+		// UpdateSettings re-validates default_repository_id ownership/active
+		// state inside the UPDATE ... RETURNING, so a zero-row result (e.g. the
+		// integration or repo changed between validation and write) surfaces as
+		// ErrNoRows. That's a client-correctable condition, not a server fault.
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "PagerDuty integration not found or default repository is no longer valid")
+			return
+		}
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update PagerDuty settings", err)
 		return
 	}
@@ -1631,8 +1639,5 @@ func (c pagerDutyRESTClient) recordAPIRequest(ctx context.Context, endpoint stri
 }
 
 func pagerDutyAPIBaseURL(cfg models.PagerDutyConfig) string {
-	if strings.EqualFold(strings.TrimSpace(cfg.ServiceRegion), "eu") {
-		return "https://api.eu.pagerduty.com"
-	}
-	return "https://api.pagerduty.com"
+	return cfg.APIBaseURL()
 }
