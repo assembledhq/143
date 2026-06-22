@@ -50,6 +50,24 @@ func (m *mockTitleMessageStore) ListBySession(_ context.Context, _, _ uuid.UUID)
 	return m.messages, m.err
 }
 
+type mockTitleThreadStore struct {
+	threads []models.SessionThread
+	err     error
+}
+
+func (m *mockTitleThreadStore) ListBySession(_ context.Context, _, _ uuid.UUID) ([]models.SessionThread, error) {
+	return m.threads, m.err
+}
+
+func titleThreadStoreWithPrimary(primaryThreadID uuid.UUID) *mockTitleThreadStore {
+	return &mockTitleThreadStore{
+		threads: []models.SessionThread{
+			{ID: primaryThreadID},
+			{ID: uuid.New()},
+		},
+	}
+}
+
 // --- tests ---
 
 func TestMaybeRegenerateTitle_SkipsWhenNotDue(t *testing.T) {
@@ -59,9 +77,10 @@ func TestMaybeRegenerateTitle_SkipsWhenNotDue(t *testing.T) {
 		sessions := &mockTitleSessionStore{
 			session: models.Session{CurrentTurn: turn},
 		}
-		svc := NewSessionTitleService(llm, sessions, &mockTitleMessageStore{})
+		primaryThreadID := uuid.New()
+		svc := NewSessionTitleService(llm, sessions, &mockTitleMessageStore{}, titleThreadStoreWithPrimary(primaryThreadID))
 
-		err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+		err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 		require.NoError(t, err)
 		assert.Equal(t, 0, llm.calls, "should not call LLM on turn %d", turn)
 	}
@@ -84,9 +103,10 @@ func TestMaybeRegenerateTitle_RunsOnThirdTurn(t *testing.T) {
 			{TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "Refactored"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err)
 	require.Equal(t, 1, llm.calls, "should still consult the LLM on due turns for potential topic shifts")
 	require.Equal(t, "New title from LLM", sessions.updatedTitle, "should update the title when the model returns a new dominant topic")
@@ -108,12 +128,43 @@ func TestMaybeRegenerateTitle_FillsMissingTitleWhenDue(t *testing.T) {
 			{TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "Refactored"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err, "missing titles should still be generated on regeneration turns")
 	require.Equal(t, 1, llm.calls, "should call LLM when session title is missing")
 	require.Equal(t, "New title from LLM", sessions.updatedTitle, "should persist the generated title when session title is missing")
+}
+
+func TestMaybeRegenerateTitle_SkipsSecondaryThread(t *testing.T) {
+	t.Parallel()
+
+	title := "Fix auth redirect loop"
+	llm := &mockLLM{response: "Review flaky checkout tests"}
+	sessions := &mockTitleSessionStore{
+		session: models.Session{Title: &title, CurrentTurn: 3},
+	}
+	messages := &mockTitleMessageStore{
+		messages: []models.SessionMessage{
+			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "Fix the auth redirect loop"},
+			{TurnNumber: 2, Role: models.MessageRoleUser, Content: "Review flaky checkout tests in a side tab"},
+		},
+	}
+	primaryThreadID := uuid.New()
+	secondaryThreadID := uuid.New()
+	threads := &mockTitleThreadStore{
+		threads: []models.SessionThread{
+			{ID: primaryThreadID},
+			{ID: secondaryThreadID},
+		},
+	}
+	svc := NewSessionTitleService(llm, sessions, messages, threads)
+
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &secondaryThreadID)
+	require.NoError(t, err, "secondary thread completion should not fail title regeneration")
+	require.Equal(t, 0, llm.calls, "secondary thread completion should not call the title LLM")
+	require.Empty(t, sessions.updatedTitle, "secondary thread completion should not update the session title")
 }
 
 func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
@@ -128,9 +179,10 @@ func TestMaybeRegenerateTitle_SkipsUpdateWhenTitleUnchanged(t *testing.T) {
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "Do something"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err, "unchanged titles should be accepted without updating")
 	require.Equal(t, 1, llm.calls, "should ask the LLM whether the title still fits")
 	require.Empty(t, sessions.updatedTitle, "should not update when the LLM keeps the existing title")
@@ -146,18 +198,19 @@ func TestMaybeRegenerateTitle_SkipsEmptyOrTooLong(t *testing.T) {
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "task"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
 	// Empty response
 	llm.response = "   "
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err)
 	assert.Empty(t, sessions.updatedTitle)
 
 	// Too long response — reset for next call
 	sessions.session.CurrentTurn = 6
 	llm.response = string(make([]byte, 121))
-	err = svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err = svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err)
 	assert.Empty(t, sessions.updatedTitle)
 }
@@ -172,9 +225,10 @@ func TestMaybeRegenerateTitle_LLMError(t *testing.T) {
 			{TurnNumber: 0, Role: models.MessageRoleUser, Content: "task"},
 		},
 	}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "llm completion")
 }
@@ -185,9 +239,10 @@ func TestMaybeRegenerateTitle_NoMessages(t *testing.T) {
 	llm := &mockLLM{response: "New"}
 	sessions := &mockTitleSessionStore{session: models.Session{Title: &title, CurrentTurn: 3}}
 	messages := &mockTitleMessageStore{messages: nil}
-	svc := NewSessionTitleService(llm, sessions, messages)
+	primaryThreadID := uuid.New()
+	svc := NewSessionTitleService(llm, sessions, messages, titleThreadStoreWithPrimary(primaryThreadID))
 
-	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New())
+	err := svc.MaybeRegenerateTitle(context.Background(), uuid.New(), uuid.New(), &primaryThreadID)
 	require.NoError(t, err)
 	assert.Equal(t, 0, llm.calls, "should not call LLM with no messages")
 }

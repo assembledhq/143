@@ -1593,7 +1593,7 @@ func buildServices(
 	// Session title service (optional — only if LLM client is available).
 	var titleService *services.SessionTitleService
 	if llmClient != nil {
-		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore)
+		titleService = services.NewSessionTitleService(llmClient, sessionStore, sessionMessageStore, sessionThreadStore)
 	}
 
 	// Linear session-linking service. Drives prepare_linear_primary,
