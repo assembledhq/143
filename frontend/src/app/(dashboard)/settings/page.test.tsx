@@ -313,7 +313,7 @@ describe('SettingsPage', () => {
       data: {
         id: 'org-1',
         name: 'Test Org',
-        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
+        settings: { pr_draft_default: false },
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-01T12:00:00Z',
       },
@@ -322,16 +322,7 @@ describe('SettingsPage', () => {
       data: {
         id: 'org-1',
         name: 'Trimmed Org',
-        settings: { builder_permissions: { require_review_before_pr: true, extra_flag: true } },
-        created_at: '2026-05-01T12:00:00Z',
-        updated_at: '2026-05-06T15:30:00Z',
-      },
-    });
-    settingsUpdateMock.mockResolvedValueOnce({
-      data: {
-        id: 'org-1',
-        name: 'Trimmed Org',
-        settings: { builder_permissions: { require_review_before_pr: false, extra_flag: true } },
+        settings: { pr_draft_default: false },
         created_at: '2026-05-01T12:00:00Z',
         updated_at: '2026-05-06T15:30:00Z',
       },
@@ -351,17 +342,7 @@ describe('SettingsPage', () => {
     await waitFor(() => {
       expect(input).toHaveValue('Trimmed Org');
     });
-
-    await user.click(screen.getByLabelText('Require builder review before PR'));
-
-    await waitFor(() => {
-      expect(settingsUpdateMock).toHaveBeenCalledWith({
-        settings: { builder_permissions: { require_review_before_pr: false } },
-      });
-    });
-    expect(settingsUpdateMock).toHaveBeenLastCalledWith({
-      settings: { builder_permissions: { require_review_before_pr: false } },
-    });
+    expect(screen.queryByLabelText('Require builder review before PR')).not.toBeInTheDocument();
   });
 
   it('shows a saved indicator only on the pull requests section after PR changes', async () => {

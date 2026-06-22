@@ -298,22 +298,14 @@ func (c *PRReadinessPolicyConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func ResolvePRReadinessPolicyConfig(orgPolicy, repoPolicy *PRReadinessPolicyConfig, legacyRequireReviewBeforePR *bool) PRReadinessPolicyConfig {
+func ResolvePRReadinessPolicyConfig(orgPolicy, repoPolicy *PRReadinessPolicyConfig) PRReadinessPolicyConfig {
 	switch {
 	case repoPolicy != nil:
 		return repoPolicy.normalized()
 	case orgPolicy != nil:
 		return orgPolicy.normalized()
 	default:
-		cfg := DefaultPRReadinessPolicyConfig()
-		if legacyRequireReviewBeforePR != nil && !*legacyRequireReviewBeforePR {
-			cfg.EnabledForBuilders = false
-			for checkType, check := range cfg.Checks {
-				check.Enforcement.Builder = PRReadinessEnforcementOff
-				cfg.Checks[checkType] = check
-			}
-		}
-		return cfg.normalized()
+		return DefaultPRReadinessPolicyConfig().normalized()
 	}
 }
 

@@ -1828,9 +1828,6 @@ export interface OrgSettings {
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
   coding_agent_tab_tools_enabled?: boolean;
-  builder_permissions?: {
-    require_review_before_pr?: boolean;
-  };
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };

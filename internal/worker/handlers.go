@@ -9795,7 +9795,7 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if stores == nil || stores.PRReadiness == nil {
 		return fmt.Errorf("PR readiness policy is not configured")
 	}
-	resolved, err := stores.PRReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID, legacyPRReadinessBuilderSetting(ctx, stores, run.OrgID))
+	resolved, err := stores.PRReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
 	if err != nil {
 		return fmt.Errorf("resolve PR readiness policy: %w", err)
 	}
@@ -9934,7 +9934,7 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		policyConfig := models.DefaultPRReadinessPolicyConfig()
 		if stores.PRReadiness != nil {
-			resolved, err := stores.PRReadiness.ResolvePolicy(ctx, orgID, session.RepositoryID, legacyPRReadinessBuilderSetting(ctx, stores, orgID))
+			resolved, err := stores.PRReadiness.ResolvePolicy(ctx, orgID, session.RepositoryID)
 			if err != nil {
 				return fmt.Errorf("resolve PR readiness policy: %w", err)
 			}
@@ -9989,21 +9989,6 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		return nil
 	}
-}
-
-func legacyPRReadinessBuilderSetting(ctx context.Context, stores *Stores, orgID uuid.UUID) *bool {
-	if stores == nil || stores.Organizations == nil {
-		return nil
-	}
-	org, err := stores.Organizations.GetByID(ctx, orgID)
-	if err != nil {
-		return nil
-	}
-	settings, err := models.ParseOrgSettings(org.Settings)
-	if err != nil {
-		return nil
-	}
-	return settings.BuilderPermissions.RequireReviewBeforePR
 }
 
 type customReadinessLLMResponse struct {

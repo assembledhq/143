@@ -343,7 +343,7 @@ func (s *testInternalPRReadinessStore) MaterializeRepoConfigChecks(_ context.Con
 	return nil
 }
 
-func (s *testInternalPRReadinessStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID, *bool) (models.PRReadinessResolvedPolicy, error) {
+func (s *testInternalPRReadinessStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.PRReadinessResolvedPolicy, error) {
 	return models.PRReadinessResolvedPolicy{Config: models.DefaultPRReadinessPolicyConfig(), Source: "default"}, nil
 }
 
