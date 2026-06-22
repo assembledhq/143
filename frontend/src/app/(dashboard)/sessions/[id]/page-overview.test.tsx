@@ -239,6 +239,52 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(within(screen.getByLabelText('Session detail actions')).queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
+  it('keeps the Overview readiness card header stacked inside the constrained detail panel', async () => {
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[1],
+            status: 'completed',
+            snapshot_key: 'snapshot-running-review',
+            sandbox_state: 'snapshotted',
+            diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+            diff_stats: { added: 1, removed: 1, files_changed: 1 },
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => {
+        return HttpResponse.json({
+          data: [{
+            id: 'review-loop-running',
+            org_id: 'org-1',
+            session_id: 'session-98765432-abcd-ef01',
+            status: 'running',
+            source: 'manual',
+            agent_type: 'claude_code',
+            max_passes: 2,
+            fix_mode: 'minimal',
+            completed_passes: 0,
+            review_required: false,
+            started_at: '2026-02-17T07:12:00Z',
+          }] as SessionReviewLoop[],
+          meta: {},
+        } satisfies ListResponse<SessionReviewLoop>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />);
+
+    const reviewStatus = await screen.findByText('Fixing with Claude Code');
+    const header = reviewStatus.closest('.flex.flex-col.gap-3');
+
+    expect(header).not.toBeNull();
+    expect(header?.className).not.toContain('lg:flex-row');
+    expect(header?.className).not.toContain('lg:justify-between');
+    expect(screen.queryByRole('button', { name: 'Check readiness' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
+  });
+
   it('moves the review action into PR health after a PR exists when a snapshot is available', async () => {
     server.use(
       http.get('/api/v1/sessions/:id', () => {
