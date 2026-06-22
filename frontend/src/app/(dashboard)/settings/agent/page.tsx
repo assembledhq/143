@@ -117,18 +117,21 @@ function defaultLabel(provider: ModalProvider, authType: AddFlowAuthType) {
 
 function OrgAuthsHeader({ showReorderHint }: { showReorderHint?: boolean }) {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-      <div className="space-y-1.5">
-        <h2 className="text-xs font-medium text-foreground">Organization-wide auths</h2>
+    <div className="space-y-1.5">
+      <h2 className="text-xs font-medium text-foreground">Organization-wide auths</h2>
+      <div
+        className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"
+        data-testid="org-auths-description-row"
+      >
         <p className="text-xs text-muted-foreground">
           Personal auths run first for each user. When none are available, sessions fall back to this stack, running top to bottom.
           {showReorderHint && " Move the auth you want to prefer higher in the list."}
         </p>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Button asChild variant="outline" size="sm">
-          <Link href="/settings/account">View personal auths</Link>
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button asChild variant="outline" size="sm">
+            <Link href="/settings/account">View personal auths</Link>
+          </Button>
+        </div>
       </div>
     </div>
   );
