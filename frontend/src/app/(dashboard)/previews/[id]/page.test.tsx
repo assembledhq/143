@@ -349,6 +349,77 @@ describe("PreviewLandingPage launch mode", () => {
     await new Promise((resolve) => window.setTimeout(resolve, 50));
     expect(startCalls).toBe(1);
   });
+
+  it("keeps the failure visible when a launched preview fails after start-latest mints a new id", async () => {
+    let phase: "stopped" | "failed" = "stopped";
+    let prev1StartCalls = 0;
+    let prev2StartCalls = 0;
+
+    server.use(
+      http.get("*/api/v1/previews/target-1", () => {
+        if (phase === "stopped") {
+          return HttpResponse.json({
+            data: {
+              target_id: "target-1",
+              preview_id: "prev-1",
+              repository_full_name: "acme/web",
+              branch: "feature/preview",
+              status: "stopped",
+              current_phase: "stopped",
+              stable_url: "https://143.dev/previews/target-1",
+              preview_url: "https://target-1.preview.143.dev",
+            },
+          });
+        }
+        // start-latest minted a fresh instance (prev-2) that then fails readiness.
+        return HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-2",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            status: "failed",
+            error: "Service failed readiness checks.",
+            current_phase: "readiness",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+          },
+        });
+      }),
+      http.post("*/api/v1/previews/prev-1/start-latest", () => {
+        prev1StartCalls += 1;
+        phase = "failed";
+        return HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-2",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            status: "starting",
+            current_phase: "start_services",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+          },
+        });
+      }),
+      http.post("*/api/v1/previews/prev-2/start-latest", () => {
+        prev2StartCalls += 1;
+        return HttpResponse.json({ data: { target_id: "target-1", preview_id: "prev-2", status: "starting" } });
+      }),
+    );
+
+    renderLaunchPage();
+
+    expect(await screen.findByText("Service failed readiness checks.")).toBeInTheDocument();
+
+    // The error must stick — not get clobbered by an auto-restart loop that
+    // flips the UI back to "Opening when ready" and spins up new instances.
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    expect(screen.getByText("Service failed readiness checks.")).toBeInTheDocument();
+    expect(screen.queryByText("Opening when ready")).not.toBeInTheDocument();
+    expect(prev1StartCalls).toBe(1);
+    expect(prev2StartCalls).toBe(0);
+  });
 });
 
 describe("PreviewLandingPage detail mode", () => {
