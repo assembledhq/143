@@ -91,7 +91,7 @@ For a PR, the PR grouping wins over branch grouping because a PR is the review o
 | `current` | Running SHA matches `latest_commit_sha`. |
 | `outdated` | Running SHA differs from `latest_commit_sha`, or the running preview's config hash differs from the currently resolved config. Config staleness (`.143/config.json` changes) triggers `outdated` the same as a commit delta. |
 | `pinned` | Group has `pinned = true`; freshness comparisons are suppressed. |
-| `unknown` | `latest_commit_sha` could not be resolved — branch was deleted, repo access was revoked, or the GitHub token expired. Groups in `unknown` freshness are surfaced in the `Needs attention` section with an explanatory message. |
+| `unknown` | `latest_commit_sha` could not be resolved — branch was deleted, repo access was revoked, or the GitHub token expired. Groups in `unknown` freshness are surfaced inline as attention rows with an explanatory message. |
 
 `latest_commit_sha` is updated by:
 
@@ -109,10 +109,9 @@ Default sections remain useful, but they should operate on grouped current previ
 
 - `Running`
 - `Ready to resume`
-- `Needs attention`
 - `Recent`
 
-`Needs attention` should include failed, unavailable, blocked, out-of-date, and freshness-unknown previews. This is more actionable than hiding these previews under generic `Recent`.
+Attention is an inline priority state, not a separate top-level section. Failed, unavailable, blocked, out-of-date, and freshness-unknown previews should be promoted within the section that matches their runtime state: running stale previews remain in `Running`, resumable previews remain in `Ready to resume`, and stopped or failed previews appear at the top of `Recent`. This keeps the page simpler while still preventing actionable problems from being buried under ordinary stopped previews.
 
 Table columns:
 
@@ -191,7 +190,7 @@ Action semantics:
 
 Pinned rows appear in the index alongside normal rows. They are visually differentiated by a `Pinned` badge next to the branch/PR name and a secondary `Unpin` action. Pinned rows do not show freshness warnings — `outdated` is suppressed and the `Start` action label reads `Start pinned` to reinforce that the user is working with a fixed commit.
 
-Pinned rows appear in whichever scope section matches their current runtime state (`Running`, `Ready to resume`, `Needs attention`, or `Recent`). They are not given a dedicated section in v1. Engineers who want to find all pinned rows can filter by `pinned=true` in the query string.
+Pinned rows appear in whichever scope section matches their current runtime state (`Running`, `Ready to resume`, or `Recent`). They are not given a dedicated section in v1. Engineers who want to find all pinned rows can filter by `pinned=true` in the query string.
 
 ### Detail Page
 
@@ -867,7 +866,7 @@ Frontend:
 
 1. **Group IDs are opaque UUIDs in v1.** Stable human-readable paths (`/previews/current/pr/assembledhq-143/42`) are useful but require URL-encoding edge cases and add router complexity. Use opaque UUIDs now and add canonical slug paths in a follow-up once the group model is stable.
 
-2. **`attention` and `recent` are separate sections.** Merging them would bury failed/outdated previews below recent-but-healthy stopped rows. Keeping them separate lets the `Needs attention` section surface actionable problems without sorting noise.
+2. **Attention is an inline priority state.** A separate `Needs attention` section added visual weight even when empty and made the page feel like backend taxonomy instead of a user workflow. The UI still queries the `attention` scope, but it merges those rows into `Running`, `Ready to resume`, or `Recent`, sorts attention rows first, and gives them state-appropriate actions such as `Start latest`. This preserves the recovery path without adding another section.
 
 3. **API-created previews default to branch grouping.** A preview created via API with no `source_id` and no PR reference groups by branch. Callers who want source-scoped groups must supply a stable `source_id`. This is the least-surprising default and matches how manual starts behave.
 

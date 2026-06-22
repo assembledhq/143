@@ -195,6 +195,9 @@ describe("PreviewsPage", () => {
     expect(
       screen.getByRole("heading", { level: 2, name: "Recent (1)" }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /needs attention/i }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("Pool: 3 of 10 previews")).toBeInTheDocument();
     expect(screen.getAllByText("PR #17 - feature/warm-link")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
@@ -410,7 +413,7 @@ describe("PreviewsPage", () => {
     renderWithProviders(<PreviewsPage />);
 
     expect(await screen.findAllByText("Failed to load previews.")).toHaveLength(
-      4,
+      3,
     );
     expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
     expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
@@ -470,9 +473,9 @@ describe("PreviewsPage", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders Out of date badge and running-vs-head SHA detail for outdated rows", async () => {
+  it("surfaces out-of-date running previews inline with the latest-start action", async () => {
     installPreviewHandlers({
-      attention: [
+      running: [
         preview({
           preview_group_id: "outdated-group",
           branch: "feature/stale",
@@ -487,12 +490,18 @@ describe("PreviewsPage", () => {
 
     renderWithProviders(<PreviewsPage />);
 
-    const attentionSection = await screen.findByRole("region", {
-      name: /needs attention/i,
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
     });
-    expect(within(attentionSection).getAllByText("Out of date")[0]).toBeInTheDocument();
     expect(
-      within(attentionSection).getAllByText(/running aabb1122, branch is ccdd3344/)[0],
+      screen.queryByRole("region", { name: /needs attention/i }),
+    ).not.toBeInTheDocument();
+    expect(within(runningSection).getAllByText("Out of date")[0]).toBeInTheDocument();
+    expect(
+      within(runningSection).getAllByText(/running aabb1122, branch is ccdd3344/)[0],
+    ).toBeInTheDocument();
+    expect(
+      within(runningSection).getAllByRole("button", { name: /start latest/i })[0],
     ).toBeInTheDocument();
   });
 
@@ -549,16 +558,9 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the attention section with failed previews sorted before stopped ones", async () => {
+  it("promotes attention previews inside Recent ahead of ordinary recent activity", async () => {
     installPreviewHandlers({
       attention: [
-        preview({
-          preview_group_id: "stopped-group",
-          branch: "feature/stopped",
-          status: "stopped",
-          freshness: "unknown",
-          preview_url: undefined,
-        }),
         preview({
           preview_group_id: "failed-group",
           branch: "feature/failed",
@@ -568,15 +570,31 @@ describe("PreviewsPage", () => {
           preview_url: undefined,
         }),
       ],
+      recent: [
+        preview({
+          preview_group_id: "stopped-group",
+          branch: "feature/stopped",
+          status: "stopped",
+          stopped_reason: "expired",
+          preview_url: undefined,
+        }),
+      ],
     });
 
     renderWithProviders(<PreviewsPage />);
 
-    const attentionSection = await screen.findByRole("region", {
-      name: /needs attention/i,
+    const recentSection = await screen.findByRole("region", {
+      name: /recent/i,
     });
-    expect(within(attentionSection).getAllByText("Failed")[0]).toBeInTheDocument();
-    expect(within(attentionSection).getAllByText("Needs attention")[0]).toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: /needs attention/i }),
+    ).not.toBeInTheDocument();
+    expect(within(recentSection).getAllByText("Failed")[0]).toBeInTheDocument();
+    expect(within(recentSection).getAllByText("Stopped")[0]).toBeInTheDocument();
+
+    const rows = within(recentSection).getAllByRole("row");
+    expect(rows[1]).toHaveTextContent("feature/failed");
+    expect(rows[2]).toHaveTextContent("feature/stopped");
   });
 
   it("keeps mobile stacked row metadata available alongside the desktop table", async () => {
