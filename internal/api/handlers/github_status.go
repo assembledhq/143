@@ -226,7 +226,11 @@ func (h *GitHubStatusHandler) HandleConnectCallback(w http.ResponseWriter, r *ht
 		return
 	}
 
-	redirectURL := h.frontendURL + "/settings?github_pr=connected"
+	// Default back to the Integrations page, where the "Connect GitHub
+	// account" button that starts this flow lives, so the user lands where
+	// they began. The resume path below overrides this to return to the
+	// originating session instead.
+	redirectURL := h.frontendURL + "/settings/integrations?github_pr=connected"
 	resumeCookieName := githubPRResumeCookiePrefix + r.URL.Query().Get("state")
 	if resumeCookie, err := r.Cookie(resumeCookieName); err == nil && resumeCookie.Value != "" && len(h.signingKey) > 0 {
 		if claims, tokenErr := parsePRAuthResumeToken(h.signingKey, resumeCookie.Value, time.Now()); tokenErr == nil {
