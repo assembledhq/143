@@ -28,6 +28,39 @@ describe("NoReposWarning", () => {
     });
   });
 
+  it("renders nothing while the integrations query is still pending", async () => {
+    let releaseIntegrations: () => void = () => {};
+    const integrationsGate = new Promise<void>((resolve) => {
+      releaseIntegrations = resolve;
+    });
+
+    server.use(
+      http.get("/api/v1/integrations", async () => {
+        await integrationsGate;
+        // No GitHub connected: once resolved this renders the warning, so the
+        // absence of the warning before release proves the loading guard.
+        return HttpResponse.json({ data: [], meta: {} });
+      }),
+      http.get("/api/v1/repositories", () => {
+        return HttpResponse.json({ data: [], meta: {} });
+      })
+    );
+
+    const { container } = renderWithProviders(
+      <NoReposWarning showDisconnectedState />
+    );
+
+    // While integrations is pending the guard returns null — nothing renders.
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByText(/github setup required/i)).not.toBeInTheDocument();
+
+    // Once the query resolves, the warning appears.
+    releaseIntegrations();
+    await waitFor(() => {
+      expect(screen.getByText(/github setup required/i)).toBeInTheDocument();
+    });
+  });
+
   it("renders nothing when GitHub is connected and repos exist", async () => {
     server.use(
       http.get("/api/v1/integrations", () => {
