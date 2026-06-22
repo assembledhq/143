@@ -634,6 +634,14 @@ type SessionPreviewPrewarmRun struct {
 
 // ServiceConfig defines a single service within a preview.
 type ServiceConfig struct {
+	// Build, when set, runs once during a dedicated build phase after the
+	// install phase and after build caches are restored, but before any
+	// service starts. It is the place to compile artifacts (e.g. `go build`)
+	// so the start Command can exec a prebuilt binary instead of compiling on
+	// the readiness-probe hot path. Build commands run in dependency order
+	// (support services first, primary last), share the service Env, and
+	// populate build caches that the post-build checkpoint persists.
+	Build   []string          `json:"build,omitempty"`
 	Command []string          `json:"command"`
 	Cwd     string            `json:"cwd,omitempty"`
 	Port    int               `json:"port"`

@@ -20,6 +20,12 @@ const PreviewDependencyCacheRuntimeVersion = "preview-dependency-cache-v1"
 const PreviewPackageManagerCacheRuntimeVersion = "preview-package-manager-cache-v1"
 const PreviewBuildCacheRuntimeVersion = "preview-build-cache-v1"
 
+// PreviewBuildCacheHomeRuntimeVersion keys the HOME-rooted build cache (Go's
+// GOCACHE/GOMODCACHE). It is distinct from the workdir build cache version so
+// the two blobs occupy separate slots under the same build_artifact kind and
+// never overwrite each other.
+const PreviewBuildCacheHomeRuntimeVersion = "preview-build-cache-home-v1"
+
 type PreviewInstallLockfileKey struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
@@ -164,6 +170,35 @@ func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDige
 	key, err := stableJSONSHA256(payload)
 	if err != nil {
 		return "", fmt.Errorf("marshal build cache key: %w", err)
+	}
+	return key, nil
+}
+
+// ComputePreviewBuildCacheHomeKey returns the latest-wins key for the
+// HOME-rooted build-artifact cache (Go's GOCACHE/GOMODCACHE). It mirrors
+// ComputePreviewBuildCacheKey but uses a distinct runtime version so the
+// home-rooted blob occupies its own slot, separate from the workdir build
+// blob, within the build_artifact cache kind.
+func ComputePreviewBuildCacheHomeKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
+	payload := previewDependencyCachePlacementKey{
+		RuntimeVersion: PreviewBuildCacheHomeRuntimeVersion,
+		OrgID:          orgID,
+		RepoID:         repoID,
+		ConfigName:     strings.TrimSpace(configName),
+		ConfigDigest:   strings.TrimSpace(configDigest),
+		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
+	}
+	if install != nil {
+		payload.InstallCommand = append([]string(nil), install.Command...)
+		payload.InstallCwd = install.Cwd
+		if payload.InstallCwd == "" {
+			payload.InstallCwd = "."
+		}
+		payload.LockfilePaths = sortedNormalizedDependencyPaths(install.Lockfiles)
+	}
+	key, err := stableJSONSHA256(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal build cache home key: %w", err)
 	}
 	return key, nil
 }
