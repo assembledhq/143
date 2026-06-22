@@ -159,6 +159,8 @@ type PRReadinessPolicyConfig struct {
 	GeneratedFileAllowedPaths []string                                        `json:"generated_file_allowed_paths,omitempty"`
 	LargeDiffFileThreshold    int                                             `json:"large_diff_file_threshold,omitempty"`
 	LargeDiffLineThreshold    int                                             `json:"large_diff_line_threshold,omitempty"`
+
+	bypassConfigured bool
 }
 
 const (
@@ -243,6 +245,37 @@ func allPRReadinessCheckTypes() []PRReadinessCheckType {
 	}
 }
 
+func (c *PRReadinessPolicyConfig) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		EnabledForBuilders        bool                                            `json:"enabled_for_builders"`
+		Checks                    map[PRReadinessCheckType]PRReadinessCheckPolicy `json:"checks,omitempty"`
+		Bypass                    *PRReadinessBypassPolicy                        `json:"bypass,omitempty"`
+		AutoRun                   PRReadinessAutoRunPolicy                        `json:"auto_run,omitempty"`
+		SensitivePaths            []string                                        `json:"sensitive_paths,omitempty"`
+		GeneratedFileAllowedPaths []string                                        `json:"generated_file_allowed_paths,omitempty"`
+		LargeDiffFileThreshold    int                                             `json:"large_diff_file_threshold,omitempty"`
+		LargeDiffLineThreshold    int                                             `json:"large_diff_line_threshold,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	c.EnabledForBuilders = decoded.EnabledForBuilders
+	c.Checks = decoded.Checks
+	c.AutoRun = decoded.AutoRun
+	c.SensitivePaths = decoded.SensitivePaths
+	c.GeneratedFileAllowedPaths = decoded.GeneratedFileAllowedPaths
+	c.LargeDiffFileThreshold = decoded.LargeDiffFileThreshold
+	c.LargeDiffLineThreshold = decoded.LargeDiffLineThreshold
+	c.bypassConfigured = decoded.Bypass != nil
+	if decoded.Bypass == nil {
+		c.Bypass = PRReadinessBypassPolicy{}
+		return nil
+	}
+	c.Bypass = *decoded.Bypass
+	return nil
+}
+
 func ResolvePRReadinessPolicyConfig(orgPolicy, repoPolicy *PRReadinessPolicyConfig, legacyRequireReviewBeforePR *bool) PRReadinessPolicyConfig {
 	switch {
 	case repoPolicy != nil:
@@ -276,7 +309,7 @@ func (c PRReadinessPolicyConfig) normalized() PRReadinessPolicyConfig {
 	if c.SensitivePaths == nil {
 		c.SensitivePaths = defaults.SensitivePaths
 	}
-	if !c.Bypass.Enabled && len(c.Bypass.AllowedRoles) == 0 && len(c.Bypass.Scopes) == 0 && len(c.Bypass.NonBypassableChecks) == 0 {
+	if !c.bypassConfigured && !c.Bypass.Enabled && len(c.Bypass.AllowedRoles) == 0 && len(c.Bypass.Scopes) == 0 && len(c.Bypass.NonBypassableChecks) == 0 {
 		c.Bypass = defaults.Bypass
 	}
 	return c

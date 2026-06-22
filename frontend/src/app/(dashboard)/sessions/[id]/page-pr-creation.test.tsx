@@ -366,6 +366,84 @@ describe('SessionDetailPage PR creation', () => {
     });
   });
 
+  it('lets builders click Create PR to queue readiness when auto-run on Create PR is enabled', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    let createPRCalled = false;
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get('/api/v1/pr-readiness-policies', () => {
+        return HttpResponse.json({
+          data: {
+            source: 'organization',
+            config: {
+              enabled_for_builders: true,
+              checks: {
+                freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+                agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+              },
+              bypass: {
+                enabled: true,
+                allowed_roles: ['admin', 'member', 'builder'],
+                scopes: ['completed_blocking_checks'],
+              },
+              auto_run: { after_session_completion: false, on_create_pr: true },
+              sensitive_paths: [],
+              large_diff_file_threshold: 25,
+              large_diff_line_threshold: 500,
+            },
+            bypass_counts: { total: 0 },
+          },
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalled = true;
+        return HttpResponse.json({ status: 'readiness_queued', readiness_run_id: 'readiness-run-1' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    const createPRButton = screen.getByRole('button', { name: /Create PR/ });
+    await user.click(createPRButton);
+
+    await waitFor(() => {
+      expect(createPRCalled).toBe(true);
+    });
+    expect(toast.success).toHaveBeenCalledWith('Readiness checks queued');
+  });
+
   it('preserves existing issue-less readiness context when saving without edits', async () => {
     const sessionWithDiff: Session = {
       ...mockSessions[0],

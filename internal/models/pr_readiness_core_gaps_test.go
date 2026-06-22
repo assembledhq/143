@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -141,6 +142,18 @@ func TestPRReadinessPolicyConfigBypassPolicy(t *testing.T) {
 
 	cfg.Bypass.Enabled = false
 	require.False(t, cfg.BypassAllowedFor(RoleAdmin), "disabled bypass policy should deny all roles")
+}
+
+func TestPRReadinessPolicyConfigExplicitBypassDisableSurvivesDefaults(t *testing.T) {
+	t.Parallel()
+
+	var cfg PRReadinessPolicyConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"enabled_for_builders":true,"bypass":{"enabled":false}}`), &cfg), "policy config should decode explicit bypass disable")
+
+	resolved := ResolvePRReadinessPolicyConfig(&cfg, nil, nil)
+
+	require.False(t, resolved.Bypass.Enabled, "explicit bypass disable should not be replaced by default enabled bypass settings")
+	require.False(t, resolved.BypassAllowedFor(RoleAdmin), "explicit bypass disable should deny bypass even when no roles/scopes are supplied")
 }
 
 func TestPRReadinessPolicyConfigValidateRejectsInvalidPolicyShape(t *testing.T) {

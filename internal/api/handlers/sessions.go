@@ -2043,6 +2043,12 @@ func (h *SessionHandler) UpsertReadinessContext(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
 		return
 	}
+	switch models.Role(middleware.ActiveRoleFromContext(r.Context())) {
+	case models.RoleAdmin, models.RoleMember, models.RoleBuilder:
+	default:
+		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
+		return
+	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {

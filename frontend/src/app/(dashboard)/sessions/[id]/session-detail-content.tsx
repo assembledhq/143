@@ -4981,8 +4981,17 @@ export function SessionDetailContent({ id }: { id: string }) {
     (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
     !hasUnbypassedReadinessBlocker;
   const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
+  const readinessAutoRunOnCreatePR = readinessPolicyResponse?.data.config.auto_run?.on_create_pr === true;
+  const readinessAutoRunCanQueue = builderRequiresReviewBeforePR &&
+    readinessAutoRunOnCreatePR &&
+    (!latestReadiness ||
+      latestReadinessStale ||
+      latestReadiness.status === "queued" ||
+      latestReadiness.status === "running");
+  const createPRAllowsSubmission = builderReviewAllowsPR || readinessAutoRunCanQueue;
   const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
-  const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
+  const canCreatePR = canAttemptCreatePR && createPRAllowsSubmission;
+  const canCreateBranch = canAttemptCreatePR && builderReviewAllowsPR;
   const readinessWarningSignature = !latestReadiness
     ? "missing"
     : latestReadinessStale
@@ -5236,7 +5245,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
     if (action === "create_branch") {
-      if (!canCreatePR) return;
+      if (!canCreateBranch) return;
       resumeAttemptRef.current = resumePRParam;
       createBranchMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
       return;
@@ -5244,7 +5253,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     if (!canCreatePR) return;
     resumeAttemptRef.current = resumePRParam;
     createPRMutation.mutate({ authorMode: "user", resumeToken: resumePRParam });
-  }, [builderReviewAllowsPR, canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
+  }, [builderReviewAllowsPR, canCreateBranch, canCreatePR, createBranchMutation, createPRMutation, hasPR, hasSnapshot, isRunning, prStatus, pushChangesMutation, resumeActionParam, resumePRParam, session?.has_unpushed_changes]);
 
   const diffStats = useMemo(() => {
     const stats = session?.diff_stats ?? sessionDiffPayload?.diff_stats;
@@ -6100,7 +6109,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [createPRMutation.isPending, ghBlocked, localPRState, submitCreatePR]);
 
   const createBranch = useCallback(() => {
-    if (localBranchState !== "idle" || createBranchMutation.isPending || !canCreatePR) {
+    if (localBranchState !== "idle" || createBranchMutation.isPending || !canCreateBranch) {
       return;
     }
     if (ghBlocked) {
@@ -6108,7 +6117,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
     createBranchMutation.mutate(undefined);
-  }, [canCreatePR, createBranchMutation, ghBlocked, localBranchState]);
+  }, [canCreateBranch, createBranchMutation, ghBlocked, localBranchState]);
 
   const createPRWithAutoMerge = useCallback(() => {
     if (localPRState !== "idle" || createPRMutation.isPending || !canCreatePR) {
@@ -6252,7 +6261,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     hasSessionChanges,
     hasSnapshot,
     isRunning,
-    builderReviewAllowsPR,
+    builderReviewAllowsPR: createPRAllowsSubmission,
     snapshotUnavailable,
     snapshotMessage,
     ghBlocked,
@@ -6276,7 +6285,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     (localBranchState === "queued" && branchState !== "failed" && branchState !== "succeeded") ||
     branchState === "queued" ||
     branchState === "pushing";
-  const branchActionDisabled = prActionDisabled || queueingBranch || creatingBranch || createBranchMutation.isPending;
+  const branchActionDisabled = !canCreateBranch || queueingBranch || creatingBranch || createBranchMutation.isPending;
   const branchActionLabel = queueingBranch
     ? "Queueing branch..."
     : creatingBranch
@@ -6284,7 +6293,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       : branchState === "failed" || localBranchActionError
         ? "Retry branch"
         : "Create branch";
-  const branchActionTitle = localBranchActionError?.message ||
+  const branchActionTitle = !canCreateBranch && !queueingBranch && !creatingBranch
+    ? "Run readiness checks successfully before creating a branch"
+    : localBranchActionError?.message ||
     (branchState === "failed" ? session.branch_creation_error || "Branch creation failed" : undefined);
   const branchURL = !hasPR && branchState === "succeeded" ? session.branch_url : undefined;
 

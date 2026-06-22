@@ -7597,6 +7597,36 @@ func TestSessionHandler_CreateReadinessCustomCheckRejectsRepositoryOutsideOrg(t 
 	require.NoError(t, mock.ExpectationsWereMet(), "repository ownership lookup should be required before saving custom checks")
 }
 
+func TestSessionHandler_UpsertReadinessContextRejectsViewer(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	handler := newSessionHandler(t, mock)
+	handler.SetReadinessStore(db.NewPRReadinessStore(mock))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr-readiness-context", strings.NewReader(`{"issue_less_reason":"triaged in customer escalation"}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleViewer})
+	ctx = middleware.WithActiveRole(ctx, string(models.RoleViewer))
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.UpsertReadinessContext(w, req)
+
+	require.Equal(t, http.StatusForbidden, w.Code, "viewer should not be allowed to mutate readiness context evidence")
+	require.Contains(t, w.Body.String(), "FORBIDDEN", "viewer readiness-context writes should use a stable forbidden error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "viewer rejection should happen before database writes")
+}
+
 func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 	t.Parallel()
 
