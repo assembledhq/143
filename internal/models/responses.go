@@ -35,9 +35,10 @@ type ErrorDetail struct {
 
 // PaginationMeta contains cursor-based pagination info.
 type PaginationMeta struct {
-	NextCursor string `json:"next_cursor,omitempty"`
-	Counts     any    `json:"counts,omitempty"`
-	Pool       any    `json:"pool,omitempty"`
+	NextCursor          string `json:"next_cursor,omitempty"`
+	DefaultRepositoryID string `json:"default_repository_id,omitempty"`
+	Counts              any    `json:"counts,omitempty"`
+	Pool                any    `json:"pool,omitempty"`
 }
 
 // ThreadMessageWindowMeta contains cursor and anchor metadata for bottom-first
