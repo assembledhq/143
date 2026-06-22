@@ -114,15 +114,110 @@ describe("AutomationGoalImprovementControl", () => {
 
     await user.click(screen.getByRole("button", { name: /improve goal/i }));
     expect(await screen.findByText("Review improved goal")).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/focused test suite/i)).toBeInTheDocument();
+    const revisedGoal = screen.getByLabelText("Revised goal");
+    expect(revisedGoal).toHaveValue(
+      "Run the focused test suite and report failures with evidence.",
+    );
+    await user.clear(revisedGoal);
+    await user.type(revisedGoal, "Run only changed tests and summarize failures.");
 
     await user.click(screen.getByRole("button", { name: "Apply" }));
 
     await waitFor(() => {
       expect(onDraftApply).toHaveBeenCalledWith(
-        "Run the focused test suite and report failures with evidence.",
+        "Run only changed tests and summarize failures.",
       );
     });
+  });
+
+  it("keeps review details collapsed by default", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("/api/v1/automations/goal-improvements", () =>
+        HttpResponse.json({
+          data: {
+            id: "imp-1",
+            org_id: "org-1",
+            mode: "fast",
+            status: "completed",
+            input_goal: "Run tests",
+            base_goal_hash: "sha256:abc",
+            proposed_goal: "Run tests with concise evidence.",
+            proposal: {
+              rationale: "The original goal was too terse.",
+              changes: ["Added evidence requirements."],
+            },
+            confidence: "medium",
+            warnings: ["No repository evidence was available."],
+            created_at: "2026-06-18T00:00:00Z",
+            updated_at: "2026-06-18T00:00:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <AutomationGoalImprovementControl
+        name="Tests"
+        goal="Run tests"
+        repositoryId="repo-1"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /improve goal/i }));
+    expect(await screen.findByLabelText("Revised goal")).toBeInTheDocument();
+    expect(screen.queryByText("Current goal")).not.toBeInTheDocument();
+    expect(screen.queryByText("Proposed changes")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Show review notes" }));
+
+    expect(await screen.findByText("Current goal")).toBeInTheDocument();
+    expect(screen.getByText("Proposed changes")).toBeInTheDocument();
+  });
+
+  it("disables Apply when the revised goal textarea is cleared", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.post("/api/v1/automations/goal-improvements", () =>
+        HttpResponse.json({
+          data: {
+            id: "imp-1",
+            org_id: "org-1",
+            mode: "fast",
+            status: "completed",
+            input_goal: "Run tests",
+            base_goal_hash: "sha256:abc",
+            proposed_goal: "Run tests with evidence.",
+            proposal: { changes: ["Added evidence."] },
+            confidence: "medium",
+            warnings: [],
+            created_at: "2026-06-18T00:00:00Z",
+            updated_at: "2026-06-18T00:00:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(
+      <AutomationGoalImprovementControl
+        name="Tests"
+        goal="Run tests"
+        repositoryId="repo-1"
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /improve goal/i }));
+    const revisedGoal = await screen.findByLabelText("Revised goal");
+    expect(screen.getByRole("button", { name: "Apply" })).not.toBeDisabled();
+
+    await user.clear(revisedGoal);
+
+    expect(screen.getByRole("button", { name: "Apply" })).toBeDisabled();
+
+    await user.type(revisedGoal, "Run only changed tests.");
+    expect(screen.getByRole("button", { name: "Apply" })).not.toBeDisabled();
   });
 
   it("shows stale-goal guidance when saved apply is rejected", async () => {
