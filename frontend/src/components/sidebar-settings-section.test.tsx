@@ -64,11 +64,11 @@ describe("SidebarSettingsSection", () => {
       "API keys",
       "Usage",
       "Audit log",
-      "Evals",
     ]) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
 
+    expect(screen.queryByText("Evals")).not.toBeInTheDocument();
     expect(screen.queryByText("PLATFORM")).not.toBeInTheDocument();
     expect(screen.queryByText("LLM")).not.toBeInTheDocument();
     expect(screen.queryByText("Runtime")).not.toBeInTheDocument();
@@ -82,7 +82,6 @@ describe("SidebarSettingsSection", () => {
 
     for (const visible of [
       "Account",
-      "Evals",
       "Team",
       "Integrations",
       "Coding agents",
@@ -91,6 +90,7 @@ describe("SidebarSettingsSection", () => {
     }
 
     for (const hidden of [
+      "Evals",
       "App LLM",
       "Autopilot",
       "Sandboxes",
