@@ -883,7 +883,7 @@ function PRAuthorshipSettings() {
                                 enforcement: { ...(current.enforcement ?? {}), [role.key]: value as PRReadinessEnforcement },
                               }))}
                             >
-                              <SelectTrigger>
+                              <SelectTrigger aria-label={`${role.label} enforcement`}>
                                 <SelectValue placeholder={`${role.label} enforcement`}>
                                   {role.label}: {READINESS_ENFORCEMENT_LABELS[enforcement]}
                                 </SelectValue>
