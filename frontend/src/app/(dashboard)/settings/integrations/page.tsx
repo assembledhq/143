@@ -363,7 +363,7 @@ function GitHubRepositoryClaims({
                   Transferring a repo owned by another organization needs your GitHub account. Connect it first to avoid an interrupted transfer.
                 </p>
                 <Button variant="link" size="sm" className="mt-1 h-auto p-0 text-xs" onClick={onConnectAccount}>
-                  Connect GitHub account
+                  Connect account to transfer
                 </Button>
               </div>
             )}
@@ -1601,13 +1601,19 @@ export default function IntegrationsPage() {
     queryFn: () => api.githubStatus.get(),
   });
   const githubAccountConnected = githubAccountStatus?.connected ?? false;
-  // connected but not usable (e.g. token expired) → prompt a reconnect.
-  const githubAccountNeedsReconnect = githubAccountConnected && !(githubAccountStatus?.has_repo_scope ?? false);
+  // A credential row exists but is no longer usable (expired / refresh failed).
+  // The backend reports this directly so the UI can prompt a reconnect.
+  const githubAccountNeedsReconnect = githubAccountStatus?.needs_reconnect ?? false;
   const githubAccountDisconnectMutation = useMutation({
     mutationFn: () => api.githubStatus.disconnect(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["github-status"] });
       queryClient.invalidateQueries({ queryKey: ["team-github-status"] });
+    },
+    onError: (err: Error) => {
+      notify.error("Couldn't disconnect your GitHub account", {
+        description: err.message || "Please try again.",
+      });
     },
   });
 

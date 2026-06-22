@@ -247,6 +247,7 @@ describe("IntegrationsPage", () => {
       pr_authorship_mode: "user_preferred",
       pr_draft_default: false,
       account_requirement: "recommended",
+      needs_reconnect: false,
     });
     githubDisconnectMock.mockResolvedValue(undefined);
     currentUserMock.role = "admin";
@@ -314,7 +315,11 @@ describe("IntegrationsPage", () => {
     renderWithProviders(<IntegrationsPage />);
 
     expect(await screen.findByText("Connected as @octocat")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Disconnect GitHub account" })).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Disconnect GitHub account" }));
+    // Confirm the destructive action in the dialog.
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    expect(githubDisconnectMock).toHaveBeenCalledTimes(1);
   });
 
   it("marks the account optional and explains app authorship under app_only", async () => {
@@ -336,12 +341,13 @@ describe("IntegrationsPage", () => {
 
   it("prompts a reconnect when the account credential is no longer usable", async () => {
     githubStatusGetMock.mockResolvedValue({
-      connected: true,
+      connected: false,
       has_repo_scope: false,
       github_login: "octocat",
       pr_authorship_mode: "user_required",
       pr_draft_default: false,
       account_requirement: "required",
+      needs_reconnect: true,
     });
     renderWithProviders(<IntegrationsPage />);
 
