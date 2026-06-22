@@ -65,8 +65,17 @@ describe("queryKeys", () => {
       expect(queryKeys.repositories.all).toEqual(["repositories"]);
     });
 
-    it("branches includes repository id", () => {
-      expect(queryKeys.repositories.branches("repo-1")).toEqual(["repositories", "repo-1", "branches"]);
+    it("branches includes repository id and an empty query by default", () => {
+      expect(queryKeys.repositories.branches("repo-1")).toEqual(["repositories", "repo-1", "branches", ""]);
+    });
+
+    it("branches includes the search query so distinct searches cache separately", () => {
+      expect(queryKeys.repositories.branches("repo-1", "release")).toEqual([
+        "repositories",
+        "repo-1",
+        "branches",
+        "release",
+      ]);
     });
   });
 
