@@ -180,6 +180,25 @@ function statusLabel(preview: PreviewCurrentResponse): string {
   return formatPreviewStatus(preview.status);
 }
 
+function capitalizeStatusDetail(detail: string): string {
+  if (!detail) return "";
+  return detail.charAt(0).toUpperCase() + detail.slice(1);
+}
+
+function statusDetail(preview: PreviewCurrentResponse, scope: PreviewScope): string {
+  if (preview.freshness === "outdated") {
+    return capitalizeStatusDetail(
+      `running ${preview.running_commit_sha?.slice(0, 8) || "unknown"}, branch is ${preview.latest_commit_sha?.slice(0, 8) || "unknown"}`,
+    );
+  }
+  if (scope === "resumable" && preview.resume_estimate_seconds) {
+    return capitalizeStatusDetail(`resumes in ~${preview.resume_estimate_seconds}s`);
+  }
+  if (scope === "recent") return capitalizeStatusDetail(stoppedReasonLabel(preview.stopped_reason));
+  if (preview.expires_at) return capitalizeStatusDetail(`expires ${expiresIn(preview.expires_at)}`);
+  return preview.current_phase ? formatPreviewStatus(preview.current_phase) : "";
+}
+
 function previewDisplayName(preview: PreviewCurrentResponse): string {
   if (preview.group_kind === "pull_request" || preview.source_type === "pull_request") {
     const sourcePRNumber = preview.source_id?.match(/#(\d+)/)?.[1];
@@ -336,15 +355,7 @@ function SectionRows({
                       {statusLabel(preview)}
                     </Badge>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      {preview.freshness === "outdated"
-                        ? `running ${preview.running_commit_sha?.slice(0, 8) || "unknown"}, branch is ${preview.latest_commit_sha?.slice(0, 8) || "unknown"}`
-                        : scope === "resumable" && preview.resume_estimate_seconds
-                        ? `resumes in ~${preview.resume_estimate_seconds}s`
-                        : scope === "recent"
-                          ? stoppedReasonLabel(preview.stopped_reason)
-                          : preview.expires_at
-                            ? `expires ${expiresIn(preview.expires_at)}`
-                            : preview.current_phase || ""}
+                      {statusDetail(preview, scope)}
                     </p>
                   </TableCell>
                   <TableCell>
