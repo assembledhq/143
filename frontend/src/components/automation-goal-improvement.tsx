@@ -28,6 +28,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
 interface AutomationGoalImprovementProps {
@@ -59,6 +60,9 @@ export function AutomationGoalImprovementControl({
   const [historyOpen, setHistoryOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastMode, setLastMode] = useState<"fast" | "deep">("fast");
+  const [reviewNotesOpen, setReviewNotesOpen] = useState(false);
+  const [editedGoalIsEmpty, setEditedGoalIsEmpty] = useState(false);
+  const editedGoalRef = useRef<HTMLTextAreaElement>(null);
   const lastImproveAtRef = useRef(0);
   const shouldPoll =
     proposal?.id &&
@@ -105,17 +109,23 @@ export function AutomationGoalImprovementControl({
         config,
       });
     },
-    onSuccess: (response) => setProposal(response.data),
+    onSuccess: (response) => {
+      setProposal(response.data);
+      setReviewNotesOpen(false);
+      setEditedGoalIsEmpty(false);
+    },
     onError: (err) => setError(errorMessage(err)),
   });
 
   const applyMutation = useMutation({
     mutationFn: () => {
-      if (!displayedProposal?.proposed_goal) {
+      const proposedGoal =
+        editedGoalRef.current?.value ?? displayedProposal?.proposed_goal ?? "";
+      if (!displayedProposal?.id || !proposedGoal.trim()) {
         throw new Error("Improvement has no proposed goal.");
       }
       if (!automationId) {
-        onDraftApply?.(displayedProposal.proposed_goal);
+        onDraftApply?.(proposedGoal);
         return Promise.resolve(null);
       }
       return api.automations.applyGoalImprovement(
@@ -123,7 +133,7 @@ export function AutomationGoalImprovementControl({
         displayedProposal.id,
         {
           expected_base_goal_hash: displayedProposal.base_goal_hash,
-          proposed_goal: displayedProposal.proposed_goal,
+          proposed_goal: proposedGoal,
         },
       );
     },
@@ -191,6 +201,7 @@ export function AutomationGoalImprovementControl({
     refetchInterval: isRunningProposal ? 3000 : false,
   });
   const transcriptPreview = latestTranscriptPreview(transcriptQuery.data?.data);
+
   const requestImprove = (mode: "fast" | "deep") => {
     const now = Date.now();
     if (now - lastImproveAtRef.current < 750) {
@@ -261,7 +272,7 @@ export function AutomationGoalImprovementControl({
         open={proposal !== null}
         onOpenChange={(open) => !open && setProposal(null)}
       >
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>
               {isRunningProposal ? "Improving goal" : "Review improved goal"}
@@ -313,55 +324,84 @@ export function AutomationGoalImprovementControl({
             </div>
           )}
           {displayedProposal && displayedProposal.status === "completed" && (
-            <div className="space-y-4">
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Current
-                  </p>
-                  <Textarea
-                    value={goal}
-                    readOnly
-                    rows={10}
-                    className="resize-y text-sm"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Proposed
-                  </p>
-                  <Textarea
-                    value={displayedProposal.proposed_goal ?? ""}
-                    readOnly
-                    rows={10}
-                    className="resize-y text-sm"
-                  />
-                </div>
-              </div>
-              <GoalDiff
-                current={goal}
-                proposed={displayedProposal.proposed_goal ?? ""}
-              />
-              <div className="grid gap-3 md:grid-cols-2">
-                <ReviewList
-                  title="Changes"
-                  items={displayedProposal.proposal?.changes}
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label
+                  htmlFor="revised-goal"
+                  className="text-xs font-medium text-muted-foreground"
+                >
+                  Revised goal
+                </Label>
+                <Textarea
+                  key={displayedProposal.id}
+                  id="revised-goal"
+                  ref={editedGoalRef}
+                  defaultValue={displayedProposal.proposed_goal ?? ""}
+                  rows={12}
+                  className="min-h-56 resize-y text-sm leading-6"
+                  onChange={(e) =>
+                    setEditedGoalIsEmpty(e.target.value.trim() === "")
+                  }
                 />
-                <ReviewList
-                  title="Warnings"
-                  items={displayedProposal.warnings}
-                  empty="No warnings."
-                />
-              </div>
-              {displayedProposal.proposal?.rationale && (
-                <p className="text-sm text-muted-foreground">
-                  {displayedProposal.proposal.rationale}
-                </p>
-              )}
-              {displayedProposal.confidence && (
                 <p className="text-xs text-muted-foreground">
-                  Confidence: {displayedProposal.confidence}
+                  Edit directly, then apply when it reads correctly.
                 </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="px-0 text-muted-foreground"
+                onClick={() => setReviewNotesOpen((open) => !open)}
+              >
+                <ChevronDown
+                  className={
+                    reviewNotesOpen
+                      ? "h-4 w-4 rotate-180 transition-transform"
+                      : "h-4 w-4 transition-transform"
+                  }
+                />
+                {reviewNotesOpen ? "Hide review notes" : "Show review notes"}
+              </Button>
+              {reviewNotesOpen && (
+                <div className="space-y-4 rounded-md border border-border bg-muted/20 p-3">
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Current goal
+                    </p>
+                    <Textarea
+                      value={goal}
+                      readOnly
+                      rows={5}
+                      className="resize-y bg-background text-sm"
+                    />
+                  </div>
+                  <GoalDiff
+                    current={goal}
+                    proposed={displayedProposal.proposed_goal ?? ""}
+                  />
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <ReviewList
+                      title="Changes"
+                      items={displayedProposal.proposal?.changes}
+                    />
+                    <ReviewList
+                      title="Warnings"
+                      items={displayedProposal.warnings}
+                      empty="No warnings."
+                    />
+                  </div>
+                  {displayedProposal.proposal?.rationale && (
+                    <p className="text-sm text-muted-foreground">
+                      {displayedProposal.proposal.rationale}
+                    </p>
+                  )}
+                  {displayedProposal.confidence && (
+                    <p className="text-xs text-muted-foreground">
+                      Confidence: {displayedProposal.confidence}
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -411,7 +451,8 @@ export function AutomationGoalImprovementControl({
               disabled={
                 applyMutation.isPending ||
                 displayedProposal?.status !== "completed" ||
-                !displayedProposal?.proposed_goal
+                !displayedProposal?.proposed_goal ||
+                editedGoalIsEmpty
               }
               onClick={() => applyMutation.mutate()}
             >
@@ -450,6 +491,8 @@ export function AutomationGoalImprovementControl({
                 onClick={() => {
                   setProposal(item);
                   setHistoryOpen(false);
+                  setReviewNotesOpen(false);
+                  setEditedGoalIsEmpty(false);
                 }}
               >
                 <div className="min-w-0 space-y-1">
@@ -520,7 +563,9 @@ function GoalDiff({
 
   return (
     <div className="space-y-1.5">
-      <p className="text-xs font-medium text-muted-foreground">Diff</p>
+      <p className="text-xs font-medium text-muted-foreground">
+        Proposed changes
+      </p>
       <div className="max-h-48 overflow-auto rounded-md border border-border bg-muted/20 p-3 font-mono text-xs">
         {removed.slice(0, 8).map((line, index) => (
           <p key={`removed-${index}-${line}`} className="text-destructive">
