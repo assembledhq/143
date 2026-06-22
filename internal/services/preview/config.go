@@ -33,6 +33,8 @@ type InfraTemplate struct {
 var supportedTemplates = map[string]InfraTemplate{
 	"postgres-17": {Image: "postgres:17-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
 	"postgres-16": {Image: "postgres:16-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
+	"postgres-15": {Image: "postgres:15-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
+	"postgres-14": {Image: "postgres:14-alpine", DefaultPort: 5432, HealthCmd: []string{"pg_isready"}, DefaultMemMB: 256, DefaultCPU: 0.25, MaxMemMB: 512},
 	"redis-7":     {Image: "redis:7-alpine", DefaultPort: 6379, HealthCmd: []string{"redis-cli", "ping"}, DefaultMemMB: 128, DefaultCPU: 0.1, MaxMemMB: 256},
 	"mysql-8":     {Image: "mysql:8.4", DefaultPort: 3306, HealthCmd: []string{"mysqladmin", "ping"}, DefaultMemMB: 384, DefaultCPU: 0.25, MaxMemMB: 768},
 }

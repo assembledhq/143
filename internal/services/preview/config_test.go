@@ -1923,6 +1923,8 @@ func TestLookupInfraTemplate(t *testing.T) {
 	}{
 		{"postgres-17", true},
 		{"postgres-16", true},
+		{"postgres-15", true},
+		{"postgres-14", true},
 		{"redis-7", true},
 		{"mysql-8", true},
 		{"elasticsearch-8", false},
