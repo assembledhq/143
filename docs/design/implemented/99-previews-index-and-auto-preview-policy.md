@@ -103,10 +103,10 @@ Ready to resume (3)                            warm — resumes in ~30s
 ┌──────────────────────────────────────────────────────────────────────┐
 │ ◌  feature/pricing-table  acme/shop      PR #479   hibernated 2h ago │
 │    auto-preview (warm) · commit 3f2a91c                              │
-│                                              [Resume] [Start latest] │
+│                                              [Resume] [Restart]      │
 ├──────────────────────────────────────────────────────────────────────┤
 │ ◌  docs/api-reference     acme/docs      Manual    stopped 5h ago    │
-│                                              [Resume] [Start latest] │
+│                                              [Resume] [Restart]      │
 └──────────────────────────────────────────────────────────────────────┘
 
 Recent (last 7 days)                                        [Show all]
@@ -115,7 +115,7 @@ Recent (last 7 days)                                        [Show all]
 │    2 days ago                                  [View logs] [Retry]   │
 ├──────────────────────────────────────────────────────────────────────┤
 │ ○  chore/deps             acme/shop      API       expired 3d ago    │
-│                                                       [Start latest] │
+│                                                       [Restart]      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -372,7 +372,7 @@ Rules:
 
 ### 2. Resume (reuse existing restart)
 
-`POST /api/v1/previews/{preview_id}/restart` gains scheduler behavior, not a new contract: when the target has a live snapshot row, worker selection pins to that `worker_node_id` first (capacity permitting), then falls back to normal selection. Response unchanged. No new endpoint — `Resume` in the UI is `restart`; `Start latest` is the existing `start-latest`.
+`POST /api/v1/previews/{preview_id}/restart` gains scheduler behavior, not a new contract: when the target has a live snapshot row, worker selection pins to that `worker_node_id` first (capacity permitting), then falls back to normal selection. Response unchanged. No new endpoint — `Resume` in the UI is `restart`; `Restart` is the existing `start-latest` action with the tooltip/accessibility label `Restart preview from the latest source state`.
 
 ### 3. Preview Policies
 
@@ -521,7 +521,7 @@ No schema dependency except the terminal-instances index (safe to include here e
 Starts immediately against MSW mocks of the A contract.
 
 - [x] B1. Build `/previews` page at `frontend/src/app/(dashboard)/previews/page.tsx`: three sections (Running / Ready to resume / Recent), `PageContainer`/`PageHeader`, browser title, search input, repository filter, desktop `Table` rows + stacked mobile rows, empty state with create CTA (settings deep-link shown to admins only). One query per scope, keys `["previews", scope, repositoryId, q]`, polling through `pollMs()` (5s running, 30s others).
-- [x] B2. Wire row actions to existing client methods: `Open preview` (stable URL), `Stop`, `Resume` → `restart`, `Start latest` → `start-latest`, `Retry`, `View logs` (detail page deep link). Mutations invalidate all `["previews", ...]` keys. Hide mutation affordances from viewers (server still enforces).
+- [x] B2. Wire row actions to existing client methods: `Open preview` (stable URL), `Stop`, `Resume` → `restart`, `Restart` → `start-latest`, `Retry`, `View logs` (detail page deep link). Mutations invalidate all `["previews", ...]` keys. Hide mutation affordances from viewers (server still enforces).
 - [x] B3. Replace MSW-only types with the real client from A6; verify against a local backend.
 - [x] B4. Add `Previews` to `authenticated-layout.tsx` after Autopilot with running-count badge fed by the list query's `meta.counts` (lazy 60s poll via `pollMs()` when the page is closed). Add a command-palette entry (`Go to Previews`).
 - [x] B5. Add a breadcrumb/back link from `/previews/new` and `/previews/[id]` to the index.

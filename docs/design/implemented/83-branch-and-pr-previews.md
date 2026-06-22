@@ -286,7 +286,7 @@ For 143-generated PRs:
 
 - Append one durable preview link in the existing 143 footer.
 - The link resolves by PR number and current head branch.
-- If the PR head SHA changes, the page should detect that the latest target is stale and offer `Start latest`.
+- If the PR head SHA changes, the page should detect that the latest target is stale and offer `Restart` with tooltip/accessibility copy clarifying that it restarts from the latest source state.
 
 For non-143 PRs:
 
