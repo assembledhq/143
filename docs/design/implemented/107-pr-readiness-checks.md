@@ -13,7 +13,7 @@ This is not a human approval system. Readiness must come from platform-observed 
 Implemented core behavior:
 
 - `pr_readiness_runs`, `pr_readiness_checks`, `pr_readiness_policies`, `pr_readiness_custom_checks`, `pr_readiness_bypasses`, and `pr_readiness_contexts` persist readiness state with `org_id` tenancy.
-- Policies resolve as repository override -> org policy -> default policy. The legacy `builder_permissions.require_review_before_pr=false` setting disables builder blocking only until an explicit readiness policy exists.
+- Policies resolve as repository override -> org policy -> default policy. Legacy builder review compatibility settings are no longer honored; absent explicit policy means the default PR readiness policy applies.
 - Checks store factual status separately from role-specific enforcement (`builder`, `engineer`, `admin`) and expose effective enforcement to the UI.
 - Builders are blocked only by current-revision, non-bypassed blocking `failed`/`error` checks. Queued/running, missing, and stale readiness cannot be bypassed.
 - The Overview card groups checks, shows per-check next actions and expandable evidence, and derives a visible stale blocker when the stored run no longer matches the session revision/snapshot.
