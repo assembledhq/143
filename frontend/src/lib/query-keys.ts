@@ -78,6 +78,12 @@ export const queryKeys = {
     slackSettings: ["integrations", "slack", "settings"] as const,
     slackUserLinks: ["integrations", "slack", "user-links"] as const,
     slackChannels: ["slack-channels"] as const,
+    pagerDuty: ["integrations", "pagerduty"] as const,
+    pagerDutyMappings: (integrationId?: string | null) => ["integrations", "pagerduty", "mappings", integrationId ?? null] as const,
+    pagerDutyIncidents: (integrationId?: string | null) => ["integrations", "pagerduty", "incidents", integrationId ?? null] as const,
+  },
+  automations: {
+    eventTriggers: (id: string) => ["automations", id, "event-triggers"] as const,
   },
   autopilot: {
     queue: (params: Record<string, string | number | null | undefined>) => ["autopilot", "queue", params] as const,

@@ -1071,6 +1071,27 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/integrations/pagerduty', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/integrations/pagerduty/mappings', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
+  http.get('/api/v1/automations/:id/event-triggers', () => {
+    return HttpResponse.json({
+      data: [],
+      meta: {},
+    });
+  }),
+
   http.get('/api/v1/pm/documents', () => {
     return HttpResponse.json({
       data: [],

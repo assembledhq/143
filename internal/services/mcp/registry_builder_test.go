@@ -78,6 +78,43 @@ func TestBuildRegistryFromEnv_CircleCI_MissingSlugSkips(t *testing.T) {
 	require.Error(t, err, "without a project slug, the CLI surface would 404 — provider must not register")
 }
 
+func TestBuildRegistryFromEnv_PagerDutyWriteToolsFollowWritebackSetting(t *testing.T) {
+	// Environment variables are process-global, and testing.T forbids Setenv
+	// in parallel tests. Keep this one serial so each case owns the registry
+	// input env.
+
+	tests := []struct {
+		name             string
+		writebackEnabled string
+		expectWriteTools bool
+	}{
+		{name: "hidden by default", expectWriteTools: false},
+		{name: "visible when enabled", writebackEnabled: "true", expectWriteTools: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PAGERDUTY_ACCESS_TOKEN", "pd-token")
+			t.Setenv("PAGERDUTY_WRITEBACK_ENABLED", tt.writebackEnabled)
+
+			tools := NewToolRegistry(BuildRegistryFromEnv(io.Discard)).ListTools()
+			names := make([]string, 0, len(tools))
+			for _, tool := range tools {
+				names = append(names, tool.Name)
+			}
+
+			require.Contains(t, names, "pagerduty_list_incidents", "PagerDuty read tools should be available with an access token")
+			if tt.expectWriteTools {
+				require.Contains(t, names, "pagerduty_add_note", "PagerDuty note write tool should be visible when writeback is enabled")
+				require.Contains(t, names, "pagerduty_create_status_update", "PagerDuty status write tool should be visible when writeback is enabled")
+				return
+			}
+			require.NotContains(t, names, "pagerduty_add_note", "PagerDuty note write tool should be hidden when writeback is disabled")
+			require.NotContains(t, names, "pagerduty_create_status_update", "PagerDuty status write tool should be hidden when writeback is disabled")
+		})
+	}
+}
+
 func TestBuildRegistryFromEnv_GitHub_NoCredsSkipsSource(t *testing.T) {
 	clearGitHubEnv(t)
 	// Owner/repo present but neither credential path — the source must NOT

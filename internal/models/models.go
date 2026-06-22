@@ -482,6 +482,13 @@ type SessionIssueLink struct {
 	// the orchestrator decodes it into SessionIssueSnapshotEntry fields when
 	// creating the immutable per-turn issue snapshot.
 	RawLinearPrimarySnapshot json.RawMessage `db:"linear_primary_snapshot" json:"-"`
+	// PagerDuty provider-state fields let the session detail header render a
+	// meaningful incident chip without loading a separate incident page.
+	PagerDutyIncidentID     *string `db:"pagerduty_incident_id" json:"pagerduty_incident_id,omitempty"`
+	PagerDutyIncidentNumber *string `db:"pagerduty_incident_number" json:"pagerduty_incident_number,omitempty"`
+	PagerDutyIncidentURL    *string `db:"pagerduty_incident_url" json:"pagerduty_incident_url,omitempty"`
+	PagerDutyServiceID      *string `db:"pagerduty_service_id" json:"pagerduty_service_id,omitempty"`
+	PagerDutyServiceName    *string `db:"pagerduty_service_name" json:"pagerduty_service_name,omitempty"`
 }
 
 type SessionIssueSnapshotAttachment struct {
@@ -982,6 +989,8 @@ const (
 	JobTypeSessionPreviewWarmBuild       = "session_preview_warm_build"
 	JobTypeBackfillPreviewGroups         = "backfill_preview_groups"
 	JobTypeSyncPRPreviewSurfaces         = "sync_pr_preview_surfaces"
+	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
+	JobTypePagerDutySync                 = "pagerduty_sync"
 )
 
 // Job represents an async work queue item.

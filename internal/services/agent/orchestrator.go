@@ -549,6 +549,10 @@ type AutomationGoalImprovementUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
 }
 
+type PagerDutySessionWritebacker interface {
+	OnSessionComplete(ctx context.Context, session models.Session, status models.SessionStatus, summary string) error
+}
+
 type EvalBootstrapLookup interface {
 	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
 }
@@ -570,6 +574,7 @@ type Orchestrator struct {
 	projectTasks               ProjectTaskUpdater               // can be nil
 	automationRuns             AutomationRunUpdater             // can be nil
 	automationGoalImprovements AutomationGoalImprovementUpdater // can be nil
+	pagerDutyWritebacker       PagerDutySessionWritebacker      // can be nil
 	issues                     IssueStore
 	repositories               RepositoryStore
 	prReadiness                PRReadinessStore
@@ -813,6 +818,7 @@ type OrchestratorConfig struct {
 	ProjectTasks               ProjectTaskUpdater               // optional — updates project tasks on run completion
 	AutomationRuns             AutomationRunUpdater             // optional — updates automation_runs on session completion
 	AutomationGoalImprovements AutomationGoalImprovementUpdater // optional — updates goal-improvement proposals on analysis session completion
+	PagerDutyWritebacker       PagerDutySessionWritebacker      // optional — writes terminal PagerDuty session status updates
 	Issues                     IssueStore
 	Repositories               RepositoryStore
 	PRReadiness                PRReadinessStore
@@ -908,6 +914,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		projectTasks:               cfg.ProjectTasks,
 		automationRuns:             cfg.AutomationRuns,
 		automationGoalImprovements: cfg.AutomationGoalImprovements,
+		pagerDutyWritebacker:       cfg.PagerDutyWritebacker,
 		issues:                     cfg.Issues,
 		repositories:               cfg.Repositories,
 		prReadiness:                cfg.PRReadiness,
@@ -941,6 +948,13 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		nodeID:                     cfg.NodeID,
 		isDraining:                 cfg.IsDraining,
 	}
+}
+
+func (o *Orchestrator) SetPagerDutyWritebacker(writebacker PagerDutySessionWritebacker) {
+	if o == nil {
+		return
+	}
+	o.pagerDutyWritebacker = writebacker
 }
 
 func (o *Orchestrator) warmMentionIndexFromSandbox(ctx context.Context, session *models.Session, liveSandbox *Sandbox, snapshotKey string, log zerolog.Logger) {
@@ -3178,6 +3192,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session completion")
 		}
 	}
+	o.notifyPagerDutySessionComplete(ctx, run, status, pagerDutySessionCompletionSummary(run))
 
 	return nil
 }
@@ -5522,7 +5537,33 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update automation goal improvement on session failure")
 		}
 	}
+	o.notifyPagerDutySessionComplete(ctx, run, models.SessionStatusFailed, errMsg)
 	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+func (o *Orchestrator) notifyPagerDutySessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus, summary string) {
+	if o == nil || o.pagerDutyWritebacker == nil || run == nil {
+		return
+	}
+	if err := o.pagerDutyWritebacker.OnSessionComplete(ctx, *run, status, summary); err != nil {
+		o.logger.Warn().
+			Err(err).
+			Str("run_id", run.ID.String()).
+			Msg("failed to write PagerDuty session completion status update")
+	}
+}
+
+func pagerDutySessionCompletionSummary(run *models.Session) string {
+	if run == nil {
+		return ""
+	}
+	if run.ResultSummary != nil && strings.TrimSpace(*run.ResultSummary) != "" {
+		return *run.ResultSummary
+	}
+	if run.Error != nil && strings.TrimSpace(*run.Error) != "" {
+		return *run.Error
+	}
+	return ""
 }
 
 // enqueueLinearMilestone schedules a linear_milestone job for the terminal

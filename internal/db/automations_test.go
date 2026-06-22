@@ -587,7 +587,8 @@ func TestAutomationStore_BulkSoftDelete(t *testing.T) {
 func automationRunColumnSlice() []string {
 	return []string{
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
-		"triggered_by_user_id", "scheduled_time", "goal_snapshot", "config_snapshot",
+		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider", "provider_event_id",
+		"trigger_context", "goal_snapshot", "config_snapshot",
 		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
 	}
 }
@@ -612,7 +613,7 @@ func TestAutomationRunStore_CreateRun_Inserts(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(13)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -643,7 +644,7 @@ func TestAutomationRunStore_CreateRun_DuplicateReturnsFalse(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(13)...).
 		WillReturnError(pgx.ErrNoRows)
 
 	created, err := store.CreateRun(context.Background(), r)
@@ -670,7 +671,7 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 		WillReturnRows(
 			pgxmock.NewRows(automationRunColumnSlice()).AddRow(
 				runID, automationID, orgID, now, models.AutomationTriggeredByManual,
-				nil, nil, "goal", []byte(`{}`),
+				nil, nil, nil, nil, nil, []byte(`{}`), "goal", []byte(`{}`),
 				models.AutomationRunStatusPending, nil, nil, nil, now, now,
 			),
 		)
@@ -832,7 +833,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			cols := AutomationRunListColumns
 			row := []any{
 				uuid.New(), uuid.New(), uuid.New(), now, models.AutomationTriggeredBySchedule,
-				nil, nil, "goal",
+				nil, nil, nil, nil, nil, []byte(`{}`), "goal",
 				tc.runStatus, nil, nil, now, now,
 			}
 			if tc.session != nil {
@@ -934,6 +935,36 @@ func TestAutomationStore_CountInFlightRuns(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationRunStore_CountRecentProviderTriggerRuns(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	store := NewAutomationRunStore(mock)
+	orgID := uuid.New()
+	automationID := uuid.New()
+	triggerID := uuid.New()
+	since := time.Date(2026, 6, 19, 12, 30, 0, 0, time.UTC)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT count\(\*\) FROM automation_runs\s+WHERE org_id = @org_id\s+AND automation_id = @automation_id\s+AND trigger_id = @trigger_id\s+AND provider = @provider\s+AND triggered_at >= @since\s+AND status IN \('pending', 'running', 'completed', 'completed_noop', 'failed'\)`).
+		WithArgs(anyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+	mock.ExpectCommit()
+
+	ctx := context.Background()
+	tx, err := mock.Begin(ctx)
+	require.NoError(t, err, "transaction should begin")
+
+	got, err := store.CountRecentProviderTriggerRuns(ctx, tx, orgID, automationID, triggerID, models.AutomationEventProviderPagerDuty, since)
+	require.NoError(t, err, "CountRecentProviderTriggerRuns should query recent provider runs")
+	require.Equal(t, 2, got, "CountRecentProviderTriggerRuns should return the database count")
+	require.NoError(t, tx.Commit(ctx), "transaction should commit")
+	require.NoError(t, mock.ExpectationsWereMet(), "all cooldown count expectations should be met")
+}
+
 func TestAutomationStore_LockByIDForUpdate(t *testing.T) {
 	t.Parallel()
 
@@ -981,7 +1012,7 @@ func TestAutomationRunStore_CreateRunInTx_Inserts(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(13)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "triggered_at", "created_at", "updated_at"}).
 				AddRow(runID, now, now, now),
@@ -1018,7 +1049,7 @@ func TestAutomationRunStore_CreateRunInTx_DuplicateReturnsFalse(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO automation_runs").
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(13)...).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectRollback()
 

@@ -173,6 +173,82 @@ func (s *OrgCredentialStore) UpdateLinearConfigIfRefreshTokenMatches(ctx context
 	return cfg, true, nil
 }
 
+// UpdatePagerDutyConfigByIDIfRefreshTokenMatches persists a refreshed PagerDuty
+// credential by id, but only if the stored refresh token still matches the one
+// we redeemed. PagerDuty rotates the refresh token on every redemption, so a
+// mismatch means a peer (another node/process) already rotated it; in that case
+// we return the current row with updated=false rather than overwriting a newer
+// token chain with our now-stale one. The row is locked FOR UPDATE for the
+// compare-and-swap. Mirrors UpdateLinearConfigIfRefreshTokenMatches but keys on
+// credential id because PagerDuty stores labeled (potentially multiple) rows.
+func (s *OrgCredentialStore) UpdatePagerDutyConfigByIDIfRefreshTokenMatches(ctx context.Context, orgID, credentialID uuid.UUID, expectedRefreshToken string, cfg models.PagerDutyConfig) (models.PagerDutyConfig, bool, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("org credential store db does not support transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("begin pagerduty credential refresh update: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	query := `
+		SELECT ` + credentialColumns + `
+		FROM org_credentials
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND provider = @provider
+		  AND status != 'disabled'
+		FOR UPDATE`
+	rows, err := tx.Query(ctx, query, pgx.NamedArgs{
+		"id":       credentialID,
+		"org_id":   orgID,
+		"provider": string(models.ProviderPagerDuty),
+	})
+	if err != nil {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("query pagerduty credential for refresh update: %w", err)
+	}
+	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.OrgCredential])
+	if err != nil {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("load pagerduty credential for refresh update: %w", err)
+	}
+
+	currentCred, err := s.decryptRow(row)
+	if err != nil {
+		return models.PagerDutyConfig{}, false, err
+	}
+	current, ok := currentCred.Config.(models.PagerDutyConfig)
+	if !ok {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("pagerduty credential config is wrong type: got %T", currentCred.Config)
+	}
+	if current.RefreshToken != expectedRefreshToken {
+		if err := tx.Commit(ctx); err != nil {
+			return models.PagerDutyConfig{}, false, fmt.Errorf("commit skipped pagerduty credential refresh update: %w", err)
+		}
+		return current, false, nil
+	}
+
+	encrypted, err := s.marshalAndEncrypt(cfg)
+	if err != nil {
+		return models.PagerDutyConfig{}, false, err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE org_credentials SET config = @config, status = 'active', updated_at = now() WHERE id = @id AND org_id = @org_id`, pgx.NamedArgs{
+		"id":     row.ID,
+		"org_id": orgID,
+		"config": encrypted,
+	})
+	if err != nil {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("update pagerduty credential after refresh: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return models.PagerDutyConfig{}, false, pgx.ErrNoRows
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.PagerDutyConfig{}, false, fmt.Errorf("commit pagerduty credential refresh update: %w", err)
+	}
+	return cfg, true, nil
+}
+
 // Get decrypts and returns the unlabeled credential for an (org, provider).
 // Convention: a provider that stores a single credential per org (e.g. an
 // Anthropic API key) uses label=""; providers with multiple rows per org

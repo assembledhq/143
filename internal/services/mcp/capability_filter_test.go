@@ -60,3 +60,29 @@ func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *
 	result := source.CallTool(context.Background(), "automation_goal_improvement_complete", json.RawMessage(`{}`))
 	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
 }
+
+func TestCapabilityFilteredToolSourceSeparatesPagerDutyReadsAndWrites(t *testing.T) {
+	t.Parallel()
+
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "pagerduty_list_incidents"},
+		{Name: "pagerduty_list_notes"},
+		{Name: "pagerduty_add_note"},
+		{Name: "pagerduty_create_status_update"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityIssueSources, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+
+	require.Equal(t, []Tool{{Name: "pagerduty_list_incidents"}, {Name: "pagerduty_list_notes"}}, source.ListTools(), "issue-source capability should allow PagerDuty reads but not writebacks")
+	writeResult := source.CallTool(context.Background(), "pagerduty_create_status_update", json.RawMessage(`{}`))
+	require.True(t, writeResult.IsError, "PagerDuty writeback should require external-comments capability")
+
+	writeSource := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "pagerduty_add_note"},
+		{Name: "pagerduty_create_status_update"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityExternalComments, AccessLevel: models.AgentCapabilityAccessWrite},
+	}})
+
+	require.Equal(t, []Tool{{Name: "pagerduty_add_note"}, {Name: "pagerduty_create_status_update"}}, writeSource.ListTools(), "external-comments capability should allow PagerDuty writebacks")
+}

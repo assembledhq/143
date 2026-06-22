@@ -9,6 +9,7 @@ const (
 	IntegrationProviderGitHub       IntegrationProvider = "github"
 	IntegrationProviderSentry       IntegrationProvider = "sentry"
 	IntegrationProviderLinear       IntegrationProvider = "linear"
+	IntegrationProviderPagerDuty    IntegrationProvider = "pagerduty"
 	IntegrationProviderSlack        IntegrationProvider = "slack"
 	IntegrationProviderNotion       IntegrationProvider = "notion"
 	IntegrationProviderCircleCI     IntegrationProvider = "circleci"
@@ -18,7 +19,7 @@ const (
 
 func (p IntegrationProvider) Validate() error {
 	switch p {
-	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear,
+	case IntegrationProviderGitHub, IntegrationProviderSentry, IntegrationProviderLinear, IntegrationProviderPagerDuty,
 		IntegrationProviderSlack, IntegrationProviderNotion, IntegrationProviderCircleCI,
 		IntegrationProviderVictoriaLogs, IntegrationProviderMezmo:
 		return nil

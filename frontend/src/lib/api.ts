@@ -835,6 +835,73 @@ export const api = {
         api_key: apiKey,
         base_url: baseUrl ?? '',
       }),
+    listPagerDuty: () =>
+      get<import('./types').ListResponse<import('./types').PagerDutyIntegration>>('/api/v1/integrations/pagerduty'),
+    loginPagerDuty: () => {
+      window.location.href = `${API_BASE}/api/v1/integrations/pagerduty/login`;
+    },
+    connectPagerDuty: (body: import('./types').PagerDutyConnectRequest) =>
+      post<import('./types').SingleResponse<import('./types').PagerDutyIntegration>>('/api/v1/integrations/pagerduty/connect', body),
+    updatePagerDuty: (
+      body: {
+        default_repository_id?: string | null;
+        writeback_enabled?: boolean;
+        auto_create_webhook?: boolean;
+        status?: import('./types').PagerDutyIntegrationStatus;
+      },
+      integrationId?: string,
+    ) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return request<import('./types').SingleResponse<import('./types').PagerDutyIntegration>>(
+        `/api/v1/integrations/pagerduty${qs}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify(body),
+        },
+      );
+    },
+    testPagerDuty: (integrationId?: string) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return post<import('./types').SingleResponse<import('./types').PagerDutyHealth>>(`/api/v1/integrations/pagerduty/test${qs}`);
+    },
+    listPagerDutyServices: (integrationId?: string) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return get<import('./types').ListResponse<import('./types').PagerDutyServiceSummary>>(`/api/v1/integrations/pagerduty/services${qs}`);
+    },
+    getPagerDutyWebhookSetup: (integrationId?: string) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return get<import('./types').SingleResponse<import('./types').PagerDutyWebhookSetup>>(`/api/v1/integrations/pagerduty/webhook-setup${qs}`);
+    },
+    createPagerDutyWebhookSetup: (body: import('./types').PagerDutyWebhookSetupRequest, integrationId?: string) => {
+      const qs = integrationId ? `?id=${encodeURIComponent(integrationId)}` : '';
+      return post<import('./types').SingleResponse<import('./types').PagerDutyWebhookSetup>>(`/api/v1/integrations/pagerduty/webhook-setup${qs}`, body);
+    },
+    listPagerDutyMappings: (integrationId: string) =>
+      get<import('./types').ListResponse<import('./types').PagerDutyServiceRepoMapping>>(
+        `/api/v1/integrations/pagerduty/mappings?integration_id=${encodeURIComponent(integrationId)}`,
+      ),
+    upsertPagerDutyMapping: (body: import('./types').PagerDutyServiceRepoMappingUpsert) =>
+      post<import('./types').SingleResponse<import('./types').PagerDutyServiceRepoMapping>>('/api/v1/integrations/pagerduty/mappings', body),
+    listPagerDutyIncidents: (params: import('./types').PagerDutyIncidentListParams = {}) => {
+      const qs = new URLSearchParams();
+      if (params.integration_id) qs.set('integration_id', params.integration_id);
+      if (params.status) qs.set('status', params.status);
+      if (params.service_id) qs.set('service_id', params.service_id);
+      if (params.limit) qs.set('limit', String(params.limit));
+      const suffix = qs.toString() ? `?${qs.toString()}` : '';
+      return get<import('./types').ListResponse<import('./types').PagerDutyIncident>>(`/api/v1/integrations/pagerduty/incidents${suffix}`);
+    },
+    getPagerDutyIncident: (incidentId: string, integrationId?: string) => {
+      const qs = integrationId ? `?pagerduty_integration_id=${encodeURIComponent(integrationId)}` : '';
+      return get<import('./types').SingleResponse<import('./types').PagerDutyIncident>>(
+        `/api/v1/integrations/pagerduty/incidents/${encodeURIComponent(incidentId)}${qs}`,
+      );
+    },
+    startPagerDutyIncidentSession: (incidentId: string, body: import('./types').PagerDutyIncidentSessionStartRequest = {}) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(
+        `/api/v1/integrations/pagerduty/incidents/${encodeURIComponent(incidentId)}/session`,
+        body,
+      ),
     disconnect: (provider: string) => del(`/api/v1/integrations/${provider}/disconnect`),
     syncGitHub: () => post<{ data: { repos_synced: number; repos_seen?: number; errors: number } }>('/api/v1/integrations/github/sync'),
     listGitHubRepositories: (installationId?: number) => {
@@ -1137,6 +1204,13 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`),
     updateCapabilities: (id: string, capabilities: import('./types').AgentCapabilityGrant[]) =>
       patch<import('./types').SingleResponse<import('./types').AgentCapabilityPolicyResponse>>(`/api/v1/automations/${id}/capabilities`, { capabilities }),
+    listEventTriggers: (id: string) =>
+      get<import('./types').ListResponse<import('./types').AutomationEventTrigger>>(`/api/v1/automations/${id}/event-triggers`),
+    replaceEventTriggers: (id: string, triggers: import('./types').AutomationEventTriggerInput[]) =>
+      request<import('./types').ListResponse<import('./types').AutomationEventTrigger>>(`/api/v1/automations/${id}/event-triggers`, {
+        method: 'PUT',
+        body: JSON.stringify(triggers),
+      }),
     stats: (id: string, params?: { since?: string; until?: string }) => {
       const searchParams = new URLSearchParams();
       if (params?.since) searchParams.set('since', params.since);
