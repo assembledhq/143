@@ -189,6 +189,39 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"organization_domains_status": toStrings(
 			OrgDomainStatusPending, OrgDomainStatusVerified,
 		),
+		// pr_readiness.go
+		"pr_readiness_runs_status": toStrings(
+			PRReadinessRunStatusQueued, PRReadinessRunStatusRunning, PRReadinessRunStatusPassed,
+			PRReadinessRunStatusWarnings, PRReadinessRunStatusBlocked, PRReadinessRunStatusFailed,
+		),
+		"pr_readiness_checks_status": toStrings(
+			PRReadinessCheckStatusPassed, PRReadinessCheckStatusWarning, PRReadinessCheckStatusFailed,
+			PRReadinessCheckStatusSkipped, PRReadinessCheckStatusError,
+		),
+		"pr_readiness_checks_check_type": toStrings(
+			PRReadinessCheckTypeFreshness, PRReadinessCheckTypeAgentReviewClean, PRReadinessCheckTypeDiffCollected,
+			PRReadinessCheckTypeTestEvidencePresent, PRReadinessCheckTypeRiskFlags, PRReadinessCheckTypeDependencyConfigRisk,
+			PRReadinessCheckTypeGeneratedFileChurn, PRReadinessCheckTypeContextComplete, PRReadinessCheckTypeReviewPacketDraftable,
+			PRReadinessCheckTypeCustomPrompt,
+		),
+		"pr_readiness_checks_enforcement": toStrings(
+			PRReadinessEnforcementOff, PRReadinessEnforcementAdvisory, PRReadinessEnforcementBlocking,
+		),
+		"pr_readiness_checks_enforcement_builder": toStrings(
+			PRReadinessEnforcementOff, PRReadinessEnforcementAdvisory, PRReadinessEnforcementBlocking,
+		),
+		"pr_readiness_checks_enforcement_engineer": toStrings(
+			PRReadinessEnforcementOff, PRReadinessEnforcementAdvisory, PRReadinessEnforcementBlocking,
+		),
+		"pr_readiness_checks_enforcement_admin": toStrings(
+			PRReadinessEnforcementOff, PRReadinessEnforcementAdvisory, PRReadinessEnforcementBlocking,
+		),
+		"pr_readiness_checks_provenance": toStrings(
+			PRReadinessProvenanceBuiltin, PRReadinessProvenanceOrgSettings, PRReadinessProvenanceRepoConfig,
+		),
+		"pr_readiness_custom_checks_source": toStrings(
+			PRReadinessCustomCheckSourceOrgSettings, PRReadinessCustomCheckSourceRepoConfig,
+		),
 	}
 
 	for _, c := range constraints {

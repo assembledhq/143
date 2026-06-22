@@ -368,6 +368,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetReadinessStore(prReadinessStore)
+	if prService != nil {
+		prService.SetReadinessStore(prReadinessStore)
+	}
 	sessionHandler.SetHumanInputRequestStore(sessionHumanInputStore)
 	sessionHandler.SetCapabilityService(agentCapabilitySvc)
 	sessionHandler.SetUserStore(userStore)
@@ -1197,6 +1200,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.List)
 				r.Get("/api/v1/sessions/{id}/review-loops/{loop_id}", reviewLoopHandler.Get)
 				r.Get("/api/v1/sessions/{id}/readiness", sessionHandler.GetReadiness)
+				r.Get("/api/v1/sessions/{id}/pr-readiness-runs/latest", sessionHandler.GetReadiness)
+				r.Get("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.GetReadinessContext)
 				r.Get("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.List)
 				r.Get("/api/v1/sessions/{id}/usage", usageHandler.ListBySession)
 				r.Get("/api/v1/usage", usageHandler.GetSummary)
@@ -1351,6 +1356,13 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
 				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/readiness/run", sessionHandler.RunReadiness)
+				r.Post("/api/v1/sessions/{id}/pr-readiness-runs", sessionHandler.RunReadiness)
+				r.Post("/api/v1/sessions/{id}/pr-readiness-bypasses", sessionHandler.CreateReadinessBypass)
+				r.Post("/api/v1/sessions/{id}/pr-readiness-context", sessionHandler.UpsertReadinessContext)
+				// Policy reads expose sensitive_paths and aggregated bypass counts,
+				// so keep them out of the viewer-readable group above.
+				r.Get("/api/v1/pr-readiness-policies", sessionHandler.GetReadinessPolicy)
+				r.Get("/api/v1/pr-readiness-custom-checks", sessionHandler.ListReadinessCustomChecks)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/previews", branchPreviewHandler.Create)
 				r.Post("/api/v1/previews/current/{preview_group_id}/stop", branchPreviewHandler.StopCurrent)
@@ -1483,6 +1495,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/bootstrap", pmHandler.Bootstrap)
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
+				r.Put("/api/v1/pr-readiness-policies", sessionHandler.PutReadinessPolicy)
+				r.Post("/api/v1/pr-readiness-custom-checks", sessionHandler.CreateReadinessCustomCheck)
+				r.Put("/api/v1/pr-readiness-custom-checks/{check_id}", sessionHandler.UpdateReadinessCustomCheck)
+				r.Delete("/api/v1/pr-readiness-custom-checks/{check_id}", sessionHandler.DeleteReadinessCustomCheck)
 				r.Put("/api/v1/repositories/{repository_id}/preview-policy", branchPreviewHandler.UpdatePolicy)
 				r.Post("/api/v1/repositories/{repository_id}/preview-policy/test-preview", branchPreviewHandler.TestPolicyPreview)
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)

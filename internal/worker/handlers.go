@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,6 +45,14 @@ import (
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+
+// prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
+// for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
+// non-consuming retries, so without this deadline a review loop that never
+// reaches a clean snapshot would requeue every prePRReviewRetryDelay forever
+// (re-running custom-check LLM calls each time). Past the deadline the run is
+// marked failed instead.
+const prePRReviewMaxWait = 30 * time.Minute
 const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
 
@@ -9786,6 +9795,13 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if stores == nil || stores.PRReadiness == nil {
 		return fmt.Errorf("PR readiness policy is not configured")
 	}
+	resolved, err := stores.PRReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID, legacyPRReadinessBuilderSetting(ctx, stores, run.OrgID))
+	if err != nil {
+		return fmt.Errorf("resolve PR readiness policy: %w", err)
+	}
+	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
+		return nil
+	}
 	readinessRun, err := stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -9799,13 +9815,11 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
 		return fmt.Errorf("PR readiness is stale for current workspace revision")
 	}
-	if readinessRun.Status == models.PRReadinessRunStatusBlocked || readinessRun.Status == models.PRReadinessRunStatusFailed {
+	if readinessRun.Status == models.PRReadinessRunStatusFailed {
 		return fmt.Errorf("PR readiness is blocked")
 	}
-	for _, check := range readinessRun.Checks {
-		if check.Enforcement == models.PRReadinessEnforcementBlocking && check.Status == models.PRReadinessCheckStatusFailed {
-			return fmt.Errorf("PR readiness blocking check failed: %s", check.CheckType)
-		}
+	if blockers := readinessRun.UnbypassedBlockingCheckKeys(models.RoleBuilder); len(blockers) > 0 {
+		return fmt.Errorf("PR readiness blocking check failed: %s", strings.Join(blockers, ", "))
 	}
 	return nil
 }
@@ -9841,8 +9855,22 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("load PR readiness run: %w", err)
 		}
+		// Skip runs that already reached a terminal state (e.g. a dead-letter
+		// MarkFailed or a prior completion). MarkRunning is guarded the same way,
+		// so treat its ErrNoRows as "already terminal" rather than a job failure.
+		if run.Status != models.PRReadinessRunStatusQueued && run.Status != models.PRReadinessRunStatusRunning {
+			logger.Info().
+				Str("session_id", sessionID.String()).
+				Str("readiness_id", readinessID.String()).
+				Str("status", string(run.Status)).
+				Msg("PR readiness run already terminal; skipping")
+			return nil
+		}
 		if run.Status != models.PRReadinessRunStatusRunning {
 			if err := stores.PRReadiness.MarkRunning(ctx, orgID, readinessID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil
+				}
 				return err
 			}
 		}
@@ -9853,6 +9881,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
 			return err
 		} else if loop != nil {
+			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+			}
 			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
 		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
@@ -9864,6 +9895,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			return err
 		}
 		if !reviewReady {
+			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+			}
 			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
 		}
 
@@ -9898,8 +9932,34 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			}
 			linkedIssueCount = len(links)
 		}
+		policyConfig := models.DefaultPRReadinessPolicyConfig()
+		if stores.PRReadiness != nil {
+			resolved, err := stores.PRReadiness.ResolvePolicy(ctx, orgID, session.RepositoryID, legacyPRReadinessBuilderSetting(ctx, stores, orgID))
+			if err != nil {
+				return fmt.Errorf("resolve PR readiness policy: %w", err)
+			}
+			policyConfig = resolved.Config
+		}
+		issueLessReason := ""
+		if stores.PRReadiness != nil {
+			contextValue, err := stores.PRReadiness.GetContext(ctx, orgID, sessionID)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("load PR readiness context: %w", err)
+			}
+			if err == nil {
+				issueLessReason = contextValue.IssueLessReason
+			}
+		}
+		customChecks := []models.PRReadinessCheck{}
+		if stores.PRReadiness != nil {
+			definedChecks, err := stores.PRReadiness.ListCustomChecks(ctx, orgID, session.RepositoryID)
+			if err != nil {
+				return fmt.Errorf("load PR readiness custom checks: %w", err)
+			}
+			customChecks = evaluateCustomReadinessChecks(ctx, services, definedChecks, session, changedFiles, logs)
+		}
 
-		result, err := readinesssvc.NewEvaluator(models.DefaultPRReadinessPolicy()).Evaluate(ctx, readinesssvc.EvaluationInput{
+		result, err := readinesssvc.NewEvaluator(policyConfig.EffectivePolicy()).Evaluate(ctx, readinesssvc.EvaluationInput{
 			Session:                    session,
 			EvaluatedWorkspaceRevision: run.EvaluatedWorkspaceRevision,
 			EvaluatedSnapshotKey:       stringValue(run.EvaluatedSnapshotKey),
@@ -9907,6 +9967,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			Logs:                       logs,
 			ChangedFiles:               changedFiles,
 			LinkedIssueCount:           linkedIssueCount,
+			IssueLessReason:            issueLessReason,
+			PolicyConfig:               policyConfig,
+			CustomChecks:               customChecks,
 		})
 		if err != nil {
 			return fmt.Errorf("evaluate PR readiness: %w", err)
@@ -9926,6 +9989,217 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		return nil
 	}
+}
+
+func legacyPRReadinessBuilderSetting(ctx context.Context, stores *Stores, orgID uuid.UUID) *bool {
+	if stores == nil || stores.Organizations == nil {
+		return nil
+	}
+	org, err := stores.Organizations.GetByID(ctx, orgID)
+	if err != nil {
+		return nil
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return nil
+	}
+	return settings.BuilderPermissions.RequireReviewBeforePR
+}
+
+type customReadinessLLMResponse struct {
+	Status  models.PRReadinessCheckStatus `json:"status"`
+	Summary string                        `json:"summary"`
+	Details map[string]any                `json:"details"`
+	Action  string                        `json:"action"`
+}
+
+func evaluateCustomReadinessChecks(ctx context.Context, services *Services, checks []models.PRReadinessCustomCheck, session models.Session, changedFiles []string, logs []models.SessionLog) []models.PRReadinessCheck {
+	results := make([]models.PRReadinessCheck, 0, len(checks))
+	for _, check := range checks {
+		if !customReadinessCheckEnabled(check) {
+			continue
+		}
+		if !customReadinessCheckMatches(check, changedFiles) {
+			results = append(results, customReadinessCheckResult(check, models.PRReadinessCheckStatusSkipped, "Custom check skipped", "No changed files matched this custom check's path filters.", nil, ""))
+			continue
+		}
+		if services == nil || services.LLM == nil {
+			results = append(results, customReadinessCheckError(check, fmt.Errorf("LLM client is not configured")))
+			continue
+		}
+		userPrompt, err := renderCustomReadinessUserPrompt(check, session, changedFiles, logs)
+		if err != nil {
+			results = append(results, customReadinessCheckError(check, err))
+			continue
+		}
+		raw, err := services.LLM.Complete(ctx, prompts.PRReadinessCustomCheckPrompt(), userPrompt)
+		if err != nil {
+			results = append(results, customReadinessCheckError(check, err))
+			continue
+		}
+		parsed, err := parseCustomReadinessLLMResponse(raw)
+		if err != nil {
+			results = append(results, customReadinessCheckError(check, err))
+			continue
+		}
+		summary := strings.TrimSpace(parsed.Summary)
+		if summary == "" {
+			summary = "Custom check completed."
+		}
+		results = append(results, customReadinessCheckResult(check, parsed.Status, check.Name, summary, parsed.Details, parsed.Action))
+	}
+	return results
+}
+
+func customReadinessCheckEnabled(check models.PRReadinessCustomCheck) bool {
+	if check.Enforcement == (models.PRReadinessEnforcementByRole{}) {
+		return true
+	}
+	return check.Enforcement.EnforcementFor(models.RoleBuilder) != models.PRReadinessEnforcementOff ||
+		check.Enforcement.EnforcementFor(models.RoleMember) != models.PRReadinessEnforcementOff ||
+		check.Enforcement.EnforcementFor(models.RoleAdmin) != models.PRReadinessEnforcementOff
+}
+
+func customReadinessCheckResult(check models.PRReadinessCustomCheck, status models.PRReadinessCheckStatus, title, summary string, details map[string]any, action string) models.PRReadinessCheck {
+	rawDetails, _ := json.Marshal(details)
+	if len(details) == 0 {
+		rawDetails = nil
+	}
+	enforcement := check.Enforcement
+	if enforcement == (models.PRReadinessEnforcementByRole{}) {
+		enforcement = models.PRReadinessEnforcementByRole{
+			Builder:  models.PRReadinessEnforcementAdvisory,
+			Engineer: models.PRReadinessEnforcementAdvisory,
+			Admin:    models.PRReadinessEnforcementAdvisory,
+		}
+	}
+	return models.PRReadinessCheck{
+		CheckKey:             check.CheckKey,
+		CheckType:            models.PRReadinessCheckTypeCustomPrompt,
+		Status:               status,
+		Enforcement:          enforcement.Builder,
+		EnforcementByRole:    enforcement,
+		EnforcementBuilder:   enforcement.Builder,
+		EnforcementEngineer:  enforcement.Engineer,
+		EnforcementAdmin:     enforcement.Admin,
+		EffectiveEnforcement: enforcement.Builder,
+		Provenance:           models.PRReadinessProvenance(check.Source),
+		Source:               string(check.Source),
+		Title:                title,
+		Summary:              summary,
+		Details:              rawDetails,
+		Action:               action,
+	}
+}
+
+func customReadinessCheckError(check models.PRReadinessCustomCheck, err error) models.PRReadinessCheck {
+	return customReadinessCheckResult(check, models.PRReadinessCheckStatusError, check.Name, "Custom readiness check failed to execute.", map[string]any{"error": err.Error()}, "Review check configuration")
+}
+
+func customReadinessCheckMatches(check models.PRReadinessCustomCheck, changedFiles []string) bool {
+	if len(check.PathFilters.Include) == 0 && len(check.PathFilters.Exclude) == 0 {
+		return true
+	}
+	for _, file := range changedFiles {
+		included := len(check.PathFilters.Include) == 0
+		for _, pattern := range check.PathFilters.Include {
+			if readinesssvc.MatchPathPattern(pattern, file) {
+				included = true
+				break
+			}
+		}
+		if !included {
+			continue
+		}
+		excluded := false
+		for _, pattern := range check.PathFilters.Exclude {
+			if readinesssvc.MatchPathPattern(pattern, file) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			return true
+		}
+	}
+	return false
+}
+
+func renderCustomReadinessUserPrompt(check models.PRReadinessCustomCheck, session models.Session, changedFiles []string, logs []models.SessionLog) (string, error) {
+	data := map[string]any{
+		"CheckName":         check.Name,
+		"ChangedFiles":      limitStrings(changedFiles, 100),
+		"DiffStats":         string(session.DiffStats),
+		"WorkspaceRevision": session.WorkspaceGeneration,
+		"Logs":              boundedReadinessLogs(logs, 20, 4000),
+	}
+	tmpl, err := template.New("custom_readiness_prompt").Parse(check.Prompt)
+	if err != nil {
+		return "", fmt.Errorf("parse custom readiness prompt template: %w", err)
+	}
+	var rendered bytes.Buffer
+	if err := tmpl.Execute(&rendered, data); err != nil {
+		return "", fmt.Errorf("render custom readiness prompt template: %w", err)
+	}
+	payload := map[string]any{
+		"check_prompt":       rendered.String(),
+		"changed_files":      data["ChangedFiles"],
+		"diff_stats":         data["DiffStats"],
+		"workspace_revision": data["WorkspaceRevision"],
+		"logs":               data["Logs"],
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal custom readiness prompt context: %w", err)
+	}
+	return string(payloadBytes), nil
+}
+
+func parseCustomReadinessLLMResponse(raw string) (customReadinessLLMResponse, error) {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	var parsed customReadinessLLMResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(trimmed)), &parsed); err != nil {
+		return customReadinessLLMResponse{}, fmt.Errorf("parse custom readiness check response: %w", err)
+	}
+	switch parsed.Status {
+	case models.PRReadinessCheckStatusPassed, models.PRReadinessCheckStatusWarning, models.PRReadinessCheckStatusFailed:
+		return parsed, nil
+	default:
+		return customReadinessLLMResponse{}, fmt.Errorf("invalid custom readiness status %q", parsed.Status)
+	}
+}
+
+func limitStrings(values []string, limit int) []string {
+	if len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func boundedReadinessLogs(logs []models.SessionLog, maxLogs, maxBytes int) []string {
+	if len(logs) > maxLogs {
+		logs = logs[len(logs)-maxLogs:]
+	}
+	// Walk newest-first so the most recent (most relevant) logs win the byte
+	// budget, and skip — rather than stop at — an oversized line so one early
+	// giant entry can't drop every newer log. Re-reverse to chronological order.
+	out := make([]string, 0, len(logs))
+	used := 0
+	for i := len(logs) - 1; i >= 0; i-- {
+		line := logs[i].Timestamp.UTC().Format(time.RFC3339) + " " + logs[i].Message
+		if used+len(line) > maxBytes {
+			continue
+		}
+		used += len(line)
+		out = append(out, line)
+	}
+	for l, r := 0, len(out)-1; l < r; l, r = l+1, r-1 {
+		out[l], out[r] = out[r], out[l]
+	}
+	return out
 }
 
 func registerPRReadinessDeadLetter(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID uuid.UUID) {
@@ -9973,6 +10247,22 @@ func retryPRReadinessReviewLoop(logger zerolog.Logger, sessionID, readinessID uu
 		RetryAfter:             &delay,
 		BypassMaxRetryDuration: true,
 	}
+}
+
+// failReadinessReviewWaitTimeout terminates a readiness run that has waited past
+// prePRReviewMaxWait for the agent review loop. It marks the run failed and
+// returns nil so the job completes instead of requeuing forever.
+func failReadinessReviewWaitTimeout(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, readinessID, sessionID uuid.UUID) error {
+	summary := fmt.Sprintf("Readiness timed out after %s waiting for the agent review loop to finish.", prePRReviewMaxWait)
+	if err := stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, summary); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("mark readiness failed after review wait timeout: %w", err)
+	}
+	logger.Warn().
+		Str("session_id", sessionID.String()).
+		Str("readiness_id", readinessID.String()).
+		Dur("max_wait", prePRReviewMaxWait).
+		Msg("PR readiness review wait timed out; marking run failed")
+	return nil
 }
 
 func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Services, session models.Session, snapshotKey string) (*models.SessionReviewLoop, bool, error) {

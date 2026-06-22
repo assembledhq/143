@@ -84,6 +84,10 @@ func CorrectnessCheckPrompt() string {
 	return render("correctness_check_prompt.template", nil)
 }
 
+func PRReadinessCustomCheckPrompt() string {
+	return render("pr_readiness_custom_check.template", nil)
+}
+
 // RegressionCheckPrompt returns the system prompt for checking regression tests.
 func RegressionCheckPrompt() string {
 	return render("regression_check_prompt.template", nil)

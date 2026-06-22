@@ -56,6 +56,8 @@ export const queryKeys = {
     agentCapabilityCatalog: ["agent-capabilities"] as const,
     network: ["settings", "network"] as const,
     runtimeStatus: ["settings", "runtime", "status"] as const,
+    prReadinessPolicy: (repositoryId?: string | null) => ["settings", "pr-readiness-policy", repositoryId ?? null] as const,
+    prReadinessCustomChecks: (repositoryId?: string | null) => ["settings", "pr-readiness-custom-checks", repositoryId ?? null] as const,
   },
   // Unified coding-credentials caches. The scope segment matches the API's
   // scope param ("org" | "personal" | "resolved"); invalidating

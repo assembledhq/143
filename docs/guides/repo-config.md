@@ -16,6 +16,7 @@ This file lets you tell 143 how to:
 - install supported sandbox tools before agent work
 - run bootstrap commands before agent work
 - run extra deterministic validation commands during validation
+- define prompt-only PR readiness checks for this repository
 
 Think of it as the repo's contract with 143: if someone opens a session against the repo, this is the file 143 reads to understand how that repo should behave.
 
@@ -82,6 +83,7 @@ There are four top-level sections today:
 - `dependencies`: supported tools for 143 to install before agent work
 - `bootstrap`: commands to prepare the workspace
 - `validation`: extra commands to run during validation
+- `pr_readiness`: prompt-only custom checks to show in PR readiness
 
 You can use any one of them on its own, or combine them in a single file.
 
@@ -262,7 +264,8 @@ This section describes the current config surface supported by the repo config p
   "preview": { "...": "optional" },
   "dependencies": { "...": "optional" },
   "bootstrap": { "...": "optional" },
-  "validation": { "...": "optional" }
+  "validation": { "...": "optional" },
+  "pr_readiness": { "...": "optional" }
 }
 ```
 
@@ -272,6 +275,7 @@ This section describes the current config surface supported by the repo config p
 | `dependencies` | object | no | Optional supported sandbox tool installs, keyed by tool name. |
 | `bootstrap` | object | no | Optional repo setup commands. |
 | `validation` | object | no | Optional extra validation commands. |
+| `pr_readiness` | object | no | Optional prompt-only PR readiness custom checks. |
 
 ### `dependencies`
 
@@ -333,6 +337,54 @@ Rules:
 - Blank strings are rejected.
 - Leading and trailing whitespace is trimmed.
 - Prefer fast, deterministic checks over long-running or flaky commands.
+
+### `pr_readiness`
+
+Repository-owned readiness checks live under the top-level `pr_readiness` key. Checks are prompt-only; they do not execute repository code. During agent repository prep, 143 validates this section and materializes active definitions for the repository. If the checked-out config removes all repo readiness checks, 143 deactivates previously materialized repo-config checks for that repository.
+
+This section only defines repository-owned custom prompt checks. Built-in readiness policy, including role enforcement, bypass scope, sensitive paths, large-diff thresholds, and generated-file allowed paths, is configured in `Settings -> Pull requests -> PR readiness` as org defaults or repository overrides.
+
+```json
+{
+  "pr_readiness": {
+    "checks": [
+      {
+        "id": "no_analytics_schema_drift",
+        "name": "Analytics schema compatibility",
+        "type": "prompt",
+        "enforcement": {
+          "builder": "blocking",
+          "engineer": "advisory",
+          "admin": "advisory"
+        },
+        "paths": {
+          "include": ["analytics/**"]
+        },
+        "prompt": "Check whether analytics schema changes remain backwards compatible. Return failed only for a concrete compatibility break."
+      }
+    ]
+  }
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `pr_readiness.checks` | object[] | no | Prompt checks to materialize for this repository. |
+| `checks[].id` | string | yes | Stable key matching `^[a-z][a-z0-9_]{2,63}$`. |
+| `checks[].name` | string | yes | Reviewer-facing check name. |
+| `checks[].type` | `"prompt"` | yes | Only prompt checks are supported. |
+| `checks[].enforcement` | object | no | Role enforcement: `off`, `advisory`, or `blocking` for `builder`, `engineer`, and `admin`. |
+| `checks[].paths.include` | string[] | no | Glob-like path filters. `analytics/**` matches nested paths. |
+| `checks[].paths.exclude` | string[] | no | Optional exclusions. |
+| `checks[].prompt` | string | yes | Go-template prompt rendered with bounded readiness context. |
+
+Rules:
+
+- Blank IDs, names, prompts, and path patterns are rejected.
+- Duplicate IDs are rejected after whitespace normalization.
+- Checks configured `off` for builder, engineer, and admin are accepted but not evaluated.
+- Custom checks receive bounded readiness context and must return structured JSON status (`passed`, `warning`, or `failed`).
+- Execution errors surface as readiness `error` results and use the check's configured enforcement.
 
 ### `preview`
 

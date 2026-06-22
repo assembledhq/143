@@ -43,6 +43,28 @@ var workerIssueColumns = []string{
 	"created_at", "updated_at", "deleted_at",
 }
 
+func TestEvaluateCustomReadinessChecksSkipsAllRoleOffChecks(t *testing.T) {
+	t.Parallel()
+
+	results := evaluateCustomReadinessChecks(context.Background(), &Services{}, []models.PRReadinessCustomCheck{
+		{
+			CheckKey: "off_check",
+			Name:     "Off check",
+			Prompt:   "This should not run.",
+			PathFilters: models.PRReadinessPathFilter{
+				Include: []string{"internal/**"},
+			},
+			Enforcement: models.PRReadinessEnforcementByRole{
+				Builder:  models.PRReadinessEnforcementOff,
+				Engineer: models.PRReadinessEnforcementOff,
+				Admin:    models.PRReadinessEnforcementOff,
+			},
+		},
+	}, models.Session{}, []string{"internal/api/foo.go"}, nil)
+
+	require.Empty(t, results, "custom checks configured off for every role should not execute or emit skipped results")
+}
+
 var workerSessionIssueLinkColumns = []string{
 	"id", "org_id", "session_id", "issue_id", "role",
 	"position", "added_by_user_id", "created_at",

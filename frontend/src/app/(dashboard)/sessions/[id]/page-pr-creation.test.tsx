@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
@@ -57,7 +57,33 @@ vi.mock('next/image', () => ({
 
 installSessionDetailPageTestHooks({ toast, routerPush });
 
+function freshReadinessHandlers() {
+  const latest = {
+    id: 'readiness-run-1',
+    org_id: 'org-1',
+    session_id: 'session-abcdef12-3456-7890',
+    status: 'passed',
+    evaluated_snapshot_key: 'snap-abc',
+    summary: 'Ready',
+    review_packet: { checked_at: '2026-02-17T07:10:00Z', bypasses: [] },
+    started_at: '2026-02-17T07:10:00Z',
+    completed_at: '2026-02-17T07:10:01Z',
+    created_at: '2026-02-17T07:10:00Z',
+    updated_at: '2026-02-17T07:10:01Z',
+    checks: [],
+    bypasses: [],
+  };
+  return [
+    http.get('/api/v1/sessions/:id/readiness', () => HttpResponse.json({ data: { latest } })),
+    http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+  ];
+}
+
 describe('SessionDetailPage PR creation', () => {
+  beforeEach(() => {
+    server.use(...freshReadinessHandlers());
+  });
+
   it('shows failure next steps and retry button', async () => {
     const failedSession: Session = {
       ...mockSessions[1],
@@ -248,6 +274,9 @@ describe('SessionDetailPage PR creation', () => {
           { status: 404 },
         );
       }),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+        return HttpResponse.json({ data: {} });
+      }),
       http.get('/api/v1/team/members', () => {
         teamRequestCount += 1;
         return HttpResponse.json({ error: { code: 'FORBIDDEN', message: 'insufficient permissions' } }, { status: 403 });
@@ -264,6 +293,423 @@ describe('SessionDetailPage PR creation', () => {
       expect.stringContaining('Run readiness checks successfully before creating a PR'),
     );
     expect(teamRequestCount).toBe(0);
+  });
+
+  it('allows builder PR creation when readiness policy disables builder enforcement', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get('/api/v1/pr-readiness-policies', () => {
+        return HttpResponse.json({
+          data: {
+            source: 'organization',
+            config: {
+              enabled_for_builders: false,
+              checks: {
+                freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+                agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+              },
+              bypass: {
+                enabled: true,
+                allowed_roles: ['admin', 'member', 'builder'],
+                scopes: ['completed_blocking_checks'],
+              },
+              auto_run: { after_session_completion: false, on_create_pr: false },
+              sensitive_paths: [],
+              large_diff_file_threshold: 25,
+              large_diff_line_threshold: 500,
+            },
+            bypass_counts: { total: 0 },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await screen.findByRole('button', { name: /Create PR/ });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create PR/ })).not.toHaveAttribute(
+        'title',
+        expect.stringContaining('Run readiness checks successfully before creating a PR'),
+      );
+    });
+  });
+
+  it('lets builders click Create PR to queue readiness when auto-run on Create PR is enabled', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    let createPRCalled = false;
+
+    server.use(
+      http.get('/api/v1/auth/me', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockMembers[0],
+            role: 'builder',
+          },
+        } satisfies SingleResponse<User>);
+      }),
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+        return HttpResponse.json({ data: {} });
+      }),
+      http.get('/api/v1/pr-readiness-policies', () => {
+        return HttpResponse.json({
+          data: {
+            source: 'organization',
+            config: {
+              enabled_for_builders: true,
+              checks: {
+                freshness: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+                agent_review_clean: { enforcement: { builder: 'blocking', engineer: 'advisory', admin: 'advisory' } },
+              },
+              bypass: {
+                enabled: true,
+                allowed_roles: ['admin', 'member', 'builder'],
+                scopes: ['completed_blocking_checks'],
+              },
+              auto_run: { after_session_completion: false, on_create_pr: true },
+              sensitive_paths: [],
+              large_diff_file_threshold: 25,
+              large_diff_line_threshold: 500,
+            },
+            bypass_counts: { total: 0 },
+          },
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalled = true;
+        return HttpResponse.json({ status: 'readiness_queued', readiness_run_id: 'readiness-run-1' }, { status: 202 });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+    });
+
+    const user = userEvent.setup();
+    const createPRButton = screen.getByRole('button', { name: /Create PR/ });
+    await user.click(createPRButton);
+
+    await waitFor(() => {
+      expect(createPRCalled).toBe(true);
+    });
+    expect(toast.success).toHaveBeenCalledWith('Readiness checks queued');
+  });
+
+  it('preserves existing issue-less readiness context when saving without edits', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      linked_issues: [],
+    };
+    let submittedReason = '';
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/sessions/:id/pr-readiness-context', ({ params }) => {
+        return HttpResponse.json({
+          data: {
+            org_id: 'org-1',
+            session_id: params.id,
+            issue_less_reason: 'Maintenance follow-up requested in Slack',
+          },
+        });
+      }),
+      http.post('/api/v1/sessions/:id/pr-readiness-context', async ({ params, request }) => {
+        const body = await request.json() as { issue_less_reason?: string };
+        submittedReason = body.issue_less_reason ?? '';
+        return HttpResponse.json({
+          data: {
+            org_id: 'org-1',
+            session_id: params.id,
+            issue_less_reason: submittedReason,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await screen.findByDisplayValue('Maintenance follow-up requested in Slack');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Save context' }));
+
+    await waitFor(() => {
+      expect(submittedReason).toBe('Maintenance follow-up requested in Slack');
+    });
+  });
+
+  it('renders readiness check actions and expandable evidence', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/analytics/schema.json\n+++ b/analytics/schema.json\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    const latest = {
+      id: 'readiness-run-1',
+      org_id: 'org-1',
+      session_id: sessionWithDiff.id,
+      status: 'warnings',
+      evaluated_workspace_revision: sessionWithDiff.workspace_revision,
+      evaluated_snapshot_key: 'snap-abc',
+      summary: 'Ready with warnings',
+      review_packet: { checked_at: '2026-02-17T07:10:00Z', bypasses: [] },
+      started_at: '2026-02-17T07:10:00Z',
+      completed_at: '2026-02-17T07:10:01Z',
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:01Z',
+      checks: [{
+        id: 'check-risk',
+        org_id: 'org-1',
+        run_id: 'readiness-run-1',
+        session_id: sessionWithDiff.id,
+        check_key: 'risk_flags',
+        check_type: 'risk_flags',
+        status: 'warning',
+        enforcement: 'advisory',
+        effective_enforcement: 'advisory',
+        title: 'Risk flags detected',
+        summary: 'Sensitive paths changed.',
+        details: { files: ['analytics/schema.json'] },
+        action: 'View files',
+        created_at: '2026-02-17T07:10:01Z',
+      }],
+      bypasses: [],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('Risk flags detected')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Show evidence for Risk flags detected' }));
+    expect(await screen.findByText(/analytics\/schema\.json/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'View files' }));
+    expect(screen.getByRole('tab', { name: /^Changes/ })).toHaveAttribute('data-state', 'active');
+  });
+
+  it('shows stale readiness as a visible blocker in the card', async () => {
+    const sessionWithNewRevision: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-new',
+      workspace_revision: 4,
+    };
+    const latest = {
+      id: 'readiness-run-1',
+      org_id: 'org-1',
+      session_id: sessionWithNewRevision.id,
+      status: 'passed',
+      evaluated_workspace_revision: 3,
+      evaluated_snapshot_key: 'snap-old',
+      summary: 'Ready',
+      review_packet: { checked_at: '2026-02-17T07:10:00Z', bypasses: [] },
+      started_at: '2026-02-17T07:10:00Z',
+      completed_at: '2026-02-17T07:10:01Z',
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:01Z',
+      checks: [{
+        id: 'check-freshness',
+        org_id: 'org-1',
+        run_id: 'readiness-run-1',
+        session_id: sessionWithNewRevision.id,
+        check_key: 'freshness',
+        check_type: 'freshness',
+        status: 'passed',
+        enforcement: 'blocking',
+        effective_enforcement: 'blocking',
+        title: 'Readiness is fresh',
+        summary: 'Checked against the latest workspace revision.',
+        action: 'Re-run',
+        created_at: '2026-02-17T07:10:01Z',
+      }],
+      bypasses: [],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: sessionWithNewRevision } satisfies SingleResponse<Session>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByText('Stale after latest changes')).toBeInTheDocument();
+    expect(screen.getByText('Readiness is stale')).toBeInTheDocument();
+  });
+
+  it('lists readiness warnings in the engineer preflight dialog', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    const latest = {
+      id: 'readiness-run-1',
+      org_id: 'org-1',
+      session_id: sessionWithDiff.id,
+      status: 'warnings',
+      evaluated_snapshot_key: 'snap-abc',
+      summary: 'Ready with warnings',
+      review_packet: { checked_at: '2026-02-17T07:10:00Z', bypasses: [] },
+      started_at: '2026-02-17T07:10:00Z',
+      completed_at: '2026-02-17T07:10:01Z',
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:01Z',
+      checks: [{
+        id: 'check-tests',
+        org_id: 'org-1',
+        run_id: 'readiness-run-1',
+        session_id: sessionWithDiff.id,
+        check_key: 'test_evidence_present',
+        check_type: 'test_evidence_present',
+        status: 'warning',
+        enforcement: 'advisory',
+        effective_enforcement: 'advisory',
+        title: 'No test evidence found',
+        summary: 'No captured test output was found.',
+        action: 'Run tests',
+        created_at: '2026-02-17T07:10:01Z',
+      }],
+      bypasses: [],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: /Create PR/ }));
+
+    const dialog = await screen.findByRole('alertdialog', { name: 'Review readiness before creating PR?' });
+    expect(within(dialog).getByText('No test evidence found')).toBeInTheDocument();
+  });
+
+  it('shows exact readiness blockers in the bypass dialog', async () => {
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+    const latest = {
+      id: 'readiness-run-1',
+      org_id: 'org-1',
+      session_id: sessionWithDiff.id,
+      status: 'blocked',
+      evaluated_snapshot_key: 'snap-abc',
+      summary: 'Blocked',
+      review_packet: { checked_at: '2026-02-17T07:10:00Z', bypasses: [] },
+      started_at: '2026-02-17T07:10:00Z',
+      completed_at: '2026-02-17T07:10:01Z',
+      created_at: '2026-02-17T07:10:00Z',
+      updated_at: '2026-02-17T07:10:01Z',
+      checks: [{
+        id: 'check-review',
+        org_id: 'org-1',
+        run_id: 'readiness-run-1',
+        session_id: sessionWithDiff.id,
+        check_key: 'agent_review_clean',
+        check_type: 'agent_review_clean',
+        status: 'failed',
+        enforcement: 'blocking',
+        effective_enforcement: 'blocking',
+        title: 'Agent review not clean',
+        summary: 'Run Review must complete cleanly.',
+        action: 'Fix with agent',
+        created_at: '2026-02-17T07:10:01Z',
+      }],
+      bypasses: [],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ error: { code: 'NOT_FOUND', message: 'pull request not found' } }, { status: 404 })),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => HttpResponse.json({ data: { latest } })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Bypass blockers' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Bypass readiness blockers' });
+    expect(within(dialog).getByText('Agent review not clean')).toBeInTheDocument();
+    expect(within(dialog).getByText('Run Review must complete cleanly.')).toBeInTheDocument();
   });
 
   it('does not show Create PR button when PR already exists', async () => {
@@ -705,6 +1151,52 @@ describe('SessionDetailPage PR creation', () => {
     const user = userEvent.setup();
     const createPRButton = await screen.findByRole('button', { name: /Create PR/ });
     await user.click(createPRButton);
+
+    await waitFor(() => {
+      expect(createPRCalled).toBe(true);
+    });
+  });
+
+  it('shows a one-time advisory readiness preflight for missing readiness', async () => {
+    const sessionWithSnapshot: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      sandbox_state: 'snapshotted',
+      snapshot_key: 'snap-abc',
+      pr_creation_state: 'idle',
+    };
+    let createPRCalled = false;
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithSnapshot } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+      http.get('/api/v1/sessions/:id/pr-readiness-runs/latest', () => {
+        return HttpResponse.json({ data: {} });
+      }),
+      http.post('/api/v1/sessions/:id/pr', () => {
+        createPRCalled = true;
+        return HttpResponse.json({ status: 'queued' }, { status: 202 });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    await user.click(await screen.findByRole('button', { name: 'Create PR' }));
+    expect(await screen.findByRole('alertdialog', { name: 'Review readiness before creating PR?' })).toBeInTheDocument();
+    expect(screen.getByText(/PR readiness is missing/)).toBeInTheDocument();
+    expect(createPRCalled).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Create PR' }));
 
     await waitFor(() => {
       expect(createPRCalled).toBe(true);

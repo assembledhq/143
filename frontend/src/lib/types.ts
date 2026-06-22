@@ -1162,7 +1162,7 @@ export interface SessionWorkspaceGenerationChangedEvent {
 }
 
 export type PRReadinessRunStatus = "queued" | "running" | "passed" | "warnings" | "blocked" | "failed";
-export type PRReadinessCheckStatus = "passed" | "warning" | "failed" | "skipped";
+export type PRReadinessCheckStatus = "passed" | "warning" | "failed" | "skipped" | "error";
 export type PRReadinessEnforcement = "off" | "advisory" | "blocking";
 export type PRReadinessCheckType =
   | "freshness"
@@ -1173,20 +1173,45 @@ export type PRReadinessCheckType =
   | "dependency_config_risk"
   | "generated_file_churn"
   | "context_complete"
-  | "review_packet_draftable";
+  | "review_packet_draftable"
+  | "custom_prompt";
+
+export interface PRReadinessEnforcementByRole {
+  builder?: PRReadinessEnforcement;
+  engineer?: PRReadinessEnforcement;
+  admin?: PRReadinessEnforcement;
+}
 
 export interface PRReadinessCheck {
   id: string;
   org_id: string;
   run_id: string;
   session_id: string;
+  check_key?: string;
   check_type: PRReadinessCheckType;
   status: PRReadinessCheckStatus;
   enforcement: PRReadinessEnforcement;
+  enforcement_by_role?: PRReadinessEnforcementByRole;
+  effective_enforcement?: PRReadinessEnforcement;
+  provenance?: "builtin" | "org_settings" | "repo_config" | string;
+  source?: string;
   title: string;
   summary: string;
   details?: unknown;
   action?: string;
+  created_at: string;
+}
+
+export interface PRReadinessBypass {
+  id: string;
+  org_id: string;
+  readiness_run_id: string;
+  session_id: string;
+  repository_id?: string;
+  pull_request_id?: string;
+  bypassed_by_user_id: string;
+  reason: string;
+  bypassed_checks: string[];
   created_at: string;
 }
 
@@ -1206,10 +1231,71 @@ export interface PRReadinessRun {
   created_at: string;
   updated_at: string;
   checks?: PRReadinessCheck[];
+  bypasses?: PRReadinessBypass[];
 }
 
 export interface PRReadinessResponse {
   latest?: PRReadinessRun;
+}
+
+export interface PRReadinessCheckPolicy {
+  enforcement?: PRReadinessEnforcementByRole;
+}
+
+export interface PRReadinessPolicyConfig {
+  enabled_for_builders: boolean;
+  checks?: Record<string, PRReadinessCheckPolicy>;
+  bypass?: { enabled: boolean; allowed_roles?: string[]; scopes?: string[]; non_bypassable_checks?: string[] };
+  auto_run?: { after_session_completion: boolean; on_create_pr: boolean };
+  sensitive_paths?: string[];
+  generated_file_allowed_paths?: string[];
+  large_diff_file_threshold?: number;
+  large_diff_line_threshold?: number;
+}
+
+export interface PRReadinessResolvedPolicy {
+  config: PRReadinessPolicyConfig;
+  source: string;
+  policy?: {
+    id: string;
+    org_id: string;
+    repository_id?: string;
+    config: PRReadinessPolicyConfig;
+    active: boolean;
+    created_by_user_id?: string;
+    created_at: string;
+  };
+  bypass_counts?: {
+    total: number;
+    by_repository?: Array<{ key: string; count: number }>;
+    by_user?: Array<{ key: string; count: number }>;
+    by_check?: Array<{ key: string; count: number }>;
+  };
+}
+
+export interface PRReadinessContext {
+  org_id: string;
+  session_id: string;
+  issue_less_reason: string;
+  created_by_user_id?: string;
+  updated_by_user_id?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface PRReadinessCustomCheck {
+  id?: string;
+  org_id?: string;
+  repository_id?: string;
+  check_key: string;
+  name: string;
+  prompt: string;
+  paths?: { include?: string[]; exclude?: string[] };
+  enforcement?: PRReadinessEnforcementByRole;
+  source?: "org_settings" | "repo_config";
+  active?: boolean;
+  created_by_user_id?: string;
+  created_at?: string;
 }
 
 export interface SessionThreadFileEvent {
