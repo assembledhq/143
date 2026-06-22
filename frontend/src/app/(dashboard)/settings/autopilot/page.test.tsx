@@ -296,6 +296,191 @@ describe("AutopilotSettingsPage", () => {
     });
   });
 
+  it("lets admins create repository overrides directly from Autopilot settings", async () => {
+    let capturedBody: unknown;
+    // Track the latest settings so GET reflects what was PATCHed; without
+    // this, the invalidation-triggered refetch after the PATCH would overwrite
+    // the optimistic update with stale data and hide the form.
+    let currentRepoSettings: unknown = {};
+    const repository = {
+      id: "repo-1",
+      org_id: "org-1",
+      integration_id: "integration-1",
+      github_id: 123,
+      full_name: "acme/web",
+      default_branch: "main",
+      private: true,
+      clone_url: "https://github.com/acme/web.git",
+      installation_id: 456,
+      status: "active",
+      settings: {},
+      created_at: "2026-03-20T00:00:00Z",
+      updated_at: "2026-03-20T00:00:00Z",
+    };
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            default_agent_type: "codex",
+            agent_config: {},
+            product_context: {
+              philosophy: "Prefer safe changes",
+              direction: "Improve activation",
+              focus_areas: ["onboarding"],
+              avoid_areas: [],
+            },
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repository], meta: {} })),
+      http.get("/api/v1/repositories/repo-1", () => HttpResponse.json({
+        data: { ...repository, settings: currentRepoSettings },
+      })),
+      http.patch("/api/v1/repositories/repo-1", async ({ request }) => {
+        capturedBody = await request.json();
+        currentRepoSettings = (capturedBody as { settings: unknown }).settings;
+        return HttpResponse.json({
+          data: { ...repository, settings: currentRepoSettings },
+        });
+      }),
+      http.get("/api/v1/coding-credentials", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    expect(await screen.findByLabelText("Repository")).toHaveTextContent("acme/web");
+    await user.click(screen.getByRole("button", { name: "Customize" }));
+
+    await waitFor(() => {
+      expect(capturedBody).toEqual({
+        settings: {
+          pm: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            product_context: {
+              philosophy: "Prefer safe changes",
+              direction: "Improve activation",
+              focus_areas: ["onboarding"],
+              avoid_areas: [],
+            },
+          },
+        },
+      });
+    });
+
+    // After save, the repo-level PM settings form should be visible.
+    // "PM Model" (capital M) uniquely identifies the repo editor's select vs
+    // the org-level "PM model" (lowercase m).
+    expect(await screen.findByLabelText("PM Model")).toBeInTheDocument();
+  });
+
+  it("shows the selected repository's settings when switching between repositories", async () => {
+    const repoWithPM = {
+      id: "repo-1",
+      org_id: "org-1",
+      integration_id: "integration-1",
+      github_id: 123,
+      full_name: "acme/web",
+      default_branch: "main",
+      private: true,
+      clone_url: "https://github.com/acme/web.git",
+      installation_id: 456,
+      status: "active",
+      settings: {
+        pm: {
+          pm_schedule_hours: 8,
+          pm_model: "claude-opus-4-7",
+          product_context: { philosophy: "", direction: "", focus_areas: [], avoid_areas: [] },
+        },
+      },
+      created_at: "2026-03-20T00:00:00Z",
+      updated_at: "2026-03-20T00:00:00Z",
+    };
+    const repoWithoutPM = {
+      id: "repo-2",
+      org_id: "org-1",
+      integration_id: "integration-1",
+      github_id: 456,
+      full_name: "acme/api",
+      default_branch: "main",
+      private: true,
+      clone_url: "https://github.com/acme/api.git",
+      installation_id: 456,
+      status: "active",
+      settings: {},
+      created_at: "2026-03-20T00:00:00Z",
+      updated_at: "2026-03-20T00:00:00Z",
+    };
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            default_agent_type: "codex",
+            agent_config: {},
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({
+        data: [repoWithPM, repoWithoutPM],
+        meta: {},
+      })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    // First repo has custom PM — the PM form should be visible immediately.
+    expect(await screen.findByLabelText("Repository")).toHaveTextContent("acme/web");
+    expect(await screen.findByLabelText("PM Model")).toBeInTheDocument();
+
+    // Switch to the second repo (no custom PM) — PM form should disappear.
+    await user.click(screen.getByLabelText("Repository"));
+    await user.click(screen.getByRole("option", { name: "acme/api" }));
+
+    await waitFor(() => {
+      expect(screen.queryByLabelText("PM Model")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("Using organization defaults (Staff PM).")).toBeInTheDocument();
+  });
+
+  it("shows empty state when no repositories are connected", async () => {
+    server.use(
+      http.get("/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Org",
+          settings: {
+            pm_schedule_hours: 4,
+            pm_model: "claude-sonnet-4-5",
+            default_agent_type: "codex",
+            agent_config: {},
+          },
+          created_at: "2026-03-20T00:00:00Z",
+          updated_at: "2026-03-20T00:00:00Z",
+        },
+      })),
+      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<AutopilotSettingsPage />);
+
+    expect(await screen.findByText("No repositories connected yet.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Repository")).not.toBeInTheDocument();
+  });
+
   it("shows an admin-only message for non-admin users", async () => {
     useAuthMock.mockReturnValue({
       user: { id: "user-2", name: "Member User", email: "member@example.com", role: "member" },
