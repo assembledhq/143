@@ -64,7 +64,7 @@ Click behavior:
 | Latest PR head has an active preview still starting | Show stable page with startup progress and auto-open when ready if the click initiated launch. |
 | Latest PR head has a warm/resumable preview | Start/resume the preview, show `Resuming preview...`, then auto-open when ready. |
 | No target/runtime exists and caller may create | Create target for latest PR head, start runtime, show progress, then auto-open. |
-| Active preview exists for an older SHA | Do not auto-open stale code. Show `New commits available` with `Open stale preview` secondary and `Start latest` primary. |
+| Active preview exists for an older SHA | Do not auto-open stale code. Show `New commits available` with `Open stale preview` secondary and `Restart` primary. |
 | Latest target failed | Show failure summary, phase/log diagnostics, and `Retry`. |
 | Preview is blocked by role/token/capacity/config | Show a specific recovery state; do not fall through to generic failure. |
 | PR is closed or merged | Show terminal state and do not start new runtimes by default. |
@@ -245,7 +245,7 @@ Example stale response:
       "reason": "stale",
       "auto_open": false,
       "represents_latest": false,
-      "primary_label": "Start latest",
+      "primary_label": "Restart",
       "secondary_label": "Open stale preview",
       "message": "This preview is for abc123; the pull request is now at def456."
     }
@@ -289,7 +289,7 @@ Supported intent values:
 
 Default `intent=open` preserves current PR-link behavior.
 
-### Start Latest
+### Restart Latest Source
 
 `POST /api/v1/previews/{target_id}/start-latest`
 
@@ -621,7 +621,7 @@ Required cases:
 
 - ready launch bootstraps and opens preview origin.
 - starting launch shows progress and polls until ready, then opens.
-- stale launch does not auto-open and shows `Start latest`.
+- stale launch does not auto-open and shows `Restart`.
 - resumable launch shows resume estimate and calls `start-latest` or restart path.
 - failed launch shows retry and logs/phase summary.
 - blocked role/token/capacity launch renders specific copy.

@@ -399,7 +399,7 @@ func TestDerivePRPreviewLaunch(t *testing.T) {
 				Reason:           models.PreviewLaunchReasonStale,
 				AutoOpen:         false,
 				RepresentsLatest: false,
-				PrimaryLabel:     "Start latest",
+				PrimaryLabel:     "Restart",
 				SecondaryLabel:   "Open stale preview",
 				StalePreviewURL:  &staleURL,
 				Message:          "This preview is for abc123; the pull request is now at def456.",

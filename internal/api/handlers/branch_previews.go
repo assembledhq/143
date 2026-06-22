@@ -3077,7 +3077,7 @@ func derivePRPreviewLaunch(resp branchPreviewResponse, opts prPreviewLaunchOptio
 			Reason:           models.PreviewLaunchReasonStale,
 			AutoOpen:         false,
 			RepresentsLatest: false,
-			PrimaryLabel:     "Start latest",
+			PrimaryLabel:     "Restart",
 			SecondaryLabel:   "Open stale preview",
 			StalePreviewURL:  resp.PreviewURL,
 			Message:          stalePreviewMessage(resp.CommitSHA, latest),

@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorText } from "@/components/ui/error-notice";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { api } from "@/lib/api";
 import { formatPreviewStatus } from "@/lib/preview-types";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
@@ -19,6 +20,8 @@ import { safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
+const RESTART_LATEST_LABEL = "Restart";
+const RESTART_LATEST_TOOLTIP = "Restart preview from the latest source state";
 
 export default function PullRequestPreviewPage({
   params,
@@ -213,7 +216,7 @@ export function PullRequestPreviewContent({
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                     <div>
                       <p className="font-medium text-foreground">Preview expired</p>
-                      <p className="text-muted-foreground">Start latest to launch a fresh runtime for this pull request.</p>
+                      <p className="text-muted-foreground">Restart to launch a fresh runtime for this pull request.</p>
                     </div>
                   </div>
                 ) : null}
@@ -314,15 +317,23 @@ export function PullRequestPreviewContent({
                     </Button>
                   ) : null}
                   {showStartAction ? (
-                    <Button
-                      type="button"
-                      variant={launch?.action === "start_latest" || launch?.action === "start" || launch?.action === "resume" ? "default" : "outline"}
-                      onClick={handleStartLatest}
-                      disabled={startLatest.isPending || startPullRequest.isPending}
-                    >
-                      <GitBranch className="h-4 w-4" />
-                      {startLatest.isPending || startPullRequest.isPending ? "Starting..." : launchStartLabel(launch?.action, launch?.primary_label)}
-                    </Button>
+                    <TooltipProvider delayDuration={150}>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            type="button"
+                            variant={launch?.action === "start_latest" || launch?.action === "start" || launch?.action === "resume" ? "default" : "outline"}
+                            aria-label={launch?.action === "start_latest" ? RESTART_LATEST_TOOLTIP : undefined}
+                            onClick={handleStartLatest}
+                            disabled={startLatest.isPending || startPullRequest.isPending}
+                          >
+                            <GitBranch className="h-4 w-4" />
+                            {startLatest.isPending || startPullRequest.isPending ? "Starting..." : launchStartLabel(launch?.action, launch?.primary_label)}
+                          </Button>
+                        </TooltipTrigger>
+                        {launch?.action === "start_latest" ? <TooltipContent>{RESTART_LATEST_TOOLTIP}</TooltipContent> : null}
+                      </Tooltip>
+                    </TooltipProvider>
                   ) : null}
                   {preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" ? (
                     <Button
@@ -359,9 +370,9 @@ function launchStartLabel(action: NonNullable<BranchPreviewResponse["launch"]>["
     case "start":
       return "Start preview";
     case "start_latest":
-      return "Start latest";
+      return RESTART_LATEST_LABEL;
     default:
-      return "Start latest";
+      return RESTART_LATEST_LABEL;
   }
 }
 
@@ -391,7 +402,7 @@ function launchStateCopy(preview: BranchPreviewResponse | undefined): {
       return {
         title: preview?.status === "expired" ? "Preview expired" : "Preview not started",
         description: launch.message ?? (preview?.status === "expired"
-          ? "Start latest to launch a fresh runtime for this pull request."
+          ? "Restart to launch a fresh runtime for this pull request."
           : "Start a preview for the latest pull request head."),
         className: "border-border bg-muted/40 text-foreground",
       };
