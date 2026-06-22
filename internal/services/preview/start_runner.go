@@ -1305,6 +1305,20 @@ func ClassifyLaunchFailure(err error) StartFailure {
 		return StartFailure{}
 	}
 	cause := err.Error()
+	out := classifyLaunchFailureCode(err, cause)
+	// A service that OOM-kills at boot surfaces here (typically as
+	// ErrServiceNotReady) with a bare "exited with code 137" cause. Prepend a
+	// plain-English OOM explanation so the launch page and instance error make
+	// the cause obvious instead of leaving the exit code to be decoded.
+	if looksLikeOOMFailure(cause) {
+		out.Message = "the preview ran out of memory and was killed (OOM, exit code 137 / SIGKILL). " +
+			"Reduce the workload's memory use — e.g. run fewer concurrent build steps, or serve a " +
+			"production build instead of a dev server. " + out.Message
+	}
+	return out
+}
+
+func classifyLaunchFailureCode(err error, cause string) StartFailure {
 	switch {
 	case errors.Is(err, ErrInfraImageUnavailable):
 		return StartFailure{Code: "PREVIEW_INFRA_IMAGE_UNAVAILABLE", Message: "preview infrastructure image is not available on this worker. The image could not be pulled from its registry — check the worker's network egress and registry credentials. Details: " + cause}
