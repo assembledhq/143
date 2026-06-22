@@ -2604,13 +2604,19 @@ func (s *PreviewStore) MarkPreviewRuntimesDrainingByWorker(ctx context.Context, 
 	return tag.RowsAffected(), nil
 }
 
-// HeartbeatPreviewRuntimesByWorker extends leases for live runtimes owned by a worker.
+// HeartbeatPreviewRuntimesByWorker extends leases for live runtimes owned by
+// active previews on a worker.
 // lint:allow-no-orgid reason="cross-org worker heartbeat extends runtimes owned by this node"
 func (s *PreviewStore) HeartbeatPreviewRuntimesByWorker(ctx context.Context, workerNodeID string, leaseExpiresAt time.Time) (int64, error) {
 	tag, err := s.db.Exec(ctx,
-		fmt.Sprintf(`UPDATE preview_runtimes
+		fmt.Sprintf(`UPDATE preview_runtimes pr
 		 SET last_heartbeat_at = now(), lease_expires_at = @lease_expires_at, updated_at = now()
-		 WHERE worker_node_id = @worker AND status IN %s`, activeRuntimeStatusFilter),
+		 FROM preview_instances pi
+		 WHERE pr.preview_instance_id = pi.id
+		   AND pr.org_id = pi.org_id
+		   AND pr.worker_node_id = @worker
+		   AND pr.status IN %s
+		   AND pi.status IN %s`, activeRuntimeStatusFilter, activeStatusFilter),
 		pgx.NamedArgs{"worker": workerNodeID, "lease_expires_at": leaseExpiresAt},
 	)
 	if err != nil {
