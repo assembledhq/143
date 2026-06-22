@@ -1239,6 +1239,9 @@ func (h *BranchPreviewHandler) startTargetRuntimeWithOptions(ctx context.Context
 	if err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_ENQUEUE_FAILED", "failed to enqueue branch preview startup", err)
 	}
+	if jobID == uuid.Nil {
+		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusConflict, "PREVIEW_START_IN_PROGRESS", "preview startup is already in progress; retry shortly", nil)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return branchPreviewResponse{}, newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_START_FAILED", "failed to start preview", err)
 	}
