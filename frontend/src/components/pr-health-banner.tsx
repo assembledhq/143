@@ -417,12 +417,28 @@ export function PRHealthBanner({
                   </p>
                 )}
                 {health.merge_when_ready.state === "failed" && health.merge_when_ready.last_error && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                    <span>Merge when ready stopped: {health.merge_when_ready.last_error}</span>
+                  <div
+                    role="status"
+                    aria-label="Merge when ready stopped"
+                    className="flex flex-col gap-1.5 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:gap-2"
+                  >
+                    <span className="min-w-0">
+                      Merge when ready stopped: {health.merge_when_ready.last_error}
+                    </span>
                     {onQueueMergeWhenReady && (
-                      <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={onQueueMergeWhenReady} disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending}>
-                        Retry
-                      </Button>
+                      <DisabledTooltip disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending} content={mergeWhenReadyAction.disabledReason}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 w-fit shrink-0 px-2 text-xs"
+                          onClick={onQueueMergeWhenReady}
+                          disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending}
+                          title={mergeWhenReadyAction.disabledReason}
+                          aria-label="Retry merge when ready"
+                        >
+                          {mergeWhenReadyAction.spinning ? "Retrying…" : "Retry"}
+                        </Button>
+                      </DisabledTooltip>
                     )}
                   </div>
                 )}
