@@ -249,7 +249,7 @@ type OrgSettings struct {
 	ContextLimits              ContextLimits          `json:"context_limits,omitempty"`
 	PRAuthorship               PRAuthorship           `json:"pr_authorship,omitempty"`
 	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       bool                   `json:"auto_archive_on_pr_close,omitempty"`
+	AutoArchiveOnPRClose       *bool                  `json:"auto_archive_on_pr_close,omitempty"`
 	DefaultWorkRepositoryID    *uuid.UUID             `json:"default_work_repository_id,omitempty"`
 	BuilderPermissions         BuilderPermissions     `json:"builder_permissions,omitempty"`
 	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
@@ -357,6 +357,14 @@ func (s OrgSettings) EffectiveCodingAgentTabToolsEnabled() bool {
 		return true
 	}
 	return *s.CodingAgentTabToolsEnabled
+}
+
+// EffectiveAutoArchiveOnPRClose applies the default PR cleanup policy.
+func (s OrgSettings) EffectiveAutoArchiveOnPRClose() bool {
+	if s.AutoArchiveOnPRClose == nil {
+		return true
+	}
+	return *s.AutoArchiveOnPRClose
 }
 
 // BuilderPermissions controls the narrower builder role's access to
