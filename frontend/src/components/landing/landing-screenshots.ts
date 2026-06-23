@@ -16,7 +16,7 @@ export const landingScreenshots = {
     alt: "143 preview tab showing a session preview environment and open preview action",
   },
   workspace: {
-    src: "/product/product-autopilot-setup.webp",
-    alt: "143 workspace setup showing coding agent selection and connected integrations",
+    src: "/product/product-sessions-list.webp",
+    alt: "143 Sessions workspace showing every team run with status, PR badges, and diffs alongside an open session",
   },
 } as const;
