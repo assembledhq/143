@@ -201,6 +201,14 @@ func (r *SandboxAuthSocketReconciler) ReconcileOnce(ctx context.Context) error {
 		// serving it. Don't steal it — leave it alone and re-check next tick;
 		// we take over only once that listener is gone. Without this guard the
 		// reconciler would unlink a sibling's live socket on every deploy.
+		//
+		// The hasLocal check means a socket we own (e.g. one an executor just
+		// turn-acquired in this process) is NOT treated as foreign: it falls
+		// through to pinContainer below and gets container-pinned so it survives
+		// the turn boundary. The only adopt-then-defer case for our own socket
+		// is the narrow race where a sibling-or-self bound it between this read
+		// and the pin — re-checked next tick, and harmless because the turn
+		// lease holds it open meanwhile.
 		path, hasLocal := r.leaser.ContainerSocketState(sessionID)
 		if !hasLocal && r.socketLive(path) {
 			adoptedCount++

@@ -644,7 +644,12 @@ func main() {
 		// but staticcheck's flow analysis can't follow logger.Fatal — gate this
 		// inside an explicit non-nil check to keep lint clean.
 		if services != nil && apiSandboxProvider != nil {
+			// SandboxAuthBroker is an interface field, so a worker with sandbox
+			// auth disabled (empty SANDBOX_AUTH_SOCKET_DIR) stores a typed-nil
+			// *Broker — the assertion would succeed with a nil pointer. Guard on
+			// broker != nil so we don't spin a reconciler that can never pin.
 			broker, brokerOK := services.SandboxAuthBroker.(*sandboxauth.Broker)
+			brokerOK = brokerOK && broker != nil
 			lister, listerOK := any(apiSandboxProvider).(agent.ManagedSandboxLister)
 			switch {
 			case brokerOK && listerOK:

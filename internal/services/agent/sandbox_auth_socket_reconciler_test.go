@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -311,4 +312,35 @@ func TestSandboxAuthSocketReconciler_PinsOwnSocketEvenWhenLive(t *testing.T) {
 
 	require.NoError(t, f.reconciler.ReconcileOnce(context.Background()))
 	require.Equal(t, []uuid.UUID{f.sessionID}, f.leaser.ensuredSorted(), "a session we already own a listener for must be pinned even while live")
+}
+
+func TestSandboxAuthSocketReconciler_RunTicksAndStopsOnCancel(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	leaser := newFakeContainerLeaser()
+	lister := &fakeManagedLister{}
+	lister.set([]ManagedSandboxContainer{managed(orgID, sessionID)}, nil)
+	sessions := &fakeSessionLoader{
+		sessions: map[uuid.UUID]models.Session{sessionID: {ID: sessionID, OrgID: orgID, RepositoryID: &repoID}},
+		errs:     map[uuid.UUID]error{},
+	}
+	repos := &fakeRepoLoader{repos: map[uuid.UUID]models.Repository{repoID: {ID: repoID, OrgID: orgID, FullName: "owner/repo"}}}
+	r := NewSandboxAuthSocketReconciler(leaser, lister, sessions, repos, nil, 5*time.Millisecond, zerolog.Nop())
+	r.socketLive = func(string) bool { return false }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { r.Run(ctx); close(done) }()
+
+	require.Eventually(t, func() bool { return len(leaser.ensuredSorted()) >= 1 }, time.Second, 2*time.Millisecond,
+		"Run should reconcile the live container on its interval")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after its context was cancelled")
+	}
 }
