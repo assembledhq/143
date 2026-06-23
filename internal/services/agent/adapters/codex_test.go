@@ -127,9 +127,9 @@ func TestCodexModelArgs(t *testing.T) {
 			expected: ` -m 'gpt-5.5'`,
 		},
 		{
-			name:     "does not add args when no env model is set",
+			name:     "uses the Codex default when no env model is set",
 			env:      map[string]string{},
-			expected: "",
+			expected: ` -m 'gpt-5.5'`,
 		},
 		{
 			name:           "uses resolved effective model when env model is absent",

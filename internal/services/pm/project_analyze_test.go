@@ -300,7 +300,7 @@ func TestAnalyzeProject_EnrichesTokenUsageHintOnPrompt(t *testing.T) {
 	require.NoError(t, err, "AnalyzeProject should succeed")
 	require.NotNil(t, inner.calledPrompt, "AnalyzeProject should pass a prompt to the inner agent")
 	require.Equal(t, models.AgentTypeCodex, inner.calledPrompt.UsageHint.AgentType, "AnalyzeProject should preserve the selected agent type in UsageHint")
-	require.Equal(t, models.CodexModelGPT54, inner.calledPrompt.UsageHint.EffectiveModel, "AnalyzeProject should propagate the effective model into UsageHint")
+	require.Equal(t, models.DefaultCodexModel, inner.calledPrompt.UsageHint.EffectiveModel, "AnalyzeProject should propagate the effective model into UsageHint")
 	require.Equal(t, agent.TokenBillingModeSubscription, inner.calledPrompt.UsageHint.BillingMode, "AnalyzeProject should record subscription billing when Codex runs via ChatGPT auth")
 }
 
