@@ -252,6 +252,7 @@ describe("ManualSessionCreatePageContent", () => {
     expect(
       screen.getByText("Start a manual session with text, files, photos, or a screenshot anywhere here."),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("manual-session-plane-canvas")).toHaveAttribute("aria-hidden", "true");
     expect(screen.queryByText("Drop a screenshot anywhere here, or use +")).not.toBeInTheDocument();
   });
 
