@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -2096,6 +2097,54 @@ type workspaceRevisionStamp struct {
 	updatedAt time.Time
 }
 
+// errRecycleSkipped signals that a recycle attempt was intentionally skipped
+// (e.g. an indeterminate sandbox liveness probe) rather than failed. The
+// recycler treats it as a no-op so the attempt is not counted or logged as a
+// failed recycle.
+var errRecycleSkipped = errors.New("recycle skipped")
+
+// recycleIsAliveAttempts bounds how many times recyclePreview probes sandbox
+// liveness before treating a persistently-erroring probe as indeterminate.
+const recycleIsAliveAttempts = 3
+
+// recycleIsAliveBackoff is the delay between liveness-probe retries, stored as
+// nanoseconds in an atomic so tests can drop it to zero without racing the
+// recycler goroutine.
+var recycleIsAliveBackoff atomic.Int64
+
+func init() { recycleIsAliveBackoff.Store(int64(500 * time.Millisecond)) }
+
+// SetRecycleIsAliveBackoffForTesting overrides the liveness-probe retry backoff.
+func SetRecycleIsAliveBackoffForTesting(d time.Duration) {
+	recycleIsAliveBackoff.Store(int64(d))
+}
+
+// probeSandboxAlive calls IsAlive with bounded retries so a momentary
+// docker-daemon hiccup within a single recycle sweep does not skip an otherwise
+// healthy preview. A definitive result (err == nil) — including "container is
+// gone" — returns immediately without retrying.
+func (m *Manager) probeSandboxAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	var lastErr error
+	for attempt := 1; attempt <= recycleIsAliveAttempts; attempt++ {
+		alive, err := m.sandboxProvider.IsAlive(ctx, sb)
+		if err == nil {
+			return alive, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+		if backoff := time.Duration(recycleIsAliveBackoff.Load()); attempt < recycleIsAliveAttempts && backoff > 0 {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+	}
+	return false, lastErr
+}
+
 func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig, revisionStamp *workspaceRevisionStamp) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
@@ -2113,6 +2162,53 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("load recycle input: %w", err)
 	}
+
+	// Guard against recycling onto a sandbox container that no longer exists.
+	// Recycle reuses the sandbox recorded at first launch (input.Sandbox); if
+	// that container was removed out-of-band (OOM, crash, prune) after the
+	// preview went ready, reusing it fails deep inside provisionInfra with a
+	// confusing "No such container" error and hard-fails the preview. Probe
+	// liveness first — the same guard the launch-time reuse path applies — and
+	// only recycle in place when the container is definitively alive. Checked
+	// before the config refresh below so a dead preview is not left with a
+	// freshly-persisted recycle config it will never use.
+	if m.sandboxProvider != nil && input.Sandbox != nil && input.Sandbox.ID != "" {
+		alive, aliveErr := m.probeSandboxAlive(ctx, input.Sandbox)
+		switch {
+		case aliveErr != nil:
+			// Indeterminate even after retries — the container may well be
+			// healthy. Don't disturb a possibly-running preview; the
+			// scheduled-recycle marker persists so a later sweep retries.
+			// Wrap errRecycleSkipped so the recycler counts this as a skip,
+			// not a failed recycle, and logs it quietly.
+			m.logger.Debug().Err(aliveErr).
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox liveness probe failed; skipping this sweep")
+			return fmt.Errorf("recycle: sandbox liveness probe failed: %w", errRecycleSkipped)
+		case !alive:
+			// Definitively gone. The preview's workspace died with the
+			// container, so there is nothing to recycle in place. Fail with an
+			// actionable message; relaunching cold-starts a fresh sandbox. Use
+			// the active-guarded status update so a preview that was stopped or
+			// expired concurrently (between the lookup above and here) is not
+			// clobbered back to "failed".
+			const deadSandboxReason = "preview sandbox was removed; relaunch to recreate it"
+			m.logger.Warn().
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox container no longer exists; failing preview so it can be relaunched")
+			if _, statusErr := m.store.UpdatePreviewStatusIfActive(ctx, orgID, previewID, models.PreviewStatusFailed, deadSandboxReason); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Str("preview_id", previewID.String()).Msg("recycle: failed to set failed status after dead sandbox")
+			}
+			if schedErr := m.store.ClearRecycleSchedule(ctx, orgID, previewID); schedErr != nil {
+				m.logger.Warn().Err(schedErr).Str("preview_id", previewID.String()).Msg("recycle: failed to clear recycle schedule after dead sandbox")
+			}
+			m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
+			return fmt.Errorf("recycle: sandbox container %s no longer exists", input.Sandbox.ID)
+		}
+	}
+
 	if refreshedConfig != nil {
 		resourcePolicy, policyErr := m.resourcePolicy(ctx, orgID)
 		if policyErr != nil {
