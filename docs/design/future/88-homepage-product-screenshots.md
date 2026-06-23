@@ -36,7 +36,7 @@ The first homepage pass uses demo-mode captures saved under `frontend/public/pro
 - `product-session-overview.webp`
 - `product-review-diff.webp`
 - `product-session-preview.webp`
-- `product-autopilot-setup.webp`
+- `product-sessions-list.webp`
 
 The review screenshot depends on the seeded session `00000000-0000-4000-a000-000000000300`, which now includes a safe demo diff in `.143/seed.sql` so the Changes tab renders a realistic review surface after reseeding.
 
