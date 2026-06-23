@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ManualSessionComposer } from "@/components/manual-session-composer";
+import { ManualSessionPlaneCanvas } from "@/components/manual-session-plane-canvas";
 import { MobileBackButton } from "@/components/mobile-back-button";
 import { buildFilterSuffix } from "@/hooks/use-people-filter";
 import { cn } from "@/lib/utils";
@@ -29,7 +30,8 @@ export function ManualSessionCreatePageContent() {
       <div className="md:hidden flex items-center px-2 pt-2">
         <MobileBackButton to="/sessions" label="Back to sessions" />
       </div>
-      <div className="flex flex-1 flex-col px-4 pb-4">
+      <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4">
+        <ManualSessionPlaneCanvas />
         <ManualSessionComposer
           enableDrafts
           autoFocus
@@ -37,7 +39,7 @@ export function ManualSessionCreatePageContent() {
           showDropIndicator
           dataTestId="manual-session-dropzone"
           textareaAriaLabel="Manual session prompt"
-          className={cn("mx-auto flex w-full max-w-3xl flex-1")}
+          className={cn("relative z-10 mx-auto flex w-full max-w-3xl flex-1")}
           innerClassName="max-w-3xl"
           showOptimisticSidebarRow={false}
           onCreated={(id) => router.replace(`/sessions/${id}${filterSuffix}`)}
