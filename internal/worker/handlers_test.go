@@ -977,6 +977,13 @@ func TestResolveSlackAutoRoutingWithClassifier(t *testing.T) {
 			expectedLLMCalls: 1,
 		},
 		{
+			name:             "formatting change request overrides classifier answer only",
+			text:             "<@U143> when the slack session is kicked off and shows an in progress changes, please use backticks to display the repo and branch. Right now they look like:\n\nRepo: assembledhq/143\nBranch: main\n\nBut Ideally I'd like them to be:\n\nRepo: `assembledhq/143`\nBranch: `main`",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.97,"reason":"formatting guidance"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 0,
+		},
+		{
 			name:             "invalid classifier response falls back conservatively",
 			text:             "<@U143> does our slack bot post notifications when a job finishes?",
 			llmResponse:      `not json`,

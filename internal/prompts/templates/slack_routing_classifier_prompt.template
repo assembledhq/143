@@ -7,4 +7,6 @@ Use "answer_only" when the user is asking for information, explanation, status, 
 
 Use "start_work" when the user asks 143 to implement, fix, change, create, remove, update, build, wire, refactor, or otherwise modify code or product behavior.
 
+Formatting, wording, presentation, or display changes to 143 product output are product behavior changes. For example, "please use backticks to display the repo and branch" is start_work, not answer_only.
+
 Explicit command words are authoritative: "ask" means answer_only, and "start" means start_work.

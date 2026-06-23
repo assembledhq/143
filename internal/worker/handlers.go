@@ -6938,6 +6938,9 @@ func resolveSlackAutoRouting(ctx context.Context, llm llmClient, logger zerolog.
 	if resolved.RoutingMode != "" && resolved.RoutingMode != slackbotsvc.SlackRoutingModeAuto {
 		return resolved
 	}
+	if slackTextDeterministicallyRequestsWork(text) {
+		return applySlackRoutingMode(resolved, slackbotsvc.SlackRoutingModeStartWork, "imperative Slack request to modify product behavior")
+	}
 	classification := classifySlackRouting(ctx, llm, logger, text)
 	return applySlackRoutingMode(resolved, classification.RoutingMode, classification.Reason)
 }
@@ -7014,6 +7017,79 @@ func fallbackSlackRoutingClassification(text, reason string) slackRoutingClassif
 		Confidence:  0,
 		Reason:      reason,
 	}
+}
+
+func slackTextDeterministicallyRequestsWork(text string) bool {
+	cleaned := normalizeSlackRoutingText(text)
+	if cleaned == "" {
+		return false
+	}
+	startWorkPhrases := []string{
+		"start this work",
+		"start the work",
+		"start this task",
+		"start the task",
+		"kick off this work",
+		"kick off the work",
+	}
+	for _, phrase := range startWorkPhrases {
+		if strings.Contains(cleaned, phrase) {
+			return true
+		}
+	}
+	requestPrefixes := []string{
+		"please ",
+		"can you ",
+		"could you ",
+		"would you ",
+		"will you ",
+		"can we ",
+		"could we ",
+		"let's ",
+		"lets ",
+	}
+	for _, prefix := range requestPrefixes {
+		if strings.HasPrefix(cleaned, prefix) && slackDirectiveRestRequestsWork(strings.TrimSpace(strings.TrimPrefix(cleaned, prefix))) {
+			return true
+		}
+	}
+	if idx := strings.Index(cleaned, " please "); idx >= 0 {
+		return slackDirectiveRestRequestsWork(strings.TrimSpace(cleaned[idx+len(" please "):]))
+	}
+	return false
+}
+
+func slackDirectiveRestRequestsWork(rest string) bool {
+	if rest == "" {
+		return false
+	}
+	answerOnlyPrefixes := []string{
+		"show me ",
+		"show us ",
+		"tell me ",
+		"explain ",
+		"describe ",
+		"list ",
+		"don't ",
+		"do not ",
+		"not ",
+	}
+	for _, prefix := range answerOnlyPrefixes {
+		if strings.HasPrefix(rest, prefix) {
+			return false
+		}
+	}
+	workTerms := []string{
+		"fix", "implement", "change", "update", "add", "remove", "create", "build",
+		"wire", "refactor", "migrate", "hide", "make", "repair", "use", "display",
+		"format", "wrap", "render", "style", "rename", "reword", "label",
+	}
+	for _, term := range workTerms {
+		if rest == term || strings.HasPrefix(rest, term+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeSlackRoutingText(text string) string {
