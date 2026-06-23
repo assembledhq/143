@@ -64,6 +64,8 @@ const (
 	ClaudeCodeModelHaiku45  = "claude-haiku-4-5"
 )
 
+const DefaultClaudeCodeModel = ClaudeCodeModelOpus48
+
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45}
 
 const (
@@ -77,6 +79,8 @@ const (
 	CodexModelGPT5Codex       = "gpt-5-codex"
 	CodexModelGPT53CodexSpark = "gpt-5.3-codex-spark"
 )
+
+const DefaultCodexModel = CodexModelGPT55
 
 var AvailableCodexModels = []string{
 	CodexModelGPT55,

@@ -16,6 +16,8 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
   CLAUDE_CODE_MODEL_HAIKU_45,
 ] as const;
 
+export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_48;
+
 export const CODEX_MODEL_GPT_5_5 = "gpt-5.5";
 export const CODEX_MODEL_GPT_5_5_FAST = "gpt-5.5-fast";
 export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
@@ -37,6 +39,8 @@ export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_5_CODEX,
   CODEX_MODEL_GPT_5_3_CODEX_SPARK,
 ] as const;
+
+export const DEFAULT_CODEX_MODEL = CODEX_MODEL_GPT_5_5;
 
 // Amp uses agent "modes" instead of model names; each mode bundles a model,
 // system prompt, and tool set on Sourcegraph's side.
@@ -111,7 +115,7 @@ export const AVAILABLE_OPENCODE_MODELS = [
   OPENCODE_MODEL_GPT_5_5,
 ] as const;
 
-export const DEFAULT_PM_MODEL = CODEX_MODEL_GPT_5_4;
+export const DEFAULT_PM_MODEL = DEFAULT_CODEX_MODEL;
 
 // PM and session model dropdowns are both built from the AGENTS registry in
 // @/lib/agents (see availableAgentModelGroups). Keeping a second PM-only list

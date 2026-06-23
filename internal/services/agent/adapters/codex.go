@@ -292,7 +292,7 @@ func codexModelArgs(env map[string]string, effectiveModel string) string {
 		model = env["OPENAI_MODEL"]
 	}
 	if model == "" {
-		return ""
+		model = models.DefaultCodexModel
 	}
 	spec := models.CodexRuntimeModel(model)
 	if spec.PriorityTier {
