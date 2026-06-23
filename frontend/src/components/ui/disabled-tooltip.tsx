@@ -14,10 +14,12 @@ export function DisabledTooltip({ children, content, disabled = false }: Disable
   // Once the wrapper span has been rendered, keep it even if content later
   // becomes undefined. Removing the wrapper unmounts the child element, which
   // invalidates any external DOM reference held to it.
-  const everHadContent = React.useRef(false);
-  if (content) everHadContent.current = true;
+  const [everHadContent, setEverHadContent] = React.useState(() => !!content);
+  React.useEffect(() => {
+    if (content) setEverHadContent(true);
+  }, [content]);
 
-  if (!everHadContent.current) {
+  if (!everHadContent) {
     return children;
   }
 
