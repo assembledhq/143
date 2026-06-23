@@ -291,6 +291,13 @@ func TestSlackAPIClient_WriteMethods(t *testing.T) {
 			wantPath: "/chat.update",
 		},
 		{
+			name: "add reaction",
+			call: func(ctx context.Context, client *SlackAPIClient) error {
+				return client.AddReaction(ctx, "test-token", "C123", "1000.1", "white_check_mark")
+			},
+			wantPath: "/reactions.add",
+		},
+		{
 			name: "post message with blocks",
 			call: func(ctx context.Context, client *SlackAPIClient) error {
 				_, err := client.PostMessageWithBlocks(ctx, "test-token", "C123", "1000.1", "hello", []SlackBlock{
