@@ -278,7 +278,7 @@ describe("NewAutomationPage", () => {
 
   it("explains why the create button is disabled even when schedule triggering is selected", async () => {
     const user = userEvent.setup();
-    searchParams.delete("template");
+    searchParamsState.value = "";
 
     server.use(
       http.get("/api/v1/repositories", () =>
