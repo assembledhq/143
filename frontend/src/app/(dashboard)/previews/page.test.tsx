@@ -505,6 +505,152 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a spinner on the start-latest button in the recent section while request is in flight", async () => {
+    const restartReleased = deferred<void>();
+    const mutationPaths: string[] = [];
+    installPreviewHandlers({
+      running: [],
+      resumable: [],
+      recent: [
+        preview({
+          preview_group_id: "recent-group",
+          branch: "fix/startup-error",
+          status: "failed",
+          stopped_reason: "error",
+          preview_url: undefined,
+        }),
+      ],
+    });
+    server.use(
+      http.post("*/api/v1/previews/current/:id/start-latest", async ({ request }) => {
+        mutationPaths.push(new URL(request.url).pathname);
+        await restartReleased.promise;
+        return HttpResponse.json({ data: preview({}) });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    const recentSection = await screen.findByRole("region", {
+      name: /recent/i,
+    });
+    const restartButton = within(recentSection).getAllByRole("button", {
+      name: /restart preview from the latest source state/i,
+    })[0];
+
+    await userEvent.click(restartButton);
+
+    await waitFor(() => {
+      expect(mutationPaths).toEqual([
+        "/api/v1/previews/current/recent-group/start-latest",
+      ]);
+    });
+    expect(restartButton).toHaveAttribute("data-loading", "true");
+    expect(
+      restartButton.querySelector('[data-slot="button-spinner"]'),
+    ).toBeInTheDocument();
+
+    restartReleased.resolve();
+  });
+
+  it("shows a spinner on the resume button in the resumable section while request is in flight", async () => {
+    const restartReleased = deferred<void>();
+    const mutationPaths: string[] = [];
+    installPreviewHandlers({
+      running: [],
+      resumable: [
+        preview({
+          preview_group_id: "resumable-group",
+          branch: "feature/paused",
+          status: "ready",
+          resumable: true,
+          preview_url: undefined,
+        }),
+      ],
+      recent: [],
+    });
+    server.use(
+      http.post("*/api/v1/previews/current/:id/restart", async ({ request }) => {
+        mutationPaths.push(new URL(request.url).pathname);
+        await restartReleased.promise;
+        return HttpResponse.json({ data: preview({}) });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    const resumableSection = await screen.findByRole("region", {
+      name: /ready to resume/i,
+    });
+    const resumeButton = within(resumableSection).getAllByRole("button", {
+      name: /resume/i,
+    })[0];
+
+    await userEvent.click(resumeButton);
+
+    await waitFor(() => {
+      expect(mutationPaths).toEqual([
+        "/api/v1/previews/current/resumable-group/restart",
+      ]);
+    });
+    expect(resumeButton).toHaveAttribute("data-loading", "true");
+    expect(
+      resumeButton.querySelector('[data-slot="button-spinner"]'),
+    ).toBeInTheDocument();
+
+    restartReleased.resolve();
+  });
+
+  it("shows a spinner on the start-latest button in the running section while request is in flight", async () => {
+    const startLatestReleased = deferred<void>();
+    const mutationPaths: string[] = [];
+    installPreviewHandlers({
+      running: [
+        preview({
+          preview_group_id: "outdated-running-group",
+          branch: "feature/stale",
+          status: "ready",
+          freshness: "outdated",
+          running_commit_sha: "aabb1122",
+          latest_commit_sha: "ccdd3344",
+          preview_url: "https://preview.143.dev",
+        }),
+      ],
+      resumable: [],
+      recent: [],
+    });
+    server.use(
+      http.post("*/api/v1/previews/current/:id/start-latest", async ({ request }) => {
+        mutationPaths.push(new URL(request.url).pathname);
+        await startLatestReleased.promise;
+        return HttpResponse.json({ data: preview({}) });
+      }),
+    );
+
+    renderWithProviders(<PreviewsPage />);
+
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
+    });
+    const restartLatestButton = within(runningSection).getAllByRole("button", {
+      name: /restart preview from the latest source state/i,
+    })[0];
+
+    await userEvent.click(restartLatestButton);
+
+    await waitFor(() => {
+      expect(mutationPaths).toEqual([
+        "/api/v1/previews/current/outdated-running-group/start-latest",
+      ]);
+    });
+    expect(restartLatestButton).toHaveAttribute("data-loading", "true");
+    expect(
+      restartLatestButton.querySelector('[data-slot="button-spinner"]'),
+    ).toBeInTheDocument();
+
+    startLatestReleased.resolve();
+  });
+
   it("does not render unsafe external preview or source URLs as links", async () => {
     installPreviewHandlers({
       running: [
