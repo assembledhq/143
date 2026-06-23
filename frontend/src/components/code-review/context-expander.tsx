@@ -73,10 +73,49 @@ export function ContextExpander({
   const hasKnownHiddenEnd = hiddenEnd != null;
   const aboveBoundaryStart = aboveVisibleStart ?? visibleStart;
   const belowBoundaryEnd = belowVisibleEnd ?? visibleEnd;
-  const canExpandAbove = canExpand && hasKnownHiddenEnd && (aboveBoundaryStart == null || aboveBoundaryStart > hiddenStart);
-  const canExpandBelow = canExpand && (!hasKnownHiddenEnd || belowBoundaryEnd == null || belowBoundaryEnd < hiddenEnd);
+  const middleRemainingStart = belowBoundaryEnd != null ? belowBoundaryEnd + 1 : hiddenStart;
+  const middleRemainingEnd = aboveBoundaryStart != null ? aboveBoundaryStart - 1 : hiddenEnd;
+  const hasMiddleRemaining =
+    hasKnownHiddenEnd &&
+    middleRemainingEnd != null &&
+    middleRemainingStart <= middleRemainingEnd;
+  const canExpandAbove = kind === "middle"
+    ? canExpand && hasMiddleRemaining
+    : canExpand && hasKnownHiddenEnd && (aboveBoundaryStart == null || aboveBoundaryStart > hiddenStart);
+  const canExpandBelow = kind === "middle"
+    ? canExpand && hasMiddleRemaining
+    : canExpand && (!hasKnownHiddenEnd || belowBoundaryEnd == null || belowBoundaryEnd < hiddenEnd);
   const controlDirections: Array<"above" | "below"> =
     kind === "top" ? ["above"] : kind === "bottom" ? ["below"] : ["above", "below"];
+
+  function getFetchWindow(direction: "above" | "below"): { line: number; below: number } | null {
+    if (direction === "above") {
+      if (hiddenEnd == null) return null;
+
+      if (kind === "middle") {
+        const fetchStart = middleRemainingStart;
+        const fetchEnd = Math.min(middleRemainingEnd ?? hiddenEnd, fetchStart + 19);
+        return { line: fetchStart, below: fetchEnd - fetchStart };
+      }
+
+      const fetchEnd = aboveBoundaryStart != null ? aboveBoundaryStart - 1 : hiddenEnd;
+      const fetchStart = Math.max(hiddenStart, fetchEnd - 19);
+      return { line: fetchStart, below: fetchEnd - fetchStart };
+    }
+
+    if (kind === "middle") {
+      if (middleRemainingEnd == null) return null;
+      const fetchEnd = middleRemainingEnd;
+      const fetchStart = Math.max(middleRemainingStart, fetchEnd - 19);
+      return { line: fetchStart, below: fetchEnd - fetchStart };
+    }
+
+    const fetchStart = belowBoundaryEnd != null ? belowBoundaryEnd + 1 : hiddenStart;
+    const fetchEnd = hiddenEnd == null
+      ? fetchStart + 19
+      : Math.min(hiddenEnd, fetchStart + 19);
+    return { line: fetchStart, below: fetchEnd - fetchStart };
+  }
 
   async function fetchRange(direction: "above" | "below") {
     if (!canExpand) return;
@@ -84,29 +123,16 @@ export function ContextExpander({
     if (direction === "below" && !canExpandBelow) return;
     setLoadingDirection(direction);
     try {
-      let line = hiddenStart;
       const above = 0;
-      let below = 0;
-
-      if (direction === "above") {
-        if (hiddenEnd == null) return;
-        const fetchEnd = aboveBoundaryStart != null ? aboveBoundaryStart - 1 : hiddenEnd;
-        const fetchStart = Math.max(hiddenStart, fetchEnd - 19);
-        line = fetchStart;
-        below = fetchEnd - fetchStart;
-      } else if (direction === "below") {
-        const fetchStart = belowBoundaryEnd != null ? belowBoundaryEnd + 1 : hiddenStart;
-        const fetchEnd = hiddenEnd == null ? fetchStart + 19 : Math.min(hiddenEnd, fetchStart + 19);
-        line = fetchStart;
-        below = fetchEnd - fetchStart;
-      }
+      const fetchWindow = getFetchWindow(direction);
+      if (!fetchWindow) return;
 
       const resp = await api.sessions.getFileContext(
         sessionId!,
         filePath!,
-        line,
+        fetchWindow.line,
         above,
-        below
+        fetchWindow.below
       );
       if (resp?.data?.lines) {
         onExpand!(direction, resp.data.lines, {
@@ -187,6 +213,13 @@ export function ContextExpander({
     );
   }
 
+  function getControlIcon(direction: "above" | "below"): LucideIcon {
+    if (kind === "middle") {
+      return direction === "above" ? ChevronDown : ChevronUp;
+    }
+    return direction === "above" ? ChevronUp : ChevronDown;
+  }
+
   return (
     <div
       className="flex min-w-fit items-stretch border-y border-sky-200/70 bg-sky-50/80 text-xs text-muted-foreground/80 dark:border-sky-900/50 dark:bg-sky-950/20"
@@ -213,7 +246,7 @@ export function ContextExpander({
                   controlDirection === "above"
                     ? !canExpandAbove
                     : !canExpandBelow,
-                Icon: controlDirection === "above" ? ChevronUp : ChevronDown,
+                Icon: getControlIcon(controlDirection),
               })
             )}
           </div>
