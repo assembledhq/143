@@ -432,6 +432,33 @@ func TestSlackAPIClient_WriteMethodSlackAPIFailures(t *testing.T) {
 	}
 }
 
+func TestSlackAPIClient_UpdateMessageWithBlocksSendsReplacementBlocks(t *testing.T) {
+	t.Parallel()
+
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/chat.update", r.URL.Path, "UpdateMessageWithBlocks should call chat.update")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload), "Slack update request should be valid JSON")
+		w.Header().Set("Content-Type", "application/json")
+		err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "channel": "C123", "ts": "1000.2"})
+		require.NoError(t, err, "test response should encode")
+	}))
+	defer server.Close()
+
+	blocks := []SlackBlock{
+		{Type: "section", Text: &SlackTextObject{Type: "mrkdwn", Text: "*Completed*"}},
+	}
+	client := newTestSlackClient(server.URL)
+
+	err := client.UpdateMessageWithBlocks(context.Background(), "test-token", "C123", "1000.2", "Completed", blocks)
+
+	require.NoError(t, err, "UpdateMessageWithBlocks should succeed")
+	require.Equal(t, "C123", payload["channel"], "Slack update should target the expected channel")
+	require.Equal(t, "1000.2", payload["ts"], "Slack update should target the expected message")
+	require.Equal(t, "Completed", payload["text"], "Slack update should include fallback text")
+	require.NotEmpty(t, payload["blocks"], "Slack update should replace the visible Block Kit content")
+}
+
 func TestSlackAPIClient_ListChannels(t *testing.T) {
 	t.Parallel()
 
