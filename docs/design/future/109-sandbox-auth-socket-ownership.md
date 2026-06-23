@@ -1,7 +1,44 @@
 # Design: Sandbox GitHub-Auth Socket Ownership
 
-> **Status:** Future
+> **Status:** Implemented
 > **Last reviewed:** 2026-06-22
+
+## Implementation status
+
+Implemented. The core finding while building this was that **socket ownership
+already lived in the long-lived worker**: the per-turn `session-executor` uses
+`sandboxauth.RemoteBrokerClient` to acquire/release a holder lease over HTTP
+(`/internal/sandbox-auth/acquire|release`), and the worker's `Broker`/`Server`
+bind the actual Unix socket. So the executor never bound a local socket — the
+real bug was narrower than this doc first assumed: the socket was pinned to the
+**turn holder lease**, so `Broker.releaseLocked` closed it at every turn
+boundary, and nothing re-bound it after a worker restart except a node-scoped
+rehydrate that missed rolling deploys.
+
+What shipped, therefore, is not "move ownership to the worker" (already true) but:
+
+- **A container lease in the broker** (`EnsureContainerLease` /
+  `ReleaseContainerLease`, `brokerEntry.containerPinned`): the socket stays open
+  while the container is alive, independent of turn holders. `releaseLocked`
+  closes only when no holders remain **and** the container pin is cleared.
+- **A worker-side reconciler** (`agent.SandboxAuthSocketReconciler`) grounded in
+  local Docker (`provider.ListManagedSandboxes`, which carries session/org id
+  labels) rather than `worker_node_id` — so it re-pins the same host containers
+  across a rolling deploy that changes the node id. It runs once synchronously at
+  startup (before jobs are accepted) and then on a 30s interval, and releases
+  pins for containers that have disappeared from the host.
+- **Cross-generation safety** (`Broker.ContainerSocketState`,
+  `Server.SocketPath`, quiet liveness probe via `io.EOF` in `handleConn`): when
+  the reconciler sees a session it has no local listener for but whose socket is
+  already live, it **adopts rather than steals** it (a sibling generation is
+  draining on the same host) and takes over only once that listener is gone.
+
+The node-scoped DB rehydrate pass (`RehydrateSandboxAuthListeners`,
+`SessionStore.ListContainerHoldingSessions`) and the broker's `EnsurePrepared`
+were removed — the reconciler supersedes them.
+
+The "Proposed design" below is retained for context; the migration steps are
+done except where noted under **Residual gap**.
 
 ## Problem
 
@@ -166,6 +203,22 @@ sandbox; this design just makes the re-binds rarer and never racy.
   container create/reap, not with turn start/end.
 - Confirm two overlapping worker generations on one host never trade ENOENT /
   "address already in use" on the same session socket.
+
+## Residual gap (known, accepted)
+
+The cross-generation guard lives in the **reconciler** (adopt-don't-steal). The
+**turn-acquire** path (`Broker.Acquire` → `Server.Listen`) does not yet
+dial-check, so it can still steal a socket a sibling generation owns. This is
+safe in practice because turns for a session are serialized — a new generation
+will not start a turn for session S while an old generation runs S's turn — so
+concurrent same-session acquires across generations effectively don't happen.
+The one remaining window: if a new-generation turn for S binds S's socket while
+the old generation still pins it, the old generation's eventual `Shutdown`
+unlinks the now-new-generation socket file, leaving S's socket dead until the
+new generation's next reconcile tick (≤30s) — bridged by the in-sandbox client's
+connect-retry. Fully closing this would require the turn-acquire path to adopt
+rather than steal too (and the broker to re-validate adopted entries). Deferred
+as not worth the added cross-process state for a sub-30s, retry-covered window.
 
 ## Open questions
 

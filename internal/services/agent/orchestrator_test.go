@@ -340,17 +340,6 @@ type mockSessionStore struct {
 	clearContainerIDCalls  int
 	containerStateCalls    int
 
-	// Programmable response for the rehydrate-pass query. Each call returns
-	// the next page; the field is used only by orchestrator-wrapper tests in
-	// sandbox_auth_rehydrate_test.go. Adding the method here means every
-	// orchestrator built with mockSessionStore satisfies
-	// ContainerHoldingSessionLister, so the wrapper's success path is
-	// reachable; the cast-fail path is exercised by a separate stub that
-	// deliberately omits the method.
-	containerHoldingPages [][]models.Session
-	containerHoldingErr   error
-	containerHoldingCalls int
-
 	// getByIDFn lets individual tests stub the session row that drain and
 	// other helpers query for status. Defaults to an empty Session when nil.
 	getByIDFn func(orgID, sessionID uuid.UUID) (models.Session, error)
@@ -731,25 +720,6 @@ func (m *mockSessionStore) ContainerHoldState(ctx context.Context, orgID, sessio
 	}
 	// Default: the live winner is another turn holder.
 	return true, false, nil
-}
-
-// ListContainerHoldingSessions returns the next pre-canned page from
-// containerHoldingPages. Used only by sandbox_auth_rehydrate_test.go to
-// exercise the orchestrator wrapper's success path; adding the method here
-// (rather than in a dedicated stub) means the wrapper's interface assertion
-// succeeds for every orchestrator built with mockSessionStore.
-func (m *mockSessionStore) ListContainerHoldingSessions(_ context.Context, _ string, _ uuid.UUID, _ int) ([]models.Session, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.containerHoldingErr != nil {
-		return nil, m.containerHoldingErr
-	}
-	idx := m.containerHoldingCalls
-	m.containerHoldingCalls++
-	if idx >= len(m.containerHoldingPages) {
-		return nil, nil
-	}
-	return m.containerHoldingPages[idx], nil
 }
 
 func (m *mockSessionStore) getStatusUpdates() []string {
@@ -10146,61 +10116,4 @@ func TestContinueSession_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"assistant message should surface the actionable error text to the user")
 	require.Equal(t, session.CurrentTurn+1, assistantMessages[0].TurnNumber,
 		"assistant error message belongs on the attempted turn, not the prior one")
-}
-
-// TestOrchestrator_RehydrateSandboxAuth_NoSandboxAuth covers the orchestrator
-// wrapper's "skip when sandboxAuth is nil" bail path. defaultDeps doesn't
-// wire a SandboxAuth, so the wrapper must short-circuit at the first nil
-// check and return (nil, nil) without touching the session store.
-func TestOrchestrator_RehydrateSandboxAuth_NoSandboxAuth(t *testing.T) {
-	t.Parallel()
-	d := defaultDeps()
-	// Pre-seed the session store with a page so we can prove the wrapper
-	// never queried it (containerHoldingCalls stays at 0).
-	d.sessions.containerHoldingPages = [][]models.Session{{
-		models.Session{ID: uuid.New(), OrgID: uuid.New()},
-	}}
-	orch := buildOrchestrator(d)
-
-	keep, err := orch.RehydrateSandboxAuthListeners(context.Background())
-	require.NoError(t, err)
-	require.Nil(t, keep, "the orchestrator wrapper must return a nil keep when sandboxAuth isn't wired so callers skip the sweep")
-	require.Equal(t, 0, d.sessions.containerHoldingCalls, "wrapper must short-circuit before touching the session store when sandboxAuth is nil")
-}
-
-// TestOrchestrator_RehydrateSandboxAuth_SuccessPath covers the wrapper's
-// happy path: with a non-nil SandboxAuth and a session store that satisfies
-// ContainerHoldingSessionLister, the wrapper plumbs through to the
-// freestanding helper and returns its keep set. MockSandboxProvider's
-// default IsAlive returns true, so the seeded row goes all the way through
-// — IsAlive → repo lookup → Listen — and lands in the keep set. That
-// exercises every line of the wrapper (213-231) plus most of the per-row
-// success path in the freestanding helper.
-func TestOrchestrator_RehydrateSandboxAuth_SuccessPath(t *testing.T) {
-	t.Parallel()
-	agent.SetIsAliveBackoffForTesting(0)
-	t.Cleanup(func() { agent.SetIsAliveBackoffForTesting(500 * time.Millisecond) })
-
-	orgID := testOrg()
-	repoID := uuid.MustParse("00000000-0000-0000-0000-000000000099")
-	containerID := "container-rehydrate-success"
-	sessionID := uuid.New()
-	d := defaultDeps()
-	d.nodeID = "worker-a"
-	authStub := &fakeSandboxAuthServer{}
-	d.sandboxAuth = authStub
-	d.identityResolver = identity.NewResolver(d.github, zerolog.Nop())
-	d.users = fakeUserStore{}
-	cid := containerID
-	d.sessions.containerHoldingPages = [][]models.Session{{
-		models.Session{ID: sessionID, OrgID: orgID, ContainerID: &cid, RepositoryID: &repoID},
-	}}
-	orch := buildOrchestrator(d)
-
-	keep, err := orch.RehydrateSandboxAuthListeners(context.Background())
-	require.NoError(t, err)
-	require.NotNil(t, keep, "wrapper success path must return non-nil keep so the caller knows sweep is safe")
-	require.Contains(t, keep, sessionID, "the alive container's session must be Listen'd and added to the keep set")
-	require.GreaterOrEqual(t, d.sessions.containerHoldingCalls, 1, "wrapper must have queried the session store at least once")
-	require.Equal(t, 1, authStub.listenCalls, "Listen must have been called exactly once for the seeded session")
 }

@@ -627,31 +627,45 @@ func main() {
 			reconcileCancel()
 		}
 
-		// Re-open the per-session GitHub credential socket listener for
-		// sessions whose containers survive a worker restart (preview holds
-		// keep them alive across the gap). Without this, in-sandbox `git push`
-		// dials a dead socket and fails with ECONNREFUSED until the next
-		// turn boundary calls Listen again. Runs after the reconciler so
-		// dead-container rows have already been cleared and we don't waste
-		// IsAlive probes on them. Best-effort: errors are logged, not fatal.
+		// Keep the per-session GitHub credential socket open for the lifetime
+		// of every sandbox container alive on this host, and re-bind them after
+		// a restart. The worker owns the socket (executors only hold short-lived
+		// per-turn leases over the remote broker), so without a container-scoped
+		// pin the socket would close at every turn boundary and on every worker
+		// restart — and a held-alive sandbox's `git push` would dial a dead
+		// socket (ECONNREFUSED) until the next turn re-acquired. The reconciler
+		// is grounded in local Docker enumeration rather than worker_node_id, so
+		// it re-pins the same host containers across a rolling deploy that gives
+		// the new worker generation a different node id. It runs an immediate
+		// synchronous pass here (before workers accept jobs, after the orphan
+		// reconciler has cleared dead rows) and then continues on an interval.
 		//
 		// services is guaranteed non-nil here (the Fatal above exits on nil)
-		// but staticcheck's flow analysis can't follow logger.Fatal — gate
-		// the rehydrate inside an explicit non-nil check to keep lint clean.
-		if services != nil {
-			if orch, ok := services.Orchestrator.(*agent.Orchestrator); ok {
-				rehydrateCtx, rehydrateCancel := context.WithTimeout(ctx, 2*time.Minute)
-				_, rehydrateErr := orch.RehydrateSandboxAuthListeners(rehydrateCtx)
-				if rehydrateErr != nil {
-					logger.Warn().Err(rehydrateErr).Msg("startup: rehydrating sandbox auth listeners failed; remaining sessions will retry on next turn boundary")
+		// but staticcheck's flow analysis can't follow logger.Fatal — gate this
+		// inside an explicit non-nil check to keep lint clean.
+		if services != nil && apiSandboxProvider != nil {
+			broker, brokerOK := services.SandboxAuthBroker.(*sandboxauth.Broker)
+			lister, listerOK := any(apiSandboxProvider).(agent.ManagedSandboxLister)
+			switch {
+			case brokerOK && listerOK:
+				orgSettingsLoader := func(ctx context.Context, orgID uuid.UUID) (models.OrgSettings, error) {
+					org, err := orgStore.GetByID(ctx, orgID)
+					if err != nil {
+						return models.OrgSettings{}, err
+					}
+					return models.ParseOrgSettings(org.Settings)
 				}
-				// Do not sweep the shared socket directory at startup. During
-				// rolling deploys, an older worker generation on this same host
-				// may still own live session sockets while the new generation
-				// boots. A broad startup sweep cannot distinguish those live
-				// sockets from stale dirs and would unlink /run/143-auth/sock
-				// inside still-running sandboxes.
-				rehydrateCancel()
+				socketReconciler := agent.NewSandboxAuthSocketReconciler(
+					broker, lister, sessionStore, repoStore, orgSettingsLoader, 0, logger,
+				)
+				reconcileCtx, reconcileCancel := context.WithTimeout(ctx, 2*time.Minute)
+				if err := socketReconciler.ReconcileOnce(reconcileCtx); err != nil {
+					logger.Warn().Err(err).Msg("startup: initial sandbox auth socket reconcile failed; periodic loop will retry")
+				}
+				reconcileCancel()
+				go socketReconciler.Run(ctx)
+			case brokerOK && !listerOK:
+				logger.Warn().Msg("startup: sandbox provider does not support managed-sandbox enumeration; credential sockets will rely on per-turn leases only")
 			}
 		}
 

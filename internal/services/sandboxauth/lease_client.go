@@ -91,19 +91,6 @@ func (c *LeaseClient) Close(sessionID uuid.UUID) {
 		Msg("sandboxauth: local lease released")
 }
 
-func (c *LeaseClient) Rehydrate(
-	ctx context.Context,
-	sessionID uuid.UUID,
-	run *models.Session,
-	repo *models.Repository,
-	orgSettings models.OrgSettings,
-) (string, error) {
-	if c == nil || c.broker == nil {
-		return "", fmt.Errorf("sandboxauth lease client is not configured")
-	}
-	return c.broker.EnsurePrepared(ctx, sessionID, run, repo, orgSettings)
-}
-
 func (c *LeaseClient) popHolder(sessionID uuid.UUID) (uuid.UUID, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

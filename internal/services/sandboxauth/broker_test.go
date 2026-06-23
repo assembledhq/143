@@ -177,6 +177,10 @@ func (s *countingBrokerServer) Close(uuid.UUID) {
 
 func (s *countingBrokerServer) Shutdown() {}
 
+func (s *countingBrokerServer) SocketPath(sessionID uuid.UUID) string {
+	return "/tmp/143-auth-test/" + sessionID.String() + "/sock"
+}
+
 func (s *countingBrokerServer) counts() (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -258,4 +262,98 @@ func TestLeaseClient_ReleasesOneGeneratedHolderPerClose(t *testing.T) {
 	client.Close(sessionID)
 	_, statErr := os.Stat(socketPath)
 	require.True(t, errors.Is(statErr, os.ErrNotExist), "socket file should be removed after all local leases close")
+}
+
+func TestBroker_ContainerLeasePinSurvivesTurnHolderRelease(t *testing.T) {
+	t.Parallel()
+
+	broker, orgID, sessionID, repoID, _ := newBrokerTestDeps(t)
+	run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}
+	repo := &models.Repository{ID: repoID, OrgID: orgID, FullName: "owner/repo", InstallationID: 123}
+	settings := models.OrgSettings{PRAuthorship: models.PRAuthorshipAppOnly}
+
+	// The reconciler pins a container lease for a live sandbox.
+	socketPath, err := broker.EnsureContainerLease(context.Background(), sessionID, run, repo, settings)
+	require.NoError(t, err, "pinning a container lease should open the listener")
+
+	// A turn acquires then releases its short-lived holder lease.
+	holder := uuid.New()
+	acquired, err := broker.Acquire(context.Background(), orgID, sessionID, holder)
+	require.NoError(t, err, "turn holder should acquire against the pinned session")
+	require.Equal(t, socketPath, acquired, "turn holder should attach to the pinned listener")
+	require.NoError(t, broker.Release(context.Background(), orgID, sessionID, holder), "turn holder should release cleanly")
+
+	// The socket must remain live across the turn boundary because the
+	// container lease still pins it — the entire point of the fix.
+	resp, err := NewClient(socketPath).Get(context.Background(), ActionPush)
+	require.NoError(t, err, "socket must stay open after the turn holder releases while the container is pinned")
+	require.Equal(t, "ghs_test", resp.Token, "pinned socket should keep serving credentials between turns")
+
+	// Releasing the container lease (container reaped) finally closes it.
+	require.NoError(t, broker.ReleaseContainerLease(orgID, sessionID), "releasing the container lease should succeed")
+	_, statErr := os.Stat(socketPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "socket should be removed once the container lease is released and no holders remain")
+}
+
+func TestBroker_ContainerLeaseReleaseKeepsSocketWhileHolderActive(t *testing.T) {
+	t.Parallel()
+
+	broker, orgID, sessionID, repoID, _ := newBrokerTestDeps(t)
+	run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}
+	repo := &models.Repository{ID: repoID, OrgID: orgID, FullName: "owner/repo", InstallationID: 123}
+
+	socketPath, err := broker.EnsureContainerLease(context.Background(), sessionID, run, repo, models.OrgSettings{})
+	require.NoError(t, err, "pinning a container lease should open the listener")
+
+	holder := uuid.New()
+	_, err = broker.Acquire(context.Background(), orgID, sessionID, holder)
+	require.NoError(t, err, "turn holder should acquire against the pinned session")
+
+	// Container reaped mid-turn: the reconciler unpins, but the in-flight turn
+	// holder must keep the socket open so the running push doesn't break.
+	require.NoError(t, broker.ReleaseContainerLease(orgID, sessionID), "releasing the container lease mid-turn should succeed")
+	resp, err := NewClient(socketPath).Get(context.Background(), ActionPush)
+	require.NoError(t, err, "socket should remain open while a turn holder is active even after the container pin is dropped")
+	require.Equal(t, "ghs_test", resp.Token, "socket should keep serving while a holder remains")
+
+	// The final holder release now closes it, since the pin is already gone.
+	require.NoError(t, broker.Release(context.Background(), orgID, sessionID, holder), "final holder release should close the unpinned socket")
+	_, statErr := os.Stat(socketPath)
+	require.True(t, errors.Is(statErr, os.ErrNotExist), "socket should close once both the pin and the last holder are gone")
+}
+
+func TestBroker_EnsureContainerLeaseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}
+	repo := &models.Repository{ID: repoID, OrgID: orgID, FullName: "owner/repo", InstallationID: 123}
+	sessionStore := &brokerSessionStoreStub{session: *run}
+	repoStore := &brokerRepositoryStoreStub{repo: *repo}
+	orgStore := &brokerOrganizationStoreStub{org: models.Organization{ID: orgID}}
+	server := &countingBrokerServer{socketPath: "/tmp/143-auth-test/sock"}
+	broker := NewBroker(server, sessionStore, repoStore, orgStore, zerolog.Nop())
+
+	for i := 0; i < 3; i++ {
+		_, err := broker.EnsureContainerLease(context.Background(), sessionID, run, repo, models.OrgSettings{})
+		require.NoError(t, err, "repeated container-lease pins should succeed")
+	}
+	listenCalls, closeCalls := server.counts()
+	require.Equal(t, 1, listenCalls, "repeated EnsureContainerLease should open the listener exactly once")
+	require.Equal(t, 0, closeCalls, "pinning should never close the listener")
+
+	require.NoError(t, broker.ReleaseContainerLease(orgID, sessionID), "releasing the idempotently-pinned lease should succeed")
+	listenCalls, closeCalls = server.counts()
+	require.Equal(t, 1, listenCalls, "release should not reopen the listener")
+	require.Equal(t, 1, closeCalls, "a single ReleaseContainerLease should close the idempotently-pinned listener once")
+}
+
+func TestBroker_ReleaseContainerLeaseUnknownSessionIsNoop(t *testing.T) {
+	t.Parallel()
+
+	broker, orgID, _, _, _ := newBrokerTestDeps(t)
+	require.NoError(t, broker.ReleaseContainerLease(orgID, uuid.New()), "releasing a container lease for an unknown session should be a no-op")
+	require.NoError(t, broker.ReleaseContainerLease(uuid.Nil, uuid.New()), "releasing with a nil org should also be a no-op for unknown sessions")
 }
