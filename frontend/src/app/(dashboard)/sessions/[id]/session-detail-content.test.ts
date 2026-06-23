@@ -13,7 +13,7 @@ import {
   mergeSessionDetailStatusUpdate,
   trackInFlightAgentUpdate,
   buildChromeThreads,
-} from "./session-detail-content";
+} from "./session-detail-state";
 import type { SessionDetail, SessionLog, SessionReviewLoop, SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
