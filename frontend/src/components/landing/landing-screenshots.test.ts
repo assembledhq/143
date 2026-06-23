@@ -16,7 +16,7 @@ describe("landing screenshots", () => {
       "/product/product-session-preview.webp",
     );
     expect(landingScreenshots.workspace.src).toBe(
-      "/product/product-autopilot-setup.webp",
+      "/product/product-sessions-list.webp",
     );
   });
 
