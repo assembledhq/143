@@ -9584,7 +9584,19 @@ func newMergePullRequestWhenReadyHandler(services *Services, logger zerolog.Logg
 			Str("org_id", orgID.String()).
 			Str("pull_request_id", pullRequestID.String()).
 			Msg("starting merge_pull_request_when_ready job")
-		return services.PR.ProcessMergeWhenReady(ctx, orgID, pullRequestID)
+		if err := services.PR.ProcessMergeWhenReady(ctx, orgID, pullRequestID); err != nil {
+			if errors.Is(err, ghservice.ErrPullRequestMergeWhenReadyChecksPending) {
+				// The PR looks mergeable only because GitHub has not registered
+				// its check runs yet. Retry on a short fixed delay (without
+				// consuming the attempt budget) so we re-evaluate once checks
+				// appear or the grace window elapses, rather than thrashing the
+				// queue with exponential backoff or dead-lettering.
+				retryAfter := 20 * time.Second
+				return &RetryableError{Err: err, RetryAfter: &retryAfter}
+			}
+			return err
+		}
+		return nil
 	}
 }
 

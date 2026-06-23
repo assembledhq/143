@@ -455,3 +455,27 @@ func TestPullRequestStore_ClaimMergeWhenReadyForProcessing(t *testing.T) {
 		})
 	}
 }
+
+func TestPullRequestStore_ReleaseMergeWhenReadyClaim(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+	orgID := uuid.New()
+	prID := uuid.New()
+
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*merge_when_ready_state = @state[\\s\\S]*merge_when_ready_error = ''[\\s\\S]*merge_when_ready_state = 'merging'").
+		WithArgs(pgx.NamedArgs{
+			"id":     prID,
+			"org_id": orgID,
+			"state":  models.PullRequestMergeWhenReadyStateQueued,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.ReleaseMergeWhenReadyClaim(context.Background(), orgID, prID)
+	require.NoError(t, err, "ReleaseMergeWhenReadyClaim should return a claimed intent to queued without error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
