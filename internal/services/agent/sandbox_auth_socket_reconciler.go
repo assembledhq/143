@@ -56,7 +56,7 @@ type SandboxAuthSessionLoader interface {
 // credential sockets in lockstep with the sandbox containers alive on this
 // host. It is the worker-side owner of socket lifetime under the
 // worker-owns-the-socket model (see
-// docs/design/future/109-sandbox-auth-socket-ownership.md):
+// docs/design/implemented/109-sandbox-auth-socket-ownership.md):
 //
 //   - The per-turn session executor still acquires/releases a short-lived
 //     holder lease over the remote broker (which keeps the socket open during a

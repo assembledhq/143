@@ -46,7 +46,7 @@ Sandboxed coding agents push to GitHub through a per-session Unix-domain socket.
 The host listens on `<socket-dir>/<session-id>/sock`; the sandbox dials it at
 `/run/143-auth/sock` via a directory bind-mount, and the host replies with a
 fresh GitHub token resolved per request (see
-[implemented/65-unified-coding-credentials.md](../implemented/65-unified-coding-credentials.md)
+[65-unified-coding-credentials.md](65-unified-coding-credentials.md)
 and `internal/services/sandboxauth/`). The per-request resolve is deliberate:
 it lets each push pick up token refreshes and org-policy changes without
 restarting the session.
