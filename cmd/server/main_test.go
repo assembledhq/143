@@ -439,10 +439,12 @@ func TestBuildWorkerMetadataProvider_IncludesSandboxCapacity(t *testing.T) {
 	require.Equal(t, 4, metadata["max_active_sandboxes"], "worker metadata should expose the per-machine sandbox cap")
 }
 
-// TestMainStartupRunsRehydrateBeforeWorkers guards the sandbox-auth socket
-// invariant: process workers must not be able to call Listen for a new job
-// while the boot-time rehydrate pass is still restoring live listeners.
-func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
+// TestMainStartupReconcilesSocketsBeforeWorkers guards the sandbox-auth socket
+// invariant: the worker must re-pin credential sockets for containers that
+// survived a restart before process workers can claim jobs, so an in-flight
+// agent's git push never races an empty socket. The boot-time reconciler pass
+// (socketReconciler.ReconcileOnce) supersedes the old node-scoped rehydrate.
+func TestMainStartupReconcilesSocketsBeforeWorkers(t *testing.T) {
 	t.Parallel()
 
 	src, err := os.ReadFile("main.go")
@@ -450,10 +452,10 @@ func TestMainStartupRunsRehydrateBeforeWorkers(t *testing.T) {
 
 	body := string(src)
 	startWorkers := strings.Index(body, "processWorkers = startProcessWorkers(")
-	rehydrate := strings.Index(body, "orch.RehydrateSandboxAuthListeners(")
+	reconcile := strings.Index(body, "socketReconciler.ReconcileOnce(")
 	require.NotEqual(t, -1, startWorkers, "startup should still start process workers")
-	require.NotEqual(t, -1, rehydrate, "startup should still run sandbox auth rehydrate")
-	require.Less(t, rehydrate, startWorkers, "sandbox auth rehydrate must run before process workers can claim jobs")
+	require.NotEqual(t, -1, reconcile, "startup should run the sandbox auth socket reconciler")
+	require.Less(t, reconcile, startWorkers, "sandbox auth socket reconcile must run before process workers can claim jobs")
 }
 
 func TestMainStartupDoesNotSweepSandboxAuthSocketDirs(t *testing.T) {
