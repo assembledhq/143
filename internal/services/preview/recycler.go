@@ -2,6 +2,7 @@ package preview
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -157,6 +158,15 @@ func (w *RecycleWorker) recycle() {
 		rErr := w.manager.RecyclePreview(previewCtx, p.OrgID, p.ID)
 		previewCancel()
 		if rErr != nil {
+			if errors.Is(rErr, errRecycleSkipped) {
+				// Intentional skip (e.g. indeterminate liveness probe) — not a
+				// failure and not a completed recycle. The scheduled marker
+				// persists so a later sweep retries.
+				w.logger.Debug().Err(rErr).
+					Str("preview_id", p.ID.String()).
+					Msg("recycle: skipped this sweep; will retry")
+				continue
+			}
 			w.logger.Warn().Err(rErr).
 				Str("preview_id", p.ID.String()).
 				Msg("recycle: failed to recycle preview")
