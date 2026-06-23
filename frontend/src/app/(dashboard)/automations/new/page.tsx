@@ -63,6 +63,7 @@ import {
 } from "@/components/automation-capabilities-editor";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { NoReposWarning } from "@/components/no-repos-warning";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import {
@@ -121,6 +122,46 @@ const pagerDutyEventTypeOptions: Array<{
     ariaLabel: "PagerDuty resolved events",
   },
 ];
+
+function formatWeeklyRunHint(
+  intervalValue: number,
+  intervalRunHour: string,
+  intervalRunMinute: string,
+  timezone: string,
+  now = new Date(),
+): string {
+  const weeks = Math.max(1, intervalValue);
+  const localParts = new Intl.DateTimeFormat(undefined, {
+    timeZone: timezone || "UTC",
+    weekday: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(now);
+  const weekday = localParts.find((part) => part.type === "weekday")?.value;
+  const localHour = Number(
+    localParts.find((part) => part.type === "hour")?.value ?? "0",
+  );
+  const localMinute = Number(
+    localParts.find((part) => part.type === "minute")?.value ?? "0",
+  );
+  const selectedHour = Number(intervalRunHour);
+  const selectedMinute = Number(intervalRunMinute);
+  const selectedBeforeNow =
+    selectedHour < localHour ||
+    (selectedHour === localHour && selectedMinute < localMinute);
+  const nextCalendarDay = new Date(now);
+  nextCalendarDay.setDate(nextCalendarDay.getDate() + 1);
+  const anchor = selectedBeforeNow
+    ? new Intl.DateTimeFormat(undefined, {
+        timeZone: timezone || "UTC",
+        weekday: "long",
+      }).format(nextCalendarDay)
+    : weekday;
+  const unitLabel = weeks === 1 ? "week" : "weeks";
+
+  return `First run anchors on ${anchor ?? "the selected weekday"}, then repeats every ${weeks} ${unitLabel}.`;
+}
 
 export default function NewAutomationPage() {
   const router = useRouter();
@@ -394,6 +435,17 @@ export default function NewAutomationPage() {
     repoId.length > 0 &&
     pagerDutyTriggerValid &&
     (scheduleEnabled || hasEventTriggers);
+  const submitDisabledReason = createMutation.isPending || redirecting
+    ? undefined
+    : getCreateDisabledReason({
+        name: name.trim(),
+        goal: goal.trim(),
+        goalTooLong: goalLength.isTooLong,
+        hasRepository: repoId.length > 0,
+        pagerDutyTriggerValid,
+        scheduleEnabled,
+        hasEventTriggers,
+      });
 
   return (
     <PageContainer size="default">
@@ -475,7 +527,7 @@ export default function NewAutomationPage() {
                         }
                         aria-label="On a schedule"
                       />
-                      <span>On a schedule</span>
+                      <span className="block">on a schedule</span>
                     </Label>
                   </div>
                   {scheduleEnabled ? (
@@ -496,7 +548,7 @@ export default function NewAutomationPage() {
                             Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
                           );
                         }}
-                        className="h-7 w-16 px-2 text-base sm:text-xs"
+                        className="h-8 w-20 px-2 text-base sm:text-xs"
                       />
                       <Select
                         value={intervalUnit}
@@ -507,7 +559,7 @@ export default function NewAutomationPage() {
                         }}
                       >
                         <SelectTrigger
-                          className="h-7 w-24 text-base sm:text-xs"
+                          className="h-8 w-24 text-base sm:text-xs"
                           aria-label="Interval unit"
                         >
                           <SelectValue />
@@ -519,14 +571,14 @@ export default function NewAutomationPage() {
                         </SelectContent>
                       </Select>
                       <span className="text-sm font-medium leading-none text-muted-foreground">
-                        At
+                        at
                       </span>
                       <Select
                         value={intervalRunHour}
                         onValueChange={setIntervalRunHour}
                       >
                         <SelectTrigger
-                          className="h-7 w-18 text-base sm:text-xs"
+                          className="h-8 w-20 text-base sm:text-xs"
                           aria-label="Run at hour"
                         >
                           <SelectValue />
@@ -545,7 +597,7 @@ export default function NewAutomationPage() {
                         onValueChange={setIntervalRunMinute}
                       >
                         <SelectTrigger
-                          className="h-7 w-18 text-base sm:text-xs"
+                          className="h-8 w-20 text-base sm:text-xs"
                           aria-label="Run at minute"
                         >
                           <SelectValue />
@@ -564,6 +616,16 @@ export default function NewAutomationPage() {
                         detected={detectedTimezone}
                         className="w-full sm:w-auto"
                       />
+                      {intervalUnit === "weeks" ? (
+                        <p className="basis-full text-xs text-muted-foreground">
+                          {formatWeeklyRunHint(
+                            intervalValue,
+                            intervalRunHour,
+                            intervalRunMinute,
+                            timezone,
+                          )}
+                        </p>
+                      ) : null}
                     </div>
                   ) : null}
                   <div className="space-y-1">
@@ -1059,27 +1121,73 @@ export default function NewAutomationPage() {
                   Failed to create automation. Please try again.
                 </p>
               )}
-              <Button
-                onClick={() => createMutation.mutate()}
-                disabled={
-                  !canSubmit || createMutation.isPending || redirecting
-                }
+              <DisabledTooltip
+                disabled={!canSubmit && !!submitDisabledReason}
+                content={submitDisabledReason}
               >
-                {createMutation.isPending || redirecting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  "Create automation"
-                )}
-              </Button>
+                <Button
+                  onClick={() => createMutation.mutate()}
+                  disabled={
+                    !canSubmit || createMutation.isPending || redirecting
+                  }
+                >
+                  {createMutation.isPending || redirecting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Creating...
+                    </>
+                  ) : (
+                    "Create automation"
+                  )}
+                </Button>
+              </DisabledTooltip>
             </div>
           }
         />
       </div>
     </PageContainer>
   );
+}
+
+function getCreateDisabledReason({
+  name,
+  goal,
+  goalTooLong,
+  hasRepository,
+  pagerDutyTriggerValid,
+  scheduleEnabled,
+  hasEventTriggers,
+}: {
+  name: string;
+  goal: string;
+  goalTooLong: boolean;
+  hasRepository: boolean;
+  pagerDutyTriggerValid: boolean;
+  scheduleEnabled: boolean;
+  hasEventTriggers: boolean;
+}): string | undefined {
+  if (!name && !goal) {
+    return "Add an automation name and goal to create this automation.";
+  }
+  if (!name) {
+    return "Add an automation name before creating it.";
+  }
+  if (!goal) {
+    return "Describe what the automation should do before creating it.";
+  }
+  if (goalTooLong) {
+    return "Shorten the automation goal before creating it.";
+  }
+  if (!hasRepository) {
+    return "Select a repository before creating the automation.";
+  }
+  if (!scheduleEnabled && !hasEventTriggers) {
+    return "Select at least one trigger before creating the automation.";
+  }
+  if (!pagerDutyTriggerValid) {
+    return "Add at least one PagerDuty service ID before creating the automation.";
+  }
+  return undefined;
 }
 
 function TemplatePicker({
