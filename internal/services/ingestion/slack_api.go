@@ -358,6 +358,22 @@ func (c *SlackAPIClient) UpdateMessage(ctx context.Context, accessToken, channel
 	return nil
 }
 
+func (c *SlackAPIClient) AddReaction(ctx context.Context, accessToken, channelID, messageTS, name string) error {
+	payload := map[string]string{
+		"channel":   channelID,
+		"timestamp": messageTS,
+		"name":      name,
+	}
+	var resp slackPostMessageResponse
+	if err := c.slackPost(ctx, accessToken, "reactions.add", payload, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("slack reactions.add: %s", resp.Error)
+	}
+	return nil
+}
+
 func (c *SlackAPIClient) DeleteMessage(ctx context.Context, accessToken, channelID, messageTS string) error {
 	payload := map[string]string{
 		"channel": channelID,
