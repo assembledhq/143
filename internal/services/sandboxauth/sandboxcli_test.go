@@ -119,7 +119,11 @@ func TestClient_GetMissingSocket(t *testing.T) {
 
 func TestClient_GetDialFailure(t *testing.T) {
 	t.Parallel()
-	_, err := NewClient("/tmp/no-such-socket-143-test").Get(context.Background(), ActionPush)
+	// Small retry budget: a missing socket is ENOENT, which Get now retries
+	// (it reappears when the host re-binds). We only assert the dial error
+	// surfaces, not that we wait out the production-default budget.
+	client := &Client{SocketPath: "/tmp/no-such-socket-143-test", retryBudget: 20 * time.Millisecond, retryInterval: 5 * time.Millisecond}
+	_, err := client.Get(context.Background(), ActionPush)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "dial")
 }

@@ -11,15 +11,26 @@ type DisabledTooltipProps = {
 };
 
 export function DisabledTooltip({ children, content, disabled = false }: DisabledTooltipProps) {
-  if (!disabled || !content) {
+  // Once the wrapper span has been rendered, keep it even if content later
+  // becomes undefined. Removing the wrapper unmounts the child element, which
+  // invalidates any external DOM reference held to it.
+  const [everHadContent, setEverHadContent] = React.useState(() => !!content);
+  React.useEffect(() => {
+    if (content) setEverHadContent(true);
+  }, [content]);
+
+  if (!everHadContent) {
     return children;
   }
 
   return (
     <TooltipProvider delayDuration={150}>
-      <Tooltip>
+      <Tooltip open={disabled && !!content ? undefined : false}>
         <TooltipTrigger asChild>
-          <span className="inline-flex cursor-not-allowed" tabIndex={0}>
+          <span
+            className={disabled ? "inline-flex cursor-not-allowed" : "inline-flex"}
+            tabIndex={disabled ? 0 : undefined}
+          >
             {children}
           </span>
         </TooltipTrigger>

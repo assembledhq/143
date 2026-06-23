@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutomationsPage from "./page";
 
@@ -14,6 +14,79 @@ vi.mock("@/hooks/use-auth", () => ({
 }));
 
 describe("AutomationsPage", () => {
+  it("renders a selectable template gallery when no automations exist", async () => {
+    currentUserRole.value = "member";
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<AutomationsPage />);
+
+    expect(await screen.findByRole("heading", { name: "Create your first automation" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Start from blank/i })).toHaveAttribute("href", "/automations/new");
+    expect(screen.getByRole("tab", { name: "Popular" })).toBeInTheDocument();
+    expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
+    expect(screen.getByText("Security sweep")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Use Find flaky tests/i })).toHaveAttribute(
+      "href",
+      "/automations/new?template=flaky-tests",
+    );
+  });
+
+  it("shows empty-state templates without create actions for builders", async () => {
+    currentUserRole.value = "builder";
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<AutomationsPage />);
+
+    expect(await screen.findByRole("heading", { name: "Create your first automation" })).toBeInTheDocument();
+    expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
+    expect(screen.getByText("Security sweep")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Use Find flaky tests/i })).not.toBeInTheDocument();
+  });
+
+  it("filters templates by search query and shows empty state when none match", async () => {
+    currentUserRole.value = "member";
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [],
+        meta: {},
+      })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutomationsPage />);
+
+    const input = await screen.findByPlaceholderText("Search templates...");
+
+    // Typing a query that matches only one featured template hides others
+    await user.type(input, "flaky");
+    expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
+    expect(screen.queryByText("Security sweep")).not.toBeInTheDocument();
+
+    // A query with no matches shows the empty message
+    await user.clear(input);
+    await user.type(input, "zzznomatch");
+    expect(screen.getByText("No templates match your search.")).toBeInTheDocument();
+    expect(screen.queryByText("Find flaky tests")).not.toBeInTheDocument();
+
+    // Clearing restores the full list
+    await user.clear(input);
+    expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
+    expect(screen.getByText("Security sweep")).toBeInTheDocument();
+  });
+
   it("renders automation cards with mobile-friendly stacked details", async () => {
     currentUserRole.value = "member";
     server.use(

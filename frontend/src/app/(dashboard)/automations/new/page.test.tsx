@@ -76,7 +76,7 @@ describe("NewAutomationPage", () => {
     const timezoneButton = await screen.findByTitle(expectedTimezone);
     const scheduleRow = timezoneButton.parentElement;
     const runEveryText = screen.getByText("Run every");
-    const atText = screen.getByText("At");
+    const atText = screen.getByText("at");
 
     expect(scheduleRow).toHaveClass("flex-wrap");
     expect(timezoneButton).toHaveClass("w-full", "sm:w-auto");
@@ -93,6 +93,49 @@ describe("NewAutomationPage", () => {
       "text-muted-foreground",
     );
     expect(screen.queryByText(/Run time is in/i)).not.toBeInTheDocument();
+  });
+
+  it("shows weekly schedule day context and keeps schedule controls consistently sized", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: "Interval unit" }));
+    await user.click(screen.getByRole("option", { name: "weeks" }));
+
+    expect(screen.getByText("at")).toBeInTheDocument();
+    expect(screen.getByText(/first run anchors on/i)).toBeInTheDocument();
+    expect(screen.getByText(/then repeats every \d+ weeks?/i)).toBeInTheDocument();
+    expect(screen.queryByText("At")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Interval value")).toHaveClass("h-8");
+    expect(screen.getByRole("combobox", { name: "Interval unit" })).toHaveClass("h-8");
+    expect(screen.getByRole("combobox", { name: "Run at hour" })).toHaveClass("h-8");
+    expect(screen.getByRole("combobox", { name: "Run at minute" })).toHaveClass("h-8");
   });
 
   it("keeps timezone in the primary schedule controls and moves execution defaults into advanced settings", async () => {
@@ -229,6 +272,55 @@ describe("NewAutomationPage", () => {
     ).not.toBeChecked();
     expect(screen.queryByText("Also trigger on")).not.toBeInTheDocument();
     expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
+    expect(screen.getByText("Triggers").parentElement).toHaveClass("flex-wrap");
+    expect(screen.getByText("on a schedule")).toHaveClass("block");
+  });
+
+  it("explains why the create button is disabled even when schedule triggering is selected", async () => {
+    const user = userEvent.setup();
+    searchParams.delete("template");
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const createButton = await screen.findByRole("button", {
+      name: "Create automation",
+    });
+    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(createButton).toBeDisabled();
+
+    const tooltipWrapper = createButton.parentElement;
+    expect(tooltipWrapper).not.toBeNull();
+    await user.hover(tooltipWrapper!);
+
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip).toHaveTextContent(
+      "Add an automation name and goal to create this automation.",
+    );
   });
 
   it("submits an event-only PR feedback automation without schedule fields", async () => {

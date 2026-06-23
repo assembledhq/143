@@ -1588,6 +1588,160 @@ func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "failed recycle should release the preview sandbox hold")
 }
 
+// TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning guards the fix for
+// the recycle path reusing a sandbox container that was removed out-of-band
+// (OOM/crash/prune) after the preview went ready. Without the liveness probe,
+// re-provisioning infrastructure against the dead container fails deep with a
+// confusing "No such container" error; with it, the preview fails fast with an
+// actionable message and never transitions to "starting" or calls StartPreview.
+func TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	// Branch preview (no session) whose recorded sandbox is gone.
+	row := newPreviewInstanceRow(previewID, uuid.Nil, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-dead","provider":"docker","work_dir":"/workspace"}`))
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+	// The guard marks the preview failed and clears the recycle schedule. No
+	// "starting" transition, RevokeAllForPreview, or handle update — those only
+	// happen once we commit to recycling onto a live sandbox.
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectExec("UPDATE preview_instances SET recycle_scheduled_at = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		return false, nil // definitively gone
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "recycle should fail when the sandbox container no longer exists")
+	require.Contains(t, err.Error(), "no longer exists", "error should explain the sandbox is gone")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-sandbox recycle should mark failed and clear the schedule without reprovisioning")
+}
+
+// TestRecyclePreview_TransientLivenessProbeSkipsSweep verifies that an
+// indeterminate liveness probe (e.g. a transient Docker error) does not disturb
+// a possibly-healthy preview: the probe is retried, then the sweep is skipped
+// with errRecycleSkipped (so the recycler does not count it as a recycle) and
+// the preview is left untouched for a later sweep to retry.
+func TestRecyclePreview_TransientLivenessProbeSkipsSweep(t *testing.T) {
+	t.Parallel()
+	SetRecycleIsAliveBackoffForTesting(0) // keep probe retries instant
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	row := newPreviewInstanceRow(previewID, uuid.Nil, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-maybe","provider":"docker","work_dir":"/workspace"}`))
+
+	// Only the instance lookup runs — the preview is left untouched.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	var probes int
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		probes++
+		return false, errors.New("docker daemon unreachable")
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "a transient liveness probe failure should return an error")
+	require.ErrorIs(t, err, errRecycleSkipped, "transient probe failure should be reported as a skip, not a recycle failure")
+	require.Equal(t, recycleIsAliveAttempts, probes, "the liveness probe should be retried before giving up")
+	require.NoError(t, mock.ExpectationsWereMet(), "transient probe failure should not mutate the preview")
+}
+
+// TestRecyclePreview_LiveSandboxProceeds confirms the liveness guard does not
+// block the happy path: when the sandbox container is alive, recycle proceeds
+// through StartPreview and back to a ready status as before.
+func TestRecyclePreview_LiveSandboxProceeds(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
+		)
+	// Full recycle path runs once the live-sandbox guard passes.
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "recycle should proceed normally when the sandbox is alive")
+	require.NoError(t, mock.ExpectationsWereMet(), "live-sandbox recycle should run the full restart path")
+}
+
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {
 	t.Parallel()
 
@@ -3318,7 +3472,7 @@ func TestManagerServiceObserver_OnServiceReady_WithPID(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3339,7 +3493,7 @@ func TestManagerServiceObserver_OnServiceReady_NoPID(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	// pid=0 must skip the second exec — the readiness probe runs before the
 	// PID-detection goroutine has had a chance to populate ss.pid for some
@@ -3360,7 +3514,7 @@ func TestManagerServiceObserver_OnServiceReady_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3383,7 +3537,7 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3400,6 +3554,100 @@ func TestManagerServiceObserver_OnServiceFailed_WithTail(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+// When the failing service is the config's primary service, OnServiceFailed
+// must additionally demote the instance to "unhealthy" so a crash after
+// readiness (e.g. an OOM kill at serve time) doesn't leave the row stuck at
+// "ready" forever — which is what makes the launch page spin indefinitely
+// against a dead process.
+func TestManagerServiceObserver_OnServiceFailed_PrimaryServiceDemotesInstance(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "frontend", 8192)
+
+	// Service row flips to failed.
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+	// Instance is demoted via UpdatePreviewStatusIfActive (non-terminal path).
+	// On a non-terminal transition with rows affected, the store then calls
+	// syncPreviewGroupStatusForPreview, which issues a follow-up query we don't
+	// mock here. That unmatched query errors and is swallowed as a warn inside
+	// the store (the demotion itself still succeeds), so the test only asserts
+	// the demotion UPDATE and intentionally leaves the group-sync unexpected.
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	obs.OnServiceFailed("frontend", "exited with code 137", []string{"out of memory"})
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAnnotatePreviewFailure(t *testing.T) {
+	t.Parallel()
+
+	t.Run("oom exit 137 is explained with the memory cap", func(t *testing.T) {
+		t.Parallel()
+		got := annotatePreviewFailure("exited with code 137; last output: app compiled", 8192)
+		require.Contains(t, got, "ran out of memory")
+		require.Contains(t, got, "8192 MiB")
+		require.Contains(t, got, "exit 137")
+		// The original failure is preserved for debugging.
+		require.Contains(t, got, "exited with code 137; last output: app compiled")
+	})
+
+	t.Run("oom without a known cap omits the cap text", func(t *testing.T) {
+		t.Parallel()
+		got := annotatePreviewFailure("signal: killed", 0)
+		require.Contains(t, got, "ran out of memory")
+		require.NotContains(t, got, "capped at")
+	})
+
+	t.Run("a long original failure tail is truncated", func(t *testing.T) {
+		t.Parallel()
+		// A huge captured stdout/stderr tail must not bloat the message.
+		raw := "exited with code 137; last output: " + strings.Repeat("x", 5000)
+		got := annotatePreviewFailure(raw, 8192)
+		require.Contains(t, got, "ran out of memory")
+		require.Contains(t, got, "8192 MiB")
+		// The whole message is the short explanation + the bounded tail, so it
+		// stays close to the cap rather than echoing the full 5k-rune raw output.
+		require.LessOrEqual(t, len([]rune(got)), maxOriginalFailureRunes+256, "the raw tail should be truncated to the cap")
+	})
+
+	t.Run("non-oom failures pass through unchanged", func(t *testing.T) {
+		t.Parallel()
+		// Exit 126 (permission) and disk exhaustion must not be mislabeled as OOM.
+		require.Equal(t, "exited with code 126", annotatePreviewFailure("exited with code 126", 8192))
+		require.Equal(t,
+			"build failed: no space left on device",
+			annotatePreviewFailure("build failed: no space left on device", 8192),
+		)
+	})
+
+	t.Run("looksLikeOOMFailure matches known signatures", func(t *testing.T) {
+		t.Parallel()
+		for _, msg := range []string{"exited with code 137", "signal: killed", "OOMKilled", "runtime: out of memory", "cannot allocate memory"} {
+			require.True(t, looksLikeOOMFailure(msg), msg)
+		}
+		for _, msg := range []string{"exited with code 1", "exited with code 126", "no space left on device", ""} {
+			require.False(t, looksLikeOOMFailure(msg), msg)
+		}
+	})
+}
+
 func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	t.Parallel()
 
@@ -3410,7 +3658,7 @@ func TestManagerServiceObserver_OnInstallFailed_WithTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3434,7 +3682,7 @@ func TestManagerServiceObserver_OnInstallOutput_PersistsInstallLog(t *testing.T)
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3458,7 +3706,7 @@ func TestManagerServiceObserver_OnPhaseStart_PersistsPreviewLog(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_instances SET current_phase").
 		WithArgs(pgx.NamedArgs{"id": previewID, "org_id": orgID, "phase": "dependency_cache_restore"}).
@@ -3511,7 +3759,7 @@ func TestManagerServiceObserver_OnDependencyCacheRestore_PersistsNonFailureStatu
 			mgr := newTestManager(mock, &mockProvider{})
 			orgID := uuid.New()
 			previewID := uuid.New()
-			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 			logID := uuid.New()
 			mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3541,7 +3789,7 @@ func TestManagerServiceObserver_OnCacheRestore_EmitsPreviewHealthCacheEvent(t *t
 	})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 	cacheKey := strings.Repeat("d", 64)
 
 	logID := uuid.New()
@@ -3578,7 +3826,7 @@ func TestManagerServiceObserver_OnPhaseStartAndEnd_PersistsLifecycleLogs(t *test
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_instances SET current_phase").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3611,7 +3859,7 @@ func TestManagerServiceObserver_OnPhaseStart_DoesNotBlockOnLifecycleLogWrite(t *
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "worker-1",
 	})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	done := make(chan struct{})
 	go func() {
@@ -3672,7 +3920,7 @@ func TestManagerServiceObserver_OnCacheSave_PersistsSuccessfulStatuses(t *testin
 			mgr := newTestManager(mock, &mockProvider{})
 			orgID := uuid.New()
 			previewID := uuid.New()
-			obs := mgr.newServiceObserver(orgID, previewID, "", "")
+			obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 			cacheKey := strings.Repeat("c", 64)
 
 			logID := uuid.New()
@@ -3698,7 +3946,7 @@ func TestManagerServiceObserver_OnServiceOutput_PersistsStartupLog(t *testing.T)
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	logID := uuid.New()
 	mock.ExpectQuery("INSERT INTO preview_logs").
@@ -3755,7 +4003,7 @@ func TestManagerServiceObserver_OnServiceOutput_DoesNotBlockOnDatabaseWrites(t *
 		Logger:       zerolog.Nop(),
 		WorkerNodeID: "worker-1",
 	})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	done := make(chan struct{})
 	go func() {
@@ -3788,7 +4036,7 @@ func TestManagerServiceObserver_OnServiceFailed_NoTail(t *testing.T) {
 	mgr := newTestManager(mock, &mockProvider{})
 	orgID := uuid.New()
 	previewID := uuid.New()
-	obs := mgr.newServiceObserver(orgID, previewID, "", "")
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 0)
 
 	mock.ExpectExec("UPDATE preview_services SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3812,7 +4060,7 @@ func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
 	defer mock.Close()
 
 	mgr := newTestManager(mock, &mockProvider{})
-	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "")
+	obs := mgr.newServiceObserver(uuid.New(), uuid.New(), "", "", "", 0)
 
 	// Both DB writes fail; the observer must log and return without panicking
 	// so a flaky DB doesn't crash the worker mid-launch.

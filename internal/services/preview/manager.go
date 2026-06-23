@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -658,7 +659,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if metricsSource == "" {
 		metricsSource = input.Initiator
 	}
-	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName)
+	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName, input.Config.Primary, instance.MemoryLimitMB)
 	defer observer.Close()
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,
@@ -860,18 +861,20 @@ func (m *Manager) AbortReservation(parentCtx context.Context, instance *models.P
 // callbacks fired after StartPreview returns (progressive support services,
 // the startService goroutine catching a non-zero exit) still land in the DB
 // even if the request context has already been canceled.
-func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo string) *managerServiceObserver {
+func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, metricsRepo, primaryService string, memoryLimitMB int) *managerServiceObserver {
 	observer := &managerServiceObserver{
-		manager:       m,
-		orgID:         orgID,
-		previewID:     previewID,
-		source:        strings.TrimSpace(metricsSource),
-		repository:    strings.TrimSpace(metricsRepo),
-		phaseStarts:   make(map[string]time.Time),
-		outputCh:      make(chan previewServiceOutput, serviceOutputBufferSize),
-		outputDone:    make(chan struct{}),
-		lifecycleCh:   make(chan previewLifecycleLog, lifecycleLogBufferSize),
-		lifecycleDone: make(chan struct{}),
+		manager:        m,
+		orgID:          orgID,
+		previewID:      previewID,
+		source:         strings.TrimSpace(metricsSource),
+		repository:     strings.TrimSpace(metricsRepo),
+		primaryService: strings.TrimSpace(primaryService),
+		memoryLimitMB:  memoryLimitMB,
+		phaseStarts:    make(map[string]time.Time),
+		outputCh:       make(chan previewServiceOutput, serviceOutputBufferSize),
+		outputDone:     make(chan struct{}),
+		lifecycleCh:    make(chan previewLifecycleLog, lifecycleLogBufferSize),
+		lifecycleDone:  make(chan struct{}),
 	}
 	go observer.runServiceOutputWriter()
 	go observer.runLifecycleLogWriter()
@@ -879,11 +882,20 @@ func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, 
 }
 
 type managerServiceObserver struct {
-	manager       *Manager
-	orgID         uuid.UUID
-	previewID     uuid.UUID
-	source        string
-	repository    string
+	manager    *Manager
+	orgID      uuid.UUID
+	previewID  uuid.UUID
+	source     string
+	repository string
+	// primaryService is the name of the config's primary service. When that
+	// service dies, the whole preview can no longer serve, so OnServiceFailed
+	// demotes the instance to "unhealthy" (see below). Empty for flows that
+	// don't supply it (the demotion is then skipped).
+	primaryService string
+	// memoryLimitMB is the preview's cgroup memory cap, surfaced in OOM
+	// failure messages so the cause is obvious without decoding exit codes.
+	// 0 when unknown (the cap is then omitted from the message).
+	memoryLimitMB int
 	phaseMu       sync.Mutex
 	phaseStarts   map[string]time.Time
 	outputCh      chan previewServiceOutput
@@ -1112,13 +1124,20 @@ func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
 func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
 	defer cancel()
-	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, errMsg); err != nil {
+
+	// Annotate OOM kills (exit 137 etc.) with a plain-English explanation and
+	// the memory cap, so the per-service error, the preview log, and the
+	// instance error all make the cause obvious instead of leaving a bare
+	// "exited with code 137" for the user to decode.
+	detail := annotatePreviewFailure(errMsg, o.memoryLimitMB)
+
+	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, detail); err != nil {
 		o.manager.logger.Warn().Err(err).
 			Str("preview_id", o.previewID.String()).
 			Str("service", name).
 			Msg("observer: failed to mark service failed")
 	}
-	msg := fmt.Sprintf("service %q failed: %s", name, errMsg)
+	msg := fmt.Sprintf("service %q failed: %s", name, detail)
 	if len(tail) > 0 {
 		msg += "\n--- last output ---\n" + strings.Join(tail, "\n")
 	}
@@ -1135,6 +1154,78 @@ func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []str
 			Str("service", name).
 			Msg("observer: failed to write preview log")
 	}
+
+	// When the primary service dies the preview can no longer serve, but the
+	// instance row is left at whatever status it last reached (typically
+	// "ready"). A crash *after* readiness — e.g. an OOM kill at serve time —
+	// otherwise leaves the instance stuck at "ready" forever, so the launch
+	// page renders the iframe against a dead process and spins indefinitely.
+	// Demote the instance to "unhealthy" so consumers (the launch page, the
+	// gateway, listings) can surface the failure and offer a restart.
+	// UpdatePreviewStatusIfActive only transitions non-terminal rows, so this
+	// never clobbers a concurrent stop/expire and stays reversible: a later
+	// readiness write can promote it back to ready/partially_ready.
+	if o.primaryService != "" && name == o.primaryService {
+		demoteErr := fmt.Sprintf("primary service %q failed and the preview can no longer serve: %s", name, detail)
+		if _, err := o.manager.store.UpdatePreviewStatusIfActive(
+			ctx, o.orgID, o.previewID, models.PreviewStatusUnhealthy, demoteErr,
+		); err != nil {
+			o.manager.logger.Warn().Err(err).
+				Str("preview_id", o.previewID.String()).
+				Str("service", name).
+				Msg("observer: failed to demote preview to unhealthy after primary service failure")
+		}
+	}
+}
+
+// looksLikeOOMFailure reports whether a service/exit failure message carries
+// the signature of an out-of-memory kill. Exit code 137 is 128+SIGKILL(9),
+// which inside a memory-capped preview container is almost always the kernel
+// OOM killer; Docker also reports "OOMKilled" in container state, and runtimes
+// print "out of memory" / "cannot allocate memory" on heap exhaustion.
+func looksLikeOOMFailure(errMsg string) bool {
+	m := strings.ToLower(errMsg)
+	return strings.Contains(m, "code 137") ||
+		strings.Contains(m, "signal: killed") ||
+		strings.Contains(m, "oomkilled") ||
+		strings.Contains(m, "out of memory") ||
+		strings.Contains(m, "cannot allocate memory")
+}
+
+// maxOriginalFailureRunes bounds the raw provider failure text appended to an
+// OOM explanation. The raw text can carry a long captured stdout/stderr tail,
+// which would otherwise bloat the instance error rendered on the launch page.
+const maxOriginalFailureRunes = 500
+
+// oomFailureExplanation returns the plain-English OOM explanation used across
+// the preview failure surfaces, including the memory cap when known
+// (memoryLimitMB > 0). It is a sentence fragment beginning "ran out of
+// memory…" so callers can prepend their own subject.
+func oomFailureExplanation(memoryLimitMB int) string {
+	capText := ""
+	if memoryLimitMB > 0 {
+		capText = fmt.Sprintf("; capped at %d MiB", memoryLimitMB)
+	}
+	return fmt.Sprintf(
+		"ran out of memory (OOM, exit 137)%s. Reduce memory use — "+
+			"e.g. serve a production build instead of a dev server.",
+		capText,
+	)
+}
+
+// annotatePreviewFailure prefixes OOM failures with a plain-English
+// explanation (and the memory cap, when known) so preview errors are
+// debuggable without decoding exit codes. Non-OOM messages pass through
+// unchanged. memoryLimitMB <= 0 omits the cap.
+func annotatePreviewFailure(errMsg string, memoryLimitMB int) string {
+	if !looksLikeOOMFailure(errMsg) {
+		return errMsg
+	}
+	// truncateRunes (defined in session_prewarm_classifier.go) trims and bounds
+	// the raw provider text so a long captured stdout/stderr tail can't bloat
+	// the instance error rendered on the launch page.
+	return oomFailureExplanation(memoryLimitMB) +
+		" Original failure: " + truncateRunes(errMsg, maxOriginalFailureRunes)
 }
 
 func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
@@ -1903,7 +1994,7 @@ func (m *Manager) ResumeStoppedWarmPreview(ctx context.Context, orgID, previewID
 		m.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("warm resume: failed to revoke access sessions")
 	}
 
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService, instance.MemoryLimitMB)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
@@ -2006,6 +2097,54 @@ type workspaceRevisionStamp struct {
 	updatedAt time.Time
 }
 
+// errRecycleSkipped signals that a recycle attempt was intentionally skipped
+// (e.g. an indeterminate sandbox liveness probe) rather than failed. The
+// recycler treats it as a no-op so the attempt is not counted or logged as a
+// failed recycle.
+var errRecycleSkipped = errors.New("recycle skipped")
+
+// recycleIsAliveAttempts bounds how many times recyclePreview probes sandbox
+// liveness before treating a persistently-erroring probe as indeterminate.
+const recycleIsAliveAttempts = 3
+
+// recycleIsAliveBackoff is the delay between liveness-probe retries, stored as
+// nanoseconds in an atomic so tests can drop it to zero without racing the
+// recycler goroutine.
+var recycleIsAliveBackoff atomic.Int64
+
+func init() { recycleIsAliveBackoff.Store(int64(500 * time.Millisecond)) }
+
+// SetRecycleIsAliveBackoffForTesting overrides the liveness-probe retry backoff.
+func SetRecycleIsAliveBackoffForTesting(d time.Duration) {
+	recycleIsAliveBackoff.Store(int64(d))
+}
+
+// probeSandboxAlive calls IsAlive with bounded retries so a momentary
+// docker-daemon hiccup within a single recycle sweep does not skip an otherwise
+// healthy preview. A definitive result (err == nil) — including "container is
+// gone" — returns immediately without retrying.
+func (m *Manager) probeSandboxAlive(ctx context.Context, sb *agent.Sandbox) (bool, error) {
+	var lastErr error
+	for attempt := 1; attempt <= recycleIsAliveAttempts; attempt++ {
+		alive, err := m.sandboxProvider.IsAlive(ctx, sb)
+		if err == nil {
+			return alive, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+		if backoff := time.Duration(recycleIsAliveBackoff.Load()); attempt < recycleIsAliveAttempts && backoff > 0 {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+	}
+	return false, lastErr
+}
+
 func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig, revisionStamp *workspaceRevisionStamp) error {
 	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
 	if err != nil {
@@ -2023,6 +2162,53 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("load recycle input: %w", err)
 	}
+
+	// Guard against recycling onto a sandbox container that no longer exists.
+	// Recycle reuses the sandbox recorded at first launch (input.Sandbox); if
+	// that container was removed out-of-band (OOM, crash, prune) after the
+	// preview went ready, reusing it fails deep inside provisionInfra with a
+	// confusing "No such container" error and hard-fails the preview. Probe
+	// liveness first — the same guard the launch-time reuse path applies — and
+	// only recycle in place when the container is definitively alive. Checked
+	// before the config refresh below so a dead preview is not left with a
+	// freshly-persisted recycle config it will never use.
+	if m.sandboxProvider != nil && input.Sandbox != nil && input.Sandbox.ID != "" {
+		alive, aliveErr := m.probeSandboxAlive(ctx, input.Sandbox)
+		switch {
+		case aliveErr != nil:
+			// Indeterminate even after retries — the container may well be
+			// healthy. Don't disturb a possibly-running preview; the
+			// scheduled-recycle marker persists so a later sweep retries.
+			// Wrap errRecycleSkipped so the recycler counts this as a skip,
+			// not a failed recycle, and logs it quietly.
+			m.logger.Debug().Err(aliveErr).
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox liveness probe failed; skipping this sweep")
+			return fmt.Errorf("recycle: sandbox liveness probe failed: %w", errRecycleSkipped)
+		case !alive:
+			// Definitively gone. The preview's workspace died with the
+			// container, so there is nothing to recycle in place. Fail with an
+			// actionable message; relaunching cold-starts a fresh sandbox. Use
+			// the active-guarded status update so a preview that was stopped or
+			// expired concurrently (between the lookup above and here) is not
+			// clobbered back to "failed".
+			const deadSandboxReason = "preview sandbox was removed; relaunch to recreate it"
+			m.logger.Warn().
+				Str("preview_id", previewID.String()).
+				Str("container_id", input.Sandbox.ID).
+				Msg("recycle: sandbox container no longer exists; failing preview so it can be relaunched")
+			if _, statusErr := m.store.UpdatePreviewStatusIfActive(ctx, orgID, previewID, models.PreviewStatusFailed, deadSandboxReason); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Str("preview_id", previewID.String()).Msg("recycle: failed to set failed status after dead sandbox")
+			}
+			if schedErr := m.store.ClearRecycleSchedule(ctx, orgID, previewID); schedErr != nil {
+				m.logger.Warn().Err(schedErr).Str("preview_id", previewID.String()).Msg("recycle: failed to clear recycle schedule after dead sandbox")
+			}
+			m.releasePreviewHoldAfterRecycleFailure(ctx, instance)
+			return fmt.Errorf("recycle: sandbox container %s no longer exists", input.Sandbox.ID)
+		}
+	}
+
 	if refreshedConfig != nil {
 		resourcePolicy, policyErr := m.resourcePolicy(ctx, orgID)
 		if policyErr != nil {
@@ -2098,7 +2284,7 @@ func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID
 
 	// Restart via provider with same sandbox and config. Use the existing
 	// instance ID so PREVIEW_ORIGIN stays stable across recycles.
-	observer := m.newServiceObserver(orgID, previewID, "", "")
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService, instance.MemoryLimitMB)
 	defer observer.Close()
 	if err := m.resolvePreviewSecrets(ctx, input); err != nil {
 		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
