@@ -173,6 +173,25 @@ vi.mock("next/navigation", () => ({
   }),
 }));
 
+vi.mock("@/components/ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: React.ReactNode; asChild?: boolean }) => <>{children}</>,
+  DropdownMenuContent: ({ children }: { children: React.ReactNode }) => <div role="menu">{children}</div>,
+  DropdownMenuItem: ({
+    children,
+    className,
+    onClick,
+  }: {
+    children: React.ReactNode;
+    className?: string;
+    onClick?: () => void;
+  }) => (
+    <button type="button" role="menuitem" className={className} onClick={onClick}>
+      {children}
+    </button>
+  ),
+}));
+
 vi.mock("@/components/no-repos-warning", () => ({
   NoReposWarning: () => <div data-testid="no-repos-warning" />,
 }));
@@ -670,6 +689,9 @@ describe("ManualSessionCreatePageContent", () => {
     const linearInput = await screen.findByRole("textbox", { name: "Linear issue id or URL" });
     await user.type(linearInput, "ACS-1234");
     await user.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("textbox", { name: "Linear issue id or URL" })).not.toBeInTheDocument();
+    });
     await user.click((await screen.findAllByRole("button", { name: "Start session" }))[0]);
 
     await waitFor(() => {
