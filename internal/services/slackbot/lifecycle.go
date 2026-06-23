@@ -157,10 +157,10 @@ func statusTitle(input SlackSessionRenderInput) string {
 func renderContextLines(input SlackSessionRenderInput) []string {
 	lines := []string{}
 	if input.Context.RepositoryName != "" {
-		lines = append(lines, "Repo: "+input.Context.RepositoryName)
+		lines = append(lines, "Repo: "+slackCodeSpan(input.Context.RepositoryName))
 	}
 	if input.Context.Branch != "" {
-		lines = append(lines, "Branch: "+input.Context.Branch)
+		lines = append(lines, "Branch: "+slackCodeSpan(input.Context.Branch))
 	}
 	if input.Context.PullRequestURL != "" {
 		lines = append(lines, "PR: "+input.Context.PullRequestURL)
@@ -172,6 +172,10 @@ func renderContextLines(input SlackSessionRenderInput) []string {
 		lines = append(lines, "Mode: "+label)
 	}
 	return lines
+}
+
+func slackCodeSpan(value string) string {
+	return "`" + strings.ReplaceAll(strings.TrimSpace(value), "`", "'") + "`"
 }
 
 func routingModeLabel(mode SlackRoutingMode) string {

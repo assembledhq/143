@@ -809,6 +809,63 @@ func TestRenderSlackFinalBlocksRequiresConfirmationForCreatePR(t *testing.T) {
 	require.True(t, slackBlocksActionHasConfirm(blocks, "slack_create_pr"), "Slack PR creation should require confirmation")
 }
 
+func TestAddSlackCompletionReactionUsesOriginalRootMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		link       models.SlackSessionLink
+		wantTS     string
+		wantCalled bool
+	}{
+		{
+			name: "uses root timestamp when available",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackThreadTS:  "1710000000.000200",
+				SlackRootTS:    "1710000000.000100",
+			},
+			wantTS:     "1710000000.000100",
+			wantCalled: true,
+		},
+		{
+			name: "falls back to thread timestamp",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+				SlackThreadTS:  "1710000000.000200",
+			},
+			wantTS:     "1710000000.000200",
+			wantCalled: true,
+		},
+		{
+			name: "skips when no source timestamp exists",
+			link: models.SlackSessionLink{
+				SlackChannelID: "C123",
+			},
+			wantCalled: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			adder := &fakeSlackReactionAdder{}
+
+			addSlackCompletionReaction(context.Background(), adder, zerolog.Nop(), "xoxb-token", tt.link)
+
+			require.Equal(t, tt.wantCalled, adder.called, "completion reaction should only be sent when the original Slack message can be identified")
+			if !tt.wantCalled {
+				return
+			}
+			require.Equal(t, "xoxb-token", adder.accessToken, "completion reaction should use the Slack bot token")
+			require.Equal(t, tt.link.SlackChannelID, adder.channelID, "completion reaction should target the source Slack channel")
+			require.Equal(t, tt.wantTS, adder.messageTS, "completion reaction should target the original Slack message timestamp")
+			require.Equal(t, "white_check_mark", adder.name, "completion reaction should use the requested checkmark emoji")
+		})
+	}
+}
+
 func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 	t.Parallel()
 
@@ -975,6 +1032,13 @@ func TestResolveSlackAutoRoutingWithClassifier(t *testing.T) {
 			llmResponse:      `{"routing_mode":"start_work","confidence":0.91,"reason":"request to modify behavior"}`,
 			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
 			expectedLLMCalls: 1,
+		},
+		{
+			name:             "formatting change request overrides classifier answer only",
+			text:             "<@U143> when the slack session is kicked off and shows an in progress changes, please use backticks to display the repo and branch. Right now they look like:\n\nRepo: assembledhq/143\nBranch: main\n\nBut Ideally I'd like them to be:\n\nRepo: `assembledhq/143`\nBranch: `main`",
+			llmResponse:      `{"routing_mode":"answer_only","confidence":0.97,"reason":"formatting guidance"}`,
+			expectedRouting:  slackbotsvc.SlackRoutingModeStartWork,
+			expectedLLMCalls: 0,
 		},
 		{
 			name:             "invalid classifier response falls back conservatively",
@@ -2547,6 +2611,24 @@ type fakeSlackMessagePoster struct {
 	textPosted   ingestion.SlackPostedMessage
 	blockCalls   int
 	textCalls    int
+}
+
+type fakeSlackReactionAdder struct {
+	called      bool
+	accessToken string
+	channelID   string
+	messageTS   string
+	name        string
+	err         error
+}
+
+func (f *fakeSlackReactionAdder) AddReaction(_ context.Context, accessToken, channelID, messageTS, name string) error {
+	f.called = true
+	f.accessToken = accessToken
+	f.channelID = channelID
+	f.messageTS = messageTS
+	f.name = name
+	return f.err
 }
 
 func (f *fakeSlackMessagePoster) PostMessage(_ context.Context, _, _, _, _ string) (ingestion.SlackPostedMessage, error) {

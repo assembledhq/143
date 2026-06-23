@@ -34,7 +34,7 @@ func TestRenderSessionStatus(t *testing.T) {
 				},
 				RoutingMode: SlackRoutingModeStartWork,
 			},
-			expected: "Starting a 143 session\n\nRepo: assembledhq/143\nBranch: main\nMode: Start work\n\nSession: https://143.test/sessions/" + sessionID.String(),
+			expected: "Starting a 143 session\n\nRepo: `assembledhq/143`\nBranch: `main`\nMode: Start work\n\nSession: https://143.test/sessions/" + sessionID.String(),
 		},
 		{
 			name: "failed status includes summary and session link",
