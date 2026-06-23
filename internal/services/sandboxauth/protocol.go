@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"syscall"
 	"time"
 )
 
@@ -124,12 +125,37 @@ const DialTimeout = 5 * time.Second
 // allow more headroom than DialTimeout.
 const CallTimeout = 30 * time.Second
 
+// defaultConnectRetryBudget bounds how long Get keeps retrying a connection
+// that is refused or whose socket file is missing. The per-session socket is
+// bound by a worker/executor process that can briefly vanish across a rolling
+// deploy or restart while the sandbox container (and this client) keep
+// running. The socket directory bind-mount is stable, so a fresh listener
+// reappears at the same path within the host's restart/rehydrate window.
+// Retrying here turns that gap into a short pause for `git push` instead of a
+// hard "connection refused" failure. Bounded so a socket that is genuinely
+// never coming back still fails the push in bounded time rather than hanging
+// git indefinitely.
+const defaultConnectRetryBudget = 30 * time.Second
+
+// defaultConnectRetryInterval is the delay between connection attempts while
+// within the retry budget. Small enough that a listener returning mid-deploy
+// is picked up promptly, large enough not to busy-spin on a refused socket
+// (which fails its dial immediately rather than after DialTimeout).
+const defaultConnectRetryInterval = 1 * time.Second
+
 // Client dials the per-session socket and runs one request/response. It
 // opens a fresh connection per call — git's credential helper invokes us
 // once per push, so connection reuse buys nothing and complicates the
 // host-side handler (which today does one Resolve per Accept).
 type Client struct {
 	SocketPath string
+
+	// retryBudget and retryInterval bound dial retries when the listener is
+	// transiently absent (connection refused / socket file missing). Zero
+	// values fall back to the package defaults; they are fields rather than
+	// consts so tests can tighten them without real-time sleeps.
+	retryBudget   time.Duration
+	retryInterval time.Duration
 }
 
 // NewClient constructs a Client that talks to socketPath. socketPath is
@@ -154,6 +180,53 @@ func (c *Client) GetAPIToken(ctx context.Context) (string, error) {
 	return resp.Token, nil
 }
 
+// dial opens the per-session socket, retrying while the listener is
+// transiently absent. A worker/executor restart (rolling deploy, crash, or
+// drain) tears down the in-process listener while the bind-mounted socket
+// directory — and this sandbox client — keep living, so a connect can be
+// refused (no listener) or hit a not-yet-recreated socket file (ENOENT) for
+// the few seconds until the host re-binds at the same path. Both are treated
+// as "retry"; any other dial error (permission, malformed path, context
+// cancellation) is returned immediately. The last attempt's error is returned
+// verbatim so the caller's "dial %s" wrapper preserves the familiar message.
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
+	budget := c.retryBudget
+	if budget <= 0 {
+		budget = defaultConnectRetryBudget
+	}
+	interval := c.retryInterval
+	if interval <= 0 {
+		interval = defaultConnectRetryInterval
+	}
+
+	dialer := net.Dialer{Timeout: DialTimeout}
+	start := time.Now()
+	for {
+		conn, err := dialer.DialContext(ctx, "unix", c.SocketPath)
+		if err == nil {
+			return conn, nil
+		}
+		if !isListenerTransientlyAbsent(err) || ctx.Err() != nil || time.Since(start) >= budget {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(interval):
+		}
+	}
+}
+
+// isListenerTransientlyAbsent reports whether a dial error means "no one is
+// listening on the socket right now" — a refused connection or a socket file
+// that does not exist yet. These are the states a host restart passes through
+// before it re-binds the per-session socket, so they are safe to retry. Other
+// errors (EACCES, ENOTSOCK, name-too-long) are not transient and must not be
+// retried.
+func isListenerTransientlyAbsent(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
 // Get asks the host to resolve a fresh GitHub credential for the given
 // action. Returns the response payload (which may carry a non-empty Error
 // field) and any transport error.
@@ -161,8 +234,7 @@ func (c *Client) Get(ctx context.Context, action Action) (*Response, error) {
 	if c.SocketPath == "" {
 		return nil, errors.New("sandboxauth: socket path is empty (set " + SocketEnvVar + ")")
 	}
-	dialer := net.Dialer{Timeout: DialTimeout}
-	conn, err := dialer.DialContext(ctx, "unix", c.SocketPath)
+	conn, err := c.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("sandboxauth: dial %s: %w", c.SocketPath, err)
 	}
