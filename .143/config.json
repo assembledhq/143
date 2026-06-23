@@ -7,7 +7,7 @@
     "primary": "frontend",
     "install": {
       "command": ["sh", ".143/preview-install-frontend.sh"],
-      "lockfiles": ["frontend/package-lock.json"],
+      "lockfiles": ["frontend/package-lock.json", "go.mod", "go.sum"],
       "verify_paths": ["frontend/node_modules/.bin/next"],
       "timeout_seconds": 600,
       "cache": {
@@ -29,6 +29,7 @@
         }
       },
       "server": {
+        "build": ["sh", ".143/preview-build.sh"],
         "command": ["sh", ".143/preview-start.sh"],
         "port": 8080,
         "env": {
