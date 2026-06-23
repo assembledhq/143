@@ -1588,6 +1588,160 @@ func TestRecyclePreview_StartFailureReleasesPreviewHold(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "failed recycle should release the preview sandbox hold")
 }
 
+// TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning guards the fix for
+// the recycle path reusing a sandbox container that was removed out-of-band
+// (OOM/crash/prune) after the preview went ready. Without the liveness probe,
+// re-provisioning infrastructure against the dead container fails deep with a
+// confusing "No such container" error; with it, the preview fails fast with an
+// actionable message and never transitions to "starting" or calls StartPreview.
+func TestRecyclePreview_DeadSandboxFailsInsteadOfReprovisioning(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	// Branch preview (no session) whose recorded sandbox is gone.
+	row := newPreviewInstanceRow(previewID, uuid.Nil, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-dead","provider":"docker","work_dir":"/workspace"}`))
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+	// The guard marks the preview failed and clears the recycle schedule. No
+	// "starting" transition, RevokeAllForPreview, or handle update — those only
+	// happen once we commit to recycling onto a live sandbox.
+	expectUpdatePreviewStatusFailed(mock)
+	mock.ExpectExec("UPDATE preview_instances SET recycle_scheduled_at = NULL").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		return false, nil // definitively gone
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "recycle should fail when the sandbox container no longer exists")
+	require.Contains(t, err.Error(), "no longer exists", "error should explain the sandbox is gone")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-sandbox recycle should mark failed and clear the schedule without reprovisioning")
+}
+
+// TestRecyclePreview_TransientLivenessProbeSkipsSweep verifies that an
+// indeterminate liveness probe (e.g. a transient Docker error) does not disturb
+// a possibly-healthy preview: the probe is retried, then the sweep is skipped
+// with errRecycleSkipped (so the recycler does not count it as a recycle) and
+// the preview is left untouched for a later sweep to retry.
+func TestRecyclePreview_TransientLivenessProbeSkipsSweep(t *testing.T) {
+	t.Parallel()
+	SetRecycleIsAliveBackoffForTesting(0) // keep probe retries instant
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	row := newPreviewInstanceRow(previewID, uuid.Nil, orgID, userID, models.PreviewStatusReady, "handle-old", now)
+	setPreviewInstanceRowColumn(row, "recycle_sandbox", []byte(`{"id":"sandbox-maybe","provider":"docker","work_dir":"/workspace"}`))
+
+	// Only the instance lookup runs — the preview is left untouched.
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols).AddRow(row...))
+
+	var probes int
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		probes++
+		return false, errors.New("docker daemon unreachable")
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.Error(t, err, "a transient liveness probe failure should return an error")
+	require.ErrorIs(t, err, errRecycleSkipped, "transient probe failure should be reported as a skip, not a recycle failure")
+	require.Equal(t, recycleIsAliveAttempts, probes, "the liveness probe should be retried before giving up")
+	require.NoError(t, mock.ExpectationsWereMet(), "transient probe failure should not mutate the preview")
+}
+
+// TestRecyclePreview_LiveSandboxProceeds confirms the liveness guard does not
+// block the happy path: when the sandbox container is alive, recycle proceeds
+// through StartPreview and back to a ready status as before.
+func TestRecyclePreview_LiveSandboxProceeds(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-old", now)...),
+		)
+	// Full recycle path runs once the live-sandbox guard passes.
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_access_sessions SET revoked_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec("UPDATE preview_instances SET preview_handle = @handle, port = @port").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET status = @status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_instances SET expires_at = @expires_at").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	sandboxProvider := testutil.NewMockSandboxProvider()
+	sandboxProvider.IsAliveFn = func(context.Context, *agent.Sandbox) (bool, error) {
+		return true, nil
+	}
+	mgr := NewManager(ManagerConfig{
+		Store:           db.NewPreviewStore(mock),
+		Provider:        &mockProvider{startHandle: &PreviewHandle{Handle: "handle-new", PrimaryPort: 3001}},
+		SandboxProvider: sandboxProvider,
+		Logger:          zerolog.Nop(),
+		WorkerNodeID:    "worker-1",
+	})
+
+	err = mgr.RecyclePreview(context.Background(), orgID, previewID)
+	require.NoError(t, err, "recycle should proceed normally when the sandbox is alive")
+	require.NoError(t, mock.ExpectationsWereMet(), "live-sandbox recycle should run the full restart path")
+}
+
 func TestRecyclePreview_FallsBackForLegacyPreviewsWithoutStoredRecycleState(t *testing.T) {
 	t.Parallel()
 
