@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -76,11 +76,16 @@ import {
   getCodingAgentReasoningOptions,
   supportsReasoningEffort,
   toCodingAgentReasoningEffort,
-  type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
+import {
+  clearAutomationDraft,
+  defaultAutomationFormState,
+  loadAutomationDraft,
+  saveAutomationDraft,
+  type AutomationFormState,
+} from "@/lib/automation-draft";
 import type {
   AgentCapabilityDefinition,
-  AgentCapabilityGrant,
   AutomationEventTriggerInput,
   AutomationGitHubEventFilters,
   ListResponse,
@@ -172,6 +177,12 @@ export default function NewAutomationPage() {
     searchParams.get("template") ?? "",
   );
   const goalEditorRef = useRef<HTMLDivElement>(null);
+  const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const draftPersistenceDisabledRef = useRef(false);
+  const latestFormRef = useRef<AutomationFormState | null>(null);
+  const draftHydratedRef = useRef(!!initialTemplate);
+  const initialTemplateRef = useRef(initialTemplate);
+  const detectedTimezoneRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!isLoading && !canManage) {
@@ -179,58 +190,70 @@ export default function NewAutomationPage() {
     }
   }, [canManage, isLoading, router]);
 
-  const [name, setName] = useState(initialTemplate?.name ?? "");
-  const [goal, setGoal] = useState(initialTemplate?.goal ?? "");
-  const [iconValue, setIconValue] = useState("⚙️");
-  const [scope, setScope] = useState("");
-  const [selectedRepoId, setSelectedRepoId] = useState("");
-  const [intervalValue, setIntervalValue] = useState(
-    initialTemplate?.defaultInterval ?? 1,
-  );
-  const [intervalUnit, setIntervalUnit] = useState<"hours" | "days" | "weeks">(
-    initialTemplate?.defaultUnit ?? "days",
-  );
-  const [intervalRunHour, setIntervalRunHour] = useState("09");
-  const [intervalRunMinute, setIntervalRunMinute] = useState("00");
   const [detectedTimezone] = useState<string>(() => browserTimezone());
-  const [timezone, setTimezone] = useState<string>(detectedTimezone);
-  const [scheduleEnabled, setScheduleEnabled] = useState(true);
-  const [productTriggers, setProductTriggers] = useState<
-    AutomationProductTrigger[]
-  >([]);
-  const [triggerBaseBranches, setTriggerBaseBranches] = useState("");
-  const [triggerAuthors, setTriggerAuthors] = useState("");
-  const [triggerPaths, setTriggerPaths] = useState("");
-  const [triggerFeedbackTypes, setTriggerFeedbackTypes] = useState("");
-  const [triggerReviewStates, setTriggerReviewStates] = useState("");
-  const [pagerDutyEnabled, setPagerDutyEnabled] = useState(false);
-  const [pagerDutyEventTypes, setPagerDutyEventTypes] = useState<
-    PagerDutyEventType[]
-  >(["incident.triggered"]);
-  const [pagerDutyServiceIDs, setPagerDutyServiceIDs] = useState("");
-  const [pagerDutyTeamIDs, setPagerDutyTeamIDs] = useState("");
-  const [pagerDutyStatuses, setPagerDutyStatuses] = useState("");
-  const [pagerDutyUrgency, setPagerDutyUrgency] = useState<"high" | "low">("high");
-  const [pagerDutyPriorityNames, setPagerDutyPriorityNames] = useState("");
-  const [pagerDutyIncidentTypes, setPagerDutyIncidentTypes] = useState("");
-  const [pagerDutyTitleContains, setPagerDutyTitleContains] = useState("");
-  const [pagerDutyCustomFields, setPagerDutyCustomFields] = useState("");
-  const [pagerDutyCooldownMinutes, setPagerDutyCooldownMinutes] = useState("0");
+  const [form, setForm] = useState<AutomationFormState>(() =>
+    defaultAutomationFormState({
+      name: initialTemplate?.name ?? "",
+      goal: initialTemplate?.goal ?? "",
+      intervalValue: initialTemplate?.defaultInterval ?? 1,
+      intervalUnit: initialTemplate?.defaultUnit ?? "days",
+      timezone: detectedTimezone,
+    }),
+  );
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
-  const [baseBranchByRepoId, setBaseBranchByRepoId] = useState<
-    Record<string, string>
-  >({});
-  const [model, setModel] = useState<string | undefined>(undefined);
-  const [identityScope, setIdentityScope] = useState<"org" | "personal">("org");
-  const [prePRReviewLoops, setPrePRReviewLoops] = useState(1);
-  const [reasoningEffort, setReasoningEffort] =
-    useState<CodingAgentReasoningEffort>("");
-  const [priority, setPriority] = useState(50);
-  const [capabilityOverride, setCapabilityOverride] = useState<
-    AgentCapabilityGrant[] | null
-  >(null);
   const [redirecting, setRedirecting] = useState(false);
+  const [draftHydrated, setDraftHydrated] = useState(!!initialTemplate);
+  const patchForm = useCallback(
+    (patch: Partial<AutomationFormState>) => {
+      setForm((current) => ({ ...current, ...patch }));
+    },
+    [],
+  );
+  const setFormField = useCallback(
+    <K extends keyof AutomationFormState>(key: K, value: AutomationFormState[K]) => {
+      setForm((current) => ({ ...current, [key]: value }));
+    },
+    [],
+  );
+
+  const {
+    name,
+    goal,
+    iconValue,
+    scope,
+    selectedRepoId,
+    intervalValue,
+    intervalUnit,
+    intervalRunHour,
+    intervalRunMinute,
+    timezone,
+    scheduleEnabled,
+    productTriggers,
+    triggerBaseBranches,
+    triggerAuthors,
+    triggerPaths,
+    triggerFeedbackTypes,
+    triggerReviewStates,
+    pagerDutyEnabled,
+    pagerDutyEventTypes,
+    pagerDutyServiceIDs,
+    pagerDutyTeamIDs,
+    pagerDutyStatuses,
+    pagerDutyUrgency,
+    pagerDutyPriorityNames,
+    pagerDutyIncidentTypes,
+    pagerDutyTitleContains,
+    pagerDutyCustomFields,
+    pagerDutyCooldownMinutes,
+    baseBranchByRepoId,
+    model,
+    identityScope,
+    prePRReviewLoops,
+    reasoningEffort,
+    priority,
+    capabilityOverride,
+  } = form;
 
   const { data: settingsResponse } = useQuery({
     queryKey: ["settings"],
@@ -297,11 +320,103 @@ export default function NewAutomationPage() {
   const showReasoningSelector = supportsReasoningEffort(effectiveAgentType);
   const reasoningOptions = getCodingAgentReasoningOptions(effectiveAgentType);
 
+  const flushDraft = useCallback(() => {
+    if (
+      !draftHydrated
+      || initialTemplate
+      || draftPersistenceDisabledRef.current
+    ) {
+      return;
+    }
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    saveAutomationDraft(form, { defaultTimezone: detectedTimezone });
+  }, [detectedTimezone, draftHydrated, form, initialTemplate]);
+
+  useEffect(() => {
+    latestFormRef.current = form;
+  }, [form]);
+
+  useEffect(() => {
+    draftHydratedRef.current = draftHydrated;
+  }, [draftHydrated]);
+
+  useEffect(() => {
+    initialTemplateRef.current = initialTemplate;
+  }, [initialTemplate]);
+
+  useEffect(() => {
+    detectedTimezoneRef.current = detectedTimezone;
+  }, [detectedTimezone]);
+
+  useEffect(() => {
+    if (initialTemplate) return;
+    const draft = loadAutomationDraft({ defaultTimezone: detectedTimezone });
+    let cancelled = false;
+
+    queueMicrotask(() => {
+      if (cancelled) return;
+      if (!draft) {
+        setDraftHydrated(true);
+        return;
+      }
+      setForm(draft);
+      setDraftHydrated(true);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detectedTimezone, initialTemplate]);
+
+  useEffect(() => {
+    if (!draftHydrated || initialTemplate || draftPersistenceDisabledRef.current) return undefined;
+    if (draftSaveTimerRef.current) {
+      clearTimeout(draftSaveTimerRef.current);
+    }
+    draftSaveTimerRef.current = setTimeout(() => {
+      saveAutomationDraft(form, { defaultTimezone: detectedTimezone });
+      draftSaveTimerRef.current = null;
+    }, 400);
+
+    return () => {
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [detectedTimezone, draftHydrated, form, initialTemplate]);
+
+  useEffect(
+    () => () => {
+      const latestForm = latestFormRef.current;
+      const defaultTimezone = detectedTimezoneRef.current;
+      if (
+        !latestForm
+        || !draftHydratedRef.current
+        || initialTemplateRef.current
+        || draftPersistenceDisabledRef.current
+      ) {
+        return;
+      }
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+      saveAutomationDraft(latestForm, { defaultTimezone: defaultTimezone ?? undefined });
+    },
+    [],
+  );
+
   const applyTemplate = (template: AutomationTemplate) => {
-    setName(template.name);
-    setGoal(template.goal);
-    setIntervalValue(template.defaultInterval);
-    setIntervalUnit(template.defaultUnit);
+    patchForm({
+      name: template.name,
+      goal: template.goal,
+      intervalValue: template.defaultInterval,
+      intervalUnit: template.defaultUnit,
+    });
     setTemplateOpen(false);
     requestAnimationFrame(() => {
       goalEditorRef.current?.querySelector("textarea")?.focus();
@@ -312,22 +427,26 @@ export default function NewAutomationPage() {
     trigger: AutomationProductTrigger,
     checked: boolean,
   ) => {
-    setProductTriggers((current) => {
-      if (checked) {
-        return current.includes(trigger) ? current : [...current, trigger];
-      }
-      return current.filter((item) => item !== trigger);
+    setForm((current) => {
+      const nextTriggers = checked
+        ? current.productTriggers.includes(trigger)
+          ? current.productTriggers
+          : [...current.productTriggers, trigger]
+        : current.productTriggers.filter((item) => item !== trigger);
+      return { ...current, productTriggers: nextTriggers };
     });
   };
   const togglePagerDutyEventType = (
     eventType: PagerDutyEventType,
     checked: boolean,
   ) => {
-    setPagerDutyEventTypes((current) => {
-      if (checked) {
-        return current.includes(eventType) ? current : [...current, eventType];
-      }
-      return current.filter((item) => item !== eventType);
+    setForm((current) => {
+      const nextEventTypes = checked
+        ? current.pagerDutyEventTypes.includes(eventType)
+          ? current.pagerDutyEventTypes
+          : [...current.pagerDutyEventTypes, eventType]
+        : current.pagerDutyEventTypes.filter((item) => item !== eventType);
+      return { ...current, pagerDutyEventTypes: nextEventTypes };
     });
   };
 
@@ -404,6 +523,12 @@ export default function NewAutomationPage() {
         ...(capabilityOverride ? { capabilities: capabilityOverride } : {}),
       }),
     onSuccess: (res) => {
+      draftPersistenceDisabledRef.current = true;
+      if (draftSaveTimerRef.current) {
+        clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+      clearAutomationDraft();
       setRedirecting(true);
       router.push(`/automations/${res.data.id}`);
     },
@@ -457,11 +582,11 @@ export default function NewAutomationPage() {
 
         <AutomationComposer
           name={name}
-          onNameChange={setName}
+          onNameChange={(value) => setFormField("name", value)}
           iconValue={iconValue}
-          onIconChange={setIconValue}
+          onIconChange={(value) => setFormField("iconValue", value)}
           goal={goal}
-          onGoalChange={setGoal}
+          onGoalChange={(value) => setFormField("goal", value)}
           repositoryId={repoId || undefined}
           branch={
             selectedBaseBranch || selectedRepo?.default_branch || undefined
@@ -489,12 +614,12 @@ export default function NewAutomationPage() {
                 pre_pr_review_loops: effectivePrePRReviewLoops,
               }}
               disabled={createMutation.isPending || redirecting}
-              onDraftApply={setGoal}
+              onDraftApply={(value) => setFormField("goal", value)}
             />
           }
           footerControls={
             <>
-                <Select value={repoId} onValueChange={setSelectedRepoId}>
+                <Select value={repoId} onValueChange={(value) => setFormField("selectedRepoId", value)}>
                   <SelectTrigger
                     className="h-8 w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
                     aria-label="Repository"
@@ -523,7 +648,7 @@ export default function NewAutomationPage() {
                       <Checkbox
                         checked={scheduleEnabled}
                         onCheckedChange={(checked) =>
-                          setScheduleEnabled(checked === true)
+                          setFormField("scheduleEnabled", checked === true)
                         }
                         aria-label="On a schedule"
                       />
@@ -544,7 +669,8 @@ export default function NewAutomationPage() {
                         value={intervalValue}
                         onChange={(e) => {
                           const parsed = parseInt(e.target.value, 10);
-                          setIntervalValue(
+                          setFormField(
+                            "intervalValue",
                             Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
                           );
                         }}
@@ -554,7 +680,7 @@ export default function NewAutomationPage() {
                         value={intervalUnit}
                         onValueChange={(v) => {
                           if (v === "hours" || v === "days" || v === "weeks") {
-                            setIntervalUnit(v);
+                            setFormField("intervalUnit", v);
                           }
                         }}
                       >
@@ -575,7 +701,7 @@ export default function NewAutomationPage() {
                       </span>
                       <Select
                         value={intervalRunHour}
-                        onValueChange={setIntervalRunHour}
+                        onValueChange={(value) => setFormField("intervalRunHour", value)}
                       >
                         <SelectTrigger
                           className="h-8 w-20 text-base sm:text-xs"
@@ -594,7 +720,7 @@ export default function NewAutomationPage() {
                       <span className="text-sm text-muted-foreground">:</span>
                       <Select
                         value={intervalRunMinute}
-                        onValueChange={setIntervalRunMinute}
+                        onValueChange={(value) => setFormField("intervalRunMinute", value)}
                       >
                         <SelectTrigger
                           className="h-8 w-20 text-base sm:text-xs"
@@ -612,7 +738,7 @@ export default function NewAutomationPage() {
                       </Select>
                       <TimezonePicker
                         value={timezone}
-                        onChange={setTimezone}
+                        onChange={(value) => setFormField("timezone", value)}
                         detected={detectedTimezone}
                         className="w-full sm:w-auto"
                       />
@@ -664,7 +790,7 @@ export default function NewAutomationPage() {
                         checked={pagerDutyEnabled}
                         disabled={!pagerDutyConnected}
                         onCheckedChange={(checked) =>
-                          setPagerDutyEnabled(checked === true)
+                          setFormField("pagerDutyEnabled", checked === true)
                         }
                         aria-label="PagerDuty incidents"
                       />
@@ -709,7 +835,7 @@ export default function NewAutomationPage() {
                             placeholder="Service IDs, comma-separated"
                             value={pagerDutyServiceIDs}
                             onChange={(event) =>
-                              setPagerDutyServiceIDs(event.target.value)
+                              setFormField("pagerDutyServiceIDs", event.target.value)
                             }
                             className="h-8"
                           />
@@ -717,7 +843,7 @@ export default function NewAutomationPage() {
                             value={pagerDutyUrgency}
                             onValueChange={(value) => {
                               if (value === "high" || value === "low") {
-                                setPagerDutyUrgency(value);
+                                setFormField("pagerDutyUrgency", value);
                               }
                             }}
                           >
@@ -739,7 +865,7 @@ export default function NewAutomationPage() {
                             placeholder="Team IDs, comma-separated"
                             value={pagerDutyTeamIDs}
                             onChange={(event) =>
-                              setPagerDutyTeamIDs(event.target.value)
+                              setFormField("pagerDutyTeamIDs", event.target.value)
                             }
                             className="h-8"
                           />
@@ -748,7 +874,7 @@ export default function NewAutomationPage() {
                             placeholder="Statuses: triggered, acknowledged"
                             value={pagerDutyStatuses}
                             onChange={(event) =>
-                              setPagerDutyStatuses(event.target.value)
+                              setFormField("pagerDutyStatuses", event.target.value)
                             }
                             className="h-8"
                           />
@@ -757,7 +883,7 @@ export default function NewAutomationPage() {
                             placeholder="Priority names, comma-separated"
                             value={pagerDutyPriorityNames}
                             onChange={(event) =>
-                              setPagerDutyPriorityNames(event.target.value)
+                              setFormField("pagerDutyPriorityNames", event.target.value)
                             }
                             className="h-8"
                           />
@@ -766,7 +892,7 @@ export default function NewAutomationPage() {
                             placeholder="Incident types, comma-separated"
                             value={pagerDutyIncidentTypes}
                             onChange={(event) =>
-                              setPagerDutyIncidentTypes(event.target.value)
+                              setFormField("pagerDutyIncidentTypes", event.target.value)
                             }
                             className="h-8"
                           />
@@ -775,7 +901,7 @@ export default function NewAutomationPage() {
                             placeholder="Title contains"
                             value={pagerDutyTitleContains}
                             onChange={(event) =>
-                              setPagerDutyTitleContains(event.target.value)
+                              setFormField("pagerDutyTitleContains", event.target.value)
                             }
                             className="h-8"
                           />
@@ -786,7 +912,7 @@ export default function NewAutomationPage() {
                             max={10080}
                             value={pagerDutyCooldownMinutes}
                             onChange={(event) =>
-                              setPagerDutyCooldownMinutes(event.target.value)
+                              setFormField("pagerDutyCooldownMinutes", event.target.value)
                             }
                             className="h-8"
                           />
@@ -795,7 +921,7 @@ export default function NewAutomationPage() {
                             placeholder="field=value, field=other"
                             value={pagerDutyCustomFields}
                             onChange={(event) =>
-                              setPagerDutyCustomFields(event.target.value)
+                              setFormField("pagerDutyCustomFields", event.target.value)
                             }
                             className="h-8 sm:col-span-2"
                           />
@@ -824,7 +950,7 @@ export default function NewAutomationPage() {
                   onSelect={applyTemplate}
                 />
                 <Button asChild variant="ghost" size="sm">
-                  <Link href="/automations/templates">
+                  <Link href="/automations/templates" onClick={flushDraft}>
                     Browse all templates
                   </Link>
                 </Button>
@@ -858,7 +984,7 @@ export default function NewAutomationPage() {
                         <Input
                           id="scope"
                           value={scope}
-                          onChange={(e) => setScope(e.target.value)}
+                          onChange={(e) => setFormField("scope", e.target.value)}
                           placeholder="e.g. src/payments/, tests/"
                         />
                       </div>
@@ -867,7 +993,7 @@ export default function NewAutomationPage() {
                         <Select
                           value={identityScope}
                           onValueChange={(value: "org" | "personal") =>
-                            setIdentityScope(value)
+                            setFormField("identityScope", value)
                           }
                         >
                           <SelectTrigger aria-label="Run as">
@@ -885,7 +1011,7 @@ export default function NewAutomationPage() {
                           id="advanced-model"
                           ariaLabel="Model"
                           value={model}
-                          onValueChange={setModel}
+                          onValueChange={(value) => setFormField("model", value)}
                         />
                       </div>
                       {showReasoningSelector ? (
@@ -894,7 +1020,8 @@ export default function NewAutomationPage() {
                           <Select
                             value={reasoningEffort || "__default__"}
                             onValueChange={(value) =>
-                              setReasoningEffort(
+                              setFormField(
+                                "reasoningEffort",
                                 value === "__default__"
                                   ? ""
                                   : toCodingAgentReasoningEffort(value),
@@ -927,9 +1054,12 @@ export default function NewAutomationPage() {
                           value={selectedBaseBranch}
                           defaultBranch={selectedRepo?.default_branch}
                           onValueChange={(branch) =>
-                            setBaseBranchByRepoId((prev) => ({
-                              ...prev,
-                              [repoId]: branch,
+                            setForm((current) => ({
+                              ...current,
+                              baseBranchByRepoId: {
+                                ...current.baseBranchByRepoId,
+                                [repoId]: branch,
+                              },
                             }))
                           }
                           label="Base branch"
@@ -942,7 +1072,7 @@ export default function NewAutomationPage() {
                         <Label>Priority</Label>
                         <Select
                           value={String(priority)}
-                          onValueChange={(v) => setPriority(parseInt(v, 10))}
+                          onValueChange={(v) => setFormField("priority", parseInt(v, 10))}
                         >
                           <SelectTrigger aria-label="Priority">
                             <SelectValue />
@@ -970,7 +1100,7 @@ export default function NewAutomationPage() {
                         <AutomationCapabilitiesEditor
                           catalog={capabilityCatalog}
                           grants={capabilityGrants}
-                          onChange={setCapabilityOverride}
+                          onChange={(value) => setFormField("capabilityOverride", value)}
                         />
                       </div>
                       <div className="space-y-3 rounded-md border border-border p-3">
@@ -990,7 +1120,7 @@ export default function NewAutomationPage() {
                               id="trigger-base-branches"
                               value={triggerBaseBranches}
                               onChange={(e) =>
-                                setTriggerBaseBranches(e.target.value)
+                                setFormField("triggerBaseBranches", e.target.value)
                               }
                               placeholder="main, release"
                             />
@@ -1001,7 +1131,7 @@ export default function NewAutomationPage() {
                               id="trigger-authors"
                               value={triggerAuthors}
                               onChange={(e) =>
-                                setTriggerAuthors(e.target.value)
+                                setFormField("triggerAuthors", e.target.value)
                               }
                               placeholder="octocat, dependabot[bot]"
                             />
@@ -1011,7 +1141,7 @@ export default function NewAutomationPage() {
                             <Input
                               id="trigger-paths"
                               value={triggerPaths}
-                              onChange={(e) => setTriggerPaths(e.target.value)}
+                              onChange={(e) => setFormField("triggerPaths", e.target.value)}
                               placeholder="src/, package.json"
                             />
                           </div>
@@ -1023,7 +1153,7 @@ export default function NewAutomationPage() {
                               id="trigger-feedback-types"
                               value={triggerFeedbackTypes}
                               onChange={(e) =>
-                                setTriggerFeedbackTypes(e.target.value)
+                                setFormField("triggerFeedbackTypes", e.target.value)
                               }
                               placeholder="Inline review comment"
                             />
@@ -1036,7 +1166,7 @@ export default function NewAutomationPage() {
                               id="trigger-review-states"
                               value={triggerReviewStates}
                               onChange={(e) =>
-                                setTriggerReviewStates(e.target.value)
+                                setFormField("triggerReviewStates", e.target.value)
                               }
                               placeholder="approved, changes_requested, commented"
                             />
@@ -1054,9 +1184,10 @@ export default function NewAutomationPage() {
                             size="icon"
                             aria-label="Decrease review passes"
                             onClick={() =>
-                              setPrePRReviewLoops((value) =>
-                                Math.max(0, value - 1),
-                              )
+                              setForm((current) => ({
+                                ...current,
+                                prePRReviewLoops: Math.max(0, current.prePRReviewLoops - 1),
+                              }))
                             }
                             disabled={!supportsNativeReviewLoop}
                           >
@@ -1071,7 +1202,8 @@ export default function NewAutomationPage() {
                             value={effectivePrePRReviewLoops}
                             onChange={(e) => {
                               const parsed = parseInt(e.target.value, 10);
-                              setPrePRReviewLoops(
+                              setFormField(
+                                "prePRReviewLoops",
                                 Number.isNaN(parsed)
                                   ? 0
                                   : Math.min(5, Math.max(0, parsed)),
@@ -1086,9 +1218,10 @@ export default function NewAutomationPage() {
                             size="icon"
                             aria-label="Increase review passes"
                             onClick={() =>
-                              setPrePRReviewLoops((value) =>
-                                Math.min(5, value + 1),
-                              )
+                              setForm((current) => ({
+                                ...current,
+                                prePRReviewLoops: Math.min(5, current.prePRReviewLoops + 1),
+                              }))
                             }
                             disabled={!supportsNativeReviewLoop}
                           >
