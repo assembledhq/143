@@ -37,6 +37,10 @@ func (c *linearAgentCreatedFetchClient) FetchIssue(_ context.Context, _ string) 
 	return c.issue, nil
 }
 
+func (c *linearAgentCreatedFetchClient) FetchUser(context.Context, string) (*linear.FetchedUser, error) {
+	return nil, errors.New("FetchUser not configured")
+}
+
 func (c *linearAgentCreatedDeadLetterClient) AgentActivityCreate(_ context.Context, in linear.AgentActivityInput) (linear.AgentActivityResult, error) {
 	c.activityCalls++
 	c.lastActivity = in
@@ -527,7 +531,7 @@ func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) 
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(issueID, now, now))
-	mock.ExpectQuery(`(?s)SELECT .+ FROM users WHERE org_id = .+COALESCE\(secondary_emails`).
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m`).
 		WithArgs(orgID, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 			creatorID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,

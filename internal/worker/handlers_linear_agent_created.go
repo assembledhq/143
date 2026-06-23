@@ -178,7 +178,7 @@ func handleLinearAgentCreated(
 		return err
 	}
 	session := buildAgentSession(orgID, repoResult, issue, fetched, agentType)
-	if err := applyLinearCreatorAttribution(ctx, deps.Stores.Users, session, fetched, logger); err != nil {
+	if err := applyLinearAgentCreatorAttribution(ctx, deps.Stores, client, session, row, payload, fetched, logger); err != nil {
 		return fmt.Errorf("apply linear creator attribution: %w", err)
 	}
 	if err := createAndAttachLinearAgentSession(ctx, deps.Stores, orgID, row.ID, session); err != nil {
