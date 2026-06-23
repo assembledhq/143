@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   formatDuration,
+  getDisplayStatus,
+  deriveEffectivePRStatus,
+  hasMeaningfulDuration,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
   hasCleanReviewLoopForSnapshot,
@@ -11,10 +14,13 @@ import {
   liveLogsForTimeline,
   mergeSessionLogListResponse,
   mergeSessionDetailStatusUpdate,
+  mergePendingMessages,
+  messageReconciliationKey,
+  statusConfig,
   trackInFlightAgentUpdate,
   buildChromeThreads,
 } from "./session-detail-state";
-import type { SessionDetail, SessionLog, SessionReviewLoop, SessionThread } from "@/lib/types";
+import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
@@ -57,6 +63,72 @@ describe("formatDuration", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(plus(2 * 60 * 60_000 + 30 * 60_000)));
     expect(formatDuration(start)).toBe("2h 30m");
+  });
+});
+
+describe("hasMeaningfulDuration", () => {
+  it("is false when either timestamp is missing", () => {
+    expect(hasMeaningfulDuration(undefined, plus(5000))).toBe(false);
+    expect(hasMeaningfulDuration(start, undefined)).toBe(false);
+    expect(hasMeaningfulDuration(undefined, undefined)).toBe(false);
+  });
+
+  it("is false for durations under one second", () => {
+    expect(hasMeaningfulDuration(start, plus(0))).toBe(false);
+    expect(hasMeaningfulDuration(start, plus(999))).toBe(false);
+  });
+
+  it("is true once the duration reaches one second", () => {
+    expect(hasMeaningfulDuration(start, plus(1000))).toBe(true);
+    expect(hasMeaningfulDuration(start, plus(5000))).toBe(true);
+  });
+});
+
+describe("getDisplayStatus", () => {
+  it("maps a pr_created session to merged styling when the PR is merged", () => {
+    expect(getDisplayStatus("pr_created", "merged")).toBe(statusConfig.pr_merged);
+  });
+
+  it("maps a pr_created session to closed styling when the PR is closed", () => {
+    expect(getDisplayStatus("pr_created", "closed")).toBe(statusConfig.pr_closed);
+  });
+
+  it("keeps the pr_created styling when the PR is still open or unknown", () => {
+    expect(getDisplayStatus("pr_created", "open")).toBe(statusConfig.pr_created);
+    expect(getDisplayStatus("pr_created", null)).toBe(statusConfig.pr_created);
+    expect(getDisplayStatus("pr_created")).toBe(statusConfig.pr_created);
+  });
+
+  it("looks up non-pr statuses directly and ignores any PR status", () => {
+    expect(getDisplayStatus("running", "merged")).toBe(statusConfig.running);
+    expect(getDisplayStatus("failed")).toBe(statusConfig.failed);
+  });
+
+  it("falls back to the pending config for an unknown status", () => {
+    expect(getDisplayStatus("totally-unknown" as never)).toBe(statusConfig.pending);
+  });
+});
+
+describe("deriveEffectivePRStatus", () => {
+  it("prefers merged from either the PR or its health status", () => {
+    expect(deriveEffectivePRStatus("open", "merged")).toBe("merged");
+    expect(deriveEffectivePRStatus("merged", null)).toBe("merged");
+  });
+
+  it("prefers closed when nothing is merged", () => {
+    expect(deriveEffectivePRStatus("open", "closed")).toBe("closed");
+    expect(deriveEffectivePRStatus("closed", null)).toBe("closed");
+  });
+
+  it("ranks merged above closed when both appear", () => {
+    expect(deriveEffectivePRStatus("closed", "merged")).toBe("merged");
+    expect(deriveEffectivePRStatus("merged", "closed")).toBe("merged");
+  });
+
+  it("falls back to the raw PR status, then undefined", () => {
+    expect(deriveEffectivePRStatus("open", null)).toBe("open");
+    expect(deriveEffectivePRStatus(null, null)).toBeUndefined();
+    expect(deriveEffectivePRStatus()).toBeUndefined();
   });
 });
 
@@ -389,6 +461,93 @@ describe("live log merging helpers", () => {
     expect(liveLogsForTimeline(false, liveLogs)).toEqual([]);
   });
 
+});
+
+describe("messageReconciliationKey", () => {
+  function message(overrides: Partial<SessionMessage> = {}): SessionMessage {
+    return {
+      id: 1,
+      session_id: "session-1",
+      org_id: "org-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      role: "user",
+      content: "hello",
+      created_at: start,
+      ...overrides,
+    };
+  }
+
+  it("ignores id and timestamp so an optimistic message matches its persisted twin", () => {
+    expect(messageReconciliationKey(message({ id: 1, created_at: start }))).toBe(
+      messageReconciliationKey(message({ id: 999, created_at: plus(5000) })),
+    );
+  });
+
+  it("treats an omitted thread_id the same as an explicit null thread", () => {
+    const omitted = message();
+    delete omitted.thread_id;
+    expect(messageReconciliationKey(omitted)).toBe(
+      messageReconciliationKey({ ...message(), thread_id: undefined }),
+    );
+  });
+
+  it("distinguishes messages that differ in reconciled content", () => {
+    expect(messageReconciliationKey(message({ content: "a" }))).not.toBe(
+      messageReconciliationKey(message({ content: "b" })),
+    );
+    expect(messageReconciliationKey(message({ role: "user" }))).not.toBe(
+      messageReconciliationKey(message({ role: "assistant" })),
+    );
+  });
+});
+
+describe("mergePendingMessages", () => {
+  function message(overrides: Partial<SessionMessage> = {}): SessionMessage {
+    return {
+      id: 1,
+      session_id: "session-1",
+      org_id: "org-1",
+      thread_id: "thread-1",
+      turn_number: 1,
+      role: "user",
+      content: "hello",
+      created_at: start,
+      ...overrides,
+    };
+  }
+
+  it("returns the base list unchanged when there are no pending messages", () => {
+    const base = [message()];
+    expect(mergePendingMessages(base, [])).toBe(base);
+  });
+
+  it("appends pending messages that are not already present", () => {
+    const base = [message({ id: 1, content: "first" })];
+    const pending = [message({ id: 2, content: "second", turn_number: 2 })];
+
+    expect(mergePendingMessages(base, pending).map((m) => m.content)).toEqual(["first", "second"]);
+  });
+
+  it("skips pending messages whose id already exists in the base list", () => {
+    const base = [message({ id: 7, content: "canonical" })];
+    const pending = [message({ id: 7, content: "stale optimistic copy" })];
+
+    expect(mergePendingMessages(base, pending)).toEqual(base);
+  });
+
+  it("skips an optimistic message once its persisted twin lands with a new id", () => {
+    const base = [message({ id: 42, content: "echo", turn_number: 3 })];
+    const pending = [message({ id: -1, content: "echo", turn_number: 3 })];
+
+    expect(mergePendingMessages(base, pending)).toEqual(base);
+  });
+
+  it("does not append the same pending message twice", () => {
+    const pending = message({ id: -1, content: "dupe" });
+
+    expect(mergePendingMessages([], [pending, pending])).toEqual([pending]);
+  });
 });
 
 describe("trackInFlightAgentUpdate", () => {
