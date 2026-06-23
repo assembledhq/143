@@ -396,53 +396,52 @@ export default function NewAutomationPage() {
     (scheduleEnabled || hasEventTriggers);
 
   return (
-    <PageContainer size="wide">
+    <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader
           title="New automation"
           description="Create a recurring agent for this team."
         />
 
-        <div className="mx-auto max-w-4xl">
-          <AutomationComposer
-            name={name}
-            onNameChange={setName}
-            iconValue={iconValue}
-            onIconChange={setIconValue}
-            goal={goal}
-            onGoalChange={setGoal}
-            repositoryId={repoId || undefined}
-            branch={
-              selectedBaseBranch || selectedRepo?.default_branch || undefined
-            }
-            agentType={effectiveAgentType}
-            goalEditorContainerRef={goalEditorRef}
-            goalImprovementControls={
-              <AutomationGoalImprovementControl
-                name={name}
-                goal={goal}
-                repositoryId={repoId || undefined}
-                scope={scope.trim() || undefined}
-                config={{
-                  schedule_type: scheduleEnabled ? "interval" : "none",
-                  triggers: productTriggers,
-                  github_event_filters: githubEventFilters,
-                  event_triggers: pagerDutyEventTriggers,
-                  base_branch: selectedBaseBranch.trim() || undefined,
-                  agent_type: effectiveAgentType,
-                  model,
-                  reasoning_effort:
-                    showReasoningSelector && reasoningEffort
-                      ? reasoningEffort
-                      : undefined,
-                  pre_pr_review_loops: effectivePrePRReviewLoops,
-                }}
-                disabled={createMutation.isPending || redirecting}
-                onDraftApply={setGoal}
-              />
-            }
-            footerControls={
-              <>
+        <AutomationComposer
+          name={name}
+          onNameChange={setName}
+          iconValue={iconValue}
+          onIconChange={setIconValue}
+          goal={goal}
+          onGoalChange={setGoal}
+          repositoryId={repoId || undefined}
+          branch={
+            selectedBaseBranch || selectedRepo?.default_branch || undefined
+          }
+          agentType={effectiveAgentType}
+          goalEditorContainerRef={goalEditorRef}
+          goalImprovementControls={
+            <AutomationGoalImprovementControl
+              name={name}
+              goal={goal}
+              repositoryId={repoId || undefined}
+              scope={scope.trim() || undefined}
+              config={{
+                schedule_type: scheduleEnabled ? "interval" : "none",
+                triggers: productTriggers,
+                github_event_filters: githubEventFilters,
+                event_triggers: pagerDutyEventTriggers,
+                base_branch: selectedBaseBranch.trim() || undefined,
+                agent_type: effectiveAgentType,
+                model,
+                reasoning_effort:
+                  showReasoningSelector && reasoningEffort
+                    ? reasoningEffort
+                    : undefined,
+                pre_pr_review_loops: effectivePrePRReviewLoops,
+              }}
+              disabled={createMutation.isPending || redirecting}
+              onDraftApply={setGoal}
+            />
+          }
+          footerControls={
+            <>
                 <Select value={repoId} onValueChange={setSelectedRepoId}>
                   <SelectTrigger
                     className="h-8 w-full border-transparent bg-muted/25 shadow-none hover:bg-muted/50 sm:w-[210px]"
@@ -1051,34 +1050,33 @@ export default function NewAutomationPage() {
                     </div>
                   </SheetContent>
                 </Sheet>
-              </>
-            }
-            submitArea={
-              <div className="flex items-center gap-3">
-                {createMutation.isError && (
-                  <p className="text-xs text-destructive">
-                    Failed to create automation. Please try again.
-                  </p>
+            </>
+          }
+          submitArea={
+            <div className="flex items-center gap-3">
+              {createMutation.isError && (
+                <p className="text-xs text-destructive">
+                  Failed to create automation. Please try again.
+                </p>
+              )}
+              <Button
+                onClick={() => createMutation.mutate()}
+                disabled={
+                  !canSubmit || createMutation.isPending || redirecting
+                }
+              >
+                {createMutation.isPending || redirecting ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  "Create automation"
                 )}
-                <Button
-                  onClick={() => createMutation.mutate()}
-                  disabled={
-                    !canSubmit || createMutation.isPending || redirecting
-                  }
-                >
-                  {createMutation.isPending || redirecting ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    "Create automation"
-                  )}
-                </Button>
-              </div>
-            }
-          />
-        </div>
+              </Button>
+            </div>
+          }
+        />
       </div>
     </PageContainer>
   );

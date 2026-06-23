@@ -522,6 +522,49 @@ describe("NewAutomationPage", () => {
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
   });
 
+  it("aligns the new automation header with the standard page container", async () => {
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await screen.findByDisplayValue("Security sweep");
+
+    const heading = screen.getByRole("heading", { name: "New automation" });
+    const pageContainer = heading.closest('[data-slot="page-container"]');
+    const composerWrapper = screen.getByTestId("automation-composer").parentElement;
+
+    expect(pageContainer).toHaveAttribute(
+      "data-size",
+      "default",
+    );
+    expect(composerWrapper).not.toHaveClass(
+      "mx-auto",
+    );
+  });
+
   it("inserts selected @ mentions into the automation goal", async () => {
     const user = userEvent.setup();
 
