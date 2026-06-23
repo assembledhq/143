@@ -129,7 +129,7 @@ type previewStartupCache interface {
 	FindBaseSnapshot(ctx context.Context, orgID, repoID uuid.UUID, baseKey, excludeCommitSHA string) (*CacheHit, error)
 	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
 	ApplyPartialInvalidation(ctx context.Context, sb *agent.Sandbox, hit *CacheHit, gitDiff []byte) error
-	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error
+	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) error
 }
 
 // branchPreviewStartupCacheKeys carries the cache keys computed for one branch
@@ -1598,16 +1598,11 @@ func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context,
 	if r == nil || r.snapshotCache == nil || r.sandboxProvider == nil || sb == nil || cfg == nil || commitSHA == "" {
 		return branchPreviewStartupCacheKeys{}, nil
 	}
-	if previewConfigHasRuntimeSecretFiles(cfg) {
-		// Runtime secret files are written into the shared workspace during
-		// LaunchPreview. The startup cache snapshots that workspace after
-		// launch, so do not read or write cache entries for these configs:
-		// otherwise worker-local cache blobs could retain plaintext secrets.
-		r.logger.Debug().
-			Str("repository_id", repoID.String()).
-			Msg("branch preview startup cache skipped because config delivers preview secrets as files")
-		return branchPreviewStartupCacheKeys{}, nil
-	}
+	// Configs that deliver runtime secret files are still cached: the secret
+	// destinations are excluded from the snapshot blob at create time (see
+	// createBranchPreviewStartupCache) and re-injected on every launch by the
+	// runtime_secret_files phase, so a restored workspace never carries stale
+	// or persisted plaintext secrets.
 	keys, err := r.computeBranchPreviewStartupCacheKeys(ctx, sb, cfg, commitSHA)
 	if err != nil {
 		r.logger.Warn().Err(err).
@@ -1753,20 +1748,10 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 		}
 		return result
 	}
-	if previewConfigHasRuntimeSecretFiles(cfg) {
-		// See maybeRestoreBranchPreviewStartupCache for why secret-file
-		// configs are excluded from the workspace snapshot cache.
-		r.logger.Debug().
-			Str("repository_id", repoID.String()).
-			Str("snapshot_key", keys.SnapshotKey).
-			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
-		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSkippedSecretFiles, 0, started, nil)
-		return StartupSnapshotSkippedSecretFiles
-	}
 	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
 	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: keys.BaseKey, CommitSHA: keys.CommitSHA}
-	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata); err != nil {
+	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata, previewSnapshotExcludePaths(cfg)); err != nil {
 		result := startupSnapshotResultForCreateError(err)
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
@@ -1861,19 +1846,67 @@ func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {
 	return lockfiles
 }
 
-func previewConfigHasRuntimeSecretFiles(cfg *models.PreviewConfig) bool {
+// previewSnapshotExcludePaths returns the workspace-relative paths to keep OUT
+// of the startup snapshot:
+//
+//   - Runtime secret-file destinations, so plaintext secrets never enter a
+//     worker-local blob (re-injected every launch by runtime_secret_files,
+//     after the snapshot is restored).
+//   - Workspace build-cache paths (preview.install.cache.build). These are
+//     already persisted and restored by the dedicated build-cache mechanism
+//     (restorePreviewBuildCache runs right before the build phase), so storing
+//     them in the snapshot too is pure duplication — and for a large monorepo's
+//     Go/turbo caches that bloat can push the blob past the size cap, which
+//     would silently defeat the whole snapshot.
+//
+// Dependency caches (node_modules, .venv, …) are deliberately NOT excluded: the
+// snapshot's value is bundling installed deps + build outputs into one restore
+// so the install phase fully skips, which requires those trees to be present.
+func previewSnapshotExcludePaths(cfg *models.PreviewConfig) []string {
 	if cfg == nil {
-		return false
+		return nil
 	}
-	if len(cfg.RuntimeSecretFiles) > 0 {
-		return true
+	paths := previewRuntimeSecretFilePaths(cfg)
+	if buildCachePaths, ok := ResolvePreviewBuildCachePaths(cfg.Install); ok {
+		paths = append(paths, buildCachePaths...)
+	}
+	return paths
+}
+
+// previewRuntimeSecretFilePaths returns every workspace-relative path the
+// runtime secret resolver writes into the workspace for this config. These are
+// excluded from the startup snapshot so plaintext secrets never enter a
+// worker-local cache blob; the runtime_secret_files phase re-injects them on
+// every launch after the snapshot is restored. The resolved RuntimeSecretFiles
+// (populated during launch) are the authoritative set; the declared bundle
+// Files are unioned in as a belt-and-suspenders guard in case resolution order
+// ever changes. Returns nil when the config delivers no secret files.
+func previewRuntimeSecretFilePaths(cfg *models.PreviewConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(raw string) {
+		clean := path.Clean(strings.TrimSpace(raw))
+		if clean == "" || clean == "." {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	for _, file := range cfg.RuntimeSecretFiles {
+		add(file.Path)
 	}
 	for _, ref := range SecretBundleRefs(cfg) {
-		if len(ref.Files) > 0 {
-			return true
+		for _, file := range ref.Files {
+			add(file)
 		}
 	}
-	return false
+	return paths
 }
 
 func cleanBranchPreviewStartupCachePath(raw string) (string, error) {

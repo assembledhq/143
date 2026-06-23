@@ -41,6 +41,39 @@ const (
 	tarExcludeFlags = `--exclude=.git --exclude='__pycache__' --exclude='.pytest_cache'`
 )
 
+// snapshotExtraExcludeFlags builds tar --exclude flags for additional
+// workspace-relative paths (e.g. runtime secret files) that must never enter
+// the snapshot blob. Each path is emitted in both the bare ("foo.json") and
+// workspace-root ("./foo.json") forms because GNU tar archives members from
+// "-C dir -- ." with a leading "./" while BusyBox tar (alpine images) does not,
+// and an exclude only fires on an exact member-name match. Paths are cleaned and
+// shell-quoted; entries that are empty, absolute, or escape the workspace are
+// dropped (they cannot name a real workspace member, so excluding them is a
+// no-op and including a malformed flag would corrupt the whole tar invocation).
+func snapshotExtraExcludeFlags(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	seen := make(map[string]struct{}, len(paths))
+	var flags []string
+	for _, raw := range paths {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(raw)))
+		if clean == "" || clean == "." || clean == ".." ||
+			strings.HasPrefix(clean, "/") || strings.HasPrefix(clean, "../") {
+			continue
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		flags = append(flags,
+			"--exclude="+shellQuote(clean),
+			"--exclude="+shellQuote("./"+clean),
+		)
+	}
+	return strings.Join(flags, " ")
+}
+
 // =============================================================================
 // Interfaces
 // =============================================================================
@@ -191,28 +224,38 @@ func ComputeSnapshotBaseKey(lockfileContents []byte, configDigest string) string
 //
 // The method is safe to call concurrently for different sandboxes. Each
 // snapshot is written to a unique file path derived from the snapshot key.
+// excludePaths are additional workspace-relative paths to keep OUT of the
+// snapshot blob — most importantly runtime secret files, which are re-injected
+// on every launch (see runtime_secret_files) and must never be persisted into a
+// worker-local cache blob in plaintext. Pass nil when there is nothing extra to
+// exclude.
 func (sc *SnapshotCache) CreateSnapshot(
 	ctx context.Context,
 	sb *agent.Sandbox,
 	snapshotKey string,
 	metadata SnapshotMetadata,
+	excludePaths []string,
 ) error {
 	log := sc.logger.With().
 		Str("snapshot_key", snapshotKey).
 		Str("sandbox_id", sb.ID).
 		Logger()
 
-	log.Info().Msg("creating filesystem snapshot")
+	log.Info().Int("extra_excludes", len(excludePaths)).Msg("creating filesystem snapshot")
 	start := time.Now()
 
 	// 1. Create the tar.gz inside the sandbox.
 	//    Using shell tar is significantly faster than Go's archive/tar for
 	//    large node_modules trees (parallel I/O, kernel-level buffering).
+	excludeFlags := tarExcludeFlags
+	if extra := snapshotExtraExcludeFlags(excludePaths); extra != "" {
+		excludeFlags += " " + extra
+	}
 	tarCmd := fmt.Sprintf(
 		"tar czf %s -C %s %s -- .",
 		snapshotTmpFile,
 		shellQuote(sb.WorkDir),
-		tarExcludeFlags,
+		excludeFlags,
 	)
 
 	var stderr bytes.Buffer
