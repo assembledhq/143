@@ -3,6 +3,12 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ContextExpander } from "./context-expander";
 
+vi.mock("lucide-react", () => ({
+  ChevronDown: () => <span data-testid="chevron-down" />,
+  ChevronUp: () => <span data-testid="chevron-up" />,
+  Loader2: () => <span data-testid="loader" />,
+}));
+
 // Mock the api module. The ApiError class is defined inside the factory
 // because vi.mock is hoisted above any module-level declarations.
 vi.mock("@/lib/api", () => {
@@ -40,6 +46,9 @@ describe("ContextExpander", () => {
       />
     );
     expect(screen.getByRole("button", { name: "Reveal context above" })).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("button", { name: "Reveal context above" })).getByTestId("chevron-up")
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Reveal context below" })).not.toBeInTheDocument();
     expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
     expect(screen.queryByText("Before change")).not.toBeInTheDocument();
@@ -61,8 +70,29 @@ describe("ContextExpander", () => {
 
     expect(screen.queryByRole("button", { name: "Reveal context above" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reveal context below" })).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("button", { name: "Reveal context below" })).getByTestId("chevron-down")
+    ).toBeInTheDocument();
     expect(screen.getByTestId("context-expander-label")).toBeEmptyDOMElement();
     expect(screen.queryByText("After change")).not.toBeInTheDocument();
+  });
+
+  it("points middle-gap arrows toward the hidden context they reveal", () => {
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={15}
+        hiddenStart={6}
+        hiddenEnd={20}
+      />
+    );
+
+    expect(
+      within(screen.getByRole("button", { name: "Reveal context above" })).getByTestId("chevron-down")
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("button", { name: "Reveal context below" })).getByTestId("chevron-up")
+    ).toBeInTheDocument();
   });
 
   it("anchors expansion controls in the line-number gutter", () => {
@@ -171,7 +201,7 @@ describe("ContextExpander", () => {
     const user = userEvent.setup();
     render(
       <ContextExpander
-        kind="middle"
+        kind="top"
         hiddenLineCount={10}
         sessionId="s1"
         filePath="src/app.ts"
@@ -211,7 +241,7 @@ describe("ContextExpander", () => {
     const user = userEvent.setup();
     render(
       <ContextExpander
-        kind="middle"
+        kind="bottom"
         hiddenLineCount={4}
         sessionId="s1"
         filePath="f.ts"
@@ -235,16 +265,16 @@ describe("ContextExpander", () => {
     });
   });
 
-  it("uses edge-specific boundaries when a middle gap is revealed from both sides", async () => {
+  it("expands middle-gap controls from adjacent visible content into the hidden range", async () => {
     const onExpand = vi.fn();
     vi.mocked(api.sessions.getFileContext).mockResolvedValue({
       data: {
-        lines: [{ number: 6, content: "x" }],
-        start_line: 6,
-        end_line: 6,
+        lines: [{ number: 21, content: "x" }],
+        start_line: 21,
+        end_line: 40,
         has_more_above: true,
         has_more_below: true,
-        total_lines: 20,
+        total_lines: 100,
       },
     } as ReturnType<typeof api.sessions.getFileContext> extends Promise<infer T> ? T : never);
 
@@ -252,24 +282,57 @@ describe("ContextExpander", () => {
     render(
       <ContextExpander
         kind="middle"
-        hiddenLineCount={3}
+        hiddenLineCount={58}
         sessionId="s1"
         filePath="f.ts"
-        hiddenStart={3}
-        hiddenEnd={7}
-        visibleStart={3}
-        visibleEnd={7}
-        aboveVisibleStart={7}
-        belowVisibleEnd={3}
+        hiddenStart={1}
+        hiddenEnd={100}
+        visibleStart={20}
+        visibleEnd={80}
+        aboveVisibleStart={80}
+        belowVisibleEnd={20}
         onExpand={onExpand}
       />
     );
 
     await user.click(screen.getByRole("button", { name: "Reveal context above" }));
-    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 3, 0, 3);
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 21, 0, 19);
 
     await user.click(screen.getByRole("button", { name: "Reveal context below" }));
-    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 4, 0, 3);
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 60, 0, 19);
+  });
+
+  it("fetches from the correct end of the hidden range on first expand (no pre-revealed content)", async () => {
+    const onExpand = vi.fn();
+    vi.mocked(api.sessions.getFileContext).mockResolvedValue({
+      data: {
+        lines: [{ number: 1, content: "x" }],
+        start_line: 1,
+        end_line: 20,
+        has_more_above: false,
+        has_more_below: true,
+        total_lines: 100,
+      },
+    } as ReturnType<typeof api.sessions.getFileContext> extends Promise<infer T> ? T : never);
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={100}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={1}
+        hiddenEnd={100}
+        onExpand={onExpand}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 1, 0, 19);
+
+    await user.click(screen.getByRole("button", { name: "Reveal context below" }));
+    expect(api.sessions.getFileContext).toHaveBeenLastCalledWith("s1", "f.ts", 81, 0, 19);
   });
 
   it("does not call onExpand on API error", async () => {
