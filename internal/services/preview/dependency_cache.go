@@ -275,7 +275,14 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	if err != nil {
 		return fmt.Errorf("dependency cache restore: %w", err)
 	}
-	cleanCmd := fmt.Sprintf("cd %s && rm -rf -- %s", shellQuote(rootDir), strings.Join(cleanArgs, " "))
+	// chmod -R u+w before removing: Go marks its module cache
+	// ($HOME/go/pkg/mod) read-only — both the files (0444) and the containing
+	// directories (0555) — so a plain `rm -rf` can't unlink them and exits 1,
+	// which previously failed the home-rooted Go cache restore and forced a
+	// cold rebuild every launch. Errors are suppressed because the paths may
+	// not exist yet on a first restore.
+	pathArgs := strings.Join(cleanArgs, " ")
+	cleanCmd := fmt.Sprintf("cd %s && chmod -R u+w -- %s 2>/dev/null; rm -rf -- %s", shellQuote(rootDir), pathArgs, pathArgs)
 	if exitCode, err := c.executor.Exec(ctx, sb, cleanCmd, io.Discard, io.Discard); err != nil || exitCode != 0 {
 		return fmt.Errorf("dependency cache restore: remove existing paths exited %d: %w", exitCode, err)
 	}
