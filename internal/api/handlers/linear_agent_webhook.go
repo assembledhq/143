@@ -53,7 +53,9 @@ type linearAgentEventIssue struct {
 }
 
 type linearAgentEventCreator struct {
-	ID string `json:"id,omitempty"`
+	ID    string `json:"id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Email string `json:"email,omitempty"`
 }
 
 type linearAgentEventSession struct {
@@ -523,6 +525,8 @@ func (d *LinearAgentDispatcher) Dispatch(ctx context.Context, integration *model
 		"linear_issue_team_id":    agentSession.Issue.TeamID,
 		"linear_issue_project_id": agentSession.Issue.ProjectID,
 		"linear_creator_user_id":  agentSession.Creator.ID,
+		"linear_creator_email":    agentSession.Creator.Email,
+		"linear_creator_name":     agentSession.Creator.Name,
 		"linear_comment_id":       agentSession.CommentID,
 		"linear_prompt_body":      agentActivity.Body,
 	}

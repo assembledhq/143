@@ -257,26 +257,29 @@ func (s *UserStore) GetByEmail(ctx context.Context, email string) (models.User, 
 // comparison below compares against already-lowercased elements rather than
 // re-lowering each element.
 //
-// No dedicated email index is needed: the org_id predicate is served by
-// idx_users_org_id, which bounds the scan to a single org's members (a small
-// set), and the OR over the three email columns is then evaluated within that
-// subset. This lookup runs at session-creation frequency, so adding expression
-// or GIN indexes here would cost write amplification on every users write for a
-// scan the planner would not choose anyway.
+// No dedicated email index is needed: the org predicate bounds the scan to a
+// single org's users or explicit members (a small set), and the OR over the
+// three email columns is then evaluated within that subset. This lookup runs at
+// session-creation frequency, so adding expression or GIN indexes here would
+// cost write amplification on every users write for a scan the planner would
+// not choose anyway.
 func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email string) (models.User, error) {
-	query := fmt.Sprintf(`
-		SELECT %s
-		FROM users
-		WHERE org_id = @org_id
-		  AND (LOWER(email) = LOWER(@email)
-		       OR LOWER(github_noreply_email) = LOWER(@email)
-		       OR LOWER(@email) = ANY(COALESCE(secondary_emails, '{}'::text[])))
+	query := `
+		SELECT u.id, @org_id::uuid AS org_id, u.email, u.name, COALESCE(m.role, u.role) AS role,
+		       u.github_id, u.github_login, u.github_noreply_email, u.avatar_url,
+		       u.password_hash, u.google_id, u.created_at
+		FROM users u
+		LEFT JOIN organization_memberships m ON m.user_id = u.id AND m.org_id = @org_id
+		WHERE (u.org_id = @org_id OR m.org_id IS NOT NULL)
+		  AND (LOWER(u.email) = LOWER(@email)
+		       OR LOWER(u.github_noreply_email) = LOWER(@email)
+		       OR LOWER(@email) = ANY(COALESCE(u.secondary_emails, '{}'::text[])))
 		ORDER BY
-		  (LOWER(email) = LOWER(@email)) DESC,
-		  (LOWER(github_noreply_email) = LOWER(@email)) DESC,
-		  created_at ASC,
-		  id ASC
-		LIMIT 1`, userSelectColumns)
+		  (LOWER(u.email) = LOWER(@email)) DESC,
+		  (LOWER(u.github_noreply_email) = LOWER(@email)) DESC,
+		  u.created_at ASC,
+		  u.id ASC
+		LIMIT 1`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "email": email})
 	if err != nil {

@@ -482,6 +482,7 @@ type Stores struct {
 	SlackOrgSelections  *db.SlackOrgSelectionStore
 	SlackBotSettings    *db.SlackBotSettingsStore
 	SlackUserLinks      *db.SlackUserLinkStore
+	LinearUserLinks     *db.LinearUserLinkStore
 	SlackChannels       *db.SlackChannelSettingsStore
 	SlackSessionLinks   *db.SlackSessionLinkStore
 	SlackInboundEvents  *db.SlackInboundEventStore

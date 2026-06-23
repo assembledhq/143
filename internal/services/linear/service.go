@@ -243,6 +243,7 @@ type CredentialReader interface {
 // a small adapter; tests pass an in-memory fake.
 type Client interface {
 	FetchIssue(ctx context.Context, identifier string) (*FetchedIssue, error)
+	FetchUser(ctx context.Context, userID string) (*FetchedUser, error)
 	ListTeamKeys(ctx context.Context) ([]TeamKeyInfo, error)
 	CreateOrUpdateAttachment(ctx context.Context, in AttachmentWriteInput) (AttachmentResult, error)
 	CreateComment(ctx context.Context, issueID, body string) (string, error)
@@ -287,10 +288,13 @@ type FetchedIssue struct {
 	StateID       string
 	Priority      string
 	AssigneeName  string
+	CreatorID     string
 	CreatorEmail  string
+	CreatorName   string
 	TeamID        string
 	TeamKey       string
 	TeamName      string
+	WorkspaceID   string
 	WorkspaceSlug string
 	// ProjectID is the Linear project id when the issue belongs to one.
 	// Empty when the issue is not in a project. Used by the inbound agent
@@ -306,6 +310,12 @@ type FetchedIssue struct {
 	Attachments      []FetchedAttachment
 	DuplicateOfKey   string
 	DuplicateOfTitle string
+}
+
+type FetchedUser struct {
+	ID    string
+	Name  string
+	Email string
 }
 
 // FetchedComment is a single Linear comment trimmed to fields the agent

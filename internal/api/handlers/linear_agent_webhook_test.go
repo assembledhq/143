@@ -570,6 +570,10 @@ func (c bootstrapWriterLinearClient) FetchIssue(context.Context, string) (*linea
 	return nil, errors.New("not used")
 }
 
+func (c bootstrapWriterLinearClient) FetchUser(context.Context, string) (*linear.FetchedUser, error) {
+	return nil, errors.New("not used")
+}
+
 func (c bootstrapWriterLinearClient) ListTeamKeys(context.Context) ([]linear.TeamKeyInfo, error) {
 	return nil, errors.New("not used")
 }

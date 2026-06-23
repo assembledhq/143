@@ -25,6 +25,8 @@ type linearAgentEventPayload struct {
 	LinearIssueTeamID    string `json:"linear_issue_team_id"`
 	LinearIssueProjectID string `json:"linear_issue_project_id"`
 	LinearCreatorUserID  string `json:"linear_creator_user_id"`
+	LinearCreatorEmail   string `json:"linear_creator_email"`
+	LinearCreatorName    string `json:"linear_creator_name"`
 	LinearCommentID      string `json:"linear_comment_id"`
 	LinearPromptBody     string `json:"linear_prompt_body"`
 }
