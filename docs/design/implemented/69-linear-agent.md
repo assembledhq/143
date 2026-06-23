@@ -114,6 +114,25 @@ row so `HandleAgentMilestone` can discover whether a 143 session was
 triggered through the agent path. Empty for sessions created the
 manual way; the milestone fan-out silently no-ops when empty.
 
+### `linear_user_links`
+Linear user identity bridge used for PR authorship and audit attribution.
+The inbound AgentSession creator is the preferred human actor for
+Linear-started sessions; the issue creator is only a compatibility fallback.
+On session creation, 143 first looks for an existing
+`(org_id, linear_workspace_key, linear_user_id)` link. If none exists and
+Linear exposes an email for the AgentSession creator, 143 matches that email
+against org members using primary email, GitHub noreply email, and secondary
+emails, then stores an `email_match` link for future sessions. Admin/self-link
+sources are reserved for private or mismatched-email users and must not be
+overwritten by automatic email matching.
+
+The bridge keeps onboarding low for the common case where Linear and 143
+emails align, while avoiding repeated heuristic matching once a stable Linear
+user id has been observed. PR creation still follows the GitHub authorship
+policy: a mapped user only creates the PR as themselves when they have valid
+GitHub App user auth and repo access; otherwise `user_preferred` falls back to
+the 143 GitHub App and `user_required` blocks.
+
 ### `OrgSettings.LinearAgent`
 `{ enabled, default_repo_id?, app_user_handle, allow_revision_per_prompt,
 per_team_enabled }`. Per-org opt-in; `enabled` defaults to false. The

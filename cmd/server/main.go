@@ -493,6 +493,7 @@ func main() {
 			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
 			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 			SlackUserLinks:      db.NewSlackUserLinkStore(pool),
+			LinearUserLinks:     db.NewLinearUserLinkStore(pool),
 			SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 			SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
 			SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
