@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => ({
     data: { id: "new-sess" },
   }),
   routerPushMock: vi.fn(),
+  routerReplaceMock: vi.fn(),
   addOptimisticSessionMock: vi.fn().mockReturnValue("optimistic-1"),
   removeOptimisticSessionMock: vi.fn(),
   markOptimisticResolvedMock: vi.fn(),
@@ -164,7 +165,7 @@ vi.mock("@/lib/errors", () => ({
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
     push: mocks.routerPushMock,
-    replace: vi.fn(),
+    replace: mocks.routerReplaceMock,
     prefetch: vi.fn(),
   }),
   useSearchParams: () => ({
@@ -552,10 +553,10 @@ describe("ManualSessionCreatePageContent", () => {
         }),
       );
     });
-    expect(mocks.addOptimisticSessionMock).toHaveBeenCalledWith("Manual Session");
+    expect(mocks.addOptimisticSessionMock).not.toHaveBeenCalled();
   });
 
-  it("keeps the start button loading after create succeeds while navigation is pending", async () => {
+  it("replaces the new-session route after create succeeds while navigation is pending", async () => {
     const user = userEvent.setup();
     const createSession = deferred<{ data: { id: string } }>();
     mocks.createSessionMock.mockImplementationOnce(() => createSession.promise);
@@ -576,8 +577,9 @@ describe("ManualSessionCreatePageContent", () => {
     });
 
     await waitFor(() => {
-      expect(mocks.routerPushMock).toHaveBeenCalledWith("/sessions/new-sess");
+      expect(mocks.routerReplaceMock).toHaveBeenCalledWith("/sessions/new-sess");
     });
+    expect(mocks.routerPushMock).not.toHaveBeenCalled();
     expect(startButton).toBeDisabled();
     expect(startButton.querySelector(".animate-spin")).not.toBeNull();
   });
