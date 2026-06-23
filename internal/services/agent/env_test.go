@@ -785,6 +785,50 @@ func TestAgentEnvResolveLinearTokenInjection(t *testing.T) {
 	})
 }
 
+func TestAgentEnvResolveAppliesAgentModelDefaults(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	orgID := uuid.New()
+	userID := uuid.New()
+
+	tests := []struct {
+		name      string
+		agentType models.AgentType
+		expected  map[string]string
+	}{
+		{
+			name:      "codex",
+			agentType: models.AgentTypeCodex,
+			expected: map[string]string{
+				"OPENAI_MODEL":                  models.DefaultCodexModel,
+				"CODEX_UNSAFE_ALLOW_NO_SANDBOX": "1",
+			},
+		},
+		{
+			name:      "claude code",
+			agentType: models.AgentTypeClaudeCode,
+			expected: map[string]string{
+				"ANTHROPIC_MODEL": models.DefaultClaudeCodeModel,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				Provider: &envSandboxProvider{},
+				Logger:   zerolog.Nop(),
+			})
+
+			got := env.Resolve(ctx, orgID, tt.agentType, &userID)
+			require.Equal(t, tt.expected, got, "Resolve should apply the hardcoded agent model default")
+		})
+	}
+}
+
 func TestAgentEnvResolveAppliesCachedAgentConfigOverrides(t *testing.T) {
 	t.Parallel()
 

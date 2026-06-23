@@ -928,14 +928,13 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 		}
 	}
 
+	e.applyAgentModelDefault(ctx, orgID, agentType, modelOverride, merged)
+
 	// Apply per-agent env overrides from org settings (agent_config.<type>.*).
 	// Scoped to Amp and Pi only — these are non-secret runtime defaults
 	// (AMP_MODE, PI_MODEL, PI_MODEL_CUSTOM), while auth itself comes from the
-	// credential stores. For claude_code/codex we keep the legacy
-	// behavior: provider creds come exclusively from resolveProviderConfig,
-	// and agent_config is treated as model-default metadata (validated,
-	// stored, but not injected here) — changing that would silently flip
-	// existing orgs' active keys.
+	// credential stores. Codex and Claude Code model defaults are applied
+	// above without changing which credential key is active.
 	if agentType == models.AgentTypeAmp || agentType == models.AgentTypePi {
 		e.applyAgentConfigOverrides(ctx, orgID, agentType, merged)
 	}
@@ -945,6 +944,34 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 	}
 
 	return merged
+}
+
+func (e *AgentEnv) applyAgentModelDefault(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, modelOverride string, merged map[string]string) {
+	envVar := models.ModelEnvVarForAgentType(agentType)
+	if envVar == "" || merged[envVar] != "" {
+		return
+	}
+
+	if model := strings.TrimSpace(modelOverride); model != "" {
+		merged[envVar] = model
+		return
+	}
+	if agentType == models.AgentTypeCodex || agentType == models.AgentTypeClaudeCode {
+		if agentConfig, ok := e.loadAgentConfig(ctx, orgID, agentType); ok {
+			if cfg := agentConfig[string(agentType)]; cfg != nil {
+				if model := strings.TrimSpace(cfg[envVar]); model != "" {
+					merged[envVar] = model
+					return
+				}
+			}
+		}
+	}
+	switch agentType {
+	case models.AgentTypeCodex:
+		merged[envVar] = models.DefaultCodexModel
+	case models.AgentTypeClaudeCode:
+		merged[envVar] = models.DefaultClaudeCodeModel
+	}
 }
 
 // CheckAuth returns a user-facing error when an agent type has no chance of
