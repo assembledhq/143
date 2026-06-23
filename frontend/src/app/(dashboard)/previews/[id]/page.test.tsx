@@ -456,6 +456,39 @@ describe("PreviewLandingPage launch mode", () => {
 });
 
 describe("PreviewLandingPage detail mode", () => {
+  it("shows a spinner inside the starting status badge", async () => {
+    searchParams = new URLSearchParams("");
+
+    server.use(
+      http.get("*/api/v1/previews/target-1", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "manual",
+            status: "starting",
+            current_phase: "start_services",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+            expires_at: "2026-05-26T21:05:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderLaunchPage();
+
+    const startingLabels = await screen.findAllByText("Starting");
+    const statusBadge = startingLabels
+      .map((label) => label.closest('[data-slot="badge"]'))
+      .find((badge): badge is Element => Boolean(badge));
+    expect(statusBadge?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+  });
+
   it("prioritizes the open command and keeps lifecycle controls in preview actions", async () => {
     searchParams = new URLSearchParams("");
 
