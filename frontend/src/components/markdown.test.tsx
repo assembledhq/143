@@ -22,6 +22,25 @@ describe("MarkdownContent", () => {
     expect(code.closest("pre")).toBeNull();
   });
 
+  it("wraps long inline code without overflowing its line box", () => {
+    render(
+      <MarkdownContent content="Use `luxonDateTimeToMomentInTimezone(adjust_start.toJSDate(), UserManager.timezone())` here" />
+    );
+
+    const code = screen.getByText(
+      "luxonDateTimeToMomentInTimezone(adjust_start.toJSDate(), UserManager.timezone())"
+    );
+    expect(code).toHaveClass("break-all", {
+      exact: false,
+    });
+    expect(code).toHaveClass("box-decoration-clone", {
+      exact: false,
+    });
+    expect(code).toHaveClass("leading-relaxed", {
+      exact: false,
+    });
+  });
+
   it("renders fenced code blocks with language", () => {
     const md = "```js\nconsole.log('hi');\n```";
     render(<MarkdownContent content={md} />);
