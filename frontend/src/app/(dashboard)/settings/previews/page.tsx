@@ -158,6 +158,31 @@ function makeEmptyBundleForm(repositoryId = ""): BundleFormState {
   };
 }
 
+function defaultPreviewPolicyForRepository(
+  repo: Repository,
+): PreviewPolicySummary {
+  return {
+    repository_id: repo.id,
+    repository_full_name: repo.full_name,
+    auto_mode: "off",
+    session_prewarm_mode: "off",
+    session_prewarm_untrusted_fork: false,
+    pr_preview_surfaces_enabled: false,
+    github_pr_comment_enabled: true,
+    github_commit_status_enabled: true,
+    preview_config_name: "",
+    preview_configured: false,
+    preview_success_recorded: false,
+    preview_ready: false,
+    preview_readiness_missing_reason: "Add .143/config.json first",
+    github_pr_comment_permission_ok: false,
+    github_commit_status_permission_ok: false,
+    last_surface_sync_sha: "",
+    last_surface_sync_error: "",
+    open_pr_count: 0,
+  };
+}
+
 export default function PreviewSettingsPage() {
   usePageTitle("Preview");
 
@@ -200,6 +225,10 @@ function AutoPreviewSection() {
   const policiesQuery = useQuery<ListResponse<PreviewPolicySummary>>({
     queryKey: ["preview-policies"],
     queryFn: () => api.previews.policies.list(),
+  });
+  const repositoriesQuery = useQuery<ListResponse<Repository>>({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
   });
   const settingsQuery = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
@@ -260,7 +289,23 @@ function AutoPreviewSection() {
     },
   });
 
-  const policies = policiesQuery.data?.data ?? [];
+  const policyRows = policiesQuery.data?.data ?? [];
+  const policiesByRepositoryId = new Map(
+    policyRows.map((policy) => [policy.repository_id, policy]),
+  );
+  const fallbackPolicyRows =
+    policyRows.length === 0
+      ? (repositoriesQuery.data?.data ?? [])
+          .filter(
+            (repo) =>
+              repo.status === "active" && !policiesByRepositoryId.has(repo.id),
+          )
+          .map(defaultPreviewPolicyForRepository)
+      : [];
+  const policies = [...policyRows, ...fallbackPolicyRows].sort((a, b) =>
+    a.repository_full_name.localeCompare(b.repository_full_name),
+  );
+  const policiesLoading = policiesQuery.isLoading || repositoriesQuery.isLoading;
 
   return (
     <section className="space-y-4" aria-labelledby="previews-heading">
@@ -278,7 +323,7 @@ function AutoPreviewSection() {
         </p>
       </div>
 
-      {policiesQuery.isLoading ? (
+      {policiesLoading ? (
         <div className="rounded-md border border-border p-4 text-sm text-muted-foreground">
           Loading preview policies...
         </div>
@@ -1072,7 +1117,6 @@ function PreviewSecretsSection() {
           bundles={bundles}
           isLoading={repositoriesQuery.isLoading || bundlesQuery.isLoading}
           repositoryName={selectedRepository?.full_name ?? ""}
-          onCreate={openCreateDialog}
           onEdit={openEditDialog}
           onDelete={setDeleteTarget}
         />
@@ -1135,14 +1179,12 @@ function BundleInventory({
   bundles,
   isLoading,
   repositoryName,
-  onCreate,
   onEdit,
   onDelete,
 }: {
   bundles: PreviewSecretBundleSummary[];
   isLoading: boolean;
   repositoryName: string;
-  onCreate: () => void;
   onEdit: (bundle: PreviewSecretBundleSummary) => void;
   onDelete: (bundle: PreviewSecretBundleSummary) => void;
 }) {
@@ -1166,11 +1208,6 @@ function BundleInventory({
               : "Choose a repository to manage preview secrets."
           }
           variant="inline"
-          action={
-            repositoryName
-              ? { label: "New bundle", onClick: onCreate }
-              : undefined
-          }
         />
       </div>
     );

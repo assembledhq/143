@@ -115,6 +115,19 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
+  it("falls back to connected repositories when preview policies are empty", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({ data: [], meta: {} })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
+    expect(screen.queryByText("No connected repositories")).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /turn off auto-preview for assembledhq\/143/i })).toBeChecked();
+  });
+
   it("enables session prewarm policies only when speculative slots are configured", async () => {
     let savedPolicy: unknown;
     let savedSettings: unknown;
