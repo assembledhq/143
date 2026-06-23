@@ -7,7 +7,7 @@ import { GitBranch } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { OpenPreviewButton } from "@/components/preview/open-preview-button";
-import { Badge } from "@/components/ui/badge";
+import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorText } from "@/components/ui/error-notice";
@@ -34,7 +34,7 @@ export default function PreviewStableLinkPage({
         <PageHeader
           title={preview?.repository_full_name ?? "Preview link"}
           description={preview?.branch ?? stableSlug}
-          action={preview ? <Badge variant={preview.status === "ready" ? "default" : "secondary"}>{preview.status.replaceAll("_", " ")}</Badge> : undefined}
+          action={preview ? <PreviewStatusBadge status={preview.status} variant={preview.status === "ready" ? "default" : "secondary"} /> : undefined}
         />
         <Card>
           <CardContent className="space-y-4 pt-6">

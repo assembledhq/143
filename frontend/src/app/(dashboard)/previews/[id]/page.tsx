@@ -23,7 +23,7 @@ import {
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { OpenPreviewButton } from "@/components/preview/open-preview-button";
-import { Badge } from "@/components/ui/badge";
+import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -416,9 +416,11 @@ function PreviewCommandState({
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
-              <Badge variant={isReady ? "default" : "secondary"} className="h-5 rounded-full px-2 text-xs">
-                {formatPreviewStatus(preview.status)}
-              </Badge>
+              <PreviewStatusBadge
+                status={preview.status}
+                variant={isReady ? "default" : "secondary"}
+                className="h-5 rounded-full px-2 text-xs"
+              />
             </div>
             <p className="max-w-2xl text-sm text-muted-foreground">{description}</p>
           </div>
@@ -630,7 +632,7 @@ function PreviewAdvancedDetails({ preview }: { preview: BranchPreviewResponse })
               {preview.services?.map((service) => (
                 <div key={service.id} className="flex min-h-10 items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
                   <span className="truncate text-foreground">{service.service_name}</span>
-                  <Badge variant={service.status === "ready" ? "default" : "secondary"}>{formatPreviewStatus(service.status)}</Badge>
+                  <PreviewStatusBadge status={service.status} variant={service.status === "ready" ? "default" : "secondary"} />
                 </div>
               ))}
             </div>
@@ -641,7 +643,7 @@ function PreviewAdvancedDetails({ preview }: { preview: BranchPreviewResponse })
               {preview.infrastructure?.map((infra) => (
                 <div key={infra.id} className="flex min-h-10 items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
                   <span className="truncate text-foreground">{infra.infra_name}</span>
-                  <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{formatPreviewStatus(infra.status)}</Badge>
+                  <PreviewStatusBadge status={infra.status} variant={infra.status === "healthy" ? "default" : "secondary"} />
                 </div>
               ))}
             </div>

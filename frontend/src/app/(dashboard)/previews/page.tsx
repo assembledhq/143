@@ -19,7 +19,7 @@ import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
-import { Badge } from "@/components/ui/badge";
+import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -178,6 +178,15 @@ function statusLabel(preview: PreviewCurrentResponse): string {
   if (preview.freshness === "unknown") return "Needs attention";
   if (preview.status === "target_created" || preview.status === "none") return "Not started";
   return formatPreviewStatus(preview.status);
+}
+
+function statusBadgeVariant(
+  preview: PreviewCurrentResponse,
+): "default" | "secondary" | "destructive" {
+  if (preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown") {
+    return "destructive";
+  }
+  return preview.status === "ready" ? "default" : "secondary";
 }
 
 function capitalizeStatusDetail(detail: string): string {
@@ -347,17 +356,11 @@ function SectionRows({
                     )}
                   </TableCell>
                   <TableCell>
-                    <Badge
-                      variant={
-                        preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
-                          ? "destructive"
-                          : preview.status === "ready"
-                            ? "default"
-                            : "secondary"
-                      }
-                    >
-                      {statusLabel(preview)}
-                    </Badge>
+                    <PreviewStatusBadge
+                      status={preview.status}
+                      label={statusLabel(preview)}
+                      variant={statusBadgeVariant(preview)}
+                    />
                     <p className="mt-1 text-xs text-muted-foreground">
                       {statusDetail(preview, scope)}
                     </p>
@@ -437,17 +440,11 @@ function SectionRows({
                   </p>
                 </div>
                 <div className="flex items-center justify-between gap-2">
-                  <Badge
-                    variant={
-                      preview.status === "failed" || preview.freshness === "outdated" || preview.freshness === "unknown"
-                        ? "destructive"
-                        : preview.status === "ready"
-                          ? "default"
-                          : "secondary"
-                    }
-                  >
-                    {statusLabel(preview)}
-                  </Badge>
+                  <PreviewStatusBadge
+                    status={preview.status}
+                    label={statusLabel(preview)}
+                    variant={statusBadgeVariant(preview)}
+                  />
                   <span className="text-xs text-muted-foreground">
                     {relativeTime(preview.created_at)}
                   </span>
