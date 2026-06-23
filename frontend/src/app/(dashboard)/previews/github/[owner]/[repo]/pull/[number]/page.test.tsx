@@ -359,6 +359,49 @@ describe("PullRequestPreviewPage", () => {
     expect(screen.getByText("Unhealthy")).toBeInTheDocument();
   });
 
+  it("shows spinners inside starting preview status badges", async () => {
+    server.use(
+      http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "pull_request",
+            status: "starting",
+            current_phase: "start_services",
+            stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+            preview_url: "https://prev-1.preview.143.dev",
+            services: [
+              {
+                id: "svc-1",
+                preview_instance_id: "prev-1",
+                service_name: "web",
+                role: "primary",
+                status: "starting",
+                command: ["npm", "run", "dev"],
+                cwd: ".",
+                port: 3000,
+                created_at: "2026-06-10T12:00:00Z",
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
+
+    const startingLabels = await screen.findAllByText("Starting");
+    expect(startingLabels).toHaveLength(2);
+    for (const label of startingLabels) {
+      expect(label.closest('[data-slot="badge"]')?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+    }
+  });
+
   it("does not auto-open stale previews and makes Restart primary", async () => {
     let startLatestCalled = false;
     server.use(
