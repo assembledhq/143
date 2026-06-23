@@ -161,6 +161,8 @@ export interface ManualSessionComposerProps {
   textareaAriaLabel?: string;
   /** Show the live drop indicator pill inside the dropzone. Page only. */
   showDropIndicator?: boolean;
+  /** Add a temporary sidebar row while create is pending. Disable when the route already renders a draft row. */
+  showOptimisticSidebarRow?: boolean;
   /** Test id placed on the outer drop-target div. */
   dataTestId?: string;
 }
@@ -293,6 +295,7 @@ export function ManualSessionComposer({
   placeholder = "Tell the agent what to do...",
   textareaAriaLabel = "Session prompt",
   showDropIndicator = false,
+  showOptimisticSidebarRow = true,
   dataTestId,
 }: ManualSessionComposerProps) {
   const { user } = useAuth();
@@ -732,7 +735,7 @@ export function ManualSessionComposer({
       const title = optimisticTitle.length > 80
         ? optimisticTitle.slice(0, 80) + "..."
         : optimisticTitle;
-      return { optimisticId: addOptimisticSession(title) };
+      return { optimisticId: showOptimisticSidebarRow ? addOptimisticSession(title) : undefined };
     },
     onSuccess: (response, _variables, context) => {
       if (selectedRepoId) {
@@ -741,7 +744,9 @@ export function ManualSessionComposer({
       discardDraftSave();
       // Keep the optimistic row visible — the sidebar swaps it for the real
       // session once the refetch lands. See OptimisticSession.resolvedId.
-      markOptimisticResolved(context.optimisticId, response.data.id);
+      if (context.optimisticId) {
+        markOptimisticResolved(context.optimisticId, response.data.id);
+      }
       applyCreatedSessionToSessionListCaches(queryClient, response.data);
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.all });
       setIsNavigatingAfterCreate(true);

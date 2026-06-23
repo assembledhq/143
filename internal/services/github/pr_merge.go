@@ -13,9 +13,19 @@ import (
 )
 
 // ErrPullRequestNotMergeable is returned when a caller invokes MergePullRequest
-// on a PR that is not currently in a clean, mergeable state. The handler maps
-// this to HTTP 409 so the UI can refresh its view of PR health.
+// on a PR that is not currently in a clean, mergeable state for a terminal
+// reason a human must resolve (merge conflicts or failed checks). The handler
+// maps this to HTTP 409 so the UI can refresh its view of PR health.
 var ErrPullRequestNotMergeable = errors.New("pull request is not in a mergeable state")
+
+// ErrPullRequestNotYetMergeable is returned when a PR is not mergeable for a
+// transient reason that is expected to clear on its own — GitHub still
+// computing mergeability, required checks still running, or branch protection
+// temporarily blocking. It is distinct from ErrPullRequestNotMergeable so the
+// merge-when-ready loop can keep waiting (rather than failing the request)
+// when the pre-merge re-sync catches checks mid-registration. The manual merge
+// handler still maps it to HTTP 409 — the PR is simply not mergeable yet.
+var ErrPullRequestNotYetMergeable = errors.New("pull request is not yet in a mergeable state")
 
 // ErrPullRequestHeadChanged is returned when an automated merge was scoped to
 // an earlier PR head SHA and the final pre-merge sync observes a different SHA.
@@ -96,6 +106,17 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		return nil, fmt.Errorf("build pull request health: %w", err)
 	}
 	if !health.CanMerge {
+		// Distinguish transient blocks (checks still running, mergeability still
+		// being computed by GitHub) from terminal ones (conflicts, failed
+		// checks). The re-sync above can legitimately observe checks that
+		// registered between the caller's CanMerge gate and this one — most
+		// commonly right after PR creation, when GitHub reports the PR clean
+		// before CI registers its pending check runs. Surfacing those as
+		// terminal would fail an otherwise-healthy merge-when-ready request.
+		if mergeBlockIsTransient(health) {
+			return nil, fmt.Errorf("%w: merge_state=%s, checks=%d",
+				ErrPullRequestNotYetMergeable, health.MergeState, len(health.Checks))
+		}
 		return nil, fmt.Errorf("%w: merge_state=%s, has_conflicts=%t, failing_tests=%d, checks=%d",
 			ErrPullRequestNotMergeable, health.MergeState, health.HasConflicts, health.FailingTestCount, len(health.Checks))
 	}
