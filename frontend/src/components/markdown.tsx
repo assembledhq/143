@@ -23,7 +23,10 @@ function Code({ className, children, ...props }: React.ComponentProps<"code">) {
 
   return (
     <code
-      className="rounded bg-background border border-border px-1 py-0.5 font-mono text-xs"
+      className={cn(
+        "box-decoration-clone break-all whitespace-normal rounded border border-border bg-background px-1 py-0.5 font-mono text-xs leading-relaxed",
+        className
+      )}
       {...props}
     >
       {children}
