@@ -505,6 +505,33 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows a spinner inside starting status badges in the overview", async () => {
+    installPreviewHandlers({
+      running: [
+        preview({
+          preview_group_id: "starting-group",
+          branch: "feature/starting",
+          status: "starting",
+          current_phase: "start_services",
+          preview_url: undefined,
+        }),
+      ],
+      resumable: [],
+      recent: [],
+    });
+
+    renderWithProviders(<PreviewsPage />);
+
+    const runningSection = await screen.findByRole("region", {
+      name: /running/i,
+    });
+    const startingLabels = within(runningSection).getAllByText("Starting");
+    expect(startingLabels.length).toBeGreaterThan(0);
+    for (const label of startingLabels) {
+      expect(label.closest('[data-slot="badge"]')?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+    }
+  });
+
   it("shows a spinner on the start-latest button in the recent section while request is in flight", async () => {
     const restartReleased = deferred<void>();
     const mutationPaths: string[] = [];

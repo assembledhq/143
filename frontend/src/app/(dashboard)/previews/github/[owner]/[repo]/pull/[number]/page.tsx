@@ -8,7 +8,7 @@ import { useSearchParams } from "next/navigation";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { OpenPreviewButton, usePreviewLauncher } from "@/components/preview/open-preview-button";
-import { Badge } from "@/components/ui/badge";
+import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorText } from "@/components/ui/error-notice";
@@ -172,7 +172,13 @@ export function PullRequestPreviewContent({
         <PageHeader
           title={title}
           description="Pull request preview"
-          action={<Badge variant={preview?.status === "ready" ? "default" : "secondary"}>{status}</Badge>}
+          action={
+            <PreviewStatusBadge
+              status={preview?.status ?? "loading"}
+              label={status}
+              variant={preview?.status === "ready" ? "default" : "secondary"}
+            />
+          }
         />
 
         <Card>
@@ -272,7 +278,7 @@ export function PullRequestPreviewContent({
                       {(preview.services ?? []).map((service) => (
                         <div key={service.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                           <span className="truncate">{service.service_name}</span>
-                          <Badge variant={service.status === "ready" ? "default" : "secondary"}>{formatPreviewStatus(service.status)}</Badge>
+                          <PreviewStatusBadge status={service.status} variant={service.status === "ready" ? "default" : "secondary"} />
                         </div>
                       ))}
                     </div>
@@ -281,7 +287,7 @@ export function PullRequestPreviewContent({
                       {(preview.infrastructure ?? []).map((infra) => (
                         <div key={infra.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
                           <span className="truncate">{infra.infra_name}</span>
-                          <Badge variant={infra.status === "healthy" ? "default" : "secondary"}>{formatPreviewStatus(infra.status)}</Badge>
+                          <PreviewStatusBadge status={infra.status} variant={infra.status === "healthy" ? "default" : "secondary"} />
                         </div>
                       ))}
                     </div>
