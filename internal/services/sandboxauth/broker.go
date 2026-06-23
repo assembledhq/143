@@ -15,6 +15,9 @@ type brokerSocketServer interface {
 	Listen(ctx context.Context, sessionID uuid.UUID, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings) (socketPath string, err error)
 	Close(sessionID uuid.UUID)
 	Shutdown()
+	// SocketPath returns the deterministic on-host socket path for a session,
+	// independent of whether a listener is currently bound there.
+	SocketPath(sessionID uuid.UUID) string
 }
 
 type BrokerSessionStore interface {
@@ -49,6 +52,15 @@ type brokerEntry struct {
 	orgID      uuid.UUID
 	socketPath string
 	holders    map[uuid.UUID]int
+
+	// containerPinned marks a listener that must stay open for as long as the
+	// session's sandbox container is alive on this host, independent of the
+	// per-turn holder leases above. Set by EnsureContainerLease (driven by the
+	// worker's container reconciler) and cleared by ReleaseContainerLease. The
+	// socket closes only when BOTH the holder count is zero AND the container
+	// pin is cleared — so a turn ending no longer tears the socket down out
+	// from under a held-alive sandbox waiting for its next push.
+	containerPinned bool
 }
 
 func NewBroker(
@@ -160,10 +172,19 @@ func (b *Broker) AcquirePrepared(
 	return socketPath, nil
 }
 
-// EnsurePrepared opens a listener for rehydration without taking a lease.
-// The next real holder that acquires the same session attaches to this
-// listener and the listener closes when that holder count drains to zero.
-func (b *Broker) EnsurePrepared(
+// EnsureContainerLease pins the session's credential socket open for the
+// lifetime of its sandbox container, independent of per-turn holder leases.
+// It is the worker-side counterpart to a live container: the container
+// reconciler calls it for every sandbox alive on this host so the socket
+// survives turn boundaries and worker restarts, and calls ReleaseContainerLease
+// when the container is gone.
+//
+// Idempotent: pinning an already-pinned (or holder-leased) session just marks
+// the existing listener pinned and returns its socket path without re-binding.
+// If no listener exists yet it opens one — so EnsureContainerLease both
+// rehydrates a socket whose owning process restarted and keeps it open across
+// the gaps between turn leases.
+func (b *Broker) EnsureContainerLease(
 	ctx context.Context,
 	sessionID uuid.UUID,
 	run *models.Session,
@@ -180,8 +201,9 @@ func (b *Broker) EnsurePrepared(
 	defer b.mu.Unlock()
 	if entry := b.active[sessionID]; entry != nil {
 		if entry.orgID != run.OrgID {
-			return "", fmt.Errorf("sandboxauth broker rehydrate: active session org %s does not match requested org %s", entry.orgID, run.OrgID)
+			return "", fmt.Errorf("sandboxauth broker container lease: active session org %s does not match requested org %s", entry.orgID, run.OrgID)
 		}
+		entry.containerPinned = true
 		return entry.socketPath, nil
 	}
 	socketPath, err := b.server.Listen(ctx, sessionID, run, repo, orgSettings)
@@ -189,11 +211,58 @@ func (b *Broker) EnsurePrepared(
 		return "", err
 	}
 	b.active[sessionID] = &brokerEntry{
-		orgID:      run.OrgID,
-		socketPath: socketPath,
-		holders:    make(map[uuid.UUID]int),
+		orgID:           run.OrgID,
+		socketPath:      socketPath,
+		holders:         make(map[uuid.UUID]int),
+		containerPinned: true,
 	}
 	return socketPath, nil
+}
+
+// ReleaseContainerLease drops the container pin for a session — called when the
+// reconciler observes the container is no longer alive on this host. The socket
+// is closed immediately if no per-turn holder lease remains; if a turn is still
+// in flight the socket stays open until that last holder releases (which will
+// then close it, since the pin is gone). Idempotent and safe to call for an
+// unknown session.
+func (b *Broker) ReleaseContainerLease(orgID, sessionID uuid.UUID) error {
+	if b == nil || b.server == nil {
+		return nil
+	}
+	if sessionID == uuid.Nil {
+		return fmt.Errorf("sandboxauth broker container release: session id is required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	entry := b.active[sessionID]
+	if entry == nil {
+		return nil
+	}
+	if orgID != uuid.Nil && entry.orgID != orgID {
+		return fmt.Errorf("sandboxauth broker container release: active session org %s does not match requested org %s", entry.orgID, orgID)
+	}
+	entry.containerPinned = false
+	if len(entry.holders) == 0 {
+		delete(b.active, sessionID)
+		b.server.Close(sessionID)
+	}
+	return nil
+}
+
+// ContainerSocketState reports the deterministic socket path for a session and
+// whether this broker currently owns a local listener entry for it. The
+// container reconciler uses it to avoid stealing a socket that a sibling worker
+// generation is still serving during a rolling deploy: when there is no local
+// entry but the path is live, the reconciler adopts (leaves it alone) and takes
+// over only once that foreign listener is gone.
+func (b *Broker) ContainerSocketState(sessionID uuid.UUID) (string, bool) {
+	if b == nil || b.server == nil {
+		return "", false
+	}
+	b.mu.Lock()
+	_, has := b.active[sessionID]
+	b.mu.Unlock()
+	return b.server.SocketPath(sessionID), has
 }
 
 func (b *Broker) Release(ctx context.Context, orgID, sessionID, holderID uuid.UUID) error {
@@ -282,6 +351,12 @@ func (b *Broker) releaseLocked(sessionID, holderID uuid.UUID) {
 	}
 	delete(entry.holders, holderID)
 	if len(entry.holders) > 0 {
+		return
+	}
+	// The last per-turn holder is gone, but keep the socket open if a container
+	// lease still pins it — the sandbox is held alive across this turn boundary
+	// and its next push must still reach a live listener.
+	if entry.containerPinned {
 		return
 	}
 	delete(b.active, sessionID)
