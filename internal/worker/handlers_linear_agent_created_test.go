@@ -531,7 +531,7 @@ func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) 
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 			AddRow(issueID, now, now))
-	mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+JOIN organization_memberships m`).
+	mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m`).
 		WithArgs(orgID, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 			creatorID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,

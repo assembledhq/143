@@ -200,7 +200,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns org user when primary email matches case insensitively",
 			lookupEmail: "Creator@Example.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -213,7 +213,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			lookupEmail: "12345+alice@users.noreply.github.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
 				noreply := "12345+alice@users.noreply.github.com"
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -225,7 +225,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns org user when secondary email matches",
 			lookupEmail: "alice@company.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
@@ -237,7 +237,7 @@ func TestUserStore_GetByOrgAndEmail(t *testing.T) {
 			name:        "returns error when no org user matches either email column",
 			lookupEmail: "unknown@example.com",
 			setupMock: func(mock pgxmock.PgxPoolIface, userID, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
+				mock.ExpectQuery(`(?s)SELECT .+ FROM users u\s+LEFT JOIN organization_memberships m.+ORDER BY.+LIMIT 1`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(userColumns))
 			},

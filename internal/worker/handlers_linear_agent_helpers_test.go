@@ -150,7 +150,7 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
 					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
@@ -180,7 +180,7 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
 					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
@@ -209,7 +209,7 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
 					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 						userID, orgID, "issueauthor@example.com", "Issue Author", "member", nil, nil, nil, nil, nil, nil, now,
@@ -221,7 +221,7 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 			row:     &db.LinearAgentSession{},
 			fetched: &linear.FetchedIssue{CreatorEmail: "IssueCreator@Example.com"},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns).AddRow(
 						userID, orgID, "issuecreator@example.com", "Issue Creator", "member", nil, nil, nil, nil, nil, nil, now,
@@ -233,7 +233,7 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 			row:     &db.LinearAgentSession{},
 			fetched: &linear.FetchedIssue{CreatorEmail: "IssueCreator@Example.com"},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnError(errors.New("connection reset by peer"))
 			},
@@ -309,7 +309,7 @@ func TestApplyLinearAgentCreatorAttributionNoMatch(t *testing.T) {
 			row:     &db.LinearAgentSession{},
 			fetched: &linear.FetchedIssue{CreatorEmail: "external@example.com"},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
+				mock.ExpectQuery(`(?s)FROM users u\s+LEFT JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(linearAgentUserColumns))
 			},
