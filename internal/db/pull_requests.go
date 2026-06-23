@@ -385,6 +385,31 @@ func (s *PullRequestStore) ClaimMergeWhenReadyForProcessing(ctx context.Context,
 	return res.RowsAffected() > 0, nil
 }
 
+// ReleaseMergeWhenReadyClaim returns a claimed (merging) merge-when-ready
+// request to the queued state so it is retried later. Used when a transient
+// block — checks still running, mergeability still being computed by GitHub —
+// is observed after the claim. It preserves the requesting user, head SHA, and
+// health version and clears any prior error. No-op if the row is not currently
+// in the merging state (e.g. it was cancelled or superseded meanwhile).
+func (s *PullRequestStore) ReleaseMergeWhenReadyClaim(ctx context.Context, orgID, id uuid.UUID) error {
+	query := `
+		UPDATE pull_requests
+		SET merge_when_ready_state = @state,
+			merge_when_ready_error = '',
+			merge_when_ready_updated_at = now(),
+			updated_at = now()
+		WHERE id = @id
+		  AND org_id = @org_id
+		  AND merge_when_ready_state = 'merging'`
+
+	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":     id,
+		"org_id": orgID,
+		"state":  models.PullRequestMergeWhenReadyStateQueued,
+	})
+	return err
+}
+
 func (s *PullRequestStore) MarkMergeWhenReadySucceeded(ctx context.Context, orgID, id uuid.UUID) error {
 	return s.markMergeWhenReadyTerminal(ctx, orgID, id, models.PullRequestMergeWhenReadyStateSucceeded, "")
 }
