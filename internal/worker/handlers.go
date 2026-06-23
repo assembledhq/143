@@ -3210,7 +3210,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
 			updateStarted := time.Now()
-			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, text); err == nil {
+			if err := slackClient.UpdateMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, text, rendered.Blocks); err == nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
 				if updateErr := stores.SlackSessionLinks.SetLatestStatusProgress(ctx, orgID, sessionID, *link.LatestStatusMessageTS, string(progress.Kind)); updateErr != nil {
 					logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack progress kind")
@@ -3284,14 +3284,14 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				Link:       link,
 				State:      slackbotsvc.SessionLifecycleComplete,
 				SessionURL: slackSessionURL(services, sessionID),
-			}).Text
+			})
 			updateStarted := time.Now()
-			if err := slackClient.UpdateMessage(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal); err != nil {
+			if err := slackClient.UpdateMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal.Text, terminal.Blocks); err != nil {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
 				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to update Slack progress message to terminal state")
 			} else {
 				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
-				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal)
+				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal.Text)
 			}
 		}
 		posted, err := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindFinal)
