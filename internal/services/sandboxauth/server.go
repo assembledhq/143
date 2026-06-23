@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -201,6 +202,15 @@ func (s *Server) Listen(
 	return sockPath, nil
 }
 
+// SocketPath returns the deterministic on-host path of a session's socket,
+// whether or not this Server currently has a listener bound there. The
+// container reconciler uses it to probe whether some process — possibly a
+// sibling worker generation still draining during a rolling deploy — is
+// already serving the socket, so it can adopt rather than steal it.
+func (s *Server) SocketPath(sessionID uuid.UUID) string {
+	return filepath.Join(s.socketDir, sessionID.String(), SocketFileName)
+}
+
 // Close stops and removes the active listener for sessionID, if any.
 // Idempotent: calling it for an unknown session does nothing.
 func (s *Server) Close(sessionID uuid.UUID) {
@@ -296,6 +306,13 @@ func (s *Server) handleConn(
 
 	var req Request
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+		// A connection that closes before sending any request is a liveness
+		// probe — the container reconciler dials the socket to learn whether
+		// another worker generation is already serving it. Treat a clean EOF as
+		// the probe it is: stay silent rather than logging it as a bad request.
+		if errors.Is(err, io.EOF) {
+			return
+		}
 		s.writeError(conn, fmt.Sprintf("decode request: %s", err))
 		logger.Warn().Err(err).Msg("sandboxauth: bad request")
 		return
