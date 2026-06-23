@@ -3058,6 +3058,35 @@ type slackMessagePoster interface {
 	PostMessageWithBlocks(ctx context.Context, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock) (ingestion.SlackPostedMessage, error)
 }
 
+type slackReactionAdder interface {
+	AddReaction(ctx context.Context, accessToken, channelID, messageTS, name string) error
+}
+
+const slackCompletionReactionName = "white_check_mark"
+
+func addSlackCompletionReaction(ctx context.Context, adder slackReactionAdder, logger zerolog.Logger, accessToken string, link models.SlackSessionLink) {
+	if adder == nil {
+		return
+	}
+	channelID := strings.TrimSpace(link.SlackChannelID)
+	messageTS := strings.TrimSpace(link.SlackRootTS)
+	if messageTS == "" {
+		messageTS = strings.TrimSpace(link.SlackThreadTS)
+	}
+	if strings.TrimSpace(accessToken) == "" || channelID == "" || messageTS == "" {
+		return
+	}
+	if err := adder.AddReaction(ctx, accessToken, channelID, messageTS, slackCompletionReactionName); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already_reacted") {
+			return
+		}
+		logger.Warn().Err(err).
+			Str("slack_channel_id", channelID).
+			Str("slack_message_ts", messageTS).
+			Msg("failed to add Slack completion reaction")
+	}
+}
+
 func postSlackMessageWithFallback(ctx context.Context, poster slackMessagePoster, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock, kind models.SlackOutboundMessageKind) (ingestion.SlackPostedMessage, error) {
 	if poster == nil {
 		return ingestion.SlackPostedMessage{}, fmt.Errorf("slack message poster is not configured")
@@ -3275,6 +3304,7 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 				logger.Warn().Err(updateErr).Str("session_id", sessionID.String()).Msg("failed to save Slack final message timestamp")
 			}
 		}
+		addSlackCompletionReaction(ctx, slackClient, logger, slackCfg.AccessToken, link)
 		return nil
 	}
 }
