@@ -2764,9 +2764,12 @@ func TestSessionStore_ListReferencedContainerIDs_QueryError(t *testing.T) {
 
 // TestSessionStore_ListContainerHoldingSessions is the rehydrate-side
 // counterpart to ListOrphanedContainers: same paging, opposite predicate
-// (EXISTS preview hold instead of NOT EXISTS). The query must filter by
-// preview_holding_container so we don't try to rehydrate listeners for
-// containers that aren't actually being kept alive across a worker restart.
+// (a container that's being kept alive across a worker restart). The query
+// must match BOTH a preview hold (preview_holding_container) and a running /
+// recovering turn hold (turn_holding_container), so we re-open the credential
+// socket for every container the orphan reconciler preserves — not just the
+// preview-held ones. (pgxmock only asserts the SQL text shape;
+// TestIntegration_ListContainerHoldingSessions exercises the real predicate.)
 func TestSessionStore_ListContainerHoldingSessions(t *testing.T) {
 	t.Parallel()
 
@@ -2776,7 +2779,7 @@ func TestSessionStore_ListContainerHoldingSessions(t *testing.T) {
 
 	store := NewSessionStore(mock)
 	now := time.Now()
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+p\.worker_node_id = @worker_node_id[\s\S]+LIMIT @limit`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND \([\s\S]+preview_holding_container = TRUE[\s\S]+OR \([\s\S]+turn_holding_container = TRUE[\s\S]+worker_node_id = @worker_node_id[\s\S]+LIMIT @limit`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
@@ -2820,7 +2823,7 @@ func TestSessionStore_ListContainerHoldingSessions_ScanError(t *testing.T) {
 	store := NewSessionStore(mock)
 	now := time.Now()
 	scanErr := errors.New("simulated mid-row scan failure")
-	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND EXISTS[\s\S]+p\.worker_node_id = @worker_node_id[\s\S]+LIMIT @limit`).
+	mock.ExpectQuery(`FROM sessions\s+WHERE container_id IS NOT NULL\s+AND id > @after_id\s+AND \([\s\S]+preview_holding_container = TRUE[\s\S]+OR \([\s\S]+turn_holding_container = TRUE[\s\S]+LIMIT @limit`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).
