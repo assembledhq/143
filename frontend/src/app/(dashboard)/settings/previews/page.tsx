@@ -293,12 +293,15 @@ function AutoPreviewSection() {
   const policiesByRepositoryId = new Map(
     policyRows.map((policy) => [policy.repository_id, policy]),
   );
-  const fallbackPolicyRows = (repositoriesQuery.data?.data ?? [])
-    .filter(
-      (repo) =>
-        repo.status === "active" && !policiesByRepositoryId.has(repo.id),
-    )
-    .map(defaultPreviewPolicyForRepository);
+  const fallbackPolicyRows =
+    policyRows.length === 0
+      ? (repositoriesQuery.data?.data ?? [])
+          .filter(
+            (repo) =>
+              repo.status === "active" && !policiesByRepositoryId.has(repo.id),
+          )
+          .map(defaultPreviewPolicyForRepository)
+      : [];
   const policies = [...policyRows, ...fallbackPolicyRows].sort((a, b) =>
     a.repository_full_name.localeCompare(b.repository_full_name),
   );
@@ -1114,7 +1117,6 @@ function PreviewSecretsSection() {
           bundles={bundles}
           isLoading={repositoriesQuery.isLoading || bundlesQuery.isLoading}
           repositoryName={selectedRepository?.full_name ?? ""}
-          onCreate={openCreateDialog}
           onEdit={openEditDialog}
           onDelete={setDeleteTarget}
         />
@@ -1177,14 +1179,12 @@ function BundleInventory({
   bundles,
   isLoading,
   repositoryName,
-  onCreate,
   onEdit,
   onDelete,
 }: {
   bundles: PreviewSecretBundleSummary[];
   isLoading: boolean;
   repositoryName: string;
-  onCreate: () => void;
   onEdit: (bundle: PreviewSecretBundleSummary) => void;
   onDelete: (bundle: PreviewSecretBundleSummary) => void;
 }) {
@@ -1208,11 +1208,6 @@ function BundleInventory({
               : "Choose a repository to manage preview secrets."
           }
           variant="inline"
-          action={
-            repositoryName
-              ? { label: "New bundle", onClick: onCreate }
-              : undefined
-          }
         />
       </div>
     );
