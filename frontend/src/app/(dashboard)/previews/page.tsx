@@ -250,6 +250,8 @@ function SectionRows({
   onStop,
   onRestart,
   onStartLatest,
+  isRestartPending,
+  isStartLatestPending,
 }: {
   scope: PreviewScope;
   previews: PreviewCurrentResponse[];
@@ -260,6 +262,8 @@ function SectionRows({
   onStop: (preview: PreviewCurrentResponse) => void;
   onRestart: (preview: PreviewCurrentResponse) => void;
   onStartLatest: (preview: PreviewCurrentResponse) => void;
+  isRestartPending: (preview: PreviewCurrentResponse) => boolean;
+  isStartLatestPending: (preview: PreviewCurrentResponse) => boolean;
 }) {
   if (isError) {
     return (
@@ -383,12 +387,16 @@ function SectionRows({
                         </Button>
                       ) : null}
                       {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                        <RestartLatestButton onClick={() => onStartLatest(preview)} />
+                        <RestartLatestButton
+                          loading={isStartLatestPending(preview)}
+                          onClick={() => onStartLatest(preview)}
+                        />
                       ) : null}
                       {canMutate && scope === "resumable" ? (
                         <Button
                           size="sm"
                           variant="outline"
+                          loading={isRestartPending(preview)}
                           onClick={() => onRestart(preview)}
                         >
                           <Play className="h-4 w-4" />
@@ -396,7 +404,10 @@ function SectionRows({
                         </Button>
                       ) : null}
                       {canMutate && scope !== "running" ? (
-                        <RestartLatestButton onClick={() => onStartLatest(preview)} />
+                        <RestartLatestButton
+                          loading={isStartLatestPending(preview)}
+                          onClick={() => onStartLatest(preview)}
+                        />
                       ) : null}
                     </div>
                   </TableCell>
@@ -465,12 +476,16 @@ function SectionRows({
                     </Button>
                   ) : null}
                   {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                    <RestartLatestButton onClick={() => onStartLatest(preview)} />
+                    <RestartLatestButton
+                      loading={isStartLatestPending(preview)}
+                      onClick={() => onStartLatest(preview)}
+                    />
                   ) : null}
                   {canMutate && scope === "resumable" ? (
                     <Button
                       size="sm"
                       variant="outline"
+                      loading={isRestartPending(preview)}
                       onClick={() => onRestart(preview)}
                     >
                       <Play className="h-4 w-4" />
@@ -478,7 +493,10 @@ function SectionRows({
                     </Button>
                   ) : null}
                   {canMutate && scope !== "running" ? (
-                    <RestartLatestButton onClick={() => onStartLatest(preview)} />
+                    <RestartLatestButton
+                      loading={isStartLatestPending(preview)}
+                      onClick={() => onStartLatest(preview)}
+                    />
                   ) : null}
                 </div>
               </CardContent>
@@ -491,8 +509,10 @@ function SectionRows({
 }
 
 function RestartLatestButton({
+  loading,
   onClick,
 }: {
+  loading: boolean;
   onClick: () => void;
 }) {
   return (
@@ -503,6 +523,7 @@ function RestartLatestButton({
             size="sm"
             variant="ghost"
             aria-label={RESTART_LATEST_TOOLTIP}
+            loading={loading}
             onClick={onClick}
           >
             <RotateCw className="h-4 w-4" />
@@ -664,14 +685,37 @@ export default function PreviewsPage() {
       api.previews.current.stop(preview.preview_group_id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
+  const [pendingRestartIds, setPendingRestartIds] = useState<Set<string>>(new Set());
   const restartPreview = useMutation({
     mutationFn: (preview: PreviewCurrentResponse) =>
       api.previews.current.restart(preview.preview_group_id),
+    onMutate: (preview) => {
+      setPendingRestartIds((prev) => new Set([...prev, preview.preview_group_id]));
+    },
+    onSettled: (_data, _error, preview) => {
+      setPendingRestartIds((prev) => {
+        const next = new Set(prev);
+        next.delete(preview.preview_group_id);
+        return next;
+      });
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
+
+  const [pendingStartLatestIds, setPendingStartLatestIds] = useState<Set<string>>(new Set());
   const startLatest = useMutation({
     mutationFn: (preview: PreviewCurrentResponse) =>
       api.previews.current.startLatest(preview.preview_group_id),
+    onMutate: (preview) => {
+      setPendingStartLatestIds((prev) => new Set([...prev, preview.preview_group_id]));
+    },
+    onSettled: (_data, _error, preview) => {
+      setPendingStartLatestIds((prev) => {
+        const next = new Set(prev);
+        next.delete(preview.preview_group_id);
+        return next;
+      });
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["previews"] }),
   });
 
@@ -790,6 +834,12 @@ export default function PreviewsPage() {
                     onStop={(preview) => stopPreview.mutate(preview)}
                     onRestart={(preview) => restartPreview.mutate(preview)}
                     onStartLatest={(preview) => startLatest.mutate(preview)}
+                    isRestartPending={(preview) =>
+                      pendingRestartIds.has(preview.preview_group_id)
+                    }
+                    isStartLatestPending={(preview) =>
+                      pendingStartLatestIds.has(preview.preview_group_id)
+                    }
                   />
                 </section>
               );
