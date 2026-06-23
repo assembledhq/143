@@ -482,6 +482,7 @@ delegate all user-facing copy to this renderer.
 Acceptance criteria:
 
 - The original ack/status message is updated to terminal state.
+- Completed sessions add `:white_check_mark:` to the original Slack message when Slack accepts the reaction.
 - The ack shows inferred repo, branch, and routing mode when known.
 - The primary action is `Join session` once a canonical session exists.
 - Final answer is posted once, with durable links and outcome context.
