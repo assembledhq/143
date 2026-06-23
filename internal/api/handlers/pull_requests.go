@@ -269,6 +269,8 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.service.MergePullRequest(r.Context(), orgID, pullRequestID, user.ID)
 	if err != nil {
 		switch {
+		case errors.Is(err, ghservice.ErrPullRequestNotYetMergeable):
+			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "Pull request checks are still running", err)
 		case errors.Is(err, ghservice.ErrPullRequestNotMergeable):
 			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "Pull request is not in a mergeable state", err)
 		case errors.Is(err, ghservice.ErrNoMergeMethodAllowed):

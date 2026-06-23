@@ -199,6 +199,96 @@ func TestPRServiceEnqueueMergeWhenReadyProcessingIncludesStaleMerging(t *testing
 	}
 }
 
+func TestMergeWhenReadyShouldWaitForChecks(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	withinGrace := now.Add(-mergeWhenReadyChecksRegisterGrace / 2)
+	pastGrace := now.Add(-mergeWhenReadyChecksRegisterGrace - time.Second)
+
+	tests := []struct {
+		name        string
+		requestedAt *time.Time
+		checks      []models.PullRequestCheckSummary
+		want        bool
+	}{
+		{
+			name:        "empty checks within grace waits",
+			requestedAt: &withinGrace,
+			want:        true,
+		},
+		{
+			name:        "empty checks past grace proceeds (no CI configured)",
+			requestedAt: &pastGrace,
+			want:        false,
+		},
+		{
+			name:        "registered checks never wait on the empty-checks gate",
+			requestedAt: &withinGrace,
+			checks:      []models.PullRequestCheckSummary{{Name: "build", Status: models.PullRequestCheckStatusPending}},
+			want:        false,
+		},
+		{
+			name:        "missing requested-at proceeds",
+			requestedAt: nil,
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pr := models.PullRequest{MergeWhenReadyRequestedAt: tt.requestedAt}
+			health := &models.PullRequestHealthResponse{Checks: tt.checks}
+			require.Equal(t, tt.want, mergeWhenReadyShouldWaitForChecks(pr, health, now))
+		})
+	}
+}
+
+func TestMergeBlockIsTransient(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		health *models.PullRequestHealthResponse
+		want   bool
+	}{
+		{
+			name:   "pending checks are transient",
+			health: &models.PullRequestHealthResponse{MergeState: models.PullRequestMergeStateBlocked, Checks: []models.PullRequestCheckSummary{{Name: "test", Status: models.PullRequestCheckStatusPending}}},
+			want:   true,
+		},
+		{
+			name:   "mergeability still computing is transient",
+			health: &models.PullRequestHealthResponse{MergeState: models.PullRequestMergeStateMergeabilityPending},
+			want:   true,
+		},
+		{
+			name:   "conflicts are terminal",
+			health: &models.PullRequestHealthResponse{MergeState: models.PullRequestMergeStateConflicted, HasConflicts: true},
+			want:   false,
+		},
+		{
+			name:   "failed checks are terminal",
+			health: &models.PullRequestHealthResponse{MergeState: models.PullRequestMergeStateClean, Checks: []models.PullRequestCheckSummary{{Name: "test", Status: models.PullRequestCheckStatusFailed}}},
+			want:   false,
+		},
+		{
+			name:   "failing test count is terminal",
+			health: &models.PullRequestHealthResponse{MergeState: models.PullRequestMergeStateClean, FailingTestCount: 1},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			derivePullRequestRepairActions(tt.health)
+			require.Equal(t, tt.want, mergeBlockIsTransient(tt.health))
+		})
+	}
+}
+
 func ptrString(v string) *string {
 	return &v
 }
