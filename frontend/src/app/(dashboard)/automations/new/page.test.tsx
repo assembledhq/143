@@ -12,9 +12,10 @@ import { server } from "@/test/mocks/server";
 import NewAutomationPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
 
+const DRAFT_STORAGE_KEY = "143:new-automation-draft";
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
-const searchParams = new URLSearchParams("template=security-sweep");
+const searchParamsState = vi.hoisted(() => ({ value: "template=security-sweep" }));
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", () => ({
@@ -22,7 +23,7 @@ vi.mock("next/navigation", () => ({
     push: pushMock,
     replace: replaceMock,
   }),
-  useSearchParams: () => searchParams,
+  useSearchParams: () => new URLSearchParams(searchParamsState.value),
 }));
 
 vi.mock("@/hooks/use-auth", () => ({
@@ -36,8 +37,9 @@ describe("NewAutomationPage", () => {
   beforeEach(() => {
     pushMock.mockReset();
     replaceMock.mockReset();
+    searchParamsState.value = "template=security-sweep";
     currentUserRole.value = "member";
-    searchParams.set("template", "security-sweep");
+    window.sessionStorage.clear();
   });
 
   it("allows the timezone selector to wrap cleanly on mobile layouts", async () => {
@@ -276,7 +278,7 @@ describe("NewAutomationPage", () => {
 
   it("explains why the create button is disabled even when schedule triggering is selected", async () => {
     const user = userEvent.setup();
-    searchParams.delete("template");
+    searchParamsState.value = "";
 
     server.use(
       http.get("/api/v1/repositories", () =>
@@ -568,6 +570,266 @@ describe("NewAutomationPage", () => {
     expect(
       (screen.getByLabelText("Goal") as HTMLTextAreaElement).value,
     ).toContain("Review the repository for concrete, actionable security risk");
+  });
+
+  it("restores the latest in-progress automation draft when no template is selected", async () => {
+    searchParamsState.value = "";
+    window.sessionStorage.setItem(
+      DRAFT_STORAGE_KEY,
+      JSON.stringify({
+        __v: 1,
+        name: "Saved automation",
+        goal: "Continue the automation I was writing.",
+        iconValue: "✨",
+        selectedRepoId: "repo-2",
+        intervalValue: 3,
+        intervalUnit: "weeks",
+        intervalRunHour: "14",
+        intervalRunMinute: "45",
+        timezone: "UTC",
+        scheduleEnabled: true,
+        productTriggers: ["github.pr.feedback"],
+        identityScope: "personal",
+        prePRReviewLoops: 2,
+        priority: 25,
+      }),
+    );
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+            {
+              id: "repo-2",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 2,
+              full_name: "acme/worker",
+              default_branch: "develop",
+              private: false,
+              clone_url: "https://github.com/acme/worker.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    expect(await screen.findByDisplayValue("Saved automation")).toBeInTheDocument();
+    expect(screen.getByLabelText("Goal")).toHaveValue("Continue the automation I was writing.");
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Repository" })).toHaveTextContent("acme/worker");
+    });
+    expect(screen.getByLabelText("Interval value")).toHaveValue(3);
+    expect(screen.getByRole("combobox", { name: "Interval unit" })).toHaveTextContent("weeks");
+    expect(screen.getByLabelText("When there is new PR feedback")).toBeChecked();
+  });
+
+  it("saves draft changes before navigating to the template library", async () => {
+    searchParamsState.value = "";
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await user.type(await screen.findByLabelText("Name"), "Draft before browsing");
+    await user.type(screen.getByLabelText("Goal"), "Do not lose this automation.");
+    await user.click(screen.getByRole("link", { name: /Browse all templates/i }));
+
+    const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+    expect(stored).not.toBeNull();
+    expect(JSON.parse(stored!)).toMatchObject({
+      __v: 1,
+      name: "Draft before browsing",
+      goal: "Do not lose this automation.",
+    });
+  });
+
+  it("debounces automation draft writes while typing", async () => {
+    searchParamsState.value = "";
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const nameInput = await screen.findByLabelText("Name");
+    vi.useFakeTimers();
+    try {
+      fireEvent.change(nameInput, { target: { value: "D" } });
+      fireEvent.change(nameInput, { target: { value: "Draft before browsing" } });
+
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+      vi.advanceTimersByTime(399);
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(1);
+      const stored = window.sessionStorage.getItem(DRAFT_STORAGE_KEY);
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored!)).toMatchObject({
+        __v: 1,
+        name: "Draft before browsing",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the stored automation draft after successful creation", async () => {
+    searchParamsState.value = "";
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("/api/v1/automations", async ({ request }) => {
+        const requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            data: {
+              id: "automation-1",
+              org_id: "org-1",
+              repository_id: "repo-1",
+              name: requestBody.name,
+              goal: requestBody.goal,
+              icon_type: "emoji",
+              icon_value: "⚙️",
+              execution_mode: "sequential",
+              max_concurrent: 1,
+              base_branch: "main",
+              identity_scope: "org",
+              pre_pr_review_loops: 1,
+              schedule_type: "interval",
+              github_event_triggers: [],
+              timezone: "UTC",
+              enabled: true,
+              priority: 50,
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await user.type(await screen.findByLabelText("Name"), "Draft to create");
+    await user.type(screen.getByLabelText("Goal"), "Create this automation.");
+    await waitFor(() => {
+      expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).not.toBeNull();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/automations/automation-1");
+    });
+    expect(window.sessionStorage.getItem(DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("does not restore a stored draft when a template is selected via URL param", async () => {
+    // searchParamsState.value is already "template=security-sweep" (default from beforeEach)
+    window.sessionStorage.setItem(
+      DRAFT_STORAGE_KEY,
+      JSON.stringify({
+        __v: 1,
+        name: "My saved draft",
+        goal: "This should not appear.",
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    // The template name should be pre-filled, not the draft name
+    expect(await screen.findByDisplayValue("Security sweep")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("My saved draft")).not.toBeInTheDocument();
   });
 
   it("renders the composer as a lightweight document-style form", async () => {
