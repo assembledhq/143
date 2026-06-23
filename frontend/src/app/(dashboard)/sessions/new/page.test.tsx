@@ -7,10 +7,10 @@ import { renderWithProviders, screen, userEvent, waitFor } from '@/test/test-uti
 import { server } from '@/test/mocks/server';
 import { ManualSessionCreatePageContent } from './manual-session-create-page-content';
 
-const pushMock = vi.fn();
+const replaceMock = vi.fn();
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: pushMock, back: vi.fn() }),
+  useRouter: () => ({ replace: replaceMock, push: vi.fn(), back: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }));
 
@@ -76,7 +76,7 @@ describe('ManualSessionCreatePage', () => {
       }),
     );
 
-    pushMock.mockReset();
+    replaceMock.mockReset();
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(screen.getByRole('button', { name: 'Add files or photos' }));
@@ -89,7 +89,7 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
+      expect(replaceMock).toHaveBeenCalledWith('/sessions/session-manual-chat-1');
     });
   }, 10000);
 
@@ -150,7 +150,7 @@ describe('ManualSessionCreatePage', () => {
       }),
     );
 
-    pushMock.mockReset();
+    replaceMock.mockReset();
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     const textarea = screen.getByPlaceholderText('Tell the agent what to do...');
@@ -163,7 +163,7 @@ describe('ManualSessionCreatePage', () => {
     await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith('/sessions/session-with-reference');
+      expect(replaceMock).toHaveBeenCalledWith('/sessions/session-with-reference');
     });
   });
 
