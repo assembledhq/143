@@ -39,7 +39,8 @@ export function ManualSessionCreatePageContent() {
           textareaAriaLabel="Manual session prompt"
           className={cn("mx-auto flex w-full max-w-3xl flex-1")}
           innerClassName="max-w-3xl"
-          onCreated={(id) => router.push(`/sessions/${id}${filterSuffix}`)}
+          showOptimisticSidebarRow={false}
+          onCreated={(id) => router.replace(`/sessions/${id}${filterSuffix}`)}
           heroSlot={
             <div className="flex-1 flex flex-col items-center justify-center px-2 pt-16 pb-4">
               <div className="text-center mb-8">
