@@ -54,19 +54,13 @@ import type {
   GitHubUserSuggestion,
 } from "@/lib/types";
 
-type InviteDraft =
-  | { mode: "email"; value: string }
-  | { mode: "github"; value: string; avatarUrl?: string; notificationEmail?: string };
-
 export default function TeamSettingsPage() {
   const queryClient = useQueryClient();
   const { user: currentUser } = useAuth();
   const canManageTeam = currentUser?.role === "admin";
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
-  const [inviteMode, setInviteMode] = useState<"email" | "github">("email");
-  const [inviteDraft, setInviteDraft] = useState<InviteDraft | null>(null);
-  const [githubNotificationEmail, setGithubNotificationEmail] = useState("");
+  const [inviteMode, setInviteMode] = useState<"email" | "github">("github");
   const [inviteError, setInviteError] = useState("");
   const [actionError, setActionError] = useState("");
   const [isInviteDialogOpen, setIsInviteDialogOpen] = useState(false);
@@ -77,6 +71,8 @@ export default function TeamSettingsPage() {
   } | null>(null);
   const [ghSearchQuery, setGhSearchQuery] = useState("");
   const [debouncedGhQuery, setDebouncedGhQuery] = useState("");
+  const [selectedGitHubAvatarUrl, setSelectedGitHubAvatarUrl] = useState<string | undefined>();
+  const [ghUserSelected, setGhUserSelected] = useState(false);
 
   const { data: membersData, isLoading: membersLoading } = useQuery<ListResponse<User>>({
     queryKey: ["team", "members"],
@@ -106,7 +102,8 @@ export default function TeamSettingsPage() {
     githubConnected &&
     inviteMode === "github" &&
     isInviteDialogOpen &&
-    debouncedGhQuery.length > 0;
+    debouncedGhQuery.length > 0 &&
+    !ghUserSelected;
 
   const { data: ghSearchData, isFetching: ghSearchLoading } = useQuery<
     ListResponse<GitHubUserSuggestion>
@@ -179,82 +176,56 @@ export default function TeamSettingsPage() {
   const resetInviteForm = () => {
     setInviteEmail("");
     setInviteRole("member");
-    setInviteMode("email");
-    setInviteDraft(null);
-    setGithubNotificationEmail("");
+    setInviteMode("github");
     setInviteError("");
     setGhSearchQuery("");
     setDebouncedGhQuery("");
-  };
-
-  const clearInviteDraft = () => {
-    setInviteDraft(null);
-    setInviteError("");
-  };
-
-  const addEmailDraft = () => {
-    const email = inviteEmail.trim();
-    if (!email) {
-      setInviteError("Add an email address to the invite.");
-      return;
-    }
-
-    setInviteDraft({ mode: "email", value: email });
-    setInviteError("");
-  };
-
-  const addGitHubDraft = (username: string, avatarUrl?: string) => {
-    const normalizedUsername = username.trim().replace(/^@/, "");
-    const notificationEmail = githubNotificationEmail.trim();
-    if (!normalizedUsername) {
-      setInviteError("Add a GitHub username to the invite.");
-      return;
-    }
-
-    setInviteDraft({
-      mode: "github",
-      value: normalizedUsername,
-      avatarUrl,
-      notificationEmail: notificationEmail || undefined,
-    });
-    setInviteError("");
-    setGhSearchQuery("");
-    setDebouncedGhQuery("");
+    setSelectedGitHubAvatarUrl(undefined);
+    setGhUserSelected(false);
   };
 
   function handleInvite(e: React.FormEvent) {
     e.preventDefault();
     setInviteError("");
-    if (!inviteDraft || inviteDraft.mode !== inviteMode) {
-      setInviteError(
-        inviteMode === "email"
-          ? "Add an email address to the invite."
-          : "Add a GitHub username to the invite.",
-      );
+    const email = inviteEmail.trim();
+    const githubUsername = ghSearchQuery.trim().replace(/^@/, "");
+
+    if (inviteMode === "email") {
+      if (!email) {
+        setInviteError("Add an email address to the invite.");
+        return;
+      }
+
+      inviteMutation.mutate({ email, role: inviteRole });
       return;
     }
 
-    if (inviteDraft.mode === "email") {
-      inviteMutation.mutate({ email: inviteDraft.value, role: inviteRole });
+    if (!githubUsername) {
+      setInviteError("Add a GitHub username to the invite.");
       return;
     }
 
     inviteMutation.mutate({
-      ...(inviteDraft.notificationEmail ? { email: inviteDraft.notificationEmail } : {}),
-      github_username: inviteDraft.value,
+      ...(email ? { email } : {}),
+      github_username: githubUsername,
       acceptance_method: "github",
       role: inviteRole,
     });
   }
 
-  const inviteDraftLabel = inviteDraft
-    ? inviteDraft.mode === "github"
-      ? `@${inviteDraft.value}`
-      : inviteDraft.value
-    : "";
-  const submitInviteLabel = inviteDraft
-    ? `Send invite to ${inviteDraftLabel}`
+  const normalizedGitHubUsername = ghSearchQuery.trim().replace(/^@/, "");
+  const trimmedInviteEmail = inviteEmail.trim();
+  const inviteeLabel = inviteMode === "github"
+    ? normalizedGitHubUsername
+      ? `@${normalizedGitHubUsername}`
+      : ""
+    : trimmedInviteEmail;
+  const submitInviteLabel = inviteeLabel
+    ? `Send invite to ${inviteeLabel}`
     : "Send invite";
+  const canSubmitInvite = inviteMode === "github"
+    ? normalizedGitHubUsername.length > 0
+    : trimmedInviteEmail.length > 0;
 
   const roleBadgeVariant = (role: string) => {
     switch (role) {
@@ -283,10 +254,6 @@ export default function TeamSettingsPage() {
       </Badge>
     );
   };
-
-  const inviteDraftMatchesMode = inviteDraft?.mode === inviteMode;
-  const emailDraftActive = inviteMode === "email" && inviteDraftMatchesMode;
-  const githubDraftActive = inviteMode === "github" && inviteDraftMatchesMode;
 
   return (
     <PageContainer size="default">
@@ -553,8 +520,11 @@ export default function TeamSettingsPage() {
                   const nextMode = v as "email" | "github";
                   setInviteMode(nextMode);
                   setInviteError("");
-                  setInviteDraft(null);
-                  setGithubNotificationEmail("");
+                  setInviteEmail("");
+                  setGhSearchQuery("");
+                  setDebouncedGhQuery("");
+                  setSelectedGitHubAvatarUrl(undefined);
+                  setGhUserSelected(false);
                 }}
               >
                 <TabsList className="w-full">
@@ -569,31 +539,19 @@ export default function TeamSettingsPage() {
                   <div className="space-y-3">
                     <div className="space-y-1.5">
                       <Label htmlFor="invite-email">Email</Label>
-                      <div className="flex gap-2">
-                        <Input
-                          id="invite-email"
-                          type="email"
-                          placeholder="colleague@company.com"
-                          value={inviteEmail}
-                          disabled={emailDraftActive}
-                          onChange={(e) => {
-                            setInviteEmail(e.target.value);
-                            setInviteError("");
-                          }}
-                          className="h-9"
-                        />
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          className="h-9 shrink-0"
-                          disabled={emailDraftActive}
-                          onClick={addEmailDraft}
-                        >
-                          Add email
-                        </Button>
-                      </div>
+                      <Input
+                        id="invite-email"
+                        type="email"
+                        placeholder="colleague@company.com"
+                        value={inviteEmail}
+                        onChange={(e) => {
+                          setInviteEmail(e.target.value);
+                          setInviteError("");
+                        }}
+                        className="h-9"
+                      />
                       <p className="text-xs text-muted-foreground">
-                        Add the email to the invite setup below before sending.
+                        The invitee will accept with this email address.
                       </p>
                     </div>
                   </div>
@@ -610,13 +568,14 @@ export default function TeamSettingsPage() {
                                 id="invite-github"
                                 placeholder="Search GitHub users..."
                                 value={ghSearchQuery}
-                                disabled={githubDraftActive}
                                 onValueChange={(value) => {
                                   setGhSearchQuery(value);
+                                  setSelectedGitHubAvatarUrl(undefined);
+                                  setGhUserSelected(false);
                                   setInviteError("");
                                 }}
                               />
-                              {debouncedGhQuery.length > 0 && (
+                              {debouncedGhQuery.length > 0 && !ghUserSelected && (
                                 <CommandList className="max-h-48">
                                   {ghSearchLoading ? (
                                     <div className="py-3 text-center text-xs text-muted-foreground">
@@ -636,12 +595,12 @@ export default function TeamSettingsPage() {
                                         <CommandItem
                                           key={user.login}
                                           value={user.login}
-                                          onSelect={() =>
-                                            addGitHubDraft(
-                                              user.login,
-                                              user.avatar_url,
-                                            )
-                                          }
+                                          onSelect={() => {
+                                            setGhSearchQuery(user.login);
+                                            setSelectedGitHubAvatarUrl(user.avatar_url);
+                                            setGhUserSelected(true);
+                                            setInviteError("");
+                                          }}
                                         >
                                           {user.avatar_url && (
                                             /* eslint-disable-next-line @next/next/no-img-element */
@@ -662,46 +621,24 @@ export default function TeamSettingsPage() {
                               )}
                             </Command>
                           </div>
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-xs text-muted-foreground">
-                              Search GitHub and choose a result, or add the typed
-                              username directly.
-                            </p>
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              className="h-9 shrink-0"
-                              disabled={githubDraftActive}
-                              onClick={() => addGitHubDraft(ghSearchQuery)}
-                            >
-                              Add GitHub username
-                            </Button>
-                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            Search GitHub and choose a result, or type a
+                            username directly.
+                          </p>
                         </>
                       ) : (
                         <>
-                          <div className="flex gap-2">
-                            <Input
-                              id="invite-github"
-                              placeholder="octocat"
-                              value={ghSearchQuery}
-                              disabled={githubDraftActive}
-                              onChange={(e) => {
-                                setGhSearchQuery(e.target.value);
-                                setInviteError("");
-                              }}
-                              className="h-9"
-                            />
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              className="h-9 shrink-0"
-                              disabled={githubDraftActive}
-                              onClick={() => addGitHubDraft(ghSearchQuery)}
-                            >
-                              Add GitHub username
-                            </Button>
-                          </div>
+                          <Input
+                            id="invite-github"
+                            placeholder="octocat"
+                            value={ghSearchQuery}
+                            onChange={(e) => {
+                              setGhSearchQuery(e.target.value);
+                              setSelectedGitHubAvatarUrl(undefined);
+                              setInviteError("");
+                            }}
+                            className="h-9"
+                          />
                           <p className="text-xs text-muted-foreground">
                             Connect a GitHub App to search for users.
                           </p>
@@ -714,10 +651,9 @@ export default function TeamSettingsPage() {
                         id="invite-github-notification-email"
                         type="email"
                         placeholder="colleague@company.com"
-                        value={githubNotificationEmail}
-                        disabled={githubDraftActive}
+                        value={inviteEmail}
                         onChange={(e) => {
-                          setGithubNotificationEmail(e.target.value);
+                          setInviteEmail(e.target.value);
                           setInviteError("");
                         }}
                         className="h-9"
@@ -730,35 +666,22 @@ export default function TeamSettingsPage() {
                 </TabsContent>
               </Tabs>
               <div className="space-y-2 rounded-lg border border-dashed border-border bg-muted/20 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">
-                      Invite setup
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Review the invitee below before sending the invite.
-                    </p>
-                  </div>
-                  {inviteDraftMatchesMode && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-8"
-                      onClick={clearInviteDraft}
-                    >
-                      Change
-                    </Button>
-                  )}
+                <div>
+                  <p className="text-sm font-medium text-foreground">
+                    Invite setup
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    This updates as you edit the fields above.
+                  </p>
                 </div>
-                {inviteDraftMatchesMode ? (
+                {inviteeLabel ? (
                   <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-3">
                     <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                      {inviteDraft.mode === "github" ? (
-                        inviteDraft.avatarUrl ? (
+                      {inviteMode === "github" ? (
+                        selectedGitHubAvatarUrl ? (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img
-                            src={inviteDraft.avatarUrl}
+                            src={selectedGitHubAvatarUrl}
                             alt=""
                             className="h-10 w-10 rounded-full"
                           />
@@ -771,14 +694,14 @@ export default function TeamSettingsPage() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground">
-                        {inviteDraftLabel}
+                        {inviteeLabel}
                       </p>
                       <p className="text-xs text-muted-foreground">
-                        {inviteDraft.mode === "github"
-                          ? inviteDraft.notificationEmail
-                            ? `Email notification will go to ${inviteDraft.notificationEmail}.`
-                            : "GitHub invitee added to this invite."
-                          : "Email invitee added to this invite."}
+                        {inviteMode === "github"
+                          ? trimmedInviteEmail
+                            ? `Email notification will go to ${trimmedInviteEmail}.`
+                            : "Acceptance will require this GitHub account."
+                          : "Acceptance will require this email address."}
                       </p>
                     </div>
                   </div>
@@ -793,8 +716,8 @@ export default function TeamSettingsPage() {
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {inviteMode === "email"
-                          ? "Add an email above to create the invite draft."
-                          : "Choose a GitHub user above to create the invite draft."}
+                          ? "Enter an email above to send an invite."
+                          : "Choose or type a GitHub username above to send an invite."}
                       </p>
                     </div>
                   </div>
@@ -823,8 +746,7 @@ export default function TeamSettingsPage() {
                   type="submit"
                   disabled={
                     inviteMutation.isPending ||
-                    !inviteDraft ||
-                    inviteDraft.mode !== inviteMode
+                    !canSubmitInvite
                   }
                 >
                   {inviteMutation.isPending ? "Sending..." : submitInviteLabel}

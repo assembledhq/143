@@ -183,9 +183,10 @@ describe('TeamSettingsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'GitHub username' })).toHaveAttribute('data-state', 'active');
+    expect(screen.getByPlaceholderText('octocat')).toBeInTheDocument();
+    expect(screen.getByLabelText('Notification email')).toBeInTheDocument();
     expect(screen.getByText('Invite setup')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Add email' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send invite' })).toBeDisabled();
   });
 
@@ -194,6 +195,7 @@ describe('TeamSettingsPage', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
+    await userEvent.click(screen.getByRole('tab', { name: 'Email' }));
     const emailInput = await screen.findByRole('textbox', { name: 'Email' });
     expect(emailInput).toHaveClass('h-9');
   });
@@ -261,23 +263,18 @@ describe('TeamSettingsPage', () => {
     expect(screen.getAllByText('Actions').length).toBeGreaterThan(0);
   });
 
-  it('adds an email invite draft before submission', async () => {
+  it('submits a live email invite without a separate draft step', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'Email' }));
 
     await waitFor(() => {
       expect(screen.getByRole('textbox', { name: 'Email' })).toBeInTheDocument();
     });
 
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'newuser@test.com');
-    await user.click(screen.getByRole('button', { name: 'Add email' }));
-
-    expect(await screen.findByText('newuser@test.com')).toBeInTheDocument();
-    expect(screen.getByRole('textbox', { name: 'Email' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Add email' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
 
     await user.click(
       screen.getByRole('button', { name: 'Send invite to newuser@test.com' }),
@@ -286,6 +283,32 @@ describe('TeamSettingsPage', () => {
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({ email: 'newuser@test.com', role: 'member' });
     });
+  });
+
+  it('does not leak the email field across invite tabs', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<TeamSettingsPage />);
+
+    await user.click(await screen.findByRole('button', { name: 'Invite' }));
+    await user.click(screen.getByRole('tab', { name: 'Email' }));
+    await user.type(screen.getByRole('textbox', { name: 'Email' }), 'newuser@test.com');
+
+    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
+    expect(screen.getByLabelText('Notification email')).toHaveValue('');
+
+    await user.type(screen.getByPlaceholderText('octocat'), 'octocat');
+    await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
+
+    await waitFor(() => {
+      expect(createInvitationMock).toHaveBeenCalledWith({
+        github_username: 'octocat',
+        acceptance_method: 'github',
+        role: 'member',
+      });
+    });
+    expect(createInvitationMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'newuser@test.com' }),
+    );
   });
 
   it('offers builder as an invite role option', async () => {
@@ -310,8 +333,8 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByLabelText('Role')).toHaveTextContent('Engineer');
 
     await user.click(screen.getByRole('option', { name: 'Engineer' }));
+    await user.click(screen.getByRole('tab', { name: 'Email' }));
     await user.type(screen.getByRole('textbox', { name: 'Email' }), 'engineer@test.com');
-    await user.click(screen.getByRole('button', { name: 'Add email' }));
     await user.click(screen.getByRole('button', { name: 'Send invite to engineer@test.com' }));
 
     await waitFor(() => {
@@ -559,12 +582,11 @@ describe('TeamSettingsPage', () => {
     expect(avatarFallbacks.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('adds a github invite draft via the fallback input when GitHub is not connected', async () => {
+  it('submits a GitHub invite from the fallback input when GitHub is not connected', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
-    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
 
     expect(
       await screen.findByText('Connect a GitHub App to search for users.'),
@@ -572,10 +594,8 @@ describe('TeamSettingsPage', () => {
 
     const input = screen.getByPlaceholderText('octocat');
     await user.type(input, '@octocat');
-    await user.click(screen.getByRole('button', { name: 'Add GitHub username' }));
 
     expect(await screen.findByText('@octocat')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
 
@@ -593,11 +613,9 @@ describe('TeamSettingsPage', () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
-    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
 
     await user.type(screen.getByPlaceholderText('octocat'), 'octocat');
     await user.type(screen.getByLabelText('Notification email'), 'octo@example.com');
-    await user.click(screen.getByRole('button', { name: 'Add GitHub username' }));
 
     expect(await screen.findByText('@octocat')).toBeInTheDocument();
     expect(screen.getByText(/octo@example\.com/)).toBeInTheDocument();
@@ -614,17 +632,16 @@ describe('TeamSettingsPage', () => {
     });
   });
 
-  it('keeps GitHub submit disabled until an invite draft exists', async () => {
+  it('keeps GitHub submit disabled until a username is present', async () => {
     const user = userEvent.setup();
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
-    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
     expect(screen.getByRole('button', { name: 'Send invite' })).toBeDisabled();
     expect(createInvitationMock).not.toHaveBeenCalled();
   });
 
-  it('moves a selected GitHub user into the invite setup when connected', async () => {
+  it('keeps the notification email editable after selecting a GitHub user when connected', async () => {
     githubInviteStatusMock.mockResolvedValue({ data: { connected: true } });
     searchGitHubUsersMock.mockResolvedValue({
       data: [{ login: 'octocat', avatar_url: 'https://example.com/a.png' }],
@@ -635,7 +652,6 @@ describe('TeamSettingsPage', () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await user.click(await screen.findByRole('button', { name: 'Invite' }));
-    await user.click(screen.getByRole('tab', { name: 'GitHub username' }));
 
     const commandInput = await screen.findByPlaceholderText(
       'Search GitHub users...',
@@ -646,14 +662,16 @@ describe('TeamSettingsPage', () => {
     await user.click(suggestion);
 
     expect(await screen.findByText('Invite setup')).toBeInTheDocument();
-    expect(await screen.findByText('GitHub invitee added to this invite.')).toBeInTheDocument();
-    expect(screen.getByText('@octocat')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Change' })).toBeInTheDocument();
+    expect(screen.getAllByText('@octocat').length).toBeGreaterThan(0);
+    const emailInput = screen.getByLabelText('Notification email');
+    expect(emailInput).toBeEnabled();
+    await user.type(emailInput, 'updated@example.com');
 
     await user.click(screen.getByRole('button', { name: 'Send invite to @octocat' }));
 
     await waitFor(() => {
       expect(createInvitationMock).toHaveBeenCalledWith({
+        email: 'updated@example.com',
         github_username: 'octocat',
         acceptance_method: 'github',
         role: 'member',
