@@ -17,15 +17,15 @@ func NewLinearUserLinkStore(db DBTX) *LinearUserLinkStore {
 	return &LinearUserLinkStore{db: db}
 }
 
-func (s *LinearUserLinkStore) GetByLinearUser(ctx context.Context, orgID uuid.UUID, workspaceKey, linearUserID string) (models.LinearUserLink, error) {
+func (s *LinearUserLinkStore) GetByLinearUser(ctx context.Context, orgID uuid.UUID, workspaceID, linearUserID string) (models.LinearUserLink, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT id, org_id, integration_id, user_id, linear_workspace_key, linear_user_id,
+		SELECT id, org_id, integration_id, user_id, linear_workspace_id, linear_user_id,
 			linear_email, linear_display_name, source, linked_at, created_at, updated_at
 		FROM linear_user_links
 		WHERE org_id = @org_id
-		  AND linear_workspace_key = @linear_workspace_key
+		  AND linear_workspace_id = @linear_workspace_id
 		  AND linear_user_id = @linear_user_id`,
-		pgx.NamedArgs{"org_id": orgID, "linear_workspace_key": workspaceKey, "linear_user_id": linearUserID})
+		pgx.NamedArgs{"org_id": orgID, "linear_workspace_id": workspaceID, "linear_user_id": linearUserID})
 	if err != nil {
 		return models.LinearUserLink{}, fmt.Errorf("query linear user link: %w", err)
 	}
@@ -35,14 +35,14 @@ func (s *LinearUserLinkStore) GetByLinearUser(ctx context.Context, orgID uuid.UU
 func (s *LinearUserLinkStore) UpsertEmailMatch(ctx context.Context, link *models.LinearUserLink) error {
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO linear_user_links (
-			org_id, integration_id, user_id, linear_workspace_key, linear_user_id,
+			org_id, integration_id, user_id, linear_workspace_id, linear_user_id,
 			linear_email, linear_display_name, source, linked_at
 		)
 		VALUES (
-			@org_id, @integration_id, @user_id, @linear_workspace_key, @linear_user_id,
+			@org_id, @integration_id, @user_id, @linear_workspace_id, @linear_user_id,
 			@linear_email, @linear_display_name, 'email_match', now()
 		)
-		ON CONFLICT (org_id, linear_workspace_key, linear_user_id)
+		ON CONFLICT (org_id, linear_workspace_id, linear_user_id)
 		DO UPDATE SET
 			integration_id = EXCLUDED.integration_id,
 			user_id = COALESCE(linear_user_links.user_id, EXCLUDED.user_id),
@@ -54,16 +54,16 @@ func (s *LinearUserLinkStore) UpsertEmailMatch(ctx context.Context, link *models
 			END,
 			linked_at = COALESCE(linear_user_links.linked_at, now()),
 			updated_at = now()
-		RETURNING id, org_id, integration_id, user_id, linear_workspace_key, linear_user_id,
+		RETURNING id, org_id, integration_id, user_id, linear_workspace_id, linear_user_id,
 			linear_email, linear_display_name, source, linked_at, created_at, updated_at`,
 		pgx.NamedArgs{
-			"org_id":               link.OrgID,
-			"integration_id":       link.IntegrationID,
-			"user_id":              link.UserID,
-			"linear_workspace_key": link.LinearWorkspaceKey,
-			"linear_user_id":       link.LinearUserID,
-			"linear_email":         link.LinearEmail,
-			"linear_display_name":  link.LinearDisplayName,
+			"org_id":              link.OrgID,
+			"integration_id":      link.IntegrationID,
+			"user_id":             link.UserID,
+			"linear_workspace_id": link.LinearWorkspaceID,
+			"linear_user_id":      link.LinearUserID,
+			"linear_email":        link.LinearEmail,
+			"linear_display_name": link.LinearDisplayName,
 		})
 	if err != nil {
 		return fmt.Errorf("upsert linear email match: %w", err)

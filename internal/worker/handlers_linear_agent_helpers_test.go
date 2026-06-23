@@ -36,7 +36,7 @@ var linearAgentUserColumns = []string{
 }
 
 var linearAgentUserLinkColumns = []string{
-	"id", "org_id", "integration_id", "user_id", "linear_workspace_key", "linear_user_id",
+	"id", "org_id", "integration_id", "user_id", "linear_workspace_id", "linear_user_id",
 	"linear_email", "linear_display_name", "source", "linked_at", "created_at", "updated_at",
 }
 
@@ -124,13 +124,13 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 			row: &db.LinearAgentSession{
 				LinearCreatorUserID: "lin_creator_1",
 			},
-			fetched: &linear.FetchedIssue{WorkspaceSlug: "acme", CreatorEmail: "issue-author@example.com"},
+			fetched: &linear.FetchedIssue{WorkspaceID: "lin_workspace_1", WorkspaceSlug: "acme", CreatorEmail: "issue-author@example.com"},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
 				email := "creator@example.com"
-				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_key = @linear_workspace_key\s+AND linear_user_id = @linear_user_id`).
-					WithArgs(orgID, "acme", "lin_creator_1").
+				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
+					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns).AddRow(
-						uuid.New(), orgID, integrationID, &userID, "acme", "lin_creator_1", &email, "Creator User",
+						uuid.New(), orgID, integrationID, &userID, "lin_workspace_1", "lin_creator_1", &email, "Creator User",
 						models.LinearUserLinkSourceEmailMatch, &now, now, now,
 					))
 			},
@@ -143,12 +143,12 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 			},
 			payload: linearAgentEventPayload{LinearCreatorEmail: "Creator@Example.com"},
 			fetched: &linear.FetchedIssue{
-				WorkspaceSlug: "acme",
-				CreatorEmail:  "issue-author@example.com",
+				WorkspaceID: "lin_workspace_1", WorkspaceSlug: "acme",
+				CreatorEmail: "issue-author@example.com",
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_key = @linear_workspace_key\s+AND linear_user_id = @linear_user_id`).
-					WithArgs(orgID, "acme", "lin_creator_1").
+				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
+					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
 				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
@@ -156,10 +156,10 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
 					))
 				email := "Creator@Example.com"
-				mock.ExpectQuery(`ON CONFLICT \(org_id, linear_workspace_key, linear_user_id\)`).
-					WithArgs(orgID, integrationID, &userID, "acme", "lin_creator_1", &email, "").
+				mock.ExpectQuery(`ON CONFLICT \(org_id, linear_workspace_id, linear_user_id\)`).
+					WithArgs(orgID, integrationID, &userID, "lin_workspace_1", "lin_creator_1", &email, "").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns).AddRow(
-						uuid.New(), orgID, integrationID, &userID, "acme", "lin_creator_1", &email, "",
+						uuid.New(), orgID, integrationID, &userID, "lin_workspace_1", "lin_creator_1", &email, "",
 						models.LinearUserLinkSourceEmailMatch, &now, now, now,
 					))
 			},
@@ -170,15 +170,15 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 				IntegrationID:       uuid.New(),
 				LinearCreatorUserID: "lin_creator_1",
 			},
-			fetched: &linear.FetchedIssue{WorkspaceSlug: "acme"},
+			fetched: &linear.FetchedIssue{WorkspaceID: "lin_workspace_1", WorkspaceSlug: "acme"},
 			client: &linearUserFetchClient{user: &linear.FetchedUser{
 				ID:    "lin_creator_1",
 				Name:  "Creator User",
 				Email: "creator@example.com",
 			}},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_key = @linear_workspace_key\s+AND linear_user_id = @linear_user_id`).
-					WithArgs(orgID, "acme", "lin_creator_1").
+				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
+					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
 				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
@@ -186,10 +186,10 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 						userID, orgID, "creator@example.com", "Creator User", "member", nil, nil, nil, nil, nil, nil, now,
 					))
 				email := "creator@example.com"
-				mock.ExpectQuery(`ON CONFLICT \(org_id, linear_workspace_key, linear_user_id\)`).
-					WithArgs(orgID, integrationID, &userID, "acme", "lin_creator_1", &email, "Creator User").
+				mock.ExpectQuery(`ON CONFLICT \(org_id, linear_workspace_id, linear_user_id\)`).
+					WithArgs(orgID, integrationID, &userID, "lin_workspace_1", "lin_creator_1", &email, "Creator User").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns).AddRow(
-						uuid.New(), orgID, integrationID, &userID, "acme", "lin_creator_1", &email, "Creator User",
+						uuid.New(), orgID, integrationID, &userID, "lin_workspace_1", "lin_creator_1", &email, "Creator User",
 						models.LinearUserLinkSourceEmailMatch, &now, now, now,
 					))
 			},
@@ -202,12 +202,12 @@ func TestApplyLinearAgentCreatorAttribution(t *testing.T) {
 			},
 			client: &linearUserFetchClient{err: errors.New("network timeout")},
 			fetched: &linear.FetchedIssue{
-				WorkspaceSlug: "acme",
-				CreatorEmail:  "issueauthor@example.com",
+				WorkspaceID: "lin_workspace_1", WorkspaceSlug: "acme",
+				CreatorEmail: "issueauthor@example.com",
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, integrationID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_key = @linear_workspace_key\s+AND linear_user_id = @linear_user_id`).
-					WithArgs(orgID, "acme", "lin_creator_1").
+				mock.ExpectQuery(`WHERE org_id = @org_id\s+AND linear_workspace_id = @linear_workspace_id\s+AND linear_user_id = @linear_user_id`).
+					WithArgs(orgID, "lin_workspace_1", "lin_creator_1").
 					WillReturnRows(pgxmock.NewRows(linearAgentUserLinkColumns))
 				mock.ExpectQuery(`(?s)FROM users u\s+JOIN organization_memberships m`).
 					WithArgs(orgID, pgxmock.AnyArg()).
@@ -302,7 +302,7 @@ func TestApplyLinearAgentCreatorAttributionNoMatch(t *testing.T) {
 		{
 			name:    "no creator ID and no issue creator email leaves session unattributed",
 			row:     &db.LinearAgentSession{},
-			fetched: &linear.FetchedIssue{WorkspaceSlug: "acme"},
+			fetched: &linear.FetchedIssue{WorkspaceID: "lin_workspace_1", WorkspaceSlug: "acme"},
 		},
 		{
 			name:    "issue creator email not found in org leaves session unattributed",

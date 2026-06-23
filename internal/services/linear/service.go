@@ -294,6 +294,7 @@ type FetchedIssue struct {
 	TeamID        string
 	TeamKey       string
 	TeamName      string
+	WorkspaceID   string
 	WorkspaceSlug string
 	// ProjectID is the Linear project id when the issue belongs to one.
 	// Empty when the issue is not in a project. Used by the inbound agent

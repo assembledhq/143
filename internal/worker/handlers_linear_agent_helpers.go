@@ -112,14 +112,14 @@ func applyLinearAgentCreatorAttribution(
 	if stores == nil || stores.Users == nil || session == nil {
 		return nil
 	}
-	workspaceKey := linearAttributionWorkspaceKey(fetched)
+	workspaceID := linearAttributionWorkspaceID(fetched)
 	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
 	if creatorID == "" && row != nil {
 		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
 	}
 	if creatorID != "" {
 		if stores.LinearUserLinks != nil {
-			link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceKey, creatorID)
+			link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, creatorID)
 			if err == nil && link.UserID != nil {
 				session.TriggeredByUserID = link.UserID
 				return nil
@@ -142,7 +142,7 @@ func applyLinearAgentCreatorAttribution(
 				displayName = strings.TrimSpace(fetchedUser.Name)
 			}
 		}
-		if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceKey, creatorID, email, displayName, logger); err != nil || matched {
+		if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceID, creatorID, email, displayName, logger); err != nil || matched {
 			return err
 		}
 	}
@@ -152,7 +152,7 @@ func applyLinearAgentCreatorAttribution(
 	}
 	issueCreatorID := strings.TrimSpace(fetched.CreatorID)
 	if issueCreatorID != "" && stores.LinearUserLinks != nil {
-		link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceKey, issueCreatorID)
+		link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, issueCreatorID)
 		if err == nil && link.UserID != nil {
 			session.TriggeredByUserID = link.UserID
 			return nil
@@ -161,7 +161,7 @@ func applyLinearAgentCreatorAttribution(
 			return fmt.Errorf("lookup linear issue creator user link: %w", err)
 		}
 	}
-	if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceKey, issueCreatorID, fetched.CreatorEmail, fetched.CreatorName, logger); err != nil || matched {
+	if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceID, issueCreatorID, fetched.CreatorEmail, fetched.CreatorName, logger); err != nil || matched {
 		return err
 	}
 	return nil
@@ -172,7 +172,7 @@ func applyLinearUserEmailAttribution(
 	stores *Stores,
 	session *models.Session,
 	row *db.LinearAgentSession,
-	workspaceKey, linearUserID, email, displayName string,
+	workspaceID, linearUserID, email, displayName string,
 	logger zerolog.Logger,
 ) (bool, error) {
 	email = strings.TrimSpace(email)
@@ -194,13 +194,13 @@ func applyLinearUserEmailAttribution(
 
 	if stores.LinearUserLinks != nil && row != nil && row.IntegrationID != uuid.Nil && strings.TrimSpace(linearUserID) != "" {
 		link := &models.LinearUserLink{
-			OrgID:              session.OrgID,
-			IntegrationID:      row.IntegrationID,
-			UserID:             &user.ID,
-			LinearWorkspaceKey: workspaceKey,
-			LinearUserID:       strings.TrimSpace(linearUserID),
-			LinearEmail:        &email,
-			LinearDisplayName:  strings.TrimSpace(displayName),
+			OrgID:             session.OrgID,
+			IntegrationID:     row.IntegrationID,
+			UserID:            &user.ID,
+			LinearWorkspaceID: workspaceID,
+			LinearUserID:      strings.TrimSpace(linearUserID),
+			LinearEmail:       &email,
+			LinearDisplayName: strings.TrimSpace(displayName),
 		}
 		if err := stores.LinearUserLinks.UpsertEmailMatch(ctx, link); err != nil {
 			logger.Warn().Err(err).
@@ -211,9 +211,12 @@ func applyLinearUserEmailAttribution(
 	return true, nil
 }
 
-func linearAttributionWorkspaceKey(fetched *linear.FetchedIssue) string {
+func linearAttributionWorkspaceID(fetched *linear.FetchedIssue) string {
 	if fetched == nil {
 		return ""
+	}
+	if strings.TrimSpace(fetched.WorkspaceID) != "" {
+		return strings.TrimSpace(fetched.WorkspaceID)
 	}
 	return strings.TrimSpace(fetched.WorkspaceSlug)
 }

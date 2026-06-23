@@ -119,7 +119,7 @@ Linear user identity bridge used for PR authorship and audit attribution.
 The inbound AgentSession creator is the preferred human actor for
 Linear-started sessions; the issue creator is only a compatibility fallback.
 On session creation, 143 first looks for an existing
-`(org_id, linear_workspace_key, linear_user_id)` link. If none exists and
+`(org_id, linear_workspace_id, linear_user_id)` link. If none exists and
 Linear exposes an email for the AgentSession creator, 143 matches that email
 against org members using primary email, GitHub noreply email, and secondary
 emails, then stores an `email_match` link for future sessions. Admin/self-link
