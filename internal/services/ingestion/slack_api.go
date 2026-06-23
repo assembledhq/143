@@ -358,6 +358,23 @@ func (c *SlackAPIClient) UpdateMessage(ctx context.Context, accessToken, channel
 	return nil
 }
 
+func (c *SlackAPIClient) UpdateMessageWithBlocks(ctx context.Context, accessToken, channelID, messageTS, text string, blocks []SlackBlock) error {
+	payload := map[string]any{
+		"channel": channelID,
+		"ts":      messageTS,
+		"text":    text,
+		"blocks":  blocks,
+	}
+	var resp slackPostMessageResponse
+	if err := c.slackPost(ctx, accessToken, "chat.update", payload, &resp); err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("slack chat.update: %s", resp.Error)
+	}
+	return nil
+}
+
 func (c *SlackAPIClient) DeleteMessage(ctx context.Context, accessToken, channelID, messageTS string) error {
 	payload := map[string]string{
 		"channel": channelID,
