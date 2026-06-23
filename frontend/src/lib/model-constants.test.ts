@@ -5,17 +5,25 @@ import {
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_OPENCODE_MODELS,
   AVAILABLE_PI_MODELS,
+  DEFAULT_CLAUDE_CODE_MODEL,
+  DEFAULT_CODEX_MODEL,
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
-  CODEX_MODEL_GPT_5_4,
+  CLAUDE_CODE_MODEL_OPUS_48,
+  CODEX_MODEL_GPT_5_5,
   LLM_PROVIDER_INFO,
   LLM_MODELS_BY_PROVIDER,
   ownerProviderForModel,
 } from "./model-constants";
 
 describe("model constants", () => {
-  it("uses gpt-5.4 as the PM default", () => {
-    expect(DEFAULT_PM_MODEL).toBe(CODEX_MODEL_GPT_5_4);
+  it("uses GPT 5.5 as the Codex and PM default", () => {
+    expect(DEFAULT_CODEX_MODEL).toBe(CODEX_MODEL_GPT_5_5);
+    expect(DEFAULT_PM_MODEL).toBe(DEFAULT_CODEX_MODEL);
+  });
+
+  it("uses Opus 4.8 as the Claude Code default", () => {
+    expect(DEFAULT_CLAUDE_CODE_MODEL).toBe(CLAUDE_CODE_MODEL_OPUS_48);
   });
 
   it("includes latest Claude Code models", () => {

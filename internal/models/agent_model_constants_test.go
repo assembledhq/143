@@ -9,7 +9,7 @@ import (
 func TestPMModelConstants(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, CodexModelGPT54, DefaultPMModel, "DefaultPMModel should use CodexModelGPT54")
+	require.Equal(t, DefaultCodexModel, DefaultPMModel, "DefaultPMModel should use the Codex default model")
 
 	// AvailablePMModels mirrors the union of every coding agent's model list,
 	// matching the session picker (frontend availableAgentModelGroups).
@@ -25,6 +25,7 @@ func TestPMModelConstants(t *testing.T) {
 func TestClaudeCodeModelConstants(t *testing.T) {
 	t.Parallel()
 
+	require.Equal(t, ClaudeCodeModelOpus48, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 4.8")
 	require.Equal(t,
 		[]string{ClaudeCodeModelFable5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
@@ -35,6 +36,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 func TestCodexModelConstants(t *testing.T) {
 	t.Parallel()
 
+	require.Equal(t, CodexModelGPT55, DefaultCodexModel, "DefaultCodexModel should use GPT 5.5")
 	require.Equal(t,
 		[]string{CodexModelGPT55, CodexModelGPT55Fast, CodexModelGPT54, CodexModelGPT54Fast, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
 		AvailableCodexModels,
