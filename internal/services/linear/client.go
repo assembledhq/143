@@ -62,8 +62,8 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 			state { id name type }
 			priority
 			assignee { name }
-			creator { email }
-			team { id key name organization { urlKey } }
+			creator { id name email }
+			team { id key name organization { id urlKey } }
 			project { id }
 			labels(first: 50) {
 				nodes { name }
@@ -94,6 +94,8 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 					Name string `json:"name"`
 				} `json:"assignee"`
 				Creator *struct {
+					ID    string `json:"id"`
+					Name  string `json:"name"`
 					Email string `json:"email"`
 				} `json:"creator"`
 				Team struct {
@@ -101,6 +103,7 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 					Key          string `json:"key"`
 					Name         string `json:"name"`
 					Organization struct {
+						ID     string `json:"id"`
 						URLKey string `json:"urlKey"`
 					} `json:"organization"`
 				} `json:"team"`
@@ -174,7 +177,11 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 		projectID = issue.Project.ID
 	}
 	creatorEmail := ""
+	creatorID := ""
+	creatorName := ""
 	if issue.Creator != nil {
+		creatorID = issue.Creator.ID
+		creatorName = issue.Creator.Name
 		creatorEmail = issue.Creator.Email
 	}
 
@@ -189,15 +196,49 @@ func (c *graphQLClient) FetchIssue(ctx context.Context, identifier string) (*Fet
 		StateType:     issue.State.Type,
 		Priority:      mapLinearPriorityName(issue.Priority),
 		AssigneeName:  issue.Assignee.Name,
+		CreatorID:     creatorID,
 		CreatorEmail:  creatorEmail,
+		CreatorName:   creatorName,
 		TeamID:        issue.Team.ID,
 		TeamKey:       issue.Team.Key,
 		TeamName:      issue.Team.Name,
+		WorkspaceID:   issue.Team.Organization.ID,
 		WorkspaceSlug: issue.Team.Organization.URLKey,
 		ProjectID:     projectID,
 		Labels:        labels,
 		Comments:      comments,
 		Attachments:   attachments,
+	}, nil
+}
+
+func (c *graphQLClient) FetchUser(ctx context.Context, userID string) (*FetchedUser, error) {
+	if userID == "" {
+		return nil, errors.New("user_id is required")
+	}
+	const query = `query UserGet($id: String!) {
+		user(id: $id) {
+			id name email
+		}
+	}`
+	var result struct {
+		Data struct {
+			User *struct {
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Email string `json:"email"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := c.do(ctx, query, map[string]any{"id": userID}, &result); err != nil {
+		return nil, err
+	}
+	if result.Data.User == nil {
+		return nil, fmt.Errorf("linear user %q not found", userID)
+	}
+	return &FetchedUser{
+		ID:    result.Data.User.ID,
+		Name:  result.Data.User.Name,
+		Email: result.Data.User.Email,
 	}, nil
 }
 

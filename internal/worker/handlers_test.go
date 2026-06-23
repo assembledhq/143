@@ -2034,6 +2034,10 @@ func (c workerLinearClient) FetchIssue(_ context.Context, identifier string) (*l
 	return c.fetch[identifier], nil
 }
 
+func (c workerLinearClient) FetchUser(context.Context, string) (*linearservice.FetchedUser, error) {
+	return nil, errors.New("FetchUser not used")
+}
+
 func (c workerLinearClient) ListTeamKeys(context.Context) ([]linearservice.TeamKeyInfo, error) {
 	return nil, c.err
 }

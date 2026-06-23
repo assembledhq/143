@@ -99,27 +99,126 @@ func buildAgentSession(orgID uuid.UUID, repo linear.AgentRepoResolveResult, issu
 	}
 }
 
-func applyLinearCreatorAttribution(ctx context.Context, users *db.UserStore, session *models.Session, fetched *linear.FetchedIssue, logger zerolog.Logger) error {
-	if users == nil || session == nil || fetched == nil {
+func applyLinearAgentCreatorAttribution(
+	ctx context.Context,
+	stores *Stores,
+	client linear.Client,
+	session *models.Session,
+	row *db.LinearAgentSession,
+	payload linearAgentEventPayload,
+	fetched *linear.FetchedIssue,
+	logger zerolog.Logger,
+) error {
+	if stores == nil || stores.Users == nil || session == nil {
 		return nil
 	}
-	email := strings.TrimSpace(fetched.CreatorEmail)
+	workspaceID := linearAttributionWorkspaceID(fetched)
+	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
+	if creatorID == "" && row != nil {
+		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
+	}
+	if creatorID != "" {
+		if stores.LinearUserLinks != nil {
+			link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, creatorID)
+			if err == nil && link.UserID != nil {
+				session.TriggeredByUserID = link.UserID
+				return nil
+			}
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("lookup linear user link: %w", err)
+			}
+		}
+
+		email := strings.TrimSpace(payload.LinearCreatorEmail)
+		displayName := strings.TrimSpace(payload.LinearCreatorName)
+		if email == "" && client != nil {
+			fetchedUser, err := client.FetchUser(ctx, creatorID)
+			if err != nil {
+				logger.Warn().Err(err).
+					Str("linear_creator_user_id", creatorID).
+					Msg("linear_agent_event: failed to fetch Linear creator for attribution")
+			} else if fetchedUser != nil {
+				email = strings.TrimSpace(fetchedUser.Email)
+				displayName = strings.TrimSpace(fetchedUser.Name)
+			}
+		}
+		if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceID, creatorID, email, displayName, logger); err != nil || matched {
+			return err
+		}
+	}
+
+	if fetched == nil {
+		return nil
+	}
+	issueCreatorID := strings.TrimSpace(fetched.CreatorID)
+	if issueCreatorID != "" && stores.LinearUserLinks != nil {
+		link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, issueCreatorID)
+		if err == nil && link.UserID != nil {
+			session.TriggeredByUserID = link.UserID
+			return nil
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lookup linear issue creator user link: %w", err)
+		}
+	}
+	if matched, err := applyLinearUserEmailAttribution(ctx, stores, session, row, workspaceID, issueCreatorID, fetched.CreatorEmail, fetched.CreatorName, logger); err != nil || matched {
+		return err
+	}
+	return nil
+}
+
+func applyLinearUserEmailAttribution(
+	ctx context.Context,
+	stores *Stores,
+	session *models.Session,
+	row *db.LinearAgentSession,
+	workspaceID, linearUserID, email, displayName string,
+	logger zerolog.Logger,
+) (bool, error) {
+	email = strings.TrimSpace(email)
 	if email == "" {
-		return nil
+		return false, nil
 	}
-	user, err := users.GetByOrgAndEmail(ctx, session.OrgID, email)
+	user, err := stores.Users.GetByOrgAndEmail(ctx, session.OrgID, email)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("lookup linear creator user: %w", err)
+			return false, fmt.Errorf("lookup linear creator user: %w", err)
 		}
 		logger.Debug().
 			Str("creator_email", email).
 			Str("org_id", session.OrgID.String()).
 			Msg("linear_agent_event: no 143 org user matched Linear creator email")
-		return nil
+		return false, nil
 	}
 	session.TriggeredByUserID = &user.ID
-	return nil
+
+	if stores.LinearUserLinks != nil && row != nil && row.IntegrationID != uuid.Nil && strings.TrimSpace(linearUserID) != "" {
+		link := &models.LinearUserLink{
+			OrgID:             session.OrgID,
+			IntegrationID:     row.IntegrationID,
+			UserID:            &user.ID,
+			LinearWorkspaceID: workspaceID,
+			LinearUserID:      strings.TrimSpace(linearUserID),
+			LinearEmail:       &email,
+			LinearDisplayName: strings.TrimSpace(displayName),
+		}
+		if err := stores.LinearUserLinks.UpsertEmailMatch(ctx, link); err != nil {
+			logger.Warn().Err(err).
+				Str("linear_user_id", linearUserID).
+				Msg("linear_agent_event: failed to persist Linear user email match")
+		}
+	}
+	return true, nil
+}
+
+func linearAttributionWorkspaceID(fetched *linear.FetchedIssue) string {
+	if fetched == nil {
+		return ""
+	}
+	if strings.TrimSpace(fetched.WorkspaceID) != "" {
+		return strings.TrimSpace(fetched.WorkspaceID)
+	}
+	return strings.TrimSpace(fetched.WorkspaceSlug)
 }
 
 func resolveLinearAgentSessionAgentType(ctx context.Context, deps LinearAgentEventHandlerDeps, orgID uuid.UUID) (models.AgentType, error) {

@@ -29,6 +29,10 @@ func (c createPathClient) FetchIssue(_ context.Context, identifier string) (*Fet
 	return c.fetch[identifier], nil
 }
 
+func (c createPathClient) FetchUser(context.Context, string) (*FetchedUser, error) {
+	return nil, errors.New("FetchUser not used")
+}
+
 func (c createPathClient) ListTeamKeys(context.Context) ([]TeamKeyInfo, error) {
 	if c.err != nil {
 		return nil, c.err

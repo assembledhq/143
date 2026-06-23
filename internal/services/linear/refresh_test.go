@@ -713,6 +713,9 @@ type fakeRetryClient struct {
 func (f *fakeRetryClient) FetchIssue(context.Context, string) (*FetchedIssue, error) {
 	panic("not used in retry tests")
 }
+func (f *fakeRetryClient) FetchUser(context.Context, string) (*FetchedUser, error) {
+	panic("not used in retry tests")
+}
 func (f *fakeRetryClient) ListTeamKeys(context.Context) ([]TeamKeyInfo, error) {
 	if f.fail401On {
 		return nil, ErrUnauthorized

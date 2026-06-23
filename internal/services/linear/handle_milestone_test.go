@@ -132,6 +132,10 @@ func (f *fakeLinearClient) FetchIssue(context.Context, string) (*FetchedIssue, e
 	return f.currentIssue, nil
 }
 
+func (f *fakeLinearClient) FetchUser(context.Context, string) (*FetchedUser, error) {
+	return nil, errors.New("FetchUser not stubbed")
+}
+
 func (f *fakeLinearClient) ListTeamKeys(context.Context) ([]TeamKeyInfo, error) {
 	return nil, errors.New("ListTeamKeys not stubbed")
 }
