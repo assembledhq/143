@@ -9590,6 +9590,10 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
 				return &RetryableError{Err: err, ConsumeAttempt: true}
 			}
+			if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
+				logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("skipping pull request state sync for disconnected repository")
+				return nil
+			}
 			return err
 		}
 		return nil

@@ -98,6 +98,40 @@ func (s PullRequestHealthEnrichmentStatus) Validate() error {
 	}
 }
 
+type PullRequestHealthSyncStatus string
+
+const (
+	PullRequestHealthSyncStatusSynced  PullRequestHealthSyncStatus = "synced"
+	PullRequestHealthSyncStatusPending PullRequestHealthSyncStatus = "pending"
+	PullRequestHealthSyncStatusBlocked PullRequestHealthSyncStatus = "blocked"
+)
+
+func (s PullRequestHealthSyncStatus) Validate() error {
+	switch s {
+	case PullRequestHealthSyncStatusSynced,
+		PullRequestHealthSyncStatusPending,
+		PullRequestHealthSyncStatusBlocked:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestHealthSyncStatus: %q", s)
+	}
+}
+
+type PullRequestHealthSyncBlocker string
+
+const (
+	PullRequestHealthSyncBlockerRepositoryDisconnected PullRequestHealthSyncBlocker = "repository_disconnected"
+)
+
+func (b PullRequestHealthSyncBlocker) Validate() error {
+	switch b {
+	case "", PullRequestHealthSyncBlockerRepositoryDisconnected:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestHealthSyncBlocker: %q", b)
+	}
+}
+
 type PullRequestMergeWhenReadyState string
 
 const (
@@ -196,6 +230,10 @@ type PullRequestHealthResponse struct {
 	HeadSHA                      string                            `json:"head_sha"`
 	BaseSHA                      string                            `json:"base_sha"`
 	HealthVersion                int64                             `json:"health_version"`
+	SyncStatus                   PullRequestHealthSyncStatus       `json:"sync_status"`
+	SyncBlocker                  PullRequestHealthSyncBlocker      `json:"sync_blocker,omitempty"`
+	RepositoryID                 *uuid.UUID                        `json:"repository_id,omitempty"`
+	RepositoryStatus             *RepositoryStatus                 `json:"repository_status,omitempty"`
 	MergeState                   PullRequestMergeState             `json:"merge_state"`
 	HasConflicts                 bool                              `json:"has_conflicts"`
 	FailingTestCount             int                               `json:"failing_test_count"`

@@ -176,6 +176,7 @@ func (s *LinearTeamRepoMappingStore) Upsert(ctx context.Context, orgID uuid.UUID
 		FROM repositories r
 		WHERE r.id = @repository_id
 		  AND r.org_id = @org_id
+		  AND r.status = 'active'
 		ON CONFLICT (org_id, linear_team_id, COALESCE(linear_project_id, '')) DO UPDATE
 		SET repository_id  = EXCLUDED.repository_id,
 		    default_branch = EXCLUDED.default_branch,

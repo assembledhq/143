@@ -18,6 +18,7 @@ const baseHealth: PullRequestHealthResponse = {
   head_sha: "head-sha",
   base_sha: "base-sha",
   health_version: 1,
+  sync_status: "synced",
   merge_state: "clean",
   has_conflicts: false,
   failing_test_count: 0,
@@ -58,6 +59,18 @@ describe("session PR action state", () => {
       {
         name: "passing checks",
         health: baseHealth,
+        expected: false,
+      },
+      {
+        name: "blocked repository with stale failed checks",
+        health: {
+          ...baseHealth,
+          sync_status: "blocked" as const,
+          sync_blocker: "repository_disconnected" as const,
+          can_fix_tests: true,
+          failing_test_count: 1,
+          checks: [{ name: "unit", category: "test" as const, status: "failed" as const }],
+        },
         expected: false,
       },
     ];
@@ -130,6 +143,25 @@ describe("session PR action state", () => {
     expect(state.disabledReason, "Push changes should explain the running-session blocker").toBe("Wait for the session to finish before pushing changes");
   });
 
+  it("hides push changes when PR health is blocked", () => {
+    const state = derivePushChangesActionState({
+      canShipPR: true,
+      hasOpenPR: true,
+      hasUnpushedChanges: true,
+      hasSnapshot: true,
+      isRunning: false,
+      builderReviewAllowsPR: true,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPush: false,
+      pushingChanges: false,
+      prHealthBlocked: true,
+    } as Parameters<typeof derivePushChangesActionState>[0] & { prHealthBlocked: boolean });
+
+    expect(state.visible, "blocked PR health should hide push changes action derivation").toBe(false);
+    expect(state.disabled, "hidden push changes action should not be disabled").toBe(false);
+  });
+
   it("maps merge health states into stable visible states", () => {
     const tests = [
       {
@@ -152,6 +184,20 @@ describe("session PR action state", () => {
         reason: "Waiting for GitHub to confirm required checks.",
       },
       {
+        name: "blocked by disconnected repository",
+        health: {
+          ...baseHealth,
+          sync_status: "blocked" as const,
+          sync_blocker: "repository_disconnected" as const,
+          can_merge: false,
+          merge_state: "unknown" as const,
+        },
+        disabled: false,
+        reason: undefined,
+        label: "Merge",
+        visible: false,
+      },
+      {
         name: "pending mergeability",
         health: { ...baseHealth, can_merge: false, merge_state: "mergeability_pending" as const },
         disabled: true,
@@ -169,7 +215,7 @@ describe("session PR action state", () => {
 
     for (const tt of tests) {
       const state = deriveMergeActionState({ health: tt.health, hasActiveRepair: false, pendingAction: null });
-      expect(state.visible, `${tt.name} should keep Merge in the PR lifecycle row`).toBe(true);
+      expect(state.visible, `${tt.name} should map Merge visibility`).toBe(tt.visible ?? true);
       expect(state.disabled, `${tt.name} should map Merge disabled state`).toBe(tt.disabled);
       expect(state.disabledReason, `${tt.name} should map Merge reason`).toBe(tt.reason);
       expect(state.label, `${tt.name} should map Merge label`).toBe(tt.label ?? "Merge");
@@ -178,6 +224,18 @@ describe("session PR action state", () => {
 
   it("maps merge-when-ready queueable and blocked states", () => {
     const tests = [
+      {
+        name: "blocked by disconnected repository cannot queue",
+        health: {
+          ...baseHealth,
+          sync_status: "blocked" as const,
+          sync_blocker: "repository_disconnected" as const,
+          can_merge: false,
+        },
+        visible: false,
+        disabled: false,
+        label: "Merge when ready",
+      },
       {
         name: "pending checks can queue",
         health: { ...baseHealth, can_merge: false, checks: [{ name: "unit", category: "test" as const, status: "pending" as const }] },

@@ -253,6 +253,7 @@ Recommended behavior:
 
 - if a fresh summary sync is in progress, show a lightweight syncing state and suppress repair buttons until eligibility is known
 - if mergeability remains `mergeability_pending` after retry, do not show `Resolve conflicts` yet; keep the Merge action visible but disabled in a neutral checking state
+- if the linked repository is no longer active in 143, return `sync_status=blocked` with `sync_blocker=repository_disconnected`; show a warning banner with a reconnect/settings CTA, stop health polling, and hide merge, repair, push, and merge-when-ready actions until the repository is reconnected
 - if failed checks are present but cannot be confidently classified, still show `Fix tests` and pass the failed check names, provider, URL, summary, annotations, and log excerpt when available
 - if the health snapshot is older than a defined freshness threshold, show the row as stale and trigger a refresh rather than reusing old button eligibility
 

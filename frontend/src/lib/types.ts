@@ -149,6 +149,8 @@ export interface AuthProviders {
   demo_password?: string;
 }
 
+export type RepositoryStatus = "active" | "paused" | "disconnected";
+
 export interface Repository {
   id: string;
   org_id: string;
@@ -161,7 +163,7 @@ export interface Repository {
   description?: string;
   clone_url: string;
   installation_id: number;
-  status: string;
+  status: RepositoryStatus;
   last_synced_at?: string;
   context_quality?: number;
   settings: Record<string, unknown>;
@@ -1693,6 +1695,10 @@ export interface PullRequestHealthResponse {
   head_sha: string;
   base_sha: string;
   health_version: number;
+  sync_status: "synced" | "pending" | "blocked";
+  sync_blocker?: "repository_disconnected";
+  repository_id?: string;
+  repository_status?: RepositoryStatus;
   merge_state:
     | "unknown"
     | "mergeability_pending"

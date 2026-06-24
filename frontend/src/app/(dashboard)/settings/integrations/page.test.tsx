@@ -11,6 +11,7 @@ const {
   linearAgentMappingsMock,
   updateLinearAgentMock,
   upsertLinearAgentMappingMock,
+  deleteLinearAgentMappingMock,
   getSlackHealthMock,
   getSlackSettingsMock,
   updateSlackSettingsMock,
@@ -55,6 +56,7 @@ const {
     linearAgentMappingsMock: vi.fn(),
     updateLinearAgentMock: vi.fn(),
     upsertLinearAgentMappingMock: vi.fn(),
+    deleteLinearAgentMappingMock: vi.fn(),
     getSlackHealthMock: vi.fn(),
     getSlackSettingsMock: vi.fn(),
     updateSlackSettingsMock: vi.fn(),
@@ -125,6 +127,7 @@ vi.mock("@/lib/api", () => ({
       listLinearAgentMappings: linearAgentMappingsMock,
       updateLinearAgentSettings: updateLinearAgentMock,
       upsertLinearAgentMapping: upsertLinearAgentMappingMock,
+      deleteLinearAgentMapping: deleteLinearAgentMappingMock,
       getSlackHealth: getSlackHealthMock,
       getSlackSettings: getSlackSettingsMock,
       updateSlackSettings: updateSlackSettingsMock,
@@ -217,6 +220,7 @@ describe("IntegrationsPage", () => {
     linearAgentMappingsMock.mockResolvedValue({ data: [], meta: {} });
     updateLinearAgentMock.mockResolvedValue(undefined);
     upsertLinearAgentMappingMock.mockResolvedValue({ data: {}, meta: {} });
+    deleteLinearAgentMappingMock.mockResolvedValue(undefined);
     getSlackHealthMock.mockResolvedValue({
       data: {
         installation: {
@@ -712,6 +716,89 @@ describe("IntegrationsPage", () => {
         linear_project_id: undefined,
         repository_id: "repo-143",
       });
+    });
+  });
+
+  it("shows stale Linear mappings for disconnected repositories while selectors only offer active repos", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-linear",
+          org_id: "org-1",
+          provider: "linear",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-143", org_id: "org-1", full_name: "assembledhq/143", status: "disconnected" },
+        { id: "repo-api", org_id: "org-1", full_name: "assembledhq/api", status: "active" },
+      ],
+      meta: {},
+    });
+    linearAgentStatusMock.mockResolvedValueOnce({
+      data: {
+        enabled: true,
+        agent_scopes_granted: true,
+        app_user_name: "143",
+        has_linear_integration: true,
+        available_teams: [
+          {
+            org_id: "org-1",
+            integration_id: "integration-linear",
+            workspace_id: "workspace-1",
+            team_id: "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+            team_key: "VIR",
+            team_name: "Virtuous Cycle",
+            refreshed_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+      },
+    });
+    linearAgentMappingsMock
+      .mockResolvedValueOnce({
+        data: [
+          {
+            id: "mapping-stale",
+            org_id: "org-1",
+            linear_team_id: "VIR",
+            repository_id: "repo-143",
+            priority: 0,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        ],
+        meta: {},
+      })
+      .mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Linear" }));
+    await screen.findByText("Linear agent routing");
+    expect(screen.getByText("assembledhq/143")).toBeInTheDocument();
+    expect(screen.getByText("Disconnected")).toBeInTheDocument();
+    expect(screen.getByText(/This mapping will block new Linear agent sessions until it is removed or changed to an active repository/)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("combobox", { name: "Override repository" }));
+    expect(await screen.findByRole("option", { name: "assembledhq/api" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "assembledhq/143" })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    const staleRepoText = screen.getByText("assembledhq/143");
+    const staleMappingRow = staleRepoText.closest(".rounded-md");
+    expect(staleMappingRow).not.toBeNull();
+    const mappingFetchesBeforeDelete = linearAgentMappingsMock.mock.calls.length;
+    await user.click(within(staleMappingRow as HTMLElement).getByRole("button", { name: "Remove mapping" }));
+    await waitFor(() => {
+      expect(deleteLinearAgentMappingMock).toHaveBeenCalledWith("mapping-stale");
+    });
+    await waitFor(() => {
+      expect(linearAgentMappingsMock.mock.calls.length).toBeGreaterThan(mappingFetchesBeforeDelete);
     });
   });
 

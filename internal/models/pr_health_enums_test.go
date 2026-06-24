@@ -95,6 +95,61 @@ func TestPullRequestHealthEnrichmentStatusValidate(t *testing.T) {
 	}
 }
 
+func TestPullRequestHealthSyncStatusValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		status    PullRequestHealthSyncStatus
+		expectErr bool
+	}{
+		{name: "synced", status: PullRequestHealthSyncStatusSynced},
+		{name: "pending", status: PullRequestHealthSyncStatusPending},
+		{name: "blocked", status: PullRequestHealthSyncStatusBlocked},
+		{name: "invalid", status: PullRequestHealthSyncStatus("oops"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.status.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported PR health sync statuses")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported PR health sync statuses")
+		})
+	}
+}
+
+func TestPullRequestHealthSyncBlockerValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		blocker   PullRequestHealthSyncBlocker
+		expectErr bool
+	}{
+		{name: "repository disconnected", blocker: PullRequestHealthSyncBlockerRepositoryDisconnected},
+		{name: "empty", blocker: PullRequestHealthSyncBlocker("")},
+		{name: "invalid", blocker: PullRequestHealthSyncBlocker("github_rate_limited"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.blocker.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported PR health sync blockers")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported PR health sync blockers")
+		})
+	}
+}
+
 func TestPullRequestMergeWhenReadyStateValidate(t *testing.T) {
 	t.Parallel()
 
