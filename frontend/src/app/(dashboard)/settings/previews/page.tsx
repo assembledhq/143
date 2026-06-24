@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import {
   Eye,
+  ExternalLink,
   HelpCircle,
   KeyRound,
   MonitorPlay,
@@ -18,6 +19,7 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
+import Link from "next/link";
 
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { EmptyState } from "@/components/empty-state";
@@ -465,7 +467,46 @@ function AutoPreviewSection() {
           </p>
         </div>
       </div>
+
+      <RuntimeEnvironmentCard />
     </section>
+  );
+}
+
+function RuntimeEnvironmentCard() {
+  return (
+    <div className="space-y-3 rounded-md border border-border p-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <h3 className="text-sm font-medium text-foreground">
+            Runtime environment
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            143 injects this environment into every preview service so apps can
+            detect they are running inside a memory-capped preview.
+          </p>
+        </div>
+        <Button asChild size="sm" variant="outline">
+          <Link href="/docs/reference/preview-config#platform-injected-environment">
+            View preview env docs
+            <ExternalLink className="h-3.5 w-3.5" />
+          </Link>
+        </Button>
+      </div>
+      <div className="space-y-1 rounded-md bg-muted px-3 py-2">
+        <code className="block font-mono text-xs text-foreground">
+          ONEFORTYTHREE=true
+        </code>
+        <code className="block font-mono text-xs text-foreground">
+          ONEFORTYTHREE_ENV=preview
+        </code>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Use the preview environment value to disable background workers,
+        schedulers, profilers, telemetry exporters, and other non-serving work
+        that is useful in production but not needed to serve a preview.
+      </p>
+    </div>
   );
 }
 

@@ -1129,7 +1129,7 @@ func (o *managerServiceObserver) OnServiceFailed(name, errMsg string, tail []str
 	// the memory cap, so the per-service error, the preview log, and the
 	// instance error all make the cause obvious instead of leaving a bare
 	// "exited with code 137" for the user to decode.
-	detail := annotatePreviewFailure(errMsg, o.memoryLimitMB)
+	detail := annotatePreviewFailure(errMsg, o.memoryLimitMB, o.oomPhaseForServiceFailure(errMsg))
 
 	if err := o.manager.store.UpdateServiceStatus(ctx, o.orgID, o.previewID, name, models.PreviewServiceStatusFailed, detail); err != nil {
 		o.manager.logger.Warn().Err(err).
@@ -1197,35 +1197,76 @@ func looksLikeOOMFailure(errMsg string) bool {
 // which would otherwise bloat the instance error rendered on the launch page.
 const maxOriginalFailureRunes = 500
 
+type oomPhase string
+
+const (
+	oomPhaseUnknown oomPhase = ""
+	oomPhaseInstall oomPhase = "install"
+	oomPhaseBuild   oomPhase = "build"
+	oomPhaseStartup oomPhase = "startup"
+	oomPhaseRuntime oomPhase = "runtime"
+)
+
+func oomPhaseAdvice(phase oomPhase) string {
+	switch phase {
+	case oomPhaseInstall:
+		return "Reduce install memory use: keep preview.install limited to dependency installation, avoid app builds there, and narrow dependency cache paths."
+	case oomPhaseBuild:
+		return "Reduce build memory use: lower build parallelism, trim source maps, split build steps, or serve a production/static build instead of keeping build tooling resident."
+	case oomPhaseRuntime:
+		return "Reduce runtime memory use: the platform injects ONEFORTYTHREE_ENV=preview; use it to disable background workers, schedulers, profilers, telemetry, and other non-serving processes."
+	case oomPhaseStartup:
+		return "Reduce startup memory use: prebuild heavy assets, keep boot-time seed/setup small, and use ONEFORTYTHREE_ENV=preview to skip work that is not required to serve the preview."
+	default:
+		return "Reduce memory use in the preview process or split heavy work out of the serving service."
+	}
+}
+
 // oomFailureExplanation returns the plain-English OOM explanation used across
 // the preview failure surfaces, including the memory cap when known
 // (memoryLimitMB > 0). It is a sentence fragment beginning "ran out of
 // memory…" so callers can prepend their own subject.
-func oomFailureExplanation(memoryLimitMB int) string {
+func oomFailureExplanation(memoryLimitMB int, phase oomPhase) string {
 	capText := ""
 	if memoryLimitMB > 0 {
 		capText = fmt.Sprintf("; capped at %d MiB", memoryLimitMB)
 	}
-	return fmt.Sprintf(
-		"ran out of memory (OOM, exit 137)%s. Reduce memory use — "+
-			"e.g. serve a production build instead of a dev server.",
-		capText,
-	)
+	return fmt.Sprintf("ran out of memory (OOM, exit 137)%s. %s", capText, oomPhaseAdvice(phase))
 }
 
 // annotatePreviewFailure prefixes OOM failures with a plain-English
 // explanation (and the memory cap, when known) so preview errors are
 // debuggable without decoding exit codes. Non-OOM messages pass through
 // unchanged. memoryLimitMB <= 0 omits the cap.
-func annotatePreviewFailure(errMsg string, memoryLimitMB int) string {
+func annotatePreviewFailure(errMsg string, memoryLimitMB int, phase oomPhase) string {
 	if !looksLikeOOMFailure(errMsg) {
 		return errMsg
 	}
 	// truncateRunes (defined in session_prewarm_classifier.go) trims and bounds
 	// the raw provider text so a long captured stdout/stderr tail can't bloat
 	// the instance error rendered on the launch page.
-	return oomFailureExplanation(memoryLimitMB) +
+	return oomFailureExplanation(memoryLimitMB, phase) +
 		" Original failure: " + truncateRunes(errMsg, maxOriginalFailureRunes)
+}
+
+func (o *managerServiceObserver) oomPhaseForServiceFailure(errMsg string) oomPhase {
+	msg := strings.ToLower(errMsg)
+	if strings.Contains(msg, " build:") {
+		return oomPhaseBuild
+	}
+
+	o.phaseMu.Lock()
+	defer o.phaseMu.Unlock()
+	if _, ok := o.phaseStarts["service_build"]; ok {
+		return oomPhaseBuild
+	}
+	if _, ok := o.phaseStarts["start_services"]; ok {
+		return oomPhaseStartup
+	}
+	if _, ok := o.phaseStarts["readiness"]; ok {
+		return oomPhaseStartup
+	}
+	return oomPhaseRuntime
 }
 
 func (o *managerServiceObserver) OnInstallFailed(errMsg string, tail []string) {
@@ -2446,23 +2487,25 @@ func (m *Manager) WorkerNodeID() string {
 }
 
 // platformEnv returns environment variables the platform injects into every
-// service of the given preview, overriding any user-declared value. Currently
-// exposes PREVIEW_ORIGIN (computed from PreviewOriginTemplate with "{id}"
-// replaced by the preview UUID). Returns nil when PreviewOriginTemplate is
-// unset, leaving user-declared env untouched.
+// service of the given preview. It always exposes ONEFORTYTHREE=true and
+// ONEFORTYTHREE_ENV=preview so apps can detect 143 preview runtimes and disable
+// background workers, profilers, schedulers, and other non-serving work;
+// validation rejects user-declared values for those reserved names so collisions
+// fail before launch. When configured, it also exposes PREVIEW_ORIGIN (computed
+// from PreviewOriginTemplate with "{id}" replaced by the preview UUID).
 func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
-	if m.previewOriginTemplate == "" {
-		return nil
+	env := map[string]string{
+		previewPlatformNameEnv:    previewPlatformNameValue,
+		previewPlatformContextEnv: previewPlatformContextValue,
 	}
-	origin := strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
-	return map[string]string{"PREVIEW_ORIGIN": origin}
+	if m.previewOriginTemplate != "" {
+		env["PREVIEW_ORIGIN"] = strings.ReplaceAll(m.previewOriginTemplate, "{id}", previewID.String())
+	}
+	return env
 }
 
 func (m *Manager) previewOrigin(previewID uuid.UUID) string {
 	env := m.platformEnv(previewID)
-	if env == nil {
-		return ""
-	}
 	return env["PREVIEW_ORIGIN"]
 }
 

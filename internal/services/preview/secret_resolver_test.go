@@ -2,6 +2,7 @@ package preview
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -54,6 +55,34 @@ func TestRenderPreviewSecretOutputsRejectsMissingHints(t *testing.T) {
 
 	require.Error(t, err, "renderPreviewSecretOutputs should reject bundles that do not satisfy repo hints")
 	require.Contains(t, err.Error(), `required env "DATABASE_URL"`, "renderPreviewSecretOutputs should identify the missing env hint")
+}
+
+func TestRenderPreviewSecretOutputsRejectsReservedPreviewModeEnv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		envName string
+	}{
+		{name: "platform identity", envName: "ONEFORTYTHREE"},
+		{name: "platform context", envName: "ONEFORTYTHREE_ENV"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := renderPreviewSecretOutputs(
+				models.PreviewSecretBundleRef{Bundle: "repo-dev", Services: []string{"web"}},
+				models.PreviewSecretBundleSource{Type: "managed", Values: map[string]string{"preview_mode": "cms"}},
+				[]models.PreviewSecretBundleOutput{{Type: "env", Values: map[string]string{tt.envName: "secret:preview_mode"}}},
+				[]string{"web"},
+			)
+
+			require.Error(t, err, "renderPreviewSecretOutputs should reject env outputs that collide with platform-injected preview env")
+			require.Contains(t, err.Error(), fmt.Sprintf(`env "%s" is reserved`, tt.envName), "error should identify the reserved env name")
+		})
+	}
 }
 
 func TestRenderPreviewSecretOutputsRejectsServiceScopedFileOutputs(t *testing.T) {

@@ -42,7 +42,21 @@ func TestClassifyLaunchFailure_OutOfMemory(t *testing.T) {
 	require.Contains(t, failure.Message, "ran out of memory", "OOM failures should be explained in plain English")
 	require.Contains(t, failure.Message, "exit 137", "OOM message should name the exit code")
 	require.Contains(t, failure.Message, "8192 MiB", "OOM message should include the memory cap")
+	require.Contains(t, failure.Message, "ONEFORTYTHREE_ENV=preview", "startup/runtime OOM guidance should point at preview-mode guards")
+	require.NotContains(t, failure.Message, "dev server", "startup/runtime OOM guidance should not assume a dev-server cause")
 	require.Contains(t, failure.Message, "webserver exited with code 137", "underlying detail should be preserved")
+}
+
+func TestClassifyLaunchFailure_BuildOutOfMemory(t *testing.T) {
+	t.Parallel()
+
+	failure := ClassifyLaunchFailure(fmt.Errorf("%w: service %q build: exited with code 137", ErrServiceBuildFailed, "webserver"), 8192)
+
+	require.Equal(t, "PREVIEW_START_FAILED", failure.Code, "build OOM should keep the existing default start-failure code")
+	require.Contains(t, failure.Message, "ran out of memory", "build OOM failures should be explained in plain English")
+	require.Contains(t, failure.Message, "build memory", "build OOM guidance should name the build phase")
+	require.Contains(t, failure.Message, "source maps", "build OOM guidance should mention build-specific reductions")
+	require.NotContains(t, failure.Message, "background workers", "build OOM guidance should not point at runtime-only background work")
 }
 
 func TestShouldReassignPreviewWorker(t *testing.T) {
