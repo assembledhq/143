@@ -111,6 +111,17 @@ const mocks = vi.hoisted(() => ({
       created_at: "2026-01-01T00:00:00Z",
     },
   }),
+  authUpdateSettingsMock: vi.fn().mockResolvedValue({
+    data: {
+      id: "user-1",
+      org_id: "org-1",
+      email: "alice@example.com",
+      name: "Alice Smith",
+      role: "admin",
+      settings: { manual_session_planes_hidden: true },
+      created_at: "2026-01-01T00:00:00Z",
+    },
+  }),
   integrationsListMock: vi.fn().mockResolvedValue({
     data: [
       {
@@ -148,6 +159,7 @@ vi.mock("@/lib/api", () => ({
     },
     auth: {
       me: mocks.authMeMock,
+      updateSettings: mocks.authUpdateSettingsMock,
     },
     integrations: {
       list: mocks.integrationsListMock,
@@ -253,7 +265,48 @@ describe("ManualSessionCreatePageContent", () => {
       screen.getByText("Start a manual session with text, files, photos, or a screenshot anywhere here."),
     ).toBeInTheDocument();
     expect(screen.getByTestId("manual-session-plane-canvas")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("button", { name: "Hide planes" })).toBeInTheDocument();
     expect(screen.queryByText("Drop a screenshot anywhere here, or use +")).not.toBeInTheDocument();
+  });
+
+  it("hides planes when the user setting is enabled", async () => {
+    mocks.authMeMock.mockResolvedValueOnce({
+      data: {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        settings: { manual_session_planes_hidden: true },
+        created_at: "2026-01-01T00:00:00Z",
+      },
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    expect(await screen.findByRole("button", { name: "Show planes" })).toBeInTheDocument();
+    expect(screen.queryByTestId("manual-session-plane-canvas")).not.toBeInTheDocument();
+  });
+
+  it("persists the planes visibility toggle as a user setting", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    await user.click(await screen.findByRole("button", { name: "Hide planes" }));
+
+    expect(mocks.authUpdateSettingsMock).toHaveBeenCalledWith({ manual_session_planes_hidden: true });
+    expect(screen.queryByTestId("manual-session-plane-canvas")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show planes" })).toBeInTheDocument();
+  });
+
+  it("aligns the mobile planes toggle with the back button", async () => {
+    setMobileViewport(true);
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const toggle = await screen.findByRole("button", { name: "Hide planes" });
+    expect(toggle).toHaveClass("right-2", "top-2", "md:right-4", "md:top-4");
   });
 
   it("does not render dictation controls on desktop or mobile", async () => {

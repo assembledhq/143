@@ -189,6 +189,8 @@ Every service receives:
 | Variable | Use |
 |---|---|
 | `HOST` | Defaults to `0.0.0.0` so frameworks bind where the preview gateway can reach them. |
+| `ONEFORTYTHREE` | Always `true`. Use this to detect that the process is running on 143. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
+| `ONEFORTYTHREE_ENV` | Always `preview` for preview runtimes. Use this to disable background consumers, schedulers, profilers, telemetry exporters, and other work that is not required to serve the preview. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `PREVIEW_ORIGIN` | Public preview URL. Use this for external base URLs, redirects, callbacks, and absolute links. |
 
 ## Trust rules

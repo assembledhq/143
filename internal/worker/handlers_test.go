@@ -861,7 +861,7 @@ func TestAddSlackCompletionReactionUsesOriginalRootMessage(t *testing.T) {
 			require.Equal(t, "xoxb-token", adder.accessToken, "completion reaction should use the Slack bot token")
 			require.Equal(t, tt.link.SlackChannelID, adder.channelID, "completion reaction should target the source Slack channel")
 			require.Equal(t, tt.wantTS, adder.messageTS, "completion reaction should target the original Slack message timestamp")
-			require.Equal(t, "white_check_mark", adder.name, "completion reaction should use the requested checkmark emoji")
+			require.Equal(t, "speech_balloon", adder.name, "completion reaction should use the response-complete emoji")
 		})
 	}
 }

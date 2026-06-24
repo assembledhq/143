@@ -810,6 +810,127 @@ func TestValidateConfig_PreviewInstall(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_RejectsReservedPreviewModeEnv(t *testing.T) {
+	t.Parallel()
+
+	base := func() models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary: "web",
+			Services: map[string]models.ServiceConfig{
+				"web": {
+					Command: []string{"npm", "start"},
+					Port:    3000,
+					Ready:   models.ReadinessProbe{HTTPPath: "/"},
+				},
+			},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Credentials:    models.CredentialConfig{Mode: "none"},
+			Network:        models.NetworkConfig{Mode: "managed"},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*models.PreviewConfig)
+		wantErrSub string
+	}{
+		{
+			name: "service env platform identity",
+			mutate: func(cfg *models.PreviewConfig) {
+				svc := cfg.Services["web"]
+				svc.Env = map[string]string{"ONEFORTYTHREE": "cms"}
+				cfg.Services["web"] = svc
+			},
+			wantErrSub: `service "web": env "ONEFORTYTHREE" is reserved`,
+		},
+		{
+			name: "service env platform context",
+			mutate: func(cfg *models.PreviewConfig) {
+				svc := cfg.Services["web"]
+				svc.Env = map[string]string{"ONEFORTYTHREE_ENV": "production"}
+				cfg.Services["web"] = svc
+			},
+			wantErrSub: `service "web": env "ONEFORTYTHREE_ENV" is reserved`,
+		},
+		{
+			name: "infrastructure injected env platform identity",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Infrastructure["db"] = models.InfrastructureConfig{
+					Template:  "postgres-17",
+					InjectEnv: map[string]string{"ONEFORTYTHREE": "true"},
+				}
+			},
+			wantErrSub: `infrastructure "db": inject_env "ONEFORTYTHREE" is reserved`,
+		},
+		{
+			name: "infrastructure injected env platform context",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Infrastructure["db"] = models.InfrastructureConfig{
+					Template:  "postgres-17",
+					InjectEnv: map[string]string{"ONEFORTYTHREE_ENV": "preview"},
+				}
+			},
+			wantErrSub: `infrastructure "db": inject_env "ONEFORTYTHREE_ENV" is reserved`,
+		},
+		{
+			name: "legacy credential env platform identity",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Credentials = models.CredentialConfig{
+					Mode: "managed_env",
+					Env:  []string{"ONEFORTYTHREE"},
+				}
+			},
+			wantErrSub: `credentials: env "ONEFORTYTHREE" is reserved`,
+		},
+		{
+			name: "legacy credential env platform context",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Credentials = models.CredentialConfig{
+					Mode: "managed_env",
+					Env:  []string{"ONEFORTYTHREE_ENV"},
+				}
+			},
+			wantErrSub: `credentials: env "ONEFORTYTHREE_ENV" is reserved`,
+		},
+		{
+			name: "secret bundle hint platform identity",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Secrets = []models.PreviewSecretBundleRef{{
+					Bundle:   "repo-dev",
+					Services: []string{"web"},
+					Env:      []string{"ONEFORTYTHREE"},
+				}}
+			},
+			wantErrSub: `secrets[0]: env "ONEFORTYTHREE" is reserved`,
+		},
+		{
+			name: "secret bundle hint platform context",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Secrets = []models.PreviewSecretBundleRef{{
+					Bundle:   "repo-dev",
+					Services: []string{"web"},
+					Env:      []string{"ONEFORTYTHREE_ENV"},
+				}}
+			},
+			wantErrSub: `secrets[0]: env "ONEFORTYTHREE_ENV" is reserved`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := base()
+			tt.mutate(&cfg)
+
+			errs := ValidateConfig(&cfg)
+
+			require.NotEmpty(t, errs, "reserved platform env names should fail preview config validation")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation error should identify the reserved env source")
+		})
+	}
+}
+
 func TestValidateConfig_Resources(t *testing.T) {
 	t.Parallel()
 

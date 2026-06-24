@@ -93,6 +93,65 @@ func TestFetchRepoMergeSettingsSurfacesHTTPError(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, apiErr.StatusCode)
 }
 
+func TestPRServiceEnqueueSlackSessionReactionUsesLifecycleEmoji(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name      string
+		reaction  string
+		dedupeKey string
+	}{
+		{
+			name:      "session archived",
+			reaction:  models.SlackReactionSessionArchived,
+			dedupeKey: "slack_reaction:" + sessionID.String() + ":" + models.SlackReactionSessionArchived,
+		},
+		{
+			name:      "pull request merged",
+			reaction:  models.SlackReactionPRMerged,
+			dedupeKey: "slack_reaction:" + sessionID.String() + ":" + models.SlackReactionPRMerged,
+		},
+		{
+			name:      "pull request closed without merge",
+			reaction:  models.SlackReactionPRClosed,
+			dedupeKey: "slack_reaction:" + sessionID.String() + ":" + models.SlackReactionPRClosed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create jobs mock")
+			defer mock.Close()
+
+			mock.ExpectQuery("INSERT INTO jobs").
+				WithArgs(pgx.NamedArgs{
+					"org_id":     orgID,
+					"queue":      "default",
+					"job_type":   "slack_add_session_reaction",
+					"payload":    pgxmock.AnyArg(),
+					"priority":   3,
+					"dedupe_key": &tt.dedupeKey,
+				}).
+				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+			service := &PRService{
+				jobs:   db.NewJobStore(mock),
+				logger: zerolog.New(io.Discard),
+			}
+
+			service.enqueueSlackSessionReaction(context.Background(), orgID, sessionID, tt.reaction)
+
+			require.NoError(t, mock.ExpectationsWereMet(), "reaction enqueue should use the expected Slack lifecycle emoji")
+		})
+	}
+}
+
 // TestMergePullRequestOnGitHubSuccess covers the happy path: GitHub returns 200
 // with merged=true and we forward the response intact.
 func TestMergePullRequestOnGitHubSuccess(t *testing.T) {

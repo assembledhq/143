@@ -54,6 +54,10 @@ changing runtime ownership semantics.
   of sending a routine SIGTERM.
 - Routine worker deploys fail closed when no safe blue/green worker port is
   available.
+- Worker blue/green capacity preflight blocks on free memory by default. Idle
+  CPU is observed but non-blocking unless operators explicitly configure
+  `WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS`, because blocking on a noisy
+  one-second CPU sample can strand a worker on the old image.
 - Manual routine worker deploys use the same port-range contract as CI. Run
   `make deploy-worker-preflight`, then deploy with
   `make deploy-fleet ROLES=app,worker`; Make defaults the worker blue/green

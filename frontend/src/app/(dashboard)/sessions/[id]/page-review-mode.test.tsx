@@ -11,6 +11,7 @@ import {
   changeFieldValue,
   submitFieldWithEnter,
   mockSessionDetailWithLazyDiff,
+  sessionWithoutRawDiff,
 } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
@@ -535,6 +536,62 @@ describe('SessionDetailPage review mode and mobile diff', () => {
     expect(await screen.findByText('Edit review comment')).toBeInTheDocument();
     expect(screen.getByDisplayValue('Add a guard before using this import.')).toBeInTheDocument();
     expect(screen.queryByTestId('inline-comment-composer-anchor')).not.toBeInTheDocument();
+  });
+
+  it('resets review center mode to chat when the session id changes without remounting', async () => {
+    const diffFor = (path: string) =>
+      `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1,3 +1,4 @@\n const a = 1;\n+const b = 2;\n const c = 3;\n export {};`;
+    const firstSession: Session = {
+      ...mockSessions[0],
+      id: 'session-review-reset-first',
+      result_summary: 'First review reset session',
+      diff: diffFor('src/first.ts'),
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+    const secondSession: Session = {
+      ...mockSessions[0],
+      id: 'session-review-reset-second',
+      result_summary: 'Second review reset session',
+      diff: diffFor('src/second.ts'),
+      diff_stats: { added: 1, removed: 0, files_changed: 1 },
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', ({ params }) => {
+        const session = params.id === firstSession.id ? firstSession : secondSession;
+        return HttpResponse.json({ data: sessionWithoutRawDiff(session) } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/diff', ({ params }) => {
+        const session = params.id === firstSession.id ? firstSession : secondSession;
+        return HttpResponse.json({
+          data: {
+            session_id: session.id,
+            diff: session.diff,
+            diff_stats: session.diff_stats,
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        });
+      }),
+    );
+
+    const { rerender } = renderWithProviders(<SessionDetailContent id={firstSession.id} />);
+    await screen.findAllByText('First review reset session');
+
+    const user = userEvent.setup();
+    await user.click(screen.getAllByTitle('View changes')[0]);
+    // In review mode the detail toggle is disabled and relabeled.
+    expect(await screen.findByTitle('File tree required during review')).toBeInTheDocument();
+
+    rerender(<SessionDetailContent id={secondSession.id} />);
+    await screen.findAllByText('Second review reset session');
+
+    // The new session must land in chat mode, not inherit review mode.
+    await waitFor(() => {
+      expect(screen.getByTitle('Hide details')).toBeInTheDocument();
+    });
+    expect(screen.queryByTitle('File tree required during review')).not.toBeInTheDocument();
   });
 
   it('exits review mode when clicking a non-changes tab', async () => {

@@ -55,6 +55,7 @@ export interface UserSettings {
     Record<"codex" | "claude_code", "low" | "medium" | "high" | "xhigh" | "max">
   >;
   diff_viewer_full_screen?: boolean;
+  manual_session_planes_hidden?: boolean;
 }
 
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
@@ -71,6 +72,7 @@ export interface UserSettingsUpdateRequest {
     >
   > | null;
   diff_viewer_full_screen?: boolean | null;
+  manual_session_planes_hidden?: boolean | null;
 }
 
 export type AgentCapabilityID =

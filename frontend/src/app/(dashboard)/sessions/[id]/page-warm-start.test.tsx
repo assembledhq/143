@@ -144,6 +144,40 @@ describe('SessionDetailPage warm-start message prefetch', () => {
     await screen.findAllByText('Fixed TypeError by adding null check');
   });
 
+  it('prefetches the next session stored thread window when the id changes without remounting', async () => {
+    const firstSessionId = 'session-prefetch-first';
+    const secondSessionId = 'session-prefetch-second';
+    const firstThreadId = 'thread-prefetch-first';
+    const secondThreadId = 'thread-prefetch-second';
+
+    writeCachedViewerScope(window.localStorage, viewerScope);
+    writeStoredSessionActiveThread(window.localStorage, firstSessionId, viewerScope, firstThreadId);
+    writeStoredSessionActiveThread(window.localStorage, secondSessionId, viewerScope, secondThreadId);
+
+    const transcriptRequests: string[] = [];
+    server.use(
+      http.get('/api/v1/sessions/:id', ({ params }) =>
+        HttpResponse.json({
+          data: { ...mockSessions[0], id: params.id as string, threads: [] },
+        } satisfies SingleResponse<Session>),
+      ),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', ({ params }) => {
+        transcriptRequests.push(params.threadId as string);
+        return HttpResponse.json(makeTranscriptWindow([], []));
+      }),
+    );
+
+    const { rerender } = renderWithProviders(<SessionDetailContent id={firstSessionId} />);
+    await waitFor(() => {
+      expect(transcriptRequests).toContain(firstThreadId);
+    });
+
+    rerender(<SessionDetailContent id={secondSessionId} />);
+    await waitFor(() => {
+      expect(transcriptRequests).toContain(secondThreadId);
+    });
+  });
+
   it('does not prefetch when no thread is stored for the session', async () => {
     writeCachedViewerScope(window.localStorage, viewerScope);
 

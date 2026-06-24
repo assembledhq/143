@@ -562,6 +562,23 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		)
 	}
 
+	for _, ms := range tr.integrations.MessageSenders() {
+		prefix := ms.Name()
+		tools = append(tools, Tool{
+			Name:        prefix + "_send",
+			Description: fmt.Sprintf("Send a message in %s and return delivery status. Use near automation completion to notify a configured channel or thread about the result.", prefix),
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"channel_id": {Type: "string", Description: "Destination channel ID"},
+					"text":       {Type: "string", Description: "Plain-text message body"},
+					"thread_ts":  {Type: "string", Description: "Optional Slack thread timestamp to reply in"},
+				},
+				Required: []string{"channel_id", "text"},
+			},
+		})
+	}
+
 	return tools
 }
 
@@ -655,6 +672,18 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 		}
 		method := name[len(prefix):]
 		return tr.callCITestInsights(ctx, ci, method, args)
+	}
+
+	for _, ms := range tr.integrations.MessageSenders() {
+		prefix := ms.Name() + "_"
+		if len(name) <= len(prefix) || name[:len(prefix)] != prefix {
+			continue
+		}
+		method := name[len(prefix):]
+		if method != "send" {
+			continue
+		}
+		return tr.callMessageSender(ctx, ms, method, args)
 	}
 
 	for _, ms := range tr.integrations.MessageSources() {
@@ -1162,6 +1191,33 @@ func (tr *ToolRegistry) callMessageSource(ctx context.Context, ms integration.Me
 
 	default:
 		return ErrorResult(fmt.Sprintf("unknown message source method: %s", method))
+	}
+}
+
+// --------------------------------------------------------------------------
+// Message sender dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callMessageSender(ctx context.Context, ms integration.MessageSender, method string, args json.RawMessage) *ToolCallResult {
+	switch method {
+	case "send":
+		var p integration.SendMessageParams
+		if err := json.Unmarshal(args, &p); err != nil {
+			return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+		}
+		if strings.TrimSpace(p.ChannelID) == "" {
+			return ErrorResult("channel_id is required")
+		}
+		if strings.TrimSpace(p.Text) == "" {
+			return ErrorResult("text is required")
+		}
+		result, err := ms.SendMessage(ctx, p)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("send message failed: %s", err))
+		}
+		return jsonResult(result)
+	default:
+		return ErrorResult(fmt.Sprintf("unknown message sender method: %s", method))
 	}
 }
 

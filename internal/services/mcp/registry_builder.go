@@ -69,6 +69,10 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 				prCreator := integration.NewInternalPullRequestCreator(token, apiURL)
 				reg.RegisterPullRequestCreator(prCreator)
 				fmt.Fprintln(logger, "143-tools: registered PR creator")
+
+				slackSender := integration.NewInternalSlackMessageSender(token, apiURL)
+				reg.RegisterMessageSender(slackSender)
+				fmt.Fprintln(logger, "143-tools: registered Slack message sender")
 			}
 
 			tabManager := integration.NewInternalSessionTabManager(token, apiURL)
