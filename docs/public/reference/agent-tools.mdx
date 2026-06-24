@@ -47,7 +47,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `github` | `list_recent_prs`, `get_pr_reviews` |
 | `circleci` | `list_flaky_tests`, `get_job_test_results`, `get_recent_test_failures` |
 | `logs` | `query`, `context`, `fields`, `stats` |
-| `slack` | `search_messages`, `get_thread` |
+| `slack` | `search_messages`, `get_thread`, `send` |
 | `issue` | `create` |
 | `pr` | `create` |
 | `project` | `propose` |
@@ -439,6 +439,27 @@ Common use: read the full discussion around a bug report before coding.
 
 ```bash
 143-tools slack get_thread --message_id msg-456
+```
+
+### `slack send`
+
+Send a plain-text Slack message through 143's platform-managed Slack connection. This command appears only when the session or automation has the Slack notification capability.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--channel-id` | string | Yes | Slack channel ID to send to, such as `C123`. |
+| `--text` | string | Yes | Plain-text message body. |
+
+Common use: post automation completion or status updates to a channel chosen by the automation owner.
+
+```bash
+143-tools slack send --channel-id C123 --text "Automation completed successfully."
+```
+
+The command returns delivery state and Slack message coordinates:
+
+```json
+{"status":"sent","channel_id":"C123","message_ts":"1700000000.000100"}
 ```
 
 ## 143 workflow tools
