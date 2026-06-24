@@ -80,6 +80,7 @@ type SessionHandler struct {
 	readinessStore     *db.PRReadinessStore
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
+	slackSessionLinks  *db.SlackSessionLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
 	threadInboxStore   *db.ThreadInboxStore
@@ -369,6 +370,10 @@ func (h *SessionHandler) getLinearLinker() linearSessionLinker {
 
 func (h *SessionHandler) SetIssueSnapshotStore(store *db.SessionTurnIssueSnapshotStore) {
 	h.issueSnapshots = store
+}
+
+func (h *SessionHandler) SetSlackSessionLinkStore(store *db.SlackSessionLinkStore) {
+	h.slackSessionLinks = store
 }
 
 func (h *SessionHandler) enrichSessionLinks(ctx context.Context, orgID uuid.UUID, session *models.Session) {
@@ -4547,6 +4552,7 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
+	h.enqueueSlackArchiveReactionIfLinked(r.Context(), orgID, sessionID)
 	if auditLoadErr != nil {
 		zerolog.Ctx(r.Context()).Warn().
 			Err(auditLoadErr).
@@ -4566,6 +4572,27 @@ func (h *SessionHandler) ArchiveSession(w http.ResponseWriter, r *http.Request) 
 	emitUserAuditWithSession(h.audit, r, models.AuditActionSessionArchived, models.AuditResourceSession, &sessionIDStr, &sessionID, nil, auditDetails)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *SessionHandler) enqueueSlackArchiveReactionIfLinked(ctx context.Context, orgID, sessionID uuid.UUID) {
+	if h.slackSessionLinks == nil || h.jobStore == nil {
+		return
+	}
+	if _, err := h.slackSessionLinks.GetBySession(ctx, orgID, sessionID); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load Slack session link for archive reaction")
+		}
+		return
+	}
+	payload := models.SlackAddSessionReactionJobPayload{
+		OrgID:        orgID.String(),
+		SessionID:    sessionID.String(),
+		ReactionName: models.SlackReactionSessionArchived,
+	}
+	dedupeKey := "slack_reaction:" + sessionID.String() + ":" + models.SlackReactionSessionArchived
+	if _, err := h.jobStore.Enqueue(ctx, orgID, "default", "slack_add_session_reaction", payload, 3, &dedupeKey); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to enqueue Slack archive reaction")
+	}
 }
 
 // UnarchiveSession removes the archived flag from a session.
