@@ -1516,7 +1516,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
   worker_host_capacity_preflight() {
     local min_mem="${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}"
-    local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}"
+    local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}"
     local attempts="${WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS:-3}"
     local retry_delay="${WORKER_BLUE_GREEN_PREFLIGHT_RETRY_DELAY_SECONDS:-2}"
     local free_mem idle_cpu idle1 total1 idle2 total2 delta cpu_count
@@ -1933,7 +1933,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
         --free-memory-mb "${WORKER_BLUE_GREEN_FREE_MEMORY_MB:-0}" \
         --min-free-memory-mb "${WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB:-512}" \
         --idle-cpu-millis "${WORKER_BLUE_GREEN_IDLE_CPU_MILLIS:-0}" \
-        --min-idle-cpu-millis "${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-250}" \
+        --min-idle-cpu-millis "${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}" \
         --include-impact \
         --json
     else
