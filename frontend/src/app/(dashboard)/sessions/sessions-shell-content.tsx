@@ -26,12 +26,7 @@ export function SessionsShellContent({ routeState }: { routeState: SessionsRoute
   }
 
   if (routeState.selectedSessionId) {
-    return (
-      <SessionDetailPageClient
-        key={routeState.selectedSessionId}
-        id={routeState.selectedSessionId}
-      />
-    );
+    return <SessionDetailPageClient id={routeState.selectedSessionId} />;
   }
 
   // Both the explicit create route (/sessions/new) and the bare index
