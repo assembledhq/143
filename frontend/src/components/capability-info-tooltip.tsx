@@ -65,8 +65,8 @@ export function CapabilityInfoTooltip({ definition }: { definition: AgentCapabil
         </TooltipTrigger>
         <TooltipContent side="top" sideOffset={6} className="max-w-72 space-y-1.5">
           <p>{detail}</p>
-          <p className="text-xs uppercase tracking-wide text-background/70">
-            {definition.category} · {RISK_LABEL[definition.risk]} · {ACCESS_LABEL[definition.max_access_level]}
+          <p className="text-xs text-background/70">
+            {RISK_LABEL[definition.risk]} · {ACCESS_LABEL[definition.max_access_level]}
           </p>
         </TooltipContent>
       </Tooltip>
