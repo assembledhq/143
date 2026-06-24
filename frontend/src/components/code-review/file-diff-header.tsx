@@ -36,11 +36,11 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
         className
       )}
     >
-      <div className="flex items-center gap-2 min-w-0">
-        <span className="text-xs font-medium font-mono text-foreground truncate">
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden whitespace-nowrap overscroll-x-contain scrollbar-hide font-mono text-xs font-medium text-foreground">
           {filePath}
         </span>
-        <DiffStatsBadge added={added} removed={removed} />
+        <DiffStatsBadge added={added} removed={removed} className="shrink-0" />
       </div>
       <div className="flex items-center gap-0.5 shrink-0">
         {onBrowseFile && (
@@ -49,7 +49,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
             variant="ghost"
             size="icon"
             onClick={() => onBrowseFile(filePath)}
-            className="h-7 w-7 text-muted-foreground hover:text-foreground"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
             title="Browse in repository explorer"
           >
             <ExternalLink className="h-3.5 w-3.5" />
@@ -60,7 +60,7 @@ export function FileDiffHeader({ filePath, added, removed, className, onBrowseFi
           variant="ghost"
           size="icon"
           onClick={copyPath}
-          className="h-7 w-7 text-muted-foreground hover:text-foreground"
+          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
           title="Copy file path"
         >
           {copied ? (
