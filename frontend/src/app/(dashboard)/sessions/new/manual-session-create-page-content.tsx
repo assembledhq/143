@@ -56,23 +56,23 @@ export function ManualSessionCreatePageContent() {
   }, [persistPlanesHidden, planesHidden]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="relative flex h-full flex-col">
       <div className="md:hidden flex items-center px-2 pt-2">
         <MobileBackButton to="/sessions" label="Back to sessions" />
       </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="absolute right-2 top-2 z-20 h-8 w-8 text-muted-foreground hover:text-foreground md:right-4 md:top-4"
+        aria-label={planesHidden ? "Show planes" : "Hide planes"}
+        title={planesHidden ? "Show planes" : "Hide planes"}
+        onClick={togglePlanes}
+      >
+        {planesHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+      </Button>
       <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4">
         {!planesHidden ? <ManualSessionPlaneCanvas /> : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          className="absolute right-4 top-4 z-20 h-8 w-8 text-muted-foreground hover:text-foreground"
-          aria-label={planesHidden ? "Show planes" : "Hide planes"}
-          title={planesHidden ? "Show planes" : "Hide planes"}
-          onClick={togglePlanes}
-        >
-          {planesHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-        </Button>
         <ManualSessionComposer
           enableDrafts
           autoFocus

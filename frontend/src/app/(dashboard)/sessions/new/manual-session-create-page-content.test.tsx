@@ -300,6 +300,15 @@ describe("ManualSessionCreatePageContent", () => {
     expect(screen.getByRole("button", { name: "Show planes" })).toBeInTheDocument();
   });
 
+  it("aligns the mobile planes toggle with the back button", async () => {
+    setMobileViewport(true);
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const toggle = await screen.findByRole("button", { name: "Hide planes" });
+    expect(toggle).toHaveClass("right-2", "top-2", "md:right-4", "md:top-4");
+  });
+
   it("does not render dictation controls on desktop or mobile", async () => {
     const { unmount } = renderWithProviders(<ManualSessionCreatePageContent />);
 
