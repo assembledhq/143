@@ -10,6 +10,17 @@ describe("FileDiffHeader", () => {
     expect(screen.getByText("src/app.ts")).toBeInTheDocument();
   });
 
+  it("keeps long file paths horizontally scrollable without moving header actions", () => {
+    const longPath = "frontend/src/app/(dashboard)/settings/runtime/components/very-long-file-name-that-overflows-mobile.tsx";
+    render(<FileDiffHeader filePath={longPath} added={3} removed={1} onBrowseFile={vi.fn()} />);
+
+    const path = screen.getByText(longPath);
+    expect(path).toHaveClass("overflow-x-auto", "whitespace-nowrap", "scrollbar-hide");
+    expect(path).not.toHaveClass("truncate");
+    expect(screen.getByTitle("Browse in repository explorer")).toHaveClass("shrink-0");
+    expect(screen.getByTitle("Copy file path")).toHaveClass("shrink-0");
+  });
+
   it("uses attached diff-surface styling without an independent sticky shadow", () => {
     const { container } = render(<FileDiffHeader filePath="src/app.ts" added={3} removed={1} />);
     const header = container.firstElementChild;

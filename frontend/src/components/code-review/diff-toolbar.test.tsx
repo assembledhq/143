@@ -104,6 +104,26 @@ describe("DiffToolbar", () => {
     expect(screen.queryByText("Split")).not.toBeInTheDocument();
   });
 
+  it("makes the mobile file path horizontally scrollable while keeping navigation controls fixed", () => {
+    const longPath = "frontend/src/app/(dashboard)/settings/runtime/components/very-long-file-name-that-overflows-mobile.tsx";
+    renderToolbar({
+      isMobile: true,
+      filePath: longPath,
+      filePositionLabel: "2 of 5",
+      onOpenFileList: vi.fn(),
+      onPrevFile: vi.fn(),
+      onNextFile: vi.fn(),
+      canGoPrev: true,
+      canGoNext: true,
+    });
+
+    const path = screen.getByText(longPath);
+    expect(path).toHaveClass("overflow-x-auto", "whitespace-nowrap", "scrollbar-hide");
+    expect(path).not.toHaveClass("truncate");
+    expect(screen.getByRole("button", { name: "Previous file" })).toHaveClass("shrink-0");
+    expect(screen.getByRole("button", { name: "Next file" })).toHaveClass("shrink-0");
+  });
+
   it("keeps mobile controls icon-first and does not render desktop-style text actions", () => {
     renderToolbar({
       isMobile: true,
