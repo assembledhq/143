@@ -1,0 +1,3 @@
+## Sandbox Runtime Guidance
+
+When running build, test, lint, or verification commands inside a 143 sandbox, avoid the small tmpfs-backed `/tmp` and `/var/tmp` paths for large scratch or cache data. Prefer rootfs-backed directories under `/home/sandbox` or the repository, and set the relevant language/tool-specific temp or cache settings when a tool may write a lot of data. Examples include common `TMPDIR`/`TEMP`/`TMP`, Go `GOTMPDIR`/`GOCACHE`, Node package-manager cache dirs, Python `PIP_CACHE_DIR`, and Rust `CARGO_HOME`/`CARGO_TARGET_DIR`. If a command fails with `no space left on device` under `/tmp` or `/var/tmp`, rerun it with those paths redirected rather than increasing sandbox disk.
