@@ -156,6 +156,18 @@ func handleLinearAgentCreated(
 		}
 		return nil
 	}
+	var disconnectedRepo *linear.AgentRepoDisconnectedError
+	if errors.As(err, &disconnectedRepo) {
+		activity := linear.DisconnectedRepoActivity(disconnectedRepo.RepositoryFullName)
+		emitErr := emitOnce(ctx, client, activities, orgID, row.ID, row.LinearAgentSessionID, activity, logger)
+		if emitErr != nil {
+			logger.Warn().Err(emitErr).Msg("linear_agent_event: failed to emit disconnected-repo response; replays will short-circuit")
+		}
+		if stateErr := agentSessions.SetState(ctx, orgID, row.ID, models.LinearAgentSessionStateComplete); stateErr != nil {
+			logger.Warn().Err(stateErr).Msg("linear_agent_event: failed to record terminal state on disconnected-repo close")
+		}
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("resolve repo: %w", err)
 	}

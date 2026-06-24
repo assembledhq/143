@@ -470,6 +470,16 @@ func TestBuildPRHealthSummaryText(t *testing.T) {
 		expected string
 	}{
 		{
+			name: "repository disconnected blocks sync",
+			health: models.PullRequestHealthResponse{
+				PullRequestNumber: 184,
+				Repository:        "assembledhq/143",
+				SyncStatus:        models.PullRequestHealthSyncStatusBlocked,
+				SyncBlocker:       models.PullRequestHealthSyncBlockerRepositoryDisconnected,
+			},
+			expected: "PR #184 cannot be refreshed because assembledhq/143 is disconnected from GitHub. Reconnect the repository to update merge status, checks, and close/merge state.",
+		},
+		{
 			name: "healthy after checks pass",
 			health: models.PullRequestHealthResponse{
 				PullRequestNumber: 184,

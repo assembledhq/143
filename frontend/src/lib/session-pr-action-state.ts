@@ -1,9 +1,16 @@
 import type { PRCreationState, PRPushState, PullRequestHealthResponse } from "./types";
 
-type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks">;
+type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks" | "sync_status">;
+
+export function prHealthBlocksPRActions(health: Pick<PullRequestHealthResponse, "sync_status"> | null | undefined): boolean {
+  return health?.sync_status === "blocked";
+}
 
 export function hasRepairableFailedChecks(health: RepairableFailedChecksInput | null | undefined): boolean {
   if (!health) {
+    return false;
+  }
+  if (prHealthBlocksPRActions(health)) {
     return false;
   }
   return health.can_fix_tests || health.failing_test_count > 0 || (health.checks ?? []).some((check) => check.status === "failed");
@@ -163,12 +170,17 @@ export type PushChangesActionInput = {
   ghBlocked: boolean;
   queueingPush: boolean;
   pushingChanges: boolean;
+  prHealthBlocked?: boolean;
   pushState?: PRPushState;
   pushError?: string;
   localError?: string;
 };
 
 export function derivePushChangesActionState(input: PushChangesActionInput): LabeledLifecycleActionState {
+  if (input.prHealthBlocked) {
+    return { visible: false, disabled: false, label: "Push changes", spinning: false };
+  }
+
   const visible = input.canShipPR && input.hasOpenPR && (
     input.hasUnpushedChanges ||
     input.queueingPush ||
@@ -281,6 +293,10 @@ export function deriveMergeActionState({ health, hasActiveRepair, pendingAction 
     return { visible: false, disabled: false, label: "Merge", spinning: false };
   }
 
+  if (health.sync_status === "blocked") {
+    return { visible: false, disabled: false, label: "Merge", spinning: false };
+  }
+
   if (pendingAction === "merge") {
     return {
       visible: true,
@@ -386,6 +402,10 @@ export function deriveMergeActionState({ health, hasActiveRepair, pendingAction 
 
 export function deriveMergeWhenReadyActionState({ health, hasActiveRepair, pendingAction, pendingMergeWhenReady }: MergeWhenReadyActionInput): LabeledLifecycleActionState {
   if (health.status !== "open") {
+    return { visible: false, disabled: false, label: "Merge when ready", spinning: false };
+  }
+
+  if (health.sync_status === "blocked") {
     return { visible: false, disabled: false, label: "Merge when ready", spinning: false };
   }
 

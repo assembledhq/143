@@ -14,6 +14,7 @@ const baseHealth: PullRequestHealthResponse = {
   head_sha: "head-sha",
   base_sha: "base-sha",
   health_version: 2,
+  sync_status: "synced",
   merge_state: "clean",
   has_conflicts: false,
   failing_test_count: 0,
@@ -178,6 +179,66 @@ describe("PRHealthBanner", () => {
     const button = screen.getByRole("button", { name: /Checking mergeability…/ });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute("title", "Waiting for GitHub to check mergeability.");
+  });
+
+  it("shows disconnected repository health as a blocked warning with settings CTA and no PR actions", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          sync_status: "blocked",
+          sync_blocker: "repository_disconnected",
+          repository_id: "repo-123",
+          repository_status: "disconnected",
+          merge_state: "unknown",
+          checks_confirmed: true,
+          failing_test_count: 2,
+          checks: [
+            { name: "unit", category: "test", status: "failed" },
+            { name: "lint", category: "test", status: "failed" },
+          ],
+          active_repairs: [
+            {
+              action_type: "fix_tests",
+              session_id: "session-456",
+              thread_id: "thread-789",
+              session_status: "running",
+              health_version: 1,
+            },
+          ],
+          summary: "PR #42 cannot be refreshed because acme/widgets is disconnected from GitHub. Reconnect the repository to update merge status, checks, and close/merge state.",
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        reviewAction={{
+          disabled: false,
+          spinning: false,
+          onClick: vi.fn(),
+        }}
+        pushChanges={{
+          label: "Push changes",
+          disabled: false,
+          spinning: false,
+          showError: false,
+          onClick: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(screen.getByText("PR health")).toBeInTheDocument();
+    expect(screen.getByText(/cannot be refreshed because acme\/widgets is disconnected from GitHub/)).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /Open GitHub settings|Reconnect repository/ });
+    expect(link).toHaveAttribute("href", "/settings/integrations");
+    expect(screen.queryByRole("button", { name: /Checking mergeability…/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Merge$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Review$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Push changes$/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("2/2 failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Fix tests running")).not.toBeInTheDocument();
   });
 
   it("renders an optional Review action in the PR action row", async () => {

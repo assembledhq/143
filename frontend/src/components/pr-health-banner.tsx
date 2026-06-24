@@ -1,6 +1,7 @@
 "use client";
 
 import { AlertTriangle, CheckCircle2, ChevronDown, ClipboardList, ExternalLink, GitMerge, GitPullRequest, Loader2, Upload, Wrench } from "lucide-react";
+import Link from "next/link";
 
 import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -11,7 +12,7 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { SyncTimeText } from "@/components/sync-time-text";
-import { deriveMergeActionState, deriveMergeWhenReadyActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
+import { deriveMergeActionState, deriveMergeWhenReadyActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 
 // PRBannerAction names every action the banner can launch. The pending value
 // is shared across buttons so they can disable each other while one is in
@@ -80,12 +81,14 @@ export function PRHealthBanner({
   reviewAction,
 }: PRHealthBannerProps) {
   const activeRepairState = deriveActiveRepairState(health.active_repairs, currentSessionId, currentThreadId);
-  const isHealthy = activeRepairState.label === null && health.can_merge;
+  const prHealthBlocked = prHealthBlocksPRActions(health);
+  const isRepositoryDisconnected = prHealthBlocked && health.sync_blocker === "repository_disconnected";
+  const isHealthy = !prHealthBlocked && activeRepairState.label === null && health.can_merge;
   const orderedChecks = [...(health.checks ?? [])]
     .map((check) => ({ ...check, status: normalizeCheckStatus(check.status) }))
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
-  const canShowResolveConflictsButton = health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
-  const canShowFixTestsButton = hasRepairableFailedChecks({ ...health, checks: orderedChecks }) && !activeRepairState.suppressFixTests;
+  const canShowResolveConflictsButton = !prHealthBlocked && health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
+  const canShowFixTestsButton = !prHealthBlocked && hasRepairableFailedChecks({ ...health, checks: orderedChecks }) && !activeRepairState.suppressFixTests;
   const mergeAction = deriveMergeActionState({
     health: { ...health, checks: orderedChecks },
     hasActiveRepair: activeRepairState.suppressMerge,
@@ -97,17 +100,21 @@ export function PRHealthBanner({
     pendingAction,
     pendingMergeWhenReady: mergeWhenReadyPending,
   });
-  const canShowMergeButton = mergeAction.visible;
-  const canShowMergeWhenReady = mergeWhenReadyAction.visible && Boolean(onQueueMergeWhenReady || onCancelMergeWhenReady);
+  const canShowMergeButton = !prHealthBlocked && mergeAction.visible;
+  const canShowMergeWhenReady = !prHealthBlocked && mergeWhenReadyAction.visible && Boolean(onQueueMergeWhenReady || onCancelMergeWhenReady);
+  const canShowReviewAction = !prHealthBlocked && !!reviewAction;
+  const canShowPushChanges = !prHealthBlocked && !!pushChanges;
+  const canShowSnapshotDetails = !prHealthBlocked;
+  const canShowActiveRepairState = canShowSnapshotDetails && !!activeRepairState.label;
   const hasActionableButton =
-    !!activeRepairState.label ||
+    canShowActiveRepairState ||
     canShowResolveConflictsButton ||
     canShowFixTestsButton ||
     canShowMergeButton ||
     canShowMergeWhenReady ||
-    !!reviewAction ||
-    !!pushChanges ||
-    !!activeRepairState.openSessionID;
+    canShowReviewAction ||
+    canShowPushChanges ||
+    (canShowSnapshotDetails && !!activeRepairState.openSessionID);
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -123,7 +130,7 @@ export function PRHealthBanner({
                 "flex h-8 w-8 items-center justify-center rounded-full",
                 isHealthy ? "bg-success/10 text-success" : "bg-warning/10 text-warning",
               )}>
-                {isHealthy ? <CheckCircle2 className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
+                {isHealthy ? <CheckCircle2 className="h-4 w-4" /> : isRepositoryDisconnected ? <AlertTriangle className="h-4 w-4" /> : <GitPullRequest className="h-4 w-4" />}
               </div>
               <div className="min-w-0">
                 <div className="text-sm font-medium text-foreground">PR health</div>
@@ -136,8 +143,17 @@ export function PRHealthBanner({
             <p className="text-xs text-foreground">{health.summary}</p>
 
             <div className="flex flex-wrap items-center gap-2">
-              <SyncTimeText syncedAt={health.github_state_synced_at} prefix="Synced" />
-              {health.failing_test_count > 0 && (
+              {isRepositoryDisconnected ? (
+                <span className="text-xs font-medium text-warning">Sync blocked</span>
+              ) : (
+                <SyncTimeText syncedAt={health.github_state_synced_at} prefix="Synced" />
+              )}
+              {isRepositoryDisconnected && (
+                <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
+                  Repository disconnected
+                </Badge>
+              )}
+              {canShowSnapshotDetails && health.failing_test_count > 0 && (
                 orderedChecks.length > 0 ? (
                   <HoverCard openDelay={100} closeDelay={100}>
                     <HoverCardTrigger asChild>
@@ -185,7 +201,7 @@ export function PRHealthBanner({
                   </Badge>
                 )
               )}
-              {health.obsolete_active_repair_sessions && (
+              {canShowSnapshotDetails && health.obsolete_active_repair_sessions && (
                 <Badge variant="secondary" className="text-xs">
                   newer repair context available
                 </Badge>
@@ -199,9 +215,23 @@ export function PRHealthBanner({
               </div>
             )}
 
+            {isRepositoryDisconnected && (
+              <div className="flex flex-col gap-2 rounded-md border border-warning/20 bg-warning/5 px-3 py-2 text-xs text-warning sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-start gap-2">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="text-warning">Reconnect this repository to update PR status and resume PR actions.</span>
+                </div>
+                <Button asChild size="sm" variant="outline" className="w-fit bg-background text-foreground">
+                  <Link href="/settings/integrations">
+                    Open GitHub settings
+                  </Link>
+                </Button>
+              </div>
+            )}
+
             {hasActionableButton && (
               <div className="space-y-2">
-                {activeRepairState.label && pendingAction === null && (
+                {canShowActiveRepairState && pendingAction === null && (
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="secondary" className="text-xs">
                       {activeRepairState.label}
@@ -355,7 +385,7 @@ export function PRHealthBanner({
                       </span>
                     </DisabledTooltip>
                   )}
-                  {reviewAction && (
+                  {canShowReviewAction && reviewAction && (
                     <DisabledTooltip
                       disabled={reviewAction.disabled || pendingAction !== null}
                       content={pendingAction !== null ? "Wait for the current PR action to finish" : reviewAction.title}
@@ -376,7 +406,7 @@ export function PRHealthBanner({
                       </Button>
                     </DisabledTooltip>
                   )}
-                  {pushChanges && (
+                  {canShowPushChanges && pushChanges && (
                     <DisabledTooltip
                       disabled={pushChanges.disabled || pendingAction !== null}
                       content={pendingAction !== null ? "Wait for the current PR action to finish" : pushChanges.title}

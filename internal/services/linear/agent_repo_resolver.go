@@ -40,10 +40,12 @@ type DefaultWorkRepositoryLoader interface {
 }
 
 // AgentRepoLookup is the narrow surface the resolver needs from the
-// repository store: "given a name within this org, give me the repo".
-// Used to honor the `repo:<name>` label override.
+// repository store: label overrides resolve by full name across all statuses,
+// while stored mappings/defaults validate by id so disconnected stale rows can
+// be blocked.
 type AgentRepoLookup interface {
-	GetByFullName(ctx context.Context, orgID uuid.UUID, fullName string) (models.Repository, error)
+	GetByFullNameAnyStatus(ctx context.Context, orgID uuid.UUID, fullName string) (models.Repository, error)
+	GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error)
 }
 
 // NewAgentRepoResolver wires the resolver. settings and repos may be nil
@@ -116,7 +118,11 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 			return AgentRepoResolveResult{}, fmt.Errorf("load agent settings: %w", err)
 		}
 		if settings.EffectiveAllowLabelRepoOverride() {
-			if repo, ok := r.resolveLabelOverride(ctx, in); ok {
+			repo, ok, err := r.resolveLabelOverride(ctx, in)
+			if err != nil {
+				return AgentRepoResolveResult{}, err
+			}
+			if ok {
 				return AgentRepoResolveResult{
 					RepositoryID: repo.ID,
 					Source:       "label_override",
@@ -137,6 +143,9 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 		if mapping.LinearProjectID != nil && *mapping.LinearProjectID == in.LinearProjectID && in.LinearProjectID != "" {
 			source = "team_project_mapping"
 		}
+		if err := r.requireActiveRepo(ctx, in.OrgID, mapping.RepositoryID); err != nil {
+			return AgentRepoResolveResult{}, err
+		}
 		return AgentRepoResolveResult{
 			RepositoryID:  mapping.RepositoryID,
 			DefaultBranch: mapping.DefaultBranch,
@@ -155,6 +164,9 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 			return AgentRepoResolveResult{}, fmt.Errorf("load agent settings: %w", err)
 		}
 		if settings.DefaultRepoID != nil {
+			if err := r.requireActiveRepo(ctx, in.OrgID, *settings.DefaultRepoID); err != nil {
+				return AgentRepoResolveResult{}, err
+			}
 			return AgentRepoResolveResult{
 				RepositoryID: *settings.DefaultRepoID,
 				Source:       "org_default",
@@ -166,6 +178,9 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 				return AgentRepoResolveResult{}, fmt.Errorf("load shared default work repository: %w", err)
 			}
 			if defaultRepoID != nil {
+				if err := r.requireActiveRepo(ctx, in.OrgID, *defaultRepoID); err != nil {
+					return AgentRepoResolveResult{}, err
+				}
 				return AgentRepoResolveResult{
 					RepositoryID: *defaultRepoID,
 					Source:       "org_default",
@@ -177,11 +192,29 @@ func (r *AgentRepoResolver) Resolve(ctx context.Context, in AgentRepoResolveInpu
 	return AgentRepoResolveResult{}, ErrAgentRepoUnmapped
 }
 
+func (r *AgentRepoResolver) requireActiveRepo(ctx context.Context, orgID, repoID uuid.UUID) error {
+	if r.repos == nil {
+		return nil
+	}
+	repo, err := r.repos.GetByID(ctx, orgID, repoID)
+	if err != nil {
+		return fmt.Errorf("load resolved repository: %w", err)
+	}
+	if repo.Status != models.RepositoryStatusActive {
+		return &AgentRepoDisconnectedError{
+			RepositoryID:       repo.ID,
+			RepositoryFullName: repo.FullName,
+			Status:             repo.Status,
+		}
+	}
+	return nil
+}
+
 // resolveLabelOverride scans the issue labels for `repo:<full-name>` and
 // returns the matched repo when found. Case-insensitive on the prefix; the
 // rest of the label is matched against repositories.full_name verbatim
 // (Linear preserves casing on labels).
-func (r *AgentRepoResolver) resolveLabelOverride(ctx context.Context, in AgentRepoResolveInput) (models.Repository, bool) {
+func (r *AgentRepoResolver) resolveLabelOverride(ctx context.Context, in AgentRepoResolveInput) (models.Repository, bool, error) {
 	const prefix = "repo:"
 	for _, label := range in.Labels {
 		trimmed := strings.TrimSpace(label)
@@ -192,19 +225,42 @@ func (r *AgentRepoResolver) resolveLabelOverride(ctx context.Context, in AgentRe
 		if fullName == "" {
 			continue
 		}
-		repo, err := r.repos.GetByFullName(ctx, in.OrgID, fullName)
+		repo, err := r.repos.GetByFullNameAnyStatus(ctx, in.OrgID, fullName)
 		if err != nil {
 			// A label that points to a repo the org doesn't have is a user
 			// error, not a system error. Fall through to the next label
 			// (and ultimately to the team mapping) rather than blowing up.
 			continue
 		}
-		return repo, true
+		if repo.Status != models.RepositoryStatusActive {
+			return models.Repository{}, false, &AgentRepoDisconnectedError{
+				RepositoryID:       repo.ID,
+				RepositoryFullName: repo.FullName,
+				Status:             repo.Status,
+			}
+		}
+		return repo, true, nil
 	}
-	return models.Repository{}, false
+	return models.Repository{}, false, nil
 }
 
 // ErrAgentRepoUnmapped is returned when the resolver finds no matching repo
 // across all four tiers. Sentinel so the dispatcher can render an
 // actionable Linear response activity instead of a 5xx.
 var ErrAgentRepoUnmapped = errors.New("no repository mapped for this Linear team/project")
+
+type AgentRepoDisconnectedError struct {
+	RepositoryID       uuid.UUID
+	RepositoryFullName string
+	Status             models.RepositoryStatus
+}
+
+func (e *AgentRepoDisconnectedError) Error() string {
+	if e == nil {
+		return "mapped repository is disconnected"
+	}
+	if e.RepositoryFullName != "" {
+		return fmt.Sprintf("mapped repository %s is disconnected", e.RepositoryFullName)
+	}
+	return fmt.Sprintf("mapped repository %s is disconnected", e.RepositoryID)
+}

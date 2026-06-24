@@ -1,7 +1,9 @@
 import { prMergedAccent } from "@/lib/pr-status-styles";
+import { pollMs } from "@/lib/poll-intervals";
 import { workingStatusesSet } from "@/lib/session-status-groups";
 import type {
   ListResponse,
+  PullRequestHealthResponse,
   PullRequestStatus,
   Session,
   SessionDetail,
@@ -121,6 +123,15 @@ export function getInitialComposerSelectedModel(thread: SessionThread): string {
 export function hasCleanReviewLoopForSnapshot(loops: SessionReviewLoop[] | undefined, snapshotKey: string | undefined): boolean {
   if (!snapshotKey) return false;
   return (loops ?? []).some((loop) => loop.status === "clean" && loop.latest_checkpoint_key === snapshotKey);
+}
+
+export function getPullRequestHealthRefetchInterval(health: PullRequestHealthResponse | undefined): number | false {
+  if (!health || health.sync_status === "blocked") {
+    return false;
+  }
+  const mergeState = health.merge_state;
+  const mergeWhenReadyState = health.merge_when_ready?.state;
+  return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? pollMs(5_000) : false;
 }
 
 function threadStatusForSessionStatus(status: Session["status"]): ThreadStatus | null {
