@@ -38,6 +38,11 @@ func TestParseUserSettings(t *testing.T) {
 			want: UserSettings{DiffViewerFullScreen: true},
 		},
 		{
+			name: "parses manual session planes hidden preference",
+			raw:  json.RawMessage(`{"manual_session_planes_hidden":true}`),
+			want: UserSettings{ManualSessionPlanesHidden: true},
+		},
+		{
 			name:    "rejects malformed json",
 			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":`),
 			wantErr: true,
@@ -92,13 +97,13 @@ func TestApplyUserSettingsMergePatch(t *testing.T) {
 		{
 			name:    "sets a field without touching the others",
 			current: json.RawMessage(`{"coding_agent_model_default":"claude-opus-4-7","coding_agent_reasoning_defaults":{"codex":"xhigh"}}`),
-			patch:   json.RawMessage(`{"diff_viewer_full_screen":true}`),
+			patch:   json.RawMessage(`{"manual_session_planes_hidden":true}`),
 			want: UserSettings{
 				CodingAgentModelDefault: "claude-opus-4-7",
 				CodingAgentReasoningDefaults: map[AgentType]ReasoningEffort{
 					AgentTypeCodex: ReasoningEffortXHigh,
 				},
-				DiffViewerFullScreen: true,
+				ManualSessionPlanesHidden: true,
 			},
 		},
 		{
@@ -205,6 +210,18 @@ func TestUserSettings_MarshalJSONB(t *testing.T) {
 		raw, err = (UserSettings{DiffViewerFullScreen: true}).MarshalJSONB()
 		require.NoError(t, err, "MarshalJSONB should accept full screen preference")
 		require.JSONEq(t, `{"diff_viewer_full_screen":true}`, string(raw), "MarshalJSONB should encode the full screen preference")
+	})
+
+	t.Run("omits manual session planes hidden when false", func(t *testing.T) {
+		t.Parallel()
+
+		raw, err := (UserSettings{ManualSessionPlanesHidden: false}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept zero-value settings")
+		require.JSONEq(t, `{}`, string(raw), "MarshalJSONB should omit the default planes preference")
+
+		raw, err = (UserSettings{ManualSessionPlanesHidden: true}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept planes preference")
+		require.JSONEq(t, `{"manual_session_planes_hidden":true}`, string(raw), "MarshalJSONB should encode the planes preference")
 	})
 
 	t.Run("rejects invalid settings", func(t *testing.T) {

@@ -1,16 +1,40 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { Eye, EyeOff } from "lucide-react";
 import { ManualSessionComposer } from "@/components/manual-session-composer";
 import { ManualSessionPlaneCanvas } from "@/components/manual-session-plane-canvas";
 import { MobileBackButton } from "@/components/mobile-back-button";
+import { Button } from "@/components/ui/button";
 import { buildFilterSuffix } from "@/hooks/use-people-filter";
+import { useAuth } from "@/hooks/use-auth";
+import { api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { cn } from "@/lib/utils";
 
 export function ManualSessionCreatePageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const storedPlanesHidden = user?.settings?.manual_session_planes_hidden ?? false;
+  const [planesHiddenOverride, setPlanesHiddenOverride] = useState<boolean | null>(null);
+  const planesHidden = planesHiddenOverride ?? storedPlanesHidden;
+
+  const { mutate: persistPlanesHidden } = useMutation({
+    mutationFn: (hidden: boolean) =>
+      api.auth.updateSettings({ manual_session_planes_hidden: hidden }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+      setPlanesHiddenOverride(null);
+    },
+    onError: () => {
+      setPlanesHiddenOverride(null);
+      toast.error("Couldn't save planes preference");
+    },
+  });
 
   // Read the currently selected repository from the URL query params
   // (set by the RepoContextSwitcher) so we clone the codebase into the sandbox.
@@ -25,13 +49,30 @@ export function ManualSessionCreatePageContent() {
     [searchParams],
   );
 
+  const togglePlanes = useCallback(() => {
+    const next = !planesHidden;
+    setPlanesHiddenOverride(next);
+    persistPlanesHidden(next);
+  }, [persistPlanesHidden, planesHidden]);
+
   return (
     <div className="flex flex-col h-full">
       <div className="md:hidden flex items-center px-2 pt-2">
         <MobileBackButton to="/sessions" label="Back to sessions" />
       </div>
       <div className="relative flex flex-1 flex-col overflow-hidden px-4 pb-4">
-        <ManualSessionPlaneCanvas />
+        {!planesHidden ? <ManualSessionPlaneCanvas /> : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="absolute right-4 top-4 z-20 h-8 w-8 text-muted-foreground hover:text-foreground"
+          aria-label={planesHidden ? "Show planes" : "Hide planes"}
+          title={planesHidden ? "Show planes" : "Hide planes"}
+          onClick={togglePlanes}
+        >
+          {planesHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+        </Button>
         <ManualSessionComposer
           enableDrafts
           autoFocus
