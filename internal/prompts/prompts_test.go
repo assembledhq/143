@@ -163,6 +163,19 @@ func TestCodingTaskPreamble(t *testing.T) {
 	assert.Contains(t, result, "untrusted external content")
 }
 
+func TestCodingSandboxGuidance(t *testing.T) {
+	t.Parallel()
+
+	result := CodingSandboxGuidance()
+	require.NotEmpty(t, result, "sandbox guidance should render")
+	require.Contains(t, result, "build, test, lint, or verification commands", "sandbox guidance should apply to all language ecosystems")
+	require.Contains(t, result, "TMPDIR", "sandbox guidance should teach agents to redirect general temp files")
+	require.Contains(t, result, "language/tool-specific", "sandbox guidance should account for ecosystem-specific cache and temp settings")
+	require.Contains(t, result, "GOTMPDIR", "sandbox guidance should keep Go temp knobs as one example")
+	require.Contains(t, result, "/home/sandbox", "sandbox guidance should point Go temp/cache paths at rootfs-backed sandbox storage")
+	require.NotContains(t, result, "When running Go verification commands", "sandbox guidance should not be framed as Go-only")
+}
+
 func TestAnswerOnlyPreamble(t *testing.T) {
 	t.Parallel()
 
