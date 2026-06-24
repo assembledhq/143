@@ -83,6 +83,23 @@ func (m *mockMessageSource) GetThread(_ context.Context, messageID string) (*int
 	}, nil
 }
 
+type mockMessageSender struct {
+	name string
+}
+
+func (m *mockMessageSender) Name() string { return m.name }
+
+func (m *mockMessageSender) SendMessage(_ context.Context, params integration.SendMessageParams) (*integration.SendMessageResult, error) {
+	if strings.TrimSpace(params.ChannelID) == "" || strings.TrimSpace(params.Text) == "" {
+		return nil, fmt.Errorf("channel_id and text are required")
+	}
+	return &integration.SendMessageResult{
+		Status:    "sent",
+		ChannelID: params.ChannelID,
+		MessageTS: "1700000000.000100",
+	}, nil
+}
+
 // --------------------------------------------------------------------------
 // Mock: IncidentProvider
 // --------------------------------------------------------------------------
@@ -265,6 +282,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterCodeReviewSource(&mockCodeReviewSource{name: "github"})
 	reg.RegisterDocumentStore(&mockDocumentStore{name: "notion"})
 	reg.RegisterMessageSource(&mockMessageSource{name: "slack"})
+	reg.RegisterMessageSender(&mockMessageSender{name: "slack"})
 	reg.RegisterIssueCreator(&mockIssueCreator{name: "issue"})
 	reg.RegisterPullRequestCreator(&mockPullRequestCreator{name: "session"})
 	reg.RegisterSessionTabManager(&mockSessionTabManager{name: "session_tabs"})
@@ -661,6 +679,27 @@ func TestCallToolMessageSourceUnknownMethod(t *testing.T) {
 	}
 }
 
+func TestCallToolMessageSenderSend(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "slack_send", json.RawMessage(`{"channel_id":"C123","text":"Automation finished successfully.","thread_ts":"1700000000.000001"}`))
+
+	require.False(t, result.IsError, "slack_send should dispatch without error")
+	require.JSONEq(t, `{"status":"sent","channel_id":"C123","message_ts":"1700000000.000100"}`, result.Content[0].Text,
+		"slack_send should return delivery status and message coordinates")
+}
+
+func TestCallToolMessageSenderSendRequiresChannelAndText(t *testing.T) {
+	t.Parallel()
+
+	tr := NewToolRegistry(buildFullTestRegistry())
+	result := tr.CallTool(context.Background(), "slack_send", json.RawMessage(`{"channel_id":"C123"}`))
+
+	require.True(t, result.IsError, "slack_send should reject a missing message body")
+	require.Contains(t, result.Content[0].Text, "text is required", "slack_send should explain the missing text")
+}
+
 // --------------------------------------------------------------------------
 // Tests: ListTools includes all integration types
 // --------------------------------------------------------------------------
@@ -670,13 +709,13 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 9 incident response + 5 task manager + 2 document store + 2 code review + 2 message source + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 36
-	if len(tools) != 36 {
+	// 4 error tracker + 9 incident response + 5 task manager + 2 document store + 2 code review + 2 message source + 1 message sender + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 37
+	if len(tools) != 37 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 36 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 37 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
@@ -695,6 +734,7 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		"notion_get_document":                  false,
 		"slack_search_messages":                false,
 		"slack_get_thread":                     false,
+		"slack_send":                           false,
 		"issue_create":                         false,
 		"create_pr":                            false,
 		"session_tabs_list":                    false,

@@ -106,6 +106,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"SlackbotHandler.Events":               "public Slack callback resolves org from verified Slack team/app installation",
 		"SlackbotHandler.Commands":             "public Slack callback resolves org from verified Slack team/app installation",
 		"SlackbotHandler.Interactions":         "public Slack callback resolves org from verified Slack team/app installation",
+		"InternalSlackMessageHandler.Send":     "internal sandbox route resolves org from the signed session-scoped internal token",
 
 		// Thin wrappers that delegate to a helper which calls OrgIDFromContext.
 		"PMHandler.Bootstrap":                      "delegates to enqueueAndRespond which uses OrgIDFromContext",

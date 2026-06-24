@@ -22,6 +22,7 @@ type Registry struct {
 	taskManagers                        map[string]TaskManager
 	documentStores                      map[string]DocumentStore
 	messageSources                      map[string]MessageSource
+	messageSenders                      map[string]MessageSender
 	codeReviewSources                   map[string]CodeReviewSource
 	issueCreators                       map[string]IssueCreator
 	prCreators                          map[string]PullRequestCreator
@@ -41,6 +42,7 @@ func NewRegistry() *Registry {
 		taskManagers:                        make(map[string]TaskManager),
 		documentStores:                      make(map[string]DocumentStore),
 		messageSources:                      make(map[string]MessageSource),
+		messageSenders:                      make(map[string]MessageSender),
 		codeReviewSources:                   make(map[string]CodeReviewSource),
 		issueCreators:                       make(map[string]IssueCreator),
 		prCreators:                          make(map[string]PullRequestCreator),
@@ -155,6 +157,13 @@ func (r *Registry) RegisterMessageSource(provider MessageSource) {
 	r.messageSources[provider.Name()] = provider
 }
 
+// RegisterMessageSender adds a message sender (e.g. Slack).
+func (r *Registry) RegisterMessageSender(provider MessageSender) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.messageSenders[provider.Name()] = provider
+}
+
 // ErrorTrackers returns all registered error trackers.
 func (r *Registry) ErrorTrackers() []ErrorTracker {
 	r.mu.RLock()
@@ -239,6 +248,28 @@ func (r *Registry) MessageSource(name string) (MessageSource, error) {
 	ms, ok := r.messageSources[name]
 	if !ok {
 		return nil, fmt.Errorf("message source %q not registered", name)
+	}
+	return ms, nil
+}
+
+// MessageSenders returns all registered message senders.
+func (r *Registry) MessageSenders() []MessageSender {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]MessageSender, 0, len(r.messageSenders))
+	for _, ms := range r.messageSenders {
+		result = append(result, ms)
+	}
+	return result
+}
+
+// MessageSender returns a specific message sender by name, or an error if not found.
+func (r *Registry) MessageSender(name string) (MessageSender, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ms, ok := r.messageSenders[name]
+	if !ok {
+		return nil, fmt.Errorf("message sender %q not registered", name)
 	}
 	return ms, nil
 }
@@ -426,6 +457,7 @@ func (r *Registry) HasAny() bool {
 		len(r.taskManagers) > 0 ||
 		len(r.documentStores) > 0 ||
 		len(r.messageSources) > 0 ||
+		len(r.messageSenders) > 0 ||
 		len(r.codeReviewSources) > 0 ||
 		len(r.issueCreators) > 0 ||
 		len(r.prCreators) > 0 ||
@@ -454,6 +486,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.messageSources {
 		m["message_sources"] = append(m["message_sources"], name)
+	}
+	for name := range r.messageSenders {
+		m["message_senders"] = append(m["message_senders"], name)
 	}
 	for name := range r.codeReviewSources {
 		m["code_review_sources"] = append(m["code_review_sources"], name)

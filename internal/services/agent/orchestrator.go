@@ -6613,6 +6613,7 @@ func (o *Orchestrator) BuildIntegrationSkills(ctx context.Context, orgID uuid.UU
 	}
 	if o.internalAPIURL != "" && o.internalAPISecret != "" {
 		reg.RegisterPullRequestCreator(&integration.StubPullRequestCreator{ProviderName: "session"})
+		reg.RegisterMessageSender(&integration.StubMessageSender{ProviderName: "slack"})
 		settings, err := o.sandboxAuthOrgSettings(ctx, orgID)
 		if err != nil {
 			o.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to load org settings for session tab tools; hiding tools from skills doc")

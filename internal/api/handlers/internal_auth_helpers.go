@@ -1,15 +1,24 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/assembledhq/143/internal/auth"
-	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
-func authorizeInternalSession(w http.ResponseWriter, r *http.Request, signingSecret string, sessionStore *db.SessionStore) (*auth.InternalTokenClaims, models.Session, bool) {
+// internalSessionGetter is the narrow slice of *db.SessionStore that internal
+// session-scoped handlers need. Accepting an interface keeps these handlers
+// unit-testable without a database.
+type internalSessionGetter interface {
+	GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
+}
+
+func authorizeInternalSession(w http.ResponseWriter, r *http.Request, signingSecret string, sessionStore internalSessionGetter) (*auth.InternalTokenClaims, models.Session, bool) {
 	tokenStr := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if tokenStr == "" {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "missing authorization token")

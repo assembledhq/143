@@ -87,6 +87,24 @@ func TestServiceResolveForSessionAddsIssueSourcesForTriggeredSessions(t *testing
 		"issue-triggered sessions should get issue sources scoped to that origin")
 }
 
+func TestServiceDefinitionsIncludesSlackNotificationsCapability(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(nil)
+	var found *models.AgentCapabilityDefinition
+	for _, def := range svc.Definitions() {
+		if def.ID == models.AgentCapabilitySlackNotifications {
+			copy := def
+			found = &copy
+			break
+		}
+	}
+
+	require.NotNil(t, found, "catalog should expose a Slack notifications capability")
+	require.Equal(t, models.AgentCapabilityAccessWrite, found.MaxAccessLevel, "Slack notification sending should require write access")
+	require.Equal(t, models.AgentCapabilityScopeIntegration, found.Scope, "Slack notification sending should be integration-scoped")
+}
+
 func TestServiceRequestGrantCreatesHumanInputApproval(t *testing.T) {
 	t.Parallel()
 
