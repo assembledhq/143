@@ -83,6 +83,23 @@ var ErrInvalidConfig = errors.New("invalid preview config")
 // default config instead of failing the build.
 var ErrPreviewConfigNotFound = errors.New("preview config not found")
 
+const (
+	previewPlatformNameEnv      = "ONEFORTYTHREE"
+	previewPlatformNameValue    = "true"
+	previewPlatformContextEnv   = "ONEFORTYTHREE_ENV"
+	previewPlatformContextValue = "preview"
+)
+
+var reservedPlatformPreviewEnvNames = map[string]struct{}{
+	previewPlatformNameEnv:    {},
+	previewPlatformContextEnv: {},
+}
+
+func isReservedPlatformPreviewEnvName(name string) bool {
+	_, ok := reservedPlatformPreviewEnvNames[name]
+	return ok
+}
+
 func InvalidConfigMessage(err error) string {
 	detail := "unknown error"
 	if err != nil {
@@ -593,6 +610,11 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 		if svc.Cwd != "" {
 			errs = append(errs, validatePathInsideRepo("service "+name+": cwd", svc.Cwd)...)
 		}
+		for envName := range svc.Env {
+			if isReservedPlatformPreviewEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("service %q: env %q is reserved for platform-injected preview runtime metadata", name, envName))
+			}
+		}
 		if svc.Ready.HTTPPath == "" {
 			errs = append(errs, fmt.Sprintf("service %q: ready.http_path is required", name))
 		} else if !isValidHTTPPath(svc.Ready.HTTPPath) {
@@ -610,6 +632,11 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 		}
 		if infra.InitScript != "" {
 			errs = append(errs, validatePathInsideRepo("infrastructure "+name+": init_script", infra.InitScript)...)
+		}
+		for envName := range infra.InjectEnv {
+			if isReservedPlatformPreviewEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("infrastructure %q: inject_env %q is reserved for platform-injected preview runtime metadata", name, envName))
+			}
 		}
 		for _, svcName := range infra.InjectInto {
 			if _, ok := cfg.Services[svcName]; !ok {
@@ -632,6 +659,11 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 			errs = append(errs, fmt.Sprintf("credentials: inject_into references unknown service %q", svcName))
 		}
 	}
+	for _, envName := range cfg.Credentials.Env {
+		if isReservedPlatformPreviewEnvName(envName) {
+			errs = append(errs, fmt.Sprintf("credentials: env %q is reserved for platform-injected preview runtime metadata", envName))
+		}
+	}
 	for i, ref := range cfg.Secrets {
 		field := fmt.Sprintf("secrets[%d]", i)
 		if strings.TrimSpace(ref.Bundle) == "" {
@@ -646,6 +678,9 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 			}
 		}
 		for _, envName := range ref.Env {
+			if isReservedPlatformPreviewEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("%s: env %q is reserved for platform-injected preview runtime metadata", field, envName))
+			}
 			if !isValidSecretEnvName(envName) {
 				errs = append(errs, fmt.Sprintf("%s: env %q is not a valid environment variable name", field, envName))
 			}

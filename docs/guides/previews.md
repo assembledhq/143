@@ -451,6 +451,8 @@ Every service receives:
 | Var | Value |
 |-----|-------|
 | `HOST` | `0.0.0.0` — most frameworks honor this for bind address. Override in your service `env` if your app reads `HOST` for something else. |
+| `ONEFORTYTHREE` | `true` — always injected by the platform. Apps can use this to detect that they are running on 143. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
+| `ONEFORTYTHREE_ENV` | `preview` — always injected for preview runtimes. Apps should use this to skip work that is not needed to serve the preview, such as background consumers, schedulers, profilers, analytics/telemetry exporters, and expensive startup warmers. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `PREVIEW_ORIGIN` | The public URL the gateway serves this preview on, e.g. `http://<id>.preview.localhost:9090`. Set this as your app's external base URL (e.g. `BASE_URL`, `FRONTEND_URL`) so redirects and absolute links point at the preview instead of `localhost`. Overrides any user-declared value. |
 
 ## Trust Split
@@ -496,6 +498,8 @@ Practical implication: if you want the agent to be able to iterate on `command`/
 | `ready.http_path contains invalid characters` | Path must match `/[a-zA-Z0-9/_.\-?&=%]*`. No shell metacharacters. |
 | Service times out on readiness | Increase `ready.timeout_seconds`. For heavy builds, first-start can exceed 90s. |
 | `PREVIEW_INSTALL_FAILED` | `preview.install.command` failed before services started. Expand startup logs for the captured install output tail. |
+| OOM / exit 137 during build | The preview exceeded its memory cap while building. Reduce build parallelism, trim source maps, split build steps, or serve a production/static build instead of keeping build tooling resident. |
+| OOM / exit 137 after the preview was ready | The running service exceeded its memory cap. Use `ONEFORTYTHREE_ENV=preview` in the app to disable background workers, schedulers, profilers, telemetry, and other non-serving processes. |
 | `EADDRINUSE` in logs | Another service in the same config already bound that port. Ports share the sandbox's network namespace. |
 | Preview works locally but not inside the sandbox | Service is binding to `127.0.0.1`. Bind to `0.0.0.0` (the gateway injects `HOST=0.0.0.0` for most frameworks). |
 | Infrastructure placeholder showing as literal `{{username}}` | Double braces are required, and the name is `username` (not `user`). |

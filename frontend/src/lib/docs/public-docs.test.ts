@@ -157,6 +157,11 @@ describe("public docs source", () => {
 
     expect(raw.content).toContain("## Set up the config");
     expect(raw.content).toContain("## Secrets and config");
+    expect(raw.content).toContain("## Runtime environment");
+    expect(raw.content).toContain("ONEFORTYTHREE=true");
+    expect(raw.content).toContain("ONEFORTYTHREE_ENV=preview");
+    expect(raw.content).toContain("These names are reserved");
+    expect(raw.content).toContain("background consumers, schedulers, profilers");
     expect(raw.content).toContain("`preview.credentials`");
     expect(raw.content).toContain("admin-managed values");
   });
