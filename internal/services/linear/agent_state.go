@@ -159,6 +159,25 @@ func UnmappedRepoActivity(teamName string) AgentMilestoneActivity {
 	}
 }
 
+func DisconnectedRepoActivity(repositoryFullName string) AgentMilestoneActivity {
+	body := "I cannot start this session because the mapped repository is disconnected. Ask an admin to reconnect it or update the Linear agent mapping."
+	if repositoryFullName == "" {
+		return AgentMilestoneActivity{
+			Type:            models.LinearAgentActivityResponse,
+			Body:            body,
+			IdemKey:         "bootstrap:disconnected_repo",
+			PinSessionState: "complete",
+		}
+	}
+	body = fmt.Sprintf("I cannot start this session because the mapped repository %s is disconnected. Ask an admin to reconnect it or update the Linear agent mapping.", repositoryFullName)
+	return AgentMilestoneActivity{
+		Type:            models.LinearAgentActivityResponse,
+		Body:            body,
+		IdemKey:         "bootstrap:disconnected_repo",
+		PinSessionState: "complete",
+	}
+}
+
 // milestoneIdemKey is the canonical idempotency-key shape for milestone
 // activities. Centralized so the dispatcher's bootstrap key, the writer's
 // emit key, and the activity-log row all agree.

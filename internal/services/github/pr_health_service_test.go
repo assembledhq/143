@@ -2280,6 +2280,109 @@ func TestPRServiceCanResumeRepairSession(t *testing.T) {
 func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.T) {
 	t.Parallel()
 
+	t.Run("disconnected repository returns blocked sync health without enqueueing", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		service := &PRService{
+			pullRequests: db.NewPullRequestStore(mock),
+			repos:        db.NewRepositoryStore(mock),
+			logger:       zerolog.New(io.Discard),
+		}
+
+		orgID := uuid.New()
+		pullRequestID := uuid.New()
+		repoID := uuid.New()
+		integrationID := uuid.New()
+		now := time.Now().UTC()
+
+		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				pullRequestID, nil, orgID, 1584, "https://github.com/assembledhq/143/pull/1584", "assembledhq/143",
+				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+				models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+			WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), models.RepositoryStatusDisconnected, nil, nil, []byte(`{}`), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+
+		resp, err := service.GetPullRequestHealth(context.Background(), orgID, pullRequestID)
+		require.NoError(t, err, "GetPullRequestHealth should return a blocked health response for disconnected repositories")
+		require.Equal(t, models.PullRequestHealthSyncStatusBlocked, resp.SyncStatus, "health sync should be blocked")
+		require.Equal(t, models.PullRequestHealthSyncBlockerRepositoryDisconnected, resp.SyncBlocker, "health sync should explain the blocker")
+		require.NotNil(t, resp.RepositoryID, "health response should include a repository id when the linked row is known")
+		require.Equal(t, repoID, *resp.RepositoryID, "health response should include the linked repository id")
+		require.NotNil(t, resp.RepositoryStatus, "health response should include a repository status when the linked row is known")
+		require.Equal(t, models.RepositoryStatusDisconnected, *resp.RepositoryStatus, "health response should include the repository status")
+		require.False(t, resp.CanMerge, "blocked health should hide merge actions")
+		require.Equal(t, "PR #1584 cannot be refreshed because assembledhq/143 is disconnected from GitHub. Reconnect the repository to update merge status, checks, and close/merge state.", resp.Summary, "blocked health should use disconnected repository copy")
+		require.NoError(t, mock.ExpectationsWereMet(), "blocked health should not attempt a GitHub sync or enqueue a retry")
+	})
+
+	t.Run("fresh disconnected repository health still returns blocked sync health", func(t *testing.T) {
+		t.Parallel()
+
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		service := &PRService{
+			pullRequests: db.NewPullRequestStore(mock),
+			repos:        db.NewRepositoryStore(mock),
+			logger:       zerolog.New(io.Discard),
+		}
+
+		orgID := uuid.New()
+		pullRequestID := uuid.New()
+		repoID := uuid.New()
+		integrationID := uuid.New()
+		now := time.Now().UTC()
+		summary := models.PullRequestHealthSummary{
+			MergeState:       models.PullRequestMergeStateClean,
+			HasConflicts:     false,
+			FailingTestCount: 0,
+			NeedsAgentAction: false,
+		}
+		summaryJSON, err := json.Marshal(summary)
+		require.NoError(t, err, "should marshal current health summary")
+
+		mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(
+				pullRequestID, nil, orgID, 1584, "https://github.com/assembledhq/143/pull/1584", "assembledhq/143",
+				"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
+				models.PullRequestMergeStateClean, false, 0, false, &now, int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
+			WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(
+				repoID, orgID, integrationID, int64(1), "assembledhq/143", "main", false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), models.RepositoryStatusDisconnected, nil, nil, []byte(`{}`), now, now,
+			))
+		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
+			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(
+				pullRequestID, orgID, int64(5), "head", "base", summaryJSON, summaryJSON, models.PullRequestHealthEnrichmentStatusNotRequested, nil, now, now,
+			))
+
+		resp, err := service.GetPullRequestHealth(context.Background(), orgID, pullRequestID)
+		require.NoError(t, err, "GetPullRequestHealth should block even when the existing health snapshot is fresh")
+		require.Equal(t, models.PullRequestHealthSyncStatusBlocked, resp.SyncStatus, "fresh health should still be marked blocked for disconnected repositories")
+		require.Equal(t, models.PullRequestHealthSyncBlockerRepositoryDisconnected, resp.SyncBlocker, "fresh blocked health should explain the repository blocker")
+		require.False(t, resp.CanMerge, "blocked fresh health should hide merge actions")
+		require.NotNil(t, resp.RepositoryStatus, "blocked fresh health should include repository status metadata")
+		require.Equal(t, models.RepositoryStatusDisconnected, *resp.RepositoryStatus, "blocked fresh health should expose the disconnected repository status")
+		require.NoError(t, mock.ExpectationsWereMet(), "fresh blocked health should not enqueue or sync")
+	})
+
 	t.Run("inline sync for unsynced pull requests", func(t *testing.T) {
 		t.Parallel()
 

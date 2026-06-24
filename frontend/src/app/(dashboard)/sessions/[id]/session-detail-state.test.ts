@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { pollMs } from "@/lib/poll-intervals";
 import {
   formatDuration,
   getDisplayStatus,
@@ -19,11 +20,40 @@ import {
   statusConfig,
   trackInFlightAgentUpdate,
   buildChromeThreads,
+  getPullRequestHealthRefetchInterval,
 } from "./session-detail-state";
-import type { SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread } from "@/lib/types";
+import type { PullRequestHealthResponse, SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread } from "@/lib/types";
 
 const start = "2026-01-01T00:00:00.000Z";
 const plus = (ms: number) => new Date(new Date(start).getTime() + ms).toISOString();
+
+const baseHealth: PullRequestHealthResponse = {
+  pull_request_id: "pr-1",
+  pull_request_number: 42,
+  repository: "assembledhq/143",
+  url: "https://github.com/assembledhq/143/pull/42",
+  status: "open",
+  head_sha: "head",
+  base_sha: "base",
+  health_version: 1,
+  sync_status: "synced",
+  merge_state: "clean",
+  has_conflicts: false,
+  failing_test_count: 0,
+  needs_agent_action: false,
+  summary: "healthy",
+  checks: [],
+  checks_confirmed: true,
+  can_resolve_conflicts: false,
+  can_fix_tests: false,
+  can_merge: true,
+  enrichment_status: "ready",
+  enrichment_requested: false,
+  enrichment_ready: true,
+  conflict_detail_available: false,
+  failing_test_detail_available: false,
+  merge_when_ready: { state: "off" },
+};
 
 describe("formatDuration", () => {
   afterEach(() => {
@@ -63,6 +93,25 @@ describe("formatDuration", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(plus(2 * 60 * 60_000 + 30 * 60_000)));
     expect(formatDuration(start)).toBe("2h 30m");
+  });
+});
+
+describe("getPullRequestHealthRefetchInterval", () => {
+  it("does not poll blocked PR health for disconnected repositories", () => {
+    expect(getPullRequestHealthRefetchInterval({
+      ...baseHealth,
+      sync_status: "blocked",
+      sync_blocker: "repository_disconnected",
+      merge_state: "unknown",
+    })).toBe(false);
+  });
+
+  it("keeps polling real pending mergeability", () => {
+    expect(getPullRequestHealthRefetchInterval({
+      ...baseHealth,
+      sync_status: "pending",
+      merge_state: "mergeability_pending",
+    })).toBe(pollMs(5_000));
   });
 });
 

@@ -34,8 +34,9 @@ const (
 )
 
 var (
-	ErrPullRequestMergeabilityPending = errors.New("pull request mergeability is still being checked by GitHub")
-	defaultMergeabilityRetryDelays    = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
+	ErrPullRequestMergeabilityPending    = errors.New("pull request mergeability is still being checked by GitHub")
+	ErrPullRequestRepositoryDisconnected = errors.New("pull request repository is disconnected")
+	defaultMergeabilityRetryDelays       = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
 )
 
 type gitHubPullRequestDetails struct {
@@ -119,10 +120,41 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	if (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen {
+	needsInlineSync := (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen
+	needsAsyncRefresh := pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter
+	var linkedRepo *models.Repository
+	if pr.Status == models.PullRequestStatusOpen && s.repos != nil {
+		repo, repoErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
+		if repoErr == nil {
+			linkedRepo = &repo
+			if repoBlocksPullRequestHealthSync(repo) {
+				resp, err := s.buildPullRequestHealthResponse(ctx, pr)
+				if err != nil {
+					return nil, err
+				}
+				applyPullRequestHealthRepositoryMetadata(resp, repo)
+				blockPullRequestHealthSync(resp)
+				return resp, nil
+			}
+		} else if !errors.Is(repoErr, pgx.ErrNoRows) {
+			s.logger.Warn().Err(repoErr).Str("repo", pr.GitHubRepo).Msg("failed to load repository before pull request health sync")
+		}
+	}
+
+	if needsInlineSync {
 		if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil {
 			if errors.Is(err, ErrPullRequestMergeabilityPending) {
 				s.enqueuePullRequestStateSync(ctx, pr)
+			} else if errors.Is(err, ErrPullRequestRepositoryDisconnected) {
+				resp, buildErr := s.buildPullRequestHealthResponse(ctx, pr)
+				if buildErr != nil {
+					return nil, buildErr
+				}
+				if linkedRepo != nil {
+					applyPullRequestHealthRepositoryMetadata(resp, *linkedRepo)
+				}
+				blockPullRequestHealthSync(resp)
+				return resp, nil
 			} else {
 				s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to sync pull request health inline")
 			}
@@ -131,13 +163,16 @@ func (s *PRService) GetPullRequestHealth(ctx context.Context, orgID, pullRequest
 		if err != nil {
 			return nil, err
 		}
-	} else if pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > prHealthStaleAfter {
+	} else if needsAsyncRefresh {
 		s.enqueuePullRequestStateSync(ctx, pr)
 	}
 
 	resp, err := s.buildPullRequestHealthResponse(ctx, pr)
 	if err != nil {
 		return nil, err
+	}
+	if linkedRepo != nil {
+		applyPullRequestHealthRepositoryMetadata(resp, *linkedRepo)
 	}
 
 	if pr.Status == models.PullRequestStatusOpen && resp.FailingTestCount > 0 && !resp.EnrichmentReady && !resp.EnrichmentRequested {
@@ -156,6 +191,7 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 		URL:                 pr.GitHubPRURL,
 		Status:              pr.Status,
 		MergeState:          pr.MergeState,
+		SyncStatus:          pullRequestHealthSyncStatus(pr),
 		HasConflicts:        pr.HasConflicts,
 		FailingTestCount:    pr.FailingTestCount,
 		NeedsAgentAction:    pr.NeedsAgentAction,
@@ -297,6 +333,13 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 }
 
 func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
+	if resp.SyncStatus == models.PullRequestHealthSyncStatusBlocked {
+		resp.CanResolveConflicts = false
+		resp.CanFixTests = false
+		resp.CanMerge = false
+		return
+	}
+
 	resp.CanResolveConflicts = resp.HasConflicts || resp.MergeState == models.PullRequestMergeStateConflicted
 	resp.CanFixTests = resp.FailingTestCount > 0 || checkSummariesHaveFailedCheck(resp.Checks)
 	// CanMerge is the green-light counterpart to the repair flags: GitHub has
@@ -307,6 +350,31 @@ func derivePullRequestRepairActions(resp *models.PullRequestHealthResponse) {
 	resp.CanMerge = resp.Status == models.PullRequestStatusOpen &&
 		resp.MergeState == models.PullRequestMergeStateClean &&
 		checksAllowMerge(resp.ChecksConfirmed, resp.Checks)
+}
+
+func pullRequestHealthSyncStatus(pr models.PullRequest) models.PullRequestHealthSyncStatus {
+	if pr.Status == models.PullRequestStatusOpen && (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0 || pr.MergeState == models.PullRequestMergeStateMergeabilityPending || pr.MergeState == models.PullRequestMergeStateUnknown) {
+		return models.PullRequestHealthSyncStatusPending
+	}
+	return models.PullRequestHealthSyncStatusSynced
+}
+
+func repoBlocksPullRequestHealthSync(repo models.Repository) bool {
+	return repo.Status != models.RepositoryStatusActive
+}
+
+func applyPullRequestHealthRepositoryMetadata(resp *models.PullRequestHealthResponse, repo models.Repository) {
+	resp.RepositoryID = &repo.ID
+	resp.RepositoryStatus = &repo.Status
+}
+
+func blockPullRequestHealthSync(resp *models.PullRequestHealthResponse) {
+	resp.SyncStatus = models.PullRequestHealthSyncStatusBlocked
+	resp.SyncBlocker = models.PullRequestHealthSyncBlockerRepositoryDisconnected
+	resp.CanResolveConflicts = false
+	resp.CanFixTests = false
+	resp.CanMerge = false
+	resp.Summary = buildPRHealthSummaryText(*resp)
 }
 
 func checksAllowMerge(checksConfirmed bool, checks []models.PullRequestCheckSummary) bool {
@@ -345,6 +413,15 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 
 	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			anyStatusRepo, anyStatusErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
+			if anyStatusErr == nil && repoBlocksPullRequestHealthSync(anyStatusRepo) {
+				return fmt.Errorf("%w: %s", ErrPullRequestRepositoryDisconnected, pr.GitHubRepo)
+			}
+			if anyStatusErr != nil && !errors.Is(anyStatusErr, pgx.ErrNoRows) {
+				return fmt.Errorf("load repository for pull request health sync: %w", anyStatusErr)
+			}
+		}
 		return fmt.Errorf("load repository for pull request health sync: %w", err)
 	}
 	token, err := s.getInstallationTokenForRepo(ctx, orgID, &repo)

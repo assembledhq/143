@@ -250,6 +250,10 @@ func deriveAggregateCIStatus(checks []models.PullRequestCheckSummary) string {
 }
 
 func buildPRHealthSummaryText(health models.PullRequestHealthResponse) string {
+	if health.SyncStatus == models.PullRequestHealthSyncStatusBlocked && health.SyncBlocker == models.PullRequestHealthSyncBlockerRepositoryDisconnected {
+		return fmt.Sprintf("PR #%d cannot be refreshed because %s is disconnected from GitHub. Reconnect the repository to update merge status, checks, and close/merge state.", health.PullRequestNumber, health.Repository)
+	}
+
 	conflicted := health.HasConflicts || health.MergeState == models.PullRequestMergeStateConflicted
 	switch {
 	case conflicted && health.FailingTestCount > 0:
