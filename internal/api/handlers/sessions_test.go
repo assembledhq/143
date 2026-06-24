@@ -10512,6 +10512,64 @@ func TestSessionHandler_ArchiveSession(t *testing.T) {
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("enqueues Slack archive reaction for linked Slack session", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgx mock pool")
+		defer mock.Close()
+
+		handler := newSessionHandler(t, mock)
+		handler.SetSlackSessionLinkStore(db.NewSlackSessionLinkStore(mock))
+		orgID := uuid.New()
+		sessionID := uuid.New()
+		userID := uuid.New()
+		linkID := uuid.New()
+		installationID := uuid.New()
+		now := time.Now()
+		dedupeKey := "slack_reaction:" + sessionID.String() + ":" + models.SlackReactionSessionArchived
+
+		mock.ExpectExec("UPDATE sessions SET archived_at").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		mock.ExpectQuery("SELECT id, org_id, session_id, slack_installation_id").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+			WillReturnRows(
+				pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "slack_installation_id", "slack_team_id", "slack_channel_id",
+					"slack_thread_ts", "slack_root_ts", "slack_message_permalink", "slack_user_id", "mapped_user_id",
+					"team_session", "latest_status_message_ts", "latest_progress_kind", "final_message_ts", "created_at", "updated_at",
+				}).AddRow(
+					linkID, orgID, sessionID, installationID, "T123", "C123",
+					"1710000000.000200", "1710000000.000100", "https://slack.test/archives/C123/p1710000000000100", "U123", &userID,
+					false, nil, nil, nil, now, now,
+				),
+			)
+		mock.ExpectQuery("INSERT INTO jobs").
+			WithArgs(pgx.NamedArgs{
+				"org_id":     orgID,
+				"queue":      "default",
+				"job_type":   "slack_add_session_reaction",
+				"payload":    pgxmock.AnyArg(),
+				"priority":   3,
+				"dedupe_key": &dedupeKey,
+			}).
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/archive", nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("id", sessionID.String())
+		ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+		ctx = middleware.WithOrgID(ctx, orgID)
+		ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID})
+		req = req.WithContext(ctx)
+		w := httptest.NewRecorder()
+
+		handler.ArchiveSession(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "archive should return 200")
+		require.NoError(t, mock.ExpectationsWereMet(), "archive should enqueue Slack package reaction")
+	})
+
 	t.Run("returns 401 when user is not authenticated", func(t *testing.T) {
 		t.Parallel()
 		mock, err := pgxmock.NewPool()

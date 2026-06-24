@@ -1900,6 +1900,9 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 		if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusMerged); err != nil {
 			return fmt.Errorf("update PR status to merged: %w", err)
 		}
+		if pr.SessionID != nil {
+			s.enqueueSlackSessionReaction(ctx, pr.OrgID, *pr.SessionID, models.SlackReactionPRMerged)
+		}
 		commitSHA := mergeCommitSHA
 		if commitSHA == "" {
 			commitSHA = headSHA
@@ -1910,6 +1913,9 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 
 	if err := s.pullRequests.UpdateStatus(ctx, pr.OrgID, pr.ID, models.PullRequestStatusClosed); err != nil {
 		return fmt.Errorf("update PR status to closed: %w", err)
+	}
+	if pr.SessionID != nil {
+		s.enqueueSlackSessionReaction(ctx, pr.OrgID, *pr.SessionID, models.SlackReactionPRClosed)
 	}
 	// Tell the Linear linker the session ended without a merge so the
 	// attachment subtitle stops saying "PR open" forever and the audit log
@@ -2034,6 +2040,7 @@ func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr mod
 	if !archived {
 		return
 	}
+	s.enqueueSlackSessionReaction(ctx, pr.OrgID, *pr.SessionID, models.SlackReactionSessionArchived)
 
 	if s.audit != nil {
 		sessionIDStr := pr.SessionID.String()
@@ -2061,6 +2068,24 @@ func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr mod
 			Details:      details,
 			SessionID:    pr.SessionID,
 		})
+	}
+}
+
+func (s *PRService) enqueueSlackSessionReaction(ctx context.Context, orgID, sessionID uuid.UUID, reactionName string) {
+	if s.jobs == nil || sessionID == uuid.Nil || strings.TrimSpace(reactionName) == "" {
+		return
+	}
+	payload := models.SlackAddSessionReactionJobPayload{
+		OrgID:        orgID.String(),
+		SessionID:    sessionID.String(),
+		ReactionName: reactionName,
+	}
+	dedupeKey := "slack_reaction:" + sessionID.String() + ":" + reactionName
+	if _, err := s.jobs.Enqueue(ctx, orgID, "default", "slack_add_session_reaction", payload, 3, &dedupeKey); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("slack_reaction_name", reactionName).
+			Msg("failed to enqueue Slack session reaction")
 	}
 }
 
