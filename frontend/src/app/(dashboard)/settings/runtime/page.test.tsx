@@ -3,6 +3,7 @@ import {
   renderWithProviders,
   screen,
   waitFor,
+  within,
   userEvent,
 } from "@/test/test-utils";
 import RuntimeSettingsPage from "./page";
@@ -251,6 +252,20 @@ describe("RuntimeSettingsPage", () => {
     expect(
       screen.getByLabelText("Keep sandbox while preview is active"),
     ).not.toBeChecked();
+  });
+
+  it("allows the session lifecycle disclosure summary to wrap on narrow screens", async () => {
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    const disclosure = await screen.findByRole("button", {
+      name: "Show session lifecycle controls",
+    });
+    const summary = await within(disclosure).findByText(/Session max 25 minutes/);
+    const action = screen.getByTestId("session-lifecycle-disclosure-action");
+
+    expect(disclosure).toHaveClass("items-start");
+    expect(summary).toHaveClass("whitespace-normal");
+    expect(action).toHaveClass("shrink-0");
   });
 
   it("keeps repository resource requests visible while exact resource caps stay advanced", async () => {
