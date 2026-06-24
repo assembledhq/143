@@ -57,6 +57,49 @@ vi.mock('next/image', () => ({
 installSessionDetailPageTestHooks({ toast, routerPush });
 
 describe('SessionDetailPage composer and session metadata', () => {
+  it('clears draft composer text when the session id changes without remounting the page shell', async () => {
+    const firstSession: Session = {
+      ...mockSessions[0],
+      id: 'session-first-draft-reset',
+      result_summary: 'First draft reset session',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      threads: [],
+    };
+    const secondSession: Session = {
+      ...mockSessions[0],
+      id: 'session-second-draft-reset',
+      result_summary: 'Second draft reset session',
+      status: 'idle',
+      completed_at: undefined,
+      current_turn: 1,
+      sandbox_state: 'snapshotted',
+      threads: [],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', ({ params }) => {
+        const session = params.id === firstSession.id ? firstSession : secondSession;
+        return HttpResponse.json({ data: session } satisfies SingleResponse<Session>);
+      }),
+    );
+
+    const { rerender } = renderWithProviders(<SessionDetailContent id={firstSession.id} />);
+    await screen.findAllByText('First draft reset session');
+    const composer = await screen.findByPlaceholderText('Send a follow-up message...');
+    changeFieldValue(composer, 'This belongs to the first session');
+    expect(composer).toHaveValue('This belongs to the first session');
+
+    rerender(<SessionDetailContent id={secondSession.id} />);
+
+    await screen.findAllByText('Second draft reset session');
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Send a follow-up message...')).toHaveValue('');
+    });
+  });
+
   it('shows model selector for agents with available models', async () => {
     const idleSession: Session = {
       ...mockSessions[0],

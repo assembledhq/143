@@ -196,7 +196,7 @@ describe("SessionsLayout", () => {
     expect(screen.getByTestId("session-detail-page-client")).toHaveAttribute("data-session-id", "session-456");
   });
 
-  it("resets detail-local state when the selected session id changes", () => {
+  it("keeps the detail shell mounted when the selected session id changes", () => {
     mockPathname = "/sessions/session-123";
     mockSelectedSegment = "session-123";
     mockSelectedSegments = ["session-123"];
@@ -208,8 +208,8 @@ describe("SessionsLayout", () => {
     );
 
     const draft = screen.getByLabelText("Detail draft");
-    fireEvent.change(draft, { target: { value: "stale detail state" } });
-    expect(screen.getByLabelText("Detail draft")).toHaveValue("stale detail state");
+    fireEvent.change(draft, { target: { value: "shell state survives" } });
+    expect(screen.getByLabelText("Detail draft")).toHaveValue("shell state survives");
 
     mockPathname = "/sessions/session-456";
     mockSelectedSegment = "session-456";
@@ -221,7 +221,7 @@ describe("SessionsLayout", () => {
     );
 
     expect(screen.getByTestId("session-detail-page-client")).toHaveAttribute("data-session-id", "session-456");
-    expect(screen.getByLabelText("Detail draft")).toHaveValue("");
+    expect(screen.getByLabelText("Detail draft")).toHaveValue("shell state survives");
   });
 
   it("replaces session detail with create content when navigating to /sessions/new", () => {
