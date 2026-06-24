@@ -87,6 +87,10 @@ export function PullRequestPreviewContent({
   const launch = preview?.launch;
   const launchState = launchStateCopy(preview);
   const launchSessionShouldOpen = launchRequested || launchSessionActive;
+  const retryAllowed =
+    Boolean(preview?.preview_id) &&
+    launch?.action !== "closed" &&
+    (launch?.action !== "blocked" || preview?.status === "failed");
   const showStartAction =
     launch?.action === "start" ||
     (Boolean(targetId) && (launch?.action === "start_latest" || launch?.action === "resume"));
@@ -341,7 +345,7 @@ export function PullRequestPreviewContent({
                       </Tooltip>
                     </TooltipProvider>
                   ) : null}
-                  {preview.preview_id && launch?.action !== "blocked" && launch?.action !== "closed" ? (
+                  {retryAllowed ? (
                     <Button
                       type="button"
                       variant={launch?.action === "retry" ? "default" : "outline"}
@@ -390,6 +394,13 @@ function launchStateCopy(preview: BranchPreviewResponse | undefined): {
 } | null {
   const launch = preview?.launch;
   if (!launch) return null;
+  if (preview?.status === "failed") {
+    return {
+      title: "Preview failed",
+      description: preview.error || launch.message || "Retry the preview to rebuild this pull request.",
+      className: "border-destructive/20 bg-destructive/5 text-destructive",
+    };
+  }
   switch (launch.action) {
     case "wait":
       return {
