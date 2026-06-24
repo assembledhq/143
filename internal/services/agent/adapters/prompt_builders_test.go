@@ -260,6 +260,21 @@ func TestBuildSystemPrompt_ManualSessionLinkedIssuesCarryTrustFence(t *testing.T
 	require.Contains(t, prompt, "untrusted external content", "trust_warning must call out untrusted external content")
 }
 
+func TestBuildSystemPrompt_ManualSessionIncludesSandboxRuntimeGuidance(t *testing.T) {
+	t.Parallel()
+
+	input := &agent.AgentInput{
+		Issue:  &models.Issue{Title: "run focused verification", Source: models.IssueSourceManual},
+		Manual: true,
+	}
+
+	prompt := buildSystemPrompt(input)
+	require.Contains(t, prompt, "build, test, lint, or verification commands", "manual coding sessions should receive language-agnostic sandbox runtime guidance")
+	require.Contains(t, prompt, "TMPDIR", "manual coding sessions should still receive sandbox runtime guidance")
+	require.Contains(t, prompt, "language/tool-specific", "manual coding sessions should learn to redirect ecosystem-specific cache and temp paths")
+	require.Contains(t, prompt, "/home/sandbox", "manual coding sessions should point Go scratch/cache paths at rootfs-backed storage")
+}
+
 func TestBuildSystemPrompt_AutomationRunMatchesSessionStyle(t *testing.T) {
 	t.Parallel()
 

@@ -1,6 +1,6 @@
 # Sandbox Disk Guardrails
 
-> **Status:** Implemented | **Last reviewed:** 2026-05-09
+> **Status:** Implemented | **Last reviewed:** 2026-06-24
 
 Production workers run untrusted, write-heavy coding sandboxes on the same Docker host as the worker service. Disk exhaustion is therefore a platform availability risk, not just a per-session failure. The long-term guardrail is layered: reclaim routine deploy churn, make sandbox ownership visible to the host, reconcile leaked containers continuously, tighten lifecycle accounting, and require real Docker storage quotas in production.
 
@@ -71,6 +71,12 @@ When the GC destroys a container, it closes any open `container_usage_events` ro
 Production worker env files set `SANDBOX_REQUIRE_DISK_QUOTA=true`. When enabled, Docker health checks create a tiny quota probe container with `StorageOpt{"size":"1G"}`. Sandbox creation also fails instead of retrying without `StorageOpt` if Docker rejects the configured per-container disk limit.
 
 This is intentionally fail-closed. Docker only enforces `StorageOpt.size` for compatible storage setups, typically `overlay2` over XFS with project quotas. Hosts using ext4 or XFS without project quotas must be reprovisioned before this flag is enabled. Local development defaults remain permissive with `SANDBOX_REQUIRE_DISK_QUOTA=false`.
+
+## Tmpfs Scratch Paths
+
+Sandbox containers mount `/tmp` as a 256 MiB noexec tmpfs and `/var/tmp` as a 512 MiB exec tmpfs. These mounts count against the container memory limit and are intentionally small; they are not expanded by raising `SANDBOX_DISK_LIMIT_GB`, which only controls root filesystem quota.
+
+Language toolchains and package managers can write large build scratch trees, compiler inputs, or dependency caches under `TMPDIR`, `/tmp`, `/var/tmp`, or ecosystem-specific cache locations. Shared sandbox runtime guidance therefore tells coding agents to run build, test, lint, and verification commands with large scratch/cache paths pointed at rootfs-backed storage under `/home/sandbox` or the repository. Examples include common `TMPDIR`/`TEMP`/`TMP`, Go `GOTMPDIR`/`GOCACHE`, Node package-manager cache dirs, Python `PIP_CACHE_DIR`, and Rust `CARGO_HOME`/`CARGO_TARGET_DIR`. This guidance prevents misleading `no space left on device` failures from tmpfs paths while keeping the tmpfs memory budget small.
 
 ## Operational Recipe
 

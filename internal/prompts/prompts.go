@@ -146,6 +146,11 @@ func CodingTaskPreamble() string {
 	return render("coding_task_preamble.template", nil)
 }
 
+// CodingSandboxGuidance returns runtime guidance shared by coding-agent prompts.
+func CodingSandboxGuidance() string {
+	return render("coding_sandbox_guidance.template", nil)
+}
+
 // AnswerOnlyPreamble returns the preamble injected into Slack answer-only agent
 // prompts. These runs should answer questions without mutating the repository.
 func AnswerOnlyPreamble() string {
