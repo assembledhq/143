@@ -1115,15 +1115,20 @@ func TestPlatformEnv_SubstitutesPreviewIDIntoTemplate(t *testing.T) {
 	env := mgr.platformEnv(id)
 
 	require.Equal(t, map[string]string{
-		"PREVIEW_ORIGIN": "http://" + id.String() + ".preview.localhost:9090",
-	}, env)
+		"ONEFORTYTHREE":     "true",
+		"ONEFORTYTHREE_ENV": "preview",
+		"PREVIEW_ORIGIN":    "http://" + id.String() + ".preview.localhost:9090",
+	}, env, "platform env should include preview mode and origin")
 }
 
-func TestPlatformEnv_EmptyTemplateReturnsNil(t *testing.T) {
+func TestPlatformEnv_EmptyTemplateStillInjectsPreviewMode(t *testing.T) {
 	t.Parallel()
 
 	mgr := NewManager(ManagerConfig{Logger: zerolog.Nop()})
-	require.Nil(t, mgr.platformEnv(uuid.New()), "empty template must skip injection so user-declared env is untouched")
+	require.Equal(t, map[string]string{
+		"ONEFORTYTHREE":     "true",
+		"ONEFORTYTHREE_ENV": "preview",
+	}, mgr.platformEnv(uuid.New()), "preview mode should be injected even when PREVIEW_ORIGIN is unavailable")
 }
 
 func TestPlatformEnv_ReplacesEveryOccurrenceOfPlaceholder(t *testing.T) {
@@ -1139,7 +1144,9 @@ func TestPlatformEnv_ReplacesEveryOccurrenceOfPlaceholder(t *testing.T) {
 	id := uuid.New()
 	env := mgr.platformEnv(id)
 
-	require.Equal(t, id.String()+"-"+id.String(), env["PREVIEW_ORIGIN"])
+	require.Equal(t, id.String()+"-"+id.String(), env["PREVIEW_ORIGIN"], "origin should replace every preview id placeholder")
+	require.Equal(t, "true", env["ONEFORTYTHREE"], "platform identity should be injected with origin")
+	require.Equal(t, "preview", env["ONEFORTYTHREE_ENV"], "preview environment should be injected with origin")
 }
 
 func TestSetInspector(t *testing.T) {
@@ -3595,33 +3602,85 @@ func TestManagerServiceObserver_OnServiceFailed_PrimaryServiceDemotesInstance(t 
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestManagerServiceObserver_OnServiceFailed_UsesActiveBuildPhaseForOOMAdvice(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mgr := newTestManager(mock, &mockProvider{})
+	orgID := uuid.New()
+	previewID := uuid.New()
+	obs := mgr.newServiceObserver(orgID, previewID, "", "", "", 8192)
+	defer obs.Close()
+
+	obs.phaseMu.Lock()
+	obs.phaseStarts["service_build"] = time.Now()
+	obs.phaseMu.Unlock()
+
+	errMsg := `service "web" build: exited with code 137`
+	expectedDetail := annotatePreviewFailure(errMsg, 8192, oomPhaseBuild)
+	mock.ExpectExec("UPDATE preview_services SET status").
+		WithArgs(pgx.NamedArgs{
+			"pid":    previewID,
+			"name":   "web",
+			"status": models.PreviewServiceStatusFailed,
+			"error":  expectedDetail,
+			"org_id": orgID,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	logID := uuid.New()
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(logID, previewID, orgID, "error", "start", "msg", json.RawMessage(`null`), time.Now()))
+
+	obs.OnServiceFailed("web", errMsg, []string{"build output"})
+
+	require.NoError(t, mock.ExpectationsWereMet(), "build-phase service OOM should persist build-specific remediation advice")
+}
+
 func TestAnnotatePreviewFailure(t *testing.T) {
 	t.Parallel()
 
 	t.Run("oom exit 137 is explained with the memory cap", func(t *testing.T) {
 		t.Parallel()
-		got := annotatePreviewFailure("exited with code 137; last output: app compiled", 8192)
-		require.Contains(t, got, "ran out of memory")
-		require.Contains(t, got, "8192 MiB")
-		require.Contains(t, got, "exit 137")
+		got := annotatePreviewFailure("exited with code 137; last output: app compiled", 8192, oomPhaseRuntime)
+		require.Contains(t, got, "ran out of memory", "OOM failures should be explained in plain English")
+		require.Contains(t, got, "8192 MiB", "OOM explanation should include the configured memory cap")
+		require.Contains(t, got, "exit 137", "OOM explanation should name the exit code")
+		require.Contains(t, got, "ONEFORTYTHREE_ENV=preview", "runtime OOM advice should point at preview-mode guards")
+		require.Contains(t, got, "background workers", "runtime OOM advice should mention disabling background work")
+		require.NotContains(t, got, "dev server", "runtime OOM advice should not assume a dev-server cause")
 		// The original failure is preserved for debugging.
-		require.Contains(t, got, "exited with code 137; last output: app compiled")
+		require.Contains(t, got, "exited with code 137; last output: app compiled", "original provider detail should be preserved")
+	})
+
+	t.Run("build oom keeps build specific advice", func(t *testing.T) {
+		t.Parallel()
+		got := annotatePreviewFailure("service \"web\" build: exited with code 137", 4096, oomPhaseBuild)
+		require.Contains(t, got, "build memory", "build OOM advice should name the build phase")
+		require.Contains(t, got, "source maps", "build OOM advice should include build-specific memory reductions")
+		require.Contains(t, got, "production/static build", "build OOM advice may still mention static production builds")
+		require.NotContains(t, got, "background workers", "build OOM advice should not point at runtime-only background work")
 	})
 
 	t.Run("oom without a known cap omits the cap text", func(t *testing.T) {
 		t.Parallel()
-		got := annotatePreviewFailure("signal: killed", 0)
-		require.Contains(t, got, "ran out of memory")
-		require.NotContains(t, got, "capped at")
+		got := annotatePreviewFailure("signal: killed", 0, oomPhaseRuntime)
+		require.Contains(t, got, "ran out of memory", "OOM explanation should still be present without a known cap")
+		require.NotContains(t, got, "capped at", "unknown memory cap should not render capped-at text")
 	})
 
 	t.Run("a long original failure tail is truncated", func(t *testing.T) {
 		t.Parallel()
 		// A huge captured stdout/stderr tail must not bloat the message.
 		raw := "exited with code 137; last output: " + strings.Repeat("x", 5000)
-		got := annotatePreviewFailure(raw, 8192)
-		require.Contains(t, got, "ran out of memory")
-		require.Contains(t, got, "8192 MiB")
+		got := annotatePreviewFailure(raw, 8192, oomPhaseRuntime)
+		require.Contains(t, got, "ran out of memory", "OOM explanation should be retained for long provider output")
+		require.Contains(t, got, "8192 MiB", "OOM explanation should include the memory cap for long provider output")
 		// The whole message is the short explanation + the bounded tail, so it
 		// stays close to the cap rather than echoing the full 5k-rune raw output.
 		require.LessOrEqual(t, len([]rune(got)), maxOriginalFailureRunes+256, "the raw tail should be truncated to the cap")
@@ -3630,10 +3689,11 @@ func TestAnnotatePreviewFailure(t *testing.T) {
 	t.Run("non-oom failures pass through unchanged", func(t *testing.T) {
 		t.Parallel()
 		// Exit 126 (permission) and disk exhaustion must not be mislabeled as OOM.
-		require.Equal(t, "exited with code 126", annotatePreviewFailure("exited with code 126", 8192))
+		require.Equal(t, "exited with code 126", annotatePreviewFailure("exited with code 126", 8192, oomPhaseRuntime), "non-OOM exit code should pass through unchanged")
 		require.Equal(t,
 			"build failed: no space left on device",
-			annotatePreviewFailure("build failed: no space left on device", 8192),
+			annotatePreviewFailure("build failed: no space left on device", 8192, oomPhaseBuild),
+			"disk exhaustion should not be mislabeled as OOM",
 		)
 	})
 

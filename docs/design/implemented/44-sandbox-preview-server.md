@@ -1043,7 +1043,9 @@ Known failure patterns the preview manager should detect and surface:
 | Port not reachable after timeout | "The dev server did not respond on port {port}. Check that your dev server binds to `0.0.0.0`, not `localhost`. You can set `HOST=0.0.0.0` in the preview config env." |
 | `EADDRINUSE` in process output | "Port {port} is already in use inside the sandbox. Check for conflicting processes or change the port in `.143/config.json`." |
 | `MODULE_NOT_FOUND` or `Cannot find module` | "A required dependency is missing. Ensure `npm install` or equivalent runs during the Build phase." |
-| OOM kill (exit code 137) | "The preview process exceeded its memory limit ({limit}MB). Try a lighter dev server configuration or request a higher limit." |
+| OOM kill during install | "The preview install ran out of memory ({limit}MB). Keep `preview.install` limited to dependency installation, avoid app builds there, and narrow dependency cache paths." |
+| OOM kill during service build | "The preview build ran out of memory ({limit}MB). Reduce build parallelism, trim source maps, split build steps, or serve a production/static build instead of keeping build tooling resident." |
+| OOM kill during startup or runtime | "The preview service ran out of memory ({limit}MB). The platform injects `ONEFORTYTHREE_ENV=preview`; use it to disable background workers, schedulers, profilers, telemetry, and other non-serving processes." |
 | Non-zero exit within 5 seconds of start | "The dev server exited immediately. Check the process output below for configuration errors." |
 | Readiness timeout with live output tail | "The {service} service did not become ready on port {port} before the timeout. Last output: {tail}" |
 | `ECONNREFUSED` on a support service port | "The {service} service is not responding on port {port}. It may have crashed or failed to start. Check the {service} process output." |
@@ -1901,7 +1903,7 @@ type ResourceLimits struct {
 }
 ```
 
-When any process in the preview is OOM-killed (exit code 137), the preview manager should transition the preview to `failed` status with a diagnostic indicating which service was likely affected (based on which process exited) and the memory limit that was exceeded.
+When any process in the preview is OOM-killed (exit code 137), the preview manager should transition the preview to `failed`/`unhealthy` status with a diagnostic indicating which service was likely affected (based on which process exited), the memory limit that was exceeded, and phase-specific remediation guidance. Install/build OOMs should suggest reducing build/install footprint; startup/runtime OOMs should point at the platform-injected `ONEFORTYTHREE_ENV=preview` convention for disabling background workers, schedulers, profilers, telemetry, and other non-serving processes.
 
 Infrastructure containers have separate resource limits (see Platform Infrastructure Services section) that are **additive** to the application service limits. A multi-service preview with a PostgreSQL sidecar uses ~1024 MB (app services) + ~256 MB (PostgreSQL) = ~1280 MB total.
 
