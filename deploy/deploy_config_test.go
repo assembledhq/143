@@ -1974,6 +1974,27 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
+func TestDetachedWorkerDeployMarksSuccessBeforePrune(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	detachedIndex := strings.Index(deployText, "starting detached worker blue/green deploy")
+	require.NotEqual(t, -1, detachedIndex, "deploy script should contain the detached worker rollover body")
+	detachedBody := deployText[detachedIndex:]
+
+	rolloutIndex := strings.Index(detachedBody, "deploy_worker_blue_green")
+	okIndex := strings.Index(detachedBody, `echo "ok" > "\$STATUS_FILE"`)
+	pruneIndex := strings.Index(detachedBody, `prune_docker_deploy_artifacts worker`)
+	require.NotEqual(t, -1, rolloutIndex, "detached worker deploy should run blue/green rollout")
+	require.NotEqual(t, -1, okIndex, "detached worker deploy should write a terminal ok status")
+	require.NotEqual(t, -1, pruneIndex, "detached worker deploy should still prune after rollout")
+	require.Less(t, rolloutIndex, okIndex, "detached worker deploy should only mark ok after blue/green succeeds")
+	require.Less(t, okIndex, pruneIndex, "detached worker deploy status should not wait for slow best-effort pruning")
+}
+
 func TestDetachedWorkerDeployReadsDatabaseEnvFromRemoteEnvFile(t *testing.T) {
 	t.Parallel()
 
@@ -2258,6 +2279,77 @@ func TestRollingDeployDiagnosticsUseFailedServiceLogs(t *testing.T) {
 	require.Contains(t, deployText, `service="${3:-$HEALTH_SERVICE}"`, "health wait should default to the role health service when no service is passed")
 	require.Contains(t, deployText, `echo "--- Last 50 lines of $service logs ---"`, "diagnostics should label logs with the failed service name")
 	require.Contains(t, deployText, `docker compose -f "$COMPOSE_FILE" logs --tail=50 "$service"`, "diagnostics should print logs from the failed service, not always the role health service")
+	require.Contains(t, deployText, `docker logs --tail=50 "$cid"`, "diagnostics should print direct container logs for per-generation worker projects")
+}
+
+func TestWaitContainerHealthyKeepsPollingAfterTransientUnhealthy(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	functionBody := extractShellFunction(t, string(deployScript), "wait_container_healthy", "wait_vector_healthy")
+
+	tmpDir := t.TempDir()
+	countFile := filepath.Join(tmpDir, "health-count")
+	fakeDocker := filepath.Join(tmpDir, "docker")
+	err = os.WriteFile(fakeDocker, []byte(`#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" != "inspect" ]; then
+  echo "unexpected docker command: $*" >&2
+  exit 1
+fi
+format=""
+shift
+if [ "$1" = "--format" ]; then
+  format="$2"
+  shift 2
+fi
+case "$format" in
+  "{{if .State.Health}}yes{{else}}no{{end}}")
+    printf 'yes\n'
+    ;;
+  "{{.State.Status}}")
+    printf 'running\n'
+    ;;
+  "{{.State.Health.Status}}")
+    count="$(cat "$COUNT_FILE" 2>/dev/null || printf '0')"
+    count="$((count + 1))"
+    printf '%s\n' "$count" > "$COUNT_FILE"
+    if [ "$count" -eq 1 ]; then
+      printf 'unhealthy\n'
+    else
+      printf 'healthy\n'
+    fi
+    ;;
+  *)
+    echo "unexpected inspect format: $format" >&2
+    exit 1
+    ;;
+esac
+`), 0o755)
+	require.NoError(t, err, "test should write fake docker executable")
+
+	script := `
+set -euo pipefail
+sleep() { :; }
+dump_diagnostics() { echo "diagnostics $*"; }
+` + functionBody + `
+COMPOSE_FILE=docker-compose.worker.yml
+HEALTH_SERVICE=worker
+wait_container_healthy container-1 6 worker
+`
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"PATH="+tmpDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"COUNT_FILE="+countFile,
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "health wait should keep polling after a transient unhealthy status: %s", output)
+
+	count, err := os.ReadFile(countFile)
+	require.NoError(t, err, "fake docker should record health status poll count")
+	require.Equal(t, "2\n", string(count), "health wait should poll again after the first unhealthy status")
+	require.Contains(t, string(output), "Health check passed.", "health wait should report success after the container becomes healthy")
 }
 
 func TestLoggingDeploySyncsProvisionedObservabilityConfig(t *testing.T) {
