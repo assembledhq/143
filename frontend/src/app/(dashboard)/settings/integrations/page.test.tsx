@@ -802,6 +802,59 @@ describe("IntegrationsPage", () => {
     });
   });
 
+  it("shows a stale Linear default repository and lets admins clear it", async () => {
+    integrationsListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "integration-linear",
+          org_id: "org-1",
+          provider: "linear",
+          status: "active",
+          created_at: "2026-01-01T00:00:00Z",
+        },
+      ],
+      meta: {},
+    });
+    repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        { id: "repo-143", org_id: "org-1", full_name: "assembledhq/143", status: "disconnected" },
+        { id: "repo-api", org_id: "org-1", full_name: "assembledhq/api", status: "active" },
+      ],
+      meta: {},
+    });
+    linearAgentStatusMock.mockResolvedValueOnce({
+      data: {
+        enabled: true,
+        agent_scopes_granted: true,
+        app_user_name: "143",
+        has_linear_integration: true,
+        default_repo_id: "repo-143",
+        available_teams: [],
+      },
+    });
+    linearAgentMappingsMock.mockResolvedValueOnce({ data: [], meta: {} });
+
+    renderWithProviders(<IntegrationsPage />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Manage Linear" }));
+    await screen.findByText("Linear agent routing");
+
+    expect(screen.getByText("assembledhq/143")).toBeInTheDocument();
+    expect(screen.getByText("Disconnected")).toBeInTheDocument();
+    expect(screen.getByText(/This default repository will block new Linear agent sessions until it is cleared or changed to an active repository/)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole("combobox", { name: "Default repository" }));
+    expect(await screen.findByRole("option", { name: "assembledhq/api" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "assembledhq/143" })).not.toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Clear default repository" }));
+    await waitFor(() => {
+      expect(updateLinearAgentMock).toHaveBeenCalledWith({ default_repo_id: null });
+    });
+  });
+
   it("manages PagerDuty health, settings, and recent incidents", async () => {
     integrationsListMock.mockResolvedValueOnce({
       data: [],

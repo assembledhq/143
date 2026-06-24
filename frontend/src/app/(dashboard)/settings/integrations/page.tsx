@@ -1008,6 +1008,17 @@ function repoName(repositories: Repository[], repoID?: string): string {
   return repositories.find((repo) => repo.id === repoID)?.full_name ?? repoID ?? "Unknown repository";
 }
 
+function repoStatusLabel(status: Repository["status"]): string {
+  switch (status) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "disconnected":
+      return "Disconnected";
+  }
+}
+
 function linearTeamLabel(team: LinearTeamKey): string {
   return team.team_name ? `${team.team_name} (${team.team_key})` : team.team_key;
 }
@@ -1066,6 +1077,8 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
   });
 
   const defaultRepoValue = status?.default_repo_id ?? NO_DEFAULT_REPO_VALUE;
+  const defaultRepo = status?.default_repo_id ? allRepositories.find((repo) => repo.id === status.default_repo_id) : undefined;
+  const staleDefaultRepo = defaultRepo && defaultRepo.status !== "active" ? defaultRepo : undefined;
   const canAddMapping = teamID.trim() !== "" && mappingRepoID !== "";
 
   return (
@@ -1096,6 +1109,31 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
                 ))}
               </SelectContent>
             </Select>
+            {staleDefaultRepo ? (
+              <div className="flex flex-col gap-2 rounded-md border border-warning/20 bg-warning/5 px-3 py-2 text-xs sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-foreground">{staleDefaultRepo.full_name}</span>
+                    <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
+                      {repoStatusLabel(staleDefaultRepo.status)}
+                    </Badge>
+                  </div>
+                  <p className="text-muted-foreground">
+                    This default repository will block new Linear agent sessions until it is cleared or changed to an active repository.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="w-fit bg-background"
+                  disabled={updateSettings.isPending}
+                  onClick={() => updateSettings.mutate({ default_repo_id: null })}
+                >
+                  Clear default repository
+                </Button>
+              </div>
+            ) : null}
             {activeRepositories.length === 0 ? (
               <p className="text-xs text-muted-foreground">Connect a GitHub repository before routing Linear agent work.</p>
             ) : null}

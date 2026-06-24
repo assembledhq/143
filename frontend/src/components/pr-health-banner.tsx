@@ -104,15 +104,17 @@ export function PRHealthBanner({
   const canShowMergeWhenReady = !prHealthBlocked && mergeWhenReadyAction.visible && Boolean(onQueueMergeWhenReady || onCancelMergeWhenReady);
   const canShowReviewAction = !prHealthBlocked && !!reviewAction;
   const canShowPushChanges = !prHealthBlocked && !!pushChanges;
+  const canShowSnapshotDetails = !prHealthBlocked;
+  const canShowActiveRepairState = canShowSnapshotDetails && !!activeRepairState.label;
   const hasActionableButton =
-    !!activeRepairState.label ||
+    canShowActiveRepairState ||
     canShowResolveConflictsButton ||
     canShowFixTestsButton ||
     canShowMergeButton ||
     canShowMergeWhenReady ||
     canShowReviewAction ||
     canShowPushChanges ||
-    !!activeRepairState.openSessionID;
+    (canShowSnapshotDetails && !!activeRepairState.openSessionID);
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
@@ -151,7 +153,7 @@ export function PRHealthBanner({
                   Repository disconnected
                 </Badge>
               )}
-              {health.failing_test_count > 0 && (
+              {canShowSnapshotDetails && health.failing_test_count > 0 && (
                 orderedChecks.length > 0 ? (
                   <HoverCard openDelay={100} closeDelay={100}>
                     <HoverCardTrigger asChild>
@@ -199,7 +201,7 @@ export function PRHealthBanner({
                   </Badge>
                 )
               )}
-              {health.obsolete_active_repair_sessions && (
+              {canShowSnapshotDetails && health.obsolete_active_repair_sessions && (
                 <Badge variant="secondary" className="text-xs">
                   newer repair context available
                 </Badge>
@@ -229,7 +231,7 @@ export function PRHealthBanner({
 
             {hasActionableButton && (
               <div className="space-y-2">
-                {activeRepairState.label && pendingAction === null && (
+                {canShowActiveRepairState && pendingAction === null && (
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge variant="secondary" className="text-xs">
                       {activeRepairState.label}

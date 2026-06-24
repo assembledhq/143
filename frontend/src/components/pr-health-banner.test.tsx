@@ -192,6 +192,20 @@ describe("PRHealthBanner", () => {
           repository_status: "disconnected",
           merge_state: "unknown",
           checks_confirmed: true,
+          failing_test_count: 2,
+          checks: [
+            { name: "unit", category: "test", status: "failed" },
+            { name: "lint", category: "test", status: "failed" },
+          ],
+          active_repairs: [
+            {
+              action_type: "fix_tests",
+              session_id: "session-456",
+              thread_id: "thread-789",
+              session_status: "running",
+              health_version: 1,
+            },
+          ],
           summary: "PR #42 cannot be refreshed because acme/widgets is disconnected from GitHub. Reconnect the repository to update merge status, checks, and close/merge state.",
         }}
         pendingAction={null}
@@ -223,6 +237,8 @@ describe("PRHealthBanner", () => {
     expect(screen.queryByRole("button", { name: /^Merge$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Review$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Push changes$/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("2/2 failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Fix tests running")).not.toBeInTheDocument();
   });
 
   it("renders an optional Review action in the PR action row", async () => {
