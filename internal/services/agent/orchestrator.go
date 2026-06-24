@@ -4625,30 +4625,40 @@ func (o *Orchestrator) drainQueuedMessagesAfterProcessedID(ctx context.Context, 
 }
 
 func (o *Orchestrator) admitNextQueuedThread(ctx context.Context, session *models.Session, log zerolog.Logger) {
-	if o == nil || session == nil || o.sessionThreads == nil || o.jobs == nil {
+	if o == nil || session == nil || o.sessions == nil || o.sessionThreads == nil || o.jobs == nil {
 		return
 	}
-	thread, err := o.sessionThreads.ClaimNextQueuedForSession(ctx, session.OrgID, session.ID, models.MaxRunningThreadsPerSession)
+	current, err := o.sessions.GetByID(ctx, session.OrgID, session.ID)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("session_id", session.ID.String()).
+			Msg("failed to refresh session before admitting queued thread")
+		return
+	}
+	if current.Status != models.SessionStatusRunning {
+		return
+	}
+	thread, err := o.sessionThreads.ClaimNextQueuedForSession(ctx, current.OrgID, current.ID, models.MaxRunningThreadsPerSession)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
 		log.Warn().Err(err).
-			Str("session_id", session.ID.String()).
+			Str("session_id", current.ID.String()).
 			Msg("failed to claim next queued sibling thread")
 		return
 	}
 	payload := map[string]string{
-		"session_id": session.ID.String(),
+		"session_id": current.ID.String(),
 		"thread_id":  thread.ID.String(),
-		"org_id":     session.OrgID.String(),
+		"org_id":     current.OrgID.String(),
 	}
 	dedupeKey := continueSessionDedupeKey(thread.ID)
-	if _, err := o.jobs.EnqueueWithTarget(ctx, session.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(session)); err != nil {
+	if _, err := o.jobs.EnqueueWithTarget(ctx, current.OrgID, "agent", "continue_session", payload, 5, &dedupeKey, models.SessionWorkerTarget(&current)); err != nil {
 		log.Warn().Err(err).
 			Str("thread_id", thread.ID.String()).
 			Msg("failed to enqueue queued sibling thread after slot opened")
-		if revertErr := o.sessionThreads.UpdateStatus(ctx, session.OrgID, thread.ID, models.ThreadStatusIdle); revertErr != nil {
+		if revertErr := o.sessionThreads.UpdateStatus(ctx, current.OrgID, thread.ID, models.ThreadStatusIdle); revertErr != nil {
 			log.Warn().Err(revertErr).
 				Str("thread_id", thread.ID.String()).
 				Msg("failed to revert queued sibling thread after enqueue failure")
