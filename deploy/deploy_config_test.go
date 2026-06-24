@@ -782,6 +782,8 @@ func TestWorkerBlueGreenPreflightChecksCapacitySchemaAndSupportServices(t *testi
 	require.Contains(t, deploy, "worker_host_capacity_preflight", "worker deploy should run a local CPU/memory capacity preflight before starting green")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_FREE_MEMORY_MB", "worker deploy should let operators set the minimum free memory needed for temporary worker overlap")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS", "worker deploy should let operators set the minimum idle CPU budget needed for temporary worker overlap")
+	require.Contains(t, deploy, `local min_cpu="${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}"`, "worker deploy should not block routine rollouts on noisy idle CPU samples unless operators explicitly configure a minimum")
+	require.Contains(t, deploy, `--min-idle-cpu-millis "${WORKER_BLUE_GREEN_MIN_IDLE_CPU_MILLIS:-0}"`, "worker deployctl preflight should inherit the non-blocking idle CPU default")
 	require.Contains(t, deploy, "WORKER_BLUE_GREEN_PREFLIGHT_ATTEMPTS", "worker deploy should retry transient capacity preflight failures before failing a routine rollout")
 	require.Contains(t, deploy, "worker_support_service_fingerprint", "worker deploy should fingerprint support-service config inputs during preflight")
 	require.Contains(t, deploy, "worker_process_config_fingerprint", "worker deploy should separately fingerprint worker-process config inputs during preflight")
