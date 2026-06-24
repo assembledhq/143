@@ -148,6 +148,7 @@ import { ResizeHandle } from "@/components/resize-handle";
 import { DiffStatsBadge } from "@/components/code-review/diff-stats-badge";
 import { LinkedIssueChips } from "./linked-issue-chips";
 import { useReviewComments } from "@/hooks/use-review-comments";
+import { useSessionScopedReset } from "@/hooks/use-session-scoped-reset";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
@@ -3614,6 +3615,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [isMobileReviewViewport, setIsMobileReviewViewport] = useState(false);
   const previousReviewParamRef = useRef(reviewParam);
   const suppressNextReviewParamClearRef = useRef(false);
+  const lastReviewSyncIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (reviewParam === "active") {
       setCenterMode("review");
@@ -3629,20 +3631,39 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [reviewParam]);
 
   useEffect(() => {
-    const urlReviewParam =
+    const urlParams =
       typeof window === "undefined"
         ? null
-        : new URLSearchParams(window.location.search).get("review");
-    const nextReviewParam =
-      typeof window === "undefined" || window.location.search === ""
+        : new URLSearchParams(window.location.search);
+    const urlReviewParam = urlParams?.get("review") ?? null;
+    const urlPreviewParam = urlParams?.get("preview") ?? null;
+    // On a session switch the new session's review state comes solely from its
+    // own URL; only the initial mount may fall back to the remembered param
+    // (e.g. an empty search string during hydration). Without this guard the
+    // stale ref carries the previous session's "active" param into the next
+    // session and leaves it stuck in review mode.
+    const isSessionSwitch =
+      lastReviewSyncIdRef.current !== undefined && lastReviewSyncIdRef.current !== id;
+    lastReviewSyncIdRef.current = id;
+    const nextReviewParam = isSessionSwitch
+      ? urlReviewParam
+      : typeof window === "undefined" || window.location.search === ""
         ? previousReviewParamRef.current
         : urlReviewParam;
     const isDirectReview = nextReviewParam === "active";
+    const isDirectPreview = urlPreviewParam === "1";
+    if (!isSessionSwitch && !isDirectReview && !isDirectPreview) {
+      return;
+    }
     setHasMountedChatPanel(!isDirectReview);
     previousReviewParamRef.current = nextReviewParam;
-    if (isDirectReview) {
-      setCenterMode("review");
-    }
+    setDetailTab(isDirectPreview ? "preview" : isDirectReview ? "changes" : "overview");
+    // Drive centerMode deterministically on session change. Without this, a
+    // session left in review mode bleeds "review" into the next session,
+    // because the reviewParam clear path is gated by
+    // suppressNextReviewParamClearRef (set by openReview) and gets skipped.
+    suppressNextReviewParamClearRef.current = false;
+    setCenterMode(isDirectReview ? "review" : "chat");
   }, [id]);
 
   useEffect(() => {
@@ -3739,6 +3760,33 @@ export function SessionDetailContent({ id }: { id: string }) {
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isDocumentVisible = useDocumentVisible();
 
+  const resetSessionChromeAndActionState = useCallback(() => {
+    setMobileDetailOpen(false);
+    setMobileReviewComposerOpen(false);
+    setMobileRenameOpen(false);
+    setKeyboardHelpOpen(false);
+    setReviewConfigOpen(false);
+    setReviewPasses(2);
+    setReviewFixMode("minimal");
+    setActiveFileIndex(0);
+    setIsEditingTitle(false);
+    setDraftTitle("");
+    setLocalPRState("idle");
+    setLocalPRActionError(null);
+    setLocalBranchState("idle");
+    setLocalBranchActionError(null);
+    setLocalPushState("idle");
+    setLocalPushActionError(null);
+    setPendingPRAction(null);
+    setPendingMergeWhenReady(false);
+    setRepairActionError(null);
+    setPRAuthPrompt(null);
+    resumeAttemptRef.current = null;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session chrome and action state", reset: resetSessionChromeAndActionState },
+  ]);
+
   const { data, isLoading, error } = useQuery({
     queryKey: queryKeys.sessions.detail(id),
     queryFn: () => api.sessions.get(id),
@@ -3832,10 +3880,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     refetchOnWindowFocus: false,
     retry: false,
   });
-  useEffect(() => {
+  const resetSessionDiffRevisionState = useCallback(() => {
     fetchedDiffBeforeRevisionRef.current = false;
     observedDiffRevisionKeyRef.current = null;
-  }, [id]);
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session diff revision state", reset: resetSessionDiffRevisionState },
+  ]);
   useEffect(() => {
     if (centerMode === "review") {
       void loadReviewDiffView();
@@ -3904,6 +3955,12 @@ export function SessionDetailContent({ id }: { id: string }) {
   // this prefetch is just unused cache. ChatPanel's useInfiniteQuery shares
   // the exact query key, so React Query dedupes against the in-flight fetch.
   const didPrefetchThreadMessagesRef = useRef(false);
+  const resetSessionPrefetchState = useCallback(() => {
+    didPrefetchThreadMessagesRef.current = false;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session prefetch state", reset: resetSessionPrefetchState },
+  ]);
   useEffect(() => {
     if (didPrefetchThreadMessagesRef.current || typeof window === "undefined") return;
     didPrefetchThreadMessagesRef.current = true;
@@ -4073,13 +4130,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     session?.workspace_revision,
   ]);
 
-  useEffect(() => {
+  const resetSessionRuntimeState = useCallback(() => {
     setHasResolvedInitialThreadSelection(false);
     setActiveThreadId(null);
     setPendingThreadPreview(null);
     setSessionStopRequest(null);
     setSessionStopOutcome(null);
-  }, [id]);
+    setOptimisticMessages([]);
+    optimisticMessageIDRef.current = -1_000_000;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session runtime state", reset: resetSessionRuntimeState },
+  ]);
 
   useEffect(() => {
     if (!session) {
@@ -4155,10 +4217,6 @@ export function SessionDetailContent({ id }: { id: string }) {
 
     writeStoredSessionActiveThread(window.localStorage, id, viewerScope, activeThreadId);
   }, [activeThreadId, hasResolvedInitialThreadSelection, id, viewerScope]);
-
-  useEffect(() => {
-    setOptimisticMessages([]);
-  }, [id]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -4297,6 +4355,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   // previous value via ref so we fire once per transition rather than on
   // every render.
   const prevPRStateRef = useRef<string | undefined>(undefined);
+  const prevPRUrlRef = useRef<string | undefined>(undefined);
+  const prevPRPushStateRef = useRef<string | undefined>(undefined);
+  const prevBranchStateRef = useRef<string | undefined>(undefined);
+  const resetSessionTransitionRefs = useCallback(() => {
+    prevPRStateRef.current = undefined;
+    prevPRUrlRef.current = undefined;
+    prevPRPushStateRef.current = undefined;
+    prevBranchStateRef.current = undefined;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session transition refs", reset: resetSessionTransitionRefs },
+  ]);
   const prUrl = prData?.data?.github_pr_url;
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
@@ -4324,7 +4394,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRStateRef.current = current;
   }, [session?.pr_creation_state, session?.pr_creation_error, prUrl, queryClient, id]);
-  const prevPRUrlRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (localPRState !== "idle" && prUrl && prevPRUrlRef.current !== prUrl && !session?.pr_creation_state) {
       toast.success("PR opened", {
@@ -4340,7 +4409,6 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Also clears localPushState when the server transitions out of in-flight
   // so the button returns to "Push changes" promptly without waiting for the
   // next polling tick.
-  const prevPRPushStateRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const prev = prevPRPushStateRef.current;
     const current = session?.pr_push_state;
@@ -4361,7 +4429,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     prevPRPushStateRef.current = current;
   }, [session?.pr_push_state, session?.pr_push_error, prUrl, queryClient, id, pullRequestId]);
-  const prevBranchStateRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     const prev = prevBranchStateRef.current;
     const current = session?.branch_creation_state;
@@ -4562,6 +4629,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     };
   }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
+  const resetSessionNotificationRefs = useCallback(() => {
+    previousSessionStatusRef.current = undefined;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session notification refs", reset: resetSessionNotificationRefs },
+  ]);
   useEffect(() => {
     const currentStatus = session?.status;
     if (!session?.id || !currentStatus) {
@@ -4849,6 +4922,13 @@ export function SessionDetailContent({ id }: { id: string }) {
   // Review card can surface blockers, bypasses, and the review packet inline.
   const [readinessBypassOpen, setReadinessBypassOpen] = useState(false);
   const [readinessBypassReason, setReadinessBypassReason] = useState("");
+  const resetSessionReadinessBypassState = useCallback(() => {
+    setReadinessBypassOpen(false);
+    setReadinessBypassReason("");
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session readiness bypass state", reset: resetSessionReadinessBypassState },
+  ]);
   const readinessPacketRef = useRef<HTMLDivElement | null>(null);
   const readinessBypassMutation = useMutation({
     mutationFn: () => api.sessions.createReadinessBypass(id, readinessBypassReason),
@@ -5083,6 +5163,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     setDiffSearchQuery,
   } = diffViewState;
   const emptyDiffRecoveryKeyRef = useRef<string | null>(null);
+  const resetSessionDiffRecoveryState = useCallback(() => {
+    emptyDiffRecoveryKeyRef.current = null;
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session diff recovery state", reset: resetSessionDiffRecoveryState },
+  ]);
   useEffect(() => {
     if (
       !shouldLoadDiff ||
@@ -5190,6 +5276,28 @@ export function SessionDetailContent({ id }: { id: string }) {
   const inFlightAgentUpdateRef = useRef<Promise<unknown> | null>(null);
   const chatPanelScrollToLiveEdgeRef = useRef<(() => void) | null>(null);
   const [chatPanelKeyboardControls, setChatPanelKeyboardControls] = useState<SessionTranscriptKeyboardControls | null>(null);
+  const resetSessionComposerState = useCallback(() => {
+    setActiveCommentLine(null);
+    setComposerMessage("");
+    setComposerPlanMode(false);
+    setComposerSelectedModel("");
+    setComposerAttachments([]);
+    setComposerReferences([]);
+    setComposerCommands([]);
+    setComposerIsUploading(false);
+    setComposerUploadError(null);
+    setAddThreadOpen(false);
+    setNewThreadAgentType("codex");
+    setNewThreadModel("");
+    setNewThreadLabel("");
+    focusComposerAfterThreadCreateRef.current = false;
+    inFlightAgentUpdateRef.current = null;
+    chatPanelScrollToLiveEdgeRef.current = null;
+    setChatPanelKeyboardControls(null);
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session composer state", reset: resetSessionComposerState },
+  ]);
   // Open comments are the source of truth for what gets attached to the next
   // message — once a send succeeds, the backend marks them resolved in the
   // same transaction, the comments query is invalidated below, and the next
@@ -5586,6 +5694,13 @@ export function SessionDetailContent({ id }: { id: string }) {
   // recent response, which is now a delta.
   const fileEventsSinceRef = useRef<string | undefined>(undefined);
   const [accumulatedFileEvents, setAccumulatedFileEvents] = useState<SessionThreadFileEvent[]>([]);
+  const resetSessionFileEventState = useCallback(() => {
+    fileEventsSinceRef.current = undefined;
+    setAccumulatedFileEvents([]);
+  }, []);
+  useSessionScopedReset(id, [
+    { name: "session file event state", reset: resetSessionFileEventState },
+  ]);
   const fileEventsQuery = useQuery({
     queryKey: queryKeys.sessions.threadFileEvents(id),
     queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
