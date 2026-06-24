@@ -6163,6 +6163,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                         <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
                           <Button
                             type="button"
+                            variant="outline"
                             size="sm"
                             className="w-full gap-1.5 sm:w-auto"
                             disabled={reviewActionDisabled}
