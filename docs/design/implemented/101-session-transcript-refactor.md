@@ -71,6 +71,16 @@ loaded history. The frontend still keeps the established transcript UI:
   active sessions.
 - Older and newer history use transcript cursors, with the existing scroll
   compensation path preserving the visible area when older content is prepended.
+- Pending sessions or tabs render one of two transcript notices. Because the
+  `pending` status covers both normal container/environment setup and a session
+  queued behind the org's concurrency limit, the frontend consults the runtime
+  capacity signal (`GET /settings/runtime/status`) to disambiguate. It compares
+  the agent-run counts (`active_agent_runs >= max_concurrent_agent_runs`) rather
+  than the response's conflated `state`, which also flips to `limited` for the
+  unrelated preview quota. When agent-run concurrency is exhausted it shows an
+  explicit "waiting for capacity" notice (with the configured limit and that the
+  session starts automatically once capacity frees up or the limit is raised);
+  otherwise it shows the standard "setting up environment" message.
 
 The older thread message and log APIs remain available for compatibility,
 internal tools, and direct log inspection.

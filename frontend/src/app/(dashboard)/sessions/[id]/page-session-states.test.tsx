@@ -239,6 +239,118 @@ describe('SessionDetailPage session states', () => {
     expect(screen.getByTitle('Send message')).toBeInTheDocument();
   });
 
+  it('explains that a pending session is waiting on the org concurrency limit', async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/runtime/status', () => {
+        return HttpResponse.json({
+          data: {
+            static_egress: { available: true, enabled: false },
+            capacity: {
+              state: 'limited',
+              active_agent_runs: 2,
+              max_concurrent_agent_runs: 2,
+              active_previews: 0,
+              max_previews_per_user: 5,
+            },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+
+    expect(await screen.findByText('Waiting for capacity')).toBeInTheDocument();
+    expect(await screen.findByText('Your organization is already at its max concurrency limit of 2 running sessions.')).toBeInTheDocument();
+    expect(screen.getByText('This session will start automatically when another session finishes or the limit is raised.')).toBeInTheDocument();
+    expect(screen.queryByText('Setting up environment')).not.toBeInTheDocument();
+  });
+
+  it('shows the environment setup message for a pending session when the org is below its concurrency limit', async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/runtime/status', () => {
+        return HttpResponse.json({
+          data: {
+            static_egress: { available: true, enabled: false },
+            capacity: {
+              state: 'normal',
+              active_agent_runs: 0,
+              max_concurrent_agent_runs: 2,
+              active_previews: 0,
+              max_previews_per_user: 5,
+            },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+
+    expect(await screen.findByText('Setting up environment')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for capacity')).not.toBeInTheDocument();
+    expect(screen.queryByText('Max concurrency reached')).not.toBeInTheDocument();
+  });
+
+  it('shows the environment setup message for a pending session when capacity is limited only by the preview quota', async () => {
+    const pendingSession: Session = {
+      ...mockSessions[0],
+      status: 'pending',
+      completed_at: undefined,
+      current_turn: 0,
+      sandbox_state: 'none',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: pendingSession } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/settings/runtime/status', () => {
+        return HttpResponse.json({
+          data: {
+            static_egress: { available: true, enabled: false },
+            capacity: {
+              // `state` is "limited" because previews are maxed, but agent-run
+              // concurrency still has headroom, so this pending session is just
+              // setting up — not queued behind the concurrency limit.
+              state: 'limited',
+              active_agent_runs: 0,
+              max_concurrent_agent_runs: 2,
+              active_previews: 5,
+              max_previews_per_user: 5,
+            },
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={pendingSession.id} />);
+
+    expect(await screen.findByText('Setting up environment')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for capacity')).not.toBeInTheDocument();
+    expect(screen.queryByText('Max concurrency reached')).not.toBeInTheDocument();
+  });
+
   it('keeps the composer enabled and sends follow-up messages while the session is running', async () => {
     let postedMessage = '';
     const runningSession: Session = {

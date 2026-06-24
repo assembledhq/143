@@ -2230,8 +2230,26 @@ function ChatPanel({
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
+  const isPending = activeThread ? activeThread.status === "pending" : session.status === "pending";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
+  // `pending` covers both the normal environment-setup window and a session
+  // that is queued because the org is at its concurrency limit. The two look
+  // identical on the session row, so consult the runtime capacity signal to
+  // decide which message to show instead of assuming every pending session is
+  // capacity-blocked. Gate on the agent-run dimension specifically rather than
+  // the conflated `state`, which also flips to "limited" when only the
+  // unrelated preview limit is reached.
+  const runtimeStatusQuery = useQuery({
+    queryKey: queryKeys.settings.runtimeStatus,
+    queryFn: () => api.settings.getRuntimeStatus(),
+    enabled: isPending,
+    staleTime: 15_000,
+    refetchInterval: 15_000,
+  });
+  const capacity = runtimeStatusQuery.data?.data.capacity;
+  const isCapacityLimited = capacity != null && capacity.active_agent_runs >= capacity.max_concurrent_agent_runs;
+  const maxConcurrentRuns = capacity?.max_concurrent_agent_runs;
   const initialThreadAnchorPosition = useMemo<SessionAnchorPosition | null>(() => {
     if (!activeThreadId || !viewerScope || typeof window === "undefined") return null;
     return readStoredSessionAnchorPosition(window.localStorage, sessionId, viewerScope, activeThreadId);
@@ -3160,16 +3178,50 @@ function ChatPanel({
             ) : null}
           </>
         )}
-        {(activeThread?.status === "pending" || (!activeThread && session.status === "pending")) && (
-          <div className="flex items-center justify-center py-12">
-            <div className="text-center space-y-2 max-w-[280px]">
-              <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
-              <p className="text-xs font-medium text-muted-foreground">Setting up environment</p>
-              <p className="text-xs text-muted-foreground/60">Preparing the container and getting the agent ready to run.</p>
+        {isPending && (
+          isCapacityLimited ? (
+            <PendingCapacityNotice maxConcurrentRuns={maxConcurrentRuns} />
+          ) : (
+            <div className="flex items-center justify-center py-12">
+              <div className="text-center space-y-2 max-w-[280px]">
+                <Loader2 className="h-8 w-8 text-muted-foreground/40 mx-auto animate-spin" />
+                <p className="text-xs font-medium text-muted-foreground">Setting up environment</p>
+                <p className="text-xs text-muted-foreground/60">Preparing the container and getting the agent ready to run.</p>
+              </div>
             </div>
-          </div>
+          )
         )}
       </div>
+    </div>
+  );
+}
+
+function PendingCapacityNotice({ maxConcurrentRuns }: { maxConcurrentRuns?: number }) {
+  const limitText = maxConcurrentRuns && maxConcurrentRuns > 0
+    ? `Your organization is already at its max concurrency limit of ${maxConcurrentRuns} running ${maxConcurrentRuns === 1 ? "session" : "sessions"}.`
+    : "Your organization is already at its max concurrency limit for running sessions.";
+
+  return (
+    <div className="flex justify-center py-8">
+      <Card className="w-full max-w-[34rem] border-amber-200/70 bg-amber-50/70 shadow-none dark:border-amber-900/60 dark:bg-amber-950/20">
+        <CardContent className="flex gap-3 p-4">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-amber-200 bg-background text-amber-700 dark:border-amber-900/70 dark:text-amber-300">
+            <Clock className="h-4 w-4" aria-hidden />
+          </div>
+          <div className="min-w-0 space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-sm font-semibold text-foreground">Waiting for capacity</p>
+              <Badge variant="outline" className="border-amber-300/80 bg-background/70 text-amber-800 dark:border-amber-800 dark:text-amber-300">
+                Max concurrency reached
+              </Badge>
+            </div>
+            <p className="text-sm text-muted-foreground">{limitText}</p>
+            <p className="text-sm text-muted-foreground">
+              This session will start automatically when another session finishes or the limit is raised.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
