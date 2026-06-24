@@ -799,15 +799,15 @@ function SessionsAndCleanupSection() {
                     ? "Hide session lifecycle controls"
                     : "Show session lifecycle controls"
                 }
-                className="flex h-auto w-full items-center justify-between gap-4 rounded-none px-0 py-4 text-left hover:bg-transparent"
+                className="flex h-auto w-full items-start justify-between gap-3 rounded-none px-0 py-4 text-left hover:bg-transparent sm:items-center sm:gap-4"
               >
-                <span className="block min-w-0 space-y-1">
-                  <span className="flex items-center gap-2 text-xs font-medium text-foreground">
+                <span className="block min-w-0 flex-1 space-y-1">
+                  <span className="flex flex-wrap items-center gap-2 text-xs font-medium whitespace-normal text-foreground">
                     Sessions and cleanup
                     <AutosaveIndicator status={autosave.status} />
                   </span>
                   {summary && (
-                    <span className="block text-sm font-medium text-foreground">
+                    <span className="block text-sm font-medium whitespace-normal text-foreground">
                       {summary}
                     </span>
                   )}
@@ -815,7 +815,10 @@ function SessionsAndCleanupSection() {
                     Lifecycle, retention, preview idle behavior, and advanced agent tab coordination.
                   </span>
                 </span>
-                <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                <span
+                  data-testid="session-lifecycle-disclosure-action"
+                  className="flex shrink-0 items-center gap-2 pt-0.5 text-xs text-muted-foreground sm:pt-0"
+                >
                   {open ? "Hide" : "Show"}
                   <ChevronDown
                     className={cn(
@@ -1067,13 +1070,13 @@ function ResourceDefaultsSection() {
                       ? "Hide advanced resource limits"
                       : "Show advanced resource limits"
                   }
-                  className="flex h-auto w-full items-center justify-between gap-4 rounded-none px-0 py-4 text-left hover:bg-transparent"
+                  className="flex h-auto w-full items-start justify-between gap-3 rounded-none px-0 py-4 text-left hover:bg-transparent sm:items-center sm:gap-4"
                 >
-                  <span className="block min-w-0 space-y-1">
-                    <span className="block text-xs font-medium text-foreground">
+                  <span className="block min-w-0 flex-1 space-y-1">
+                    <span className="block text-xs font-medium whitespace-normal text-foreground">
                       Advanced resource limits
                     </span>
-                    <span className="block text-sm font-medium text-foreground">
+                    <span className="block text-sm font-medium whitespace-normal text-foreground">
                       {advancedSummary}
                     </span>
                     <span className="block text-xs leading-5 whitespace-normal text-muted-foreground">
