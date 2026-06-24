@@ -395,7 +395,26 @@ Any preview with `preview.secrets`, `preview.credentials.mode` other than `none`
   <Step>The session page exposes the preview on an isolated preview origin.</Step>
 </Steps>
 
-Every service also receives `HOST=0.0.0.0` and, when available, `PREVIEW_ORIGIN`. Use `PREVIEW_ORIGIN` as the external base URL for callbacks, redirects, and absolute links that must point back to the public preview URL.
+Every service also receives platform-injected environment variables for preview-specific behavior.
+
+| Variable | Use |
+|---|---|
+| `HOST` | Defaults to `0.0.0.0` so frameworks bind where the preview gateway can reach them. |
+| `ONEFORTYTHREE=true` | Always injected. Use this to detect that the process is running on 143. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
+| `ONEFORTYTHREE_ENV=preview` | Always injected for preview runtimes. Use this to disable background consumers, schedulers, profilers, telemetry exporters, and other work that is useful in production but not needed to serve the preview. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
+| `PREVIEW_ORIGIN` | Public preview URL, when available. Use this as the external base URL for callbacks, redirects, and absolute links that must point back to the public preview URL. |
+
+## Runtime environment
+
+`ONEFORTYTHREE=true` and `ONEFORTYTHREE_ENV=preview` are the stable signals that app code is running inside a 143 preview. They are injected by the platform for every service. These names are reserved in configs and secret bundle env outputs, and declarations fail validation.
+
+Use `ONEFORTYTHREE_ENV=preview` in startup code to keep the serving path enabled while skipping work that can exceed preview limits or make previews noisy:
+
+- background consumers
+- schedulers and cron loops
+- profilers and telemetry exporters
+- expensive startup warmers
+- non-serving maintenance processes
 
 ## Use previews
 

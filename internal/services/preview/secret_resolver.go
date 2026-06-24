@@ -97,6 +97,9 @@ func renderPreviewSecretOutputs(ref models.PreviewSecretBundleRef, source models
 		switch output.Type {
 		case "env":
 			for key, expr := range output.Values {
+				if isReservedPlatformPreviewEnvName(key) {
+					return nil, nil, fmt.Errorf("env %q is reserved for platform-injected preview runtime metadata", key)
+				}
 				value, err := resolvePreviewSecretExpression(expr, source.Values)
 				if err != nil {
 					return nil, nil, fmt.Errorf("env %s: %w", key, err)

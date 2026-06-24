@@ -1315,9 +1315,22 @@ func ClassifyLaunchFailure(err error, memoryLimitMB int) StartFailure {
 	// manager.go) so the launch page and instance error make the cause obvious
 	// instead of leaving the exit code to be decoded.
 	if looksLikeOOMFailure(cause) {
-		out.Message = "the preview " + oomFailureExplanation(memoryLimitMB) + " " + out.Message
+		out.Message = "the preview " + oomFailureExplanation(memoryLimitMB, oomPhaseForLaunchFailure(err)) + " " + out.Message
 	}
 	return out
+}
+
+func oomPhaseForLaunchFailure(err error) oomPhase {
+	switch {
+	case errors.Is(err, ErrInstallFailed):
+		return oomPhaseInstall
+	case errors.Is(err, ErrServiceBuildFailed):
+		return oomPhaseBuild
+	case errors.Is(err, ErrServiceNotReady):
+		return oomPhaseStartup
+	default:
+		return oomPhaseUnknown
+	}
 }
 
 func classifyLaunchFailureCode(err error, cause string) StartFailure {

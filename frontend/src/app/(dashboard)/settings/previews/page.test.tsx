@@ -128,6 +128,27 @@ describe("PreviewSettingsPage", () => {
     expect(screen.getByRole("radio", { name: /turn off auto-preview for assembledhq\/143/i })).toBeChecked();
   });
 
+  it("explains the platform-injected preview runtime environment", async () => {
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Runtime environment" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("ONEFORTYTHREE=true")).toBeInTheDocument();
+    expect(screen.getByText("ONEFORTYTHREE_ENV=preview")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /disable background workers, schedulers, profilers, telemetry exporters, and other non-serving work/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /view preview env docs/i }),
+    ).toHaveAttribute(
+      "href",
+      "/docs/reference/preview-config#platform-injected-environment",
+    );
+  });
+
   it("enables session prewarm policies only when speculative slots are configured", async () => {
     let savedPolicy: unknown;
     let savedSettings: unknown;
