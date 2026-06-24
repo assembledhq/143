@@ -574,6 +574,43 @@ describe("PullRequestPreviewPage", () => {
     expect(screen.queryByRole("button", { name: /Restart|Start preview|Resume preview/ })).not.toBeInTheDocument();
   });
 
+  it("prefers failed preview diagnostics over blocked launch copy", async () => {
+    server.use(
+      http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "def456",
+            latest_commit_sha: "def456",
+            source_type: "pull_request",
+            status: "failed",
+            error: "the preview ran out of memory (OOM, exit 137); capped at 4096 MiB.",
+            stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+            pull_request_url: "https://github.com/acme/web/pull/42",
+            launch: {
+              action: "blocked",
+              reason: "preview_unavailable",
+              auto_open: false,
+              represents_latest: true,
+              message: "restart preview to apply network setting",
+            },
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
+
+    expect(await screen.findByText("Preview failed")).toBeInTheDocument();
+    expect(screen.getAllByText("the preview ran out of memory (OOM, exit 137); capped at 4096 MiB.").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Preview blocked")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry preview|Retry/ })).toBeEnabled();
+  });
+
   it("does not show Open preview button while preview is starting", async () => {
     server.use(
       http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
