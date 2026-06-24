@@ -335,6 +335,7 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	w.Register("slack_sync_app_home", newSlackSyncAppHomeHandler(stores, services, logger))
 	w.Register("slack_post_run_update", newSlackPostRunUpdateHandler(stores, services, logger))
 	w.Register("slack_post_final_response", newSlackPostFinalResponseHandler(stores, services, logger))
+	w.Register("slack_add_session_reaction", newSlackAddSessionReactionHandler(stores, logger))
 	w.Register("slack_deliver_human_input", newSlackDeliverHumanInputHandler(stores, services, logger))
 	w.Register("slack_send_notification", newSlackSendNotificationHandler(stores, services, logger))
 	w.Register("slack_handle_interaction", newSlackHandleInteractionHandler(stores, services, logger))
@@ -3062,9 +3063,13 @@ type slackReactionAdder interface {
 	AddReaction(ctx context.Context, accessToken, channelID, messageTS, name string) error
 }
 
-const slackCompletionReactionName = "white_check_mark"
+const slackCompletionReactionName = models.SlackReactionCompletedResponse
 
 func addSlackCompletionReaction(ctx context.Context, adder slackReactionAdder, logger zerolog.Logger, accessToken string, link models.SlackSessionLink) {
+	addSlackSessionReaction(ctx, adder, logger, accessToken, link, slackCompletionReactionName)
+}
+
+func addSlackSessionReaction(ctx context.Context, adder slackReactionAdder, logger zerolog.Logger, accessToken string, link models.SlackSessionLink, reactionName string) {
 	if adder == nil {
 		return
 	}
@@ -3073,17 +3078,19 @@ func addSlackCompletionReaction(ctx context.Context, adder slackReactionAdder, l
 	if messageTS == "" {
 		messageTS = strings.TrimSpace(link.SlackThreadTS)
 	}
-	if strings.TrimSpace(accessToken) == "" || channelID == "" || messageTS == "" {
+	reactionName = strings.TrimSpace(reactionName)
+	if strings.TrimSpace(accessToken) == "" || channelID == "" || messageTS == "" || reactionName == "" {
 		return
 	}
-	if err := adder.AddReaction(ctx, accessToken, channelID, messageTS, slackCompletionReactionName); err != nil {
+	if err := adder.AddReaction(ctx, accessToken, channelID, messageTS, reactionName); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "already_reacted") {
 			return
 		}
 		logger.Warn().Err(err).
 			Str("slack_channel_id", channelID).
 			Str("slack_message_ts", messageTS).
-			Msg("failed to add Slack completion reaction")
+			Str("slack_reaction_name", reactionName).
+			Msg("failed to add Slack session reaction")
 	}
 }
 
@@ -3305,6 +3312,37 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 			}
 		}
 		addSlackCompletionReaction(ctx, slackClient, logger, slackCfg.AccessToken, link)
+		return nil
+	}
+}
+
+func newSlackAddSessionReactionHandler(stores *Stores, logger zerolog.Logger) JobHandler {
+	slackClient := ingestion.NewSlackAPIClient(logger)
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		if stores == nil || stores.Credentials == nil || stores.SlackSessionLinks == nil {
+			return fmt.Errorf("slack reaction dependencies are not configured")
+		}
+		var input models.SlackAddSessionReactionJobPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal slack reaction payload: %w", err)
+		}
+		orgID, sessionID, err := parseSlackSessionJobIDs(input.OrgID, input.SessionID)
+		if err != nil {
+			return err
+		}
+		link, err := stores.SlackSessionLinks.GetBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("get slack session link: %w", err)
+		}
+		cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+		if err != nil {
+			return fmt.Errorf("get slack credentials: %w", err)
+		}
+		slackCfg, ok := cred.Config.(models.SlackConfig)
+		if !ok {
+			return fmt.Errorf("unexpected slack credential type")
+		}
+		addSlackSessionReaction(ctx, slackClient, logger, slackCfg.AccessToken, link, input.ReactionName)
 		return nil
 	}
 }
