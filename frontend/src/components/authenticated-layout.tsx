@@ -15,6 +15,7 @@ import {
   X,
   Settings,
   MonitorPlay,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -304,6 +305,12 @@ function SidebarBody({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top" className="w-48">
+              <DropdownMenuItem asChild>
+                <Link href="/docs">
+                  <BookOpen className="h-4 w-4" />
+                  Docs
+                </Link>
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={onLogout}>
                 <LogOut className="h-4 w-4" />
                 Log out

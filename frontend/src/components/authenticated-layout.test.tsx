@@ -272,7 +272,7 @@ describe("AuthenticatedLayout", () => {
     expect(screen.getByRole("link", { name: "Audit log" })).toHaveAttribute("href", "/settings/audit-log");
   });
 
-  it("shows only log out in the user menu", async () => {
+  it("shows docs in the user menu", async () => {
     const user = userEvent.setup();
 
     renderWithProviders(
@@ -283,6 +283,7 @@ describe("AuthenticatedLayout", () => {
 
     await user.click(screen.getByRole("button", { name: /Alex Doe/ }));
 
+    expect(await screen.findByRole("menuitem", { name: "Docs" })).toHaveAttribute("href", "/docs");
     expect(await screen.findByRole("menuitem", { name: "Log out" })).toBeInTheDocument();
   });
 
