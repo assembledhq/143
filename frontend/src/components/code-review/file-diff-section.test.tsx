@@ -175,13 +175,13 @@ describe("FileDiffSection", () => {
 
   it("marks the horizontal diff viewport as a size container for inline comments", () => {
     const { container } = render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
-    expect(container.querySelector(".overflow-x-auto")).toHaveClass("[container-type:inline-size]");
+    expect(container.querySelector(".overflow-x-auto.max-w-full")).toHaveClass("[container-type:inline-size]");
   });
 
   it("contains wide diff content inside the file section instead of widening the page", () => {
     const { container } = render(<FileDiffSection file={makeDiffFile()} viewMode="unified" />);
     const section = container.firstElementChild;
-    const horizontalViewport = container.querySelector(".overflow-x-auto");
+    const horizontalViewport = container.querySelector(".overflow-x-auto.max-w-full");
 
     expect(section).toHaveClass("min-w-0", "max-w-full");
     expect(section).not.toHaveClass("overflow-hidden");
