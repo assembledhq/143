@@ -87,6 +87,13 @@ func buildSystemPrompt(input *agent.AgentInput) string {
 			b.WriteString("\n\n")
 		}
 	}
+	if input == nil || input.PromptStyle != agent.PromptStyleAnswerOnly {
+		guidance := prompts.CodingSandboxGuidance()
+		b.WriteString(guidance)
+		if !strings.HasSuffix(guidance, "\n\n") {
+			b.WriteString("\n\n")
+		}
+	}
 
 	// Repo conventions from context docs.
 	if len(input.ContextDocs) > 0 {
