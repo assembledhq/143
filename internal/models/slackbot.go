@@ -240,6 +240,13 @@ func (s SlackNotificationPreset) Validate() error {
 	}
 }
 
+const (
+	SlackReactionCompletedResponse = "speech_balloon"
+	SlackReactionSessionArchived   = "package"
+	SlackReactionPRMerged          = "twisted_rightwards_arrows"
+	SlackReactionPRClosed          = "x"
+)
+
 type SlackNotificationKind string
 
 const (
@@ -412,6 +419,12 @@ type SlackPostFinalResponseJobPayload struct {
 	SessionID          string `json:"session_id"`
 	SlackSessionLinkID string `json:"slack_session_link_id"`
 	FinalMessageID     int64  `json:"final_message_id"`
+}
+
+type SlackAddSessionReactionJobPayload struct {
+	OrgID        string `json:"org_id"`
+	SessionID    string `json:"session_id"`
+	ReactionName string `json:"reaction_name"`
 }
 
 type SlackPostRunUpdateJobPayload struct {
