@@ -194,6 +194,9 @@ func (j *drainStubJobs) OldestPendingSessionJobAge(context.Context) (time.Durati
 type drainStubThreads struct {
 	clearedThreadIDs []uuid.UUID
 	clearErr         error
+	nextQueuedThread models.SessionThread
+	claimNextErr     error
+	claimNextCalls   int
 }
 
 func (t *drainStubThreads) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.ThreadStatus) error {
@@ -213,7 +216,14 @@ func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID u
 	return nil
 }
 func (t *drainStubThreads) ClaimNextQueuedForSession(context.Context, uuid.UUID, uuid.UUID, int) (models.SessionThread, error) {
-	return models.SessionThread{}, pgx.ErrNoRows
+	t.claimNextCalls++
+	if t.claimNextErr != nil {
+		return models.SessionThread{}, t.claimNextErr
+	}
+	if t.nextQueuedThread.ID == uuid.Nil {
+		return models.SessionThread{}, pgx.ErrNoRows
+	}
+	return t.nextQueuedThread, nil
 }
 
 type drainStubHumanInputs struct {
@@ -520,4 +530,63 @@ func TestDrainQueuedMessages_NilProcessedNoOp(t *testing.T) {
 	o.drainQueuedMessages(context.Background(), &models.Session{}, nil, nil, zerolog.Nop())
 
 	require.Empty(t, jobs.enqueues, "drain must no-op when no message was processed")
+}
+
+func TestAdmitNextQueuedThread_SkipsTerminalSessionStatus(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	sessions := &drainStubSessions{session: models.Session{
+		ID:     sessionID,
+		OrgID:  orgID,
+		Status: models.SessionStatusFailed,
+	}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{nextQueuedThread: models.SessionThread{
+		ID:        threadID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.ThreadStatusRunning,
+	}}
+	o := newDrainOrchestrator(nil, sessions, jobs, threads)
+
+	o.admitNextQueuedThread(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, zerolog.Nop())
+
+	require.Zero(t, threads.claimNextCalls, "terminal sessions must not claim queued threads after a runtime closes")
+	require.Empty(t, jobs.enqueues, "terminal sessions must not enqueue follow-up continue_session jobs")
+}
+
+func TestAdmitNextQueuedThread_EnqueuesForDrainableSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	workerNodeID := "worker-a"
+	containerID := "container-a"
+	sessions := &drainStubSessions{session: models.Session{
+		ID:           sessionID,
+		OrgID:        orgID,
+		Status:       models.SessionStatusRunning,
+		WorkerNodeID: &workerNodeID,
+		ContainerID:  &containerID,
+	}}
+	jobs := &drainStubJobs{}
+	threads := &drainStubThreads{nextQueuedThread: models.SessionThread{
+		ID:        threadID,
+		OrgID:     orgID,
+		SessionID: sessionID,
+		Status:    models.ThreadStatusRunning,
+	}}
+	o := newDrainOrchestrator(nil, sessions, jobs, threads)
+
+	o.admitNextQueuedThread(context.Background(), &models.Session{ID: sessionID, OrgID: orgID}, zerolog.Nop())
+
+	require.Equal(t, 1, threads.claimNextCalls, "drainable sessions should claim one queued thread when a runtime slot opens")
+	require.Len(t, jobs.enqueues, 1, "drainable sessions should enqueue the claimed thread")
+	require.Equal(t, "continue_session", jobs.enqueues[0].jobType, "admitted queued threads should resume through continue_session")
+	require.Equal(t, continueSessionDedupeKey(threadID), jobs.enqueues[0].dedupeKey, "admitted queued threads should be deduped by thread")
+	require.Equal(t, workerNodeID, jobs.enqueues[0].targetNodeID, "admitted queued threads should stay pinned to the session worker")
 }
