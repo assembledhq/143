@@ -135,3 +135,24 @@ func TestUnmappedRepoActivity(t *testing.T) {
 		t.Errorf("Body=%q should mention the team name", a.Body)
 	}
 }
+
+func TestDisconnectedRepoActivity(t *testing.T) {
+	t.Parallel()
+
+	a := DisconnectedRepoActivity("assembledhq/143")
+	if a.Type != models.LinearAgentActivityResponse {
+		t.Errorf("Type=%q want response", a.Type)
+	}
+	if a.PinSessionState != "complete" {
+		t.Errorf("PinSessionState=%q want complete (benign user state, not an error)", a.PinSessionState)
+	}
+	if a.IdemKey != "bootstrap:disconnected_repo" {
+		t.Errorf("IdemKey=%q want bootstrap:disconnected_repo", a.IdemKey)
+	}
+	if !strings.Contains(a.Body, "mapped repository assembledhq/143 is disconnected") {
+		t.Errorf("Body=%q should mention the disconnected repository", a.Body)
+	}
+	if !strings.Contains(a.Body, "update the Linear agent mapping") {
+		t.Errorf("Body=%q should include the mapping repair path", a.Body)
+	}
+}

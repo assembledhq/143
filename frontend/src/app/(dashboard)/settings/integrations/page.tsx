@@ -1008,6 +1008,17 @@ function repoName(repositories: Repository[], repoID?: string): string {
   return repositories.find((repo) => repo.id === repoID)?.full_name ?? repoID ?? "Unknown repository";
 }
 
+function repoStatusLabel(status: Repository["status"]): string {
+  switch (status) {
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "disconnected":
+      return "Disconnected";
+  }
+}
+
 function linearTeamLabel(team: LinearTeamKey): string {
   return team.team_name ? `${team.team_name} (${team.team_key})` : team.team_key;
 }
@@ -1035,12 +1046,13 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
   });
   const { data: repositoriesResp } = useQuery({
     queryKey: queryKeys.repositories.all,
-    queryFn: () => api.repositories.list(),
+    queryFn: () => api.repositories.list({ includeDisconnected: true }),
     enabled: !repositoriesOverride,
     staleTime: 60_000,
   });
 
-  const repositories = (repositoriesOverride ?? repositoriesResp?.data ?? []).filter((repo) => repo.status === "active");
+  const allRepositories = repositoriesOverride ?? repositoriesResp?.data ?? [];
+  const activeRepositories = allRepositories.filter((repo) => repo.status === "active");
   const status = statusResp?.data;
   const availableTeams = status?.available_teams ?? [];
   const mappings = mappingsResp?.data ?? [];
@@ -1065,6 +1077,8 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
   });
 
   const defaultRepoValue = status?.default_repo_id ?? NO_DEFAULT_REPO_VALUE;
+  const defaultRepo = status?.default_repo_id ? allRepositories.find((repo) => repo.id === status.default_repo_id) : undefined;
+  const staleDefaultRepo = defaultRepo && defaultRepo.status !== "active" ? defaultRepo : undefined;
   const canAddMapping = teamID.trim() !== "" && mappingRepoID !== "";
 
   return (
@@ -1083,19 +1097,44 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
               onValueChange={(value) =>
                 updateSettings.mutate({ default_repo_id: value === NO_DEFAULT_REPO_VALUE ? null : value })
               }
-              disabled={repositories.length === 0 || updateSettings.isPending}
+              disabled={activeRepositories.length === 0 || updateSettings.isPending}
             >
               <SelectTrigger id="linear-default-repo" aria-label="Default repository">
                 <SelectValue placeholder="Choose a default repository" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_DEFAULT_REPO_VALUE}>No default repository</SelectItem>
-                {repositories.map((repo) => (
+                {activeRepositories.map((repo) => (
                   <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
-            {repositories.length === 0 ? (
+            {staleDefaultRepo ? (
+              <div className="flex flex-col gap-2 rounded-md border border-warning/20 bg-warning/5 px-3 py-2 text-xs sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-medium text-foreground">{staleDefaultRepo.full_name}</span>
+                    <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
+                      {repoStatusLabel(staleDefaultRepo.status)}
+                    </Badge>
+                  </div>
+                  <p className="text-muted-foreground">
+                    This default repository will block new Linear agent sessions until it is cleared or changed to an active repository.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="w-fit bg-background"
+                  disabled={updateSettings.isPending}
+                  onClick={() => updateSettings.mutate({ default_repo_id: null })}
+                >
+                  Clear default repository
+                </Button>
+              </div>
+            ) : null}
+            {activeRepositories.length === 0 ? (
               <p className="text-xs text-muted-foreground">Connect a GitHub repository before routing Linear agent work.</p>
             ) : null}
             {!status?.agent_scopes_granted ? (
@@ -1112,26 +1151,40 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
             <p className="text-sm text-muted-foreground">No team-specific overrides yet.</p>
           ) : (
             <div className="space-y-2">
-              {mappings.map((mapping: LinearTeamRepoMapping) => (
-                <div key={mapping.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium">{linearTeamMappingLabel(availableTeams, mapping.linear_team_id)}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {mapping.linear_project_id ? `Project ${mapping.linear_project_id} -> ` : ""}{repoName(repositories, mapping.repository_id)}
+              {mappings.map((mapping: LinearTeamRepoMapping) => {
+                const mappedRepo = allRepositories.find((repo) => repo.id === mapping.repository_id);
+                const stale = mappedRepo?.status === "disconnected";
+                return (
+                  <div key={mapping.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{linearTeamMappingLabel(availableTeams, mapping.linear_team_id)}</div>
+                      <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <span>{mapping.linear_project_id ? `Project ${mapping.linear_project_id} -> ` : ""}{repoName(allRepositories, mapping.repository_id)}</span>
+                        {stale ? (
+                          <Badge variant="secondary" className="bg-warning/10 text-warning text-xs">
+                            Disconnected
+                          </Badge>
+                        ) : null}
+                      </div>
+                      {stale ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          This mapping will block new Linear agent sessions until it is removed or changed to an active repository.
+                        </p>
+                      ) : null}
                     </div>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      title="Remove mapping"
+                      disabled={deleteMapping.isPending}
+                      onClick={() => deleteMapping.mutate(mapping.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
                   </div>
-                  <Button
-                    type="button"
-                    size="icon"
-                    variant="ghost"
-                    title="Remove mapping"
-                    disabled={deleteMapping.isPending}
-                    onClick={() => deleteMapping.mutate(mapping.id)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -1165,12 +1218,12 @@ function LinearAgentRoutingSettings({ repositoriesOverride }: { repositoriesOver
               value={projectID}
               onChange={(event) => setProjectID(event.target.value)}
             />
-            <Select value={mappingRepoID} onValueChange={setMappingRepoID} disabled={repositories.length === 0}>
+            <Select value={mappingRepoID} onValueChange={setMappingRepoID} disabled={activeRepositories.length === 0}>
               <SelectTrigger aria-label="Override repository">
                 <SelectValue placeholder="Repository" />
               </SelectTrigger>
               <SelectContent>
-                {repositories.map((repo) => (
+                {activeRepositories.map((repo) => (
                   <SelectItem key={repo.id} value={repo.id}>{repo.full_name}</SelectItem>
                 ))}
               </SelectContent>

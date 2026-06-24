@@ -18,13 +18,31 @@ import (
 // error so we can verify the resolver falls through to the team mapping.
 type fakeRepoLookup struct {
 	byFullName map[string]models.Repository
+	byID       map[uuid.UUID]models.Repository
 }
 
 func (f *fakeRepoLookup) GetByFullName(_ context.Context, _ uuid.UUID, fullName string) (models.Repository, error) {
 	if repo, ok := f.byFullName[fullName]; ok {
+		if repo.Status != models.RepositoryStatusActive {
+			return models.Repository{}, errors.New("repo not found")
+		}
 		return repo, nil
 	}
 	return models.Repository{}, errors.New("repo not found")
+}
+
+func (f *fakeRepoLookup) GetByFullNameAnyStatus(_ context.Context, _ uuid.UUID, fullName string) (models.Repository, error) {
+	if repo, ok := f.byFullName[fullName]; ok {
+		return repo, nil
+	}
+	return models.Repository{}, errors.New("repo not found")
+}
+
+func (f *fakeRepoLookup) GetByID(_ context.Context, _ uuid.UUID, repoID uuid.UUID) (models.Repository, error) {
+	if repo, ok := f.byID[repoID]; ok {
+		return repo, nil
+	}
+	return models.Repository{ID: repoID, Status: models.RepositoryStatusActive}, nil
 }
 
 // fakeSettingsLoader implements AgentSettingsLoader for the org-default
@@ -63,7 +81,7 @@ func newResolverRig(t *testing.T) *resolverRig {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	t.Cleanup(mock.Close)
-	repos := &fakeRepoLookup{byFullName: map[string]models.Repository{}}
+	repos := &fakeRepoLookup{byFullName: map[string]models.Repository{}, byID: map[uuid.UUID]models.Repository{}}
 	settings := &fakeSettingsLoader{}
 	resolver := NewAgentRepoResolver(db.NewLinearTeamRepoMappingStore(mock), settings, repos)
 	return &resolverRig{
@@ -117,7 +135,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	t.Run("label override wins over everything else when enabled", func(t *testing.T) {
 		t.Parallel()
 		rig := newResolverRig(t)
-		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled"}
+		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled", Status: models.RepositoryStatusActive}
 		rig.repos.byFullName["org/labelled"] = labelRepo
 		allow := true
 		rig.settings.settings = models.LinearAgentSettings{AllowLabelRepoOverride: &allow}
@@ -140,7 +158,7 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 	t.Run("label override is ignored when the org has not opted in", func(t *testing.T) {
 		t.Parallel()
 		rig := newResolverRig(t)
-		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled"}
+		labelRepo := models.Repository{ID: uuid.New(), FullName: "org/labelled", Status: models.RepositoryStatusActive}
 		rig.repos.byFullName["org/labelled"] = labelRepo
 		// rig.settings.settings is the zero value — AllowLabelRepoOverride
 		// defaults to false. The label should be ignored entirely and the
@@ -159,6 +177,32 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 			"label override must not redirect work when AllowLabelRepoOverride is false")
 		require.Equal(t, "team_default_mapping", got.Source)
 		require.NoError(t, rig.mock.ExpectationsWereMet())
+	})
+
+	t.Run("blocks disconnected label override without falling through", func(t *testing.T) {
+		t.Parallel()
+		rig := newResolverRig(t)
+		repoID := uuid.New()
+		rig.repos.byFullName["assembledhq/143"] = models.Repository{
+			ID:       repoID,
+			FullName: "assembledhq/143",
+			Status:   models.RepositoryStatusDisconnected,
+		}
+		allow := true
+		rig.settings.settings = models.LinearAgentSettings{AllowLabelRepoOverride: &allow}
+
+		_, err := rig.resolver.Resolve(context.Background(), AgentRepoResolveInput{
+			OrgID:           rig.orgID,
+			LinearTeamID:    "team_X",
+			LinearProjectID: "proj_Y",
+			Labels:          []string{"repo:assembledhq/143"},
+		})
+
+		var disconnected *AgentRepoDisconnectedError
+		require.ErrorAs(t, err, &disconnected, "resolver should block a label override that names a disconnected repository")
+		require.Equal(t, repoID, disconnected.RepositoryID, "error should identify the disconnected label repository")
+		require.Equal(t, "assembledhq/143", disconnected.RepositoryFullName, "error should name the disconnected label repository")
+		require.NoError(t, rig.mock.ExpectationsWereMet(), "disconnected label override should not fall through to mappings")
 	})
 
 	t.Run("falls through to team+project mapping when label is absent", func(t *testing.T) {
@@ -197,6 +241,31 @@ func TestAgentRepoResolver_PriorityFallthrough(t *testing.T) {
 		require.Equal(t, repoID, got.RepositoryID)
 		require.Equal(t, "team_default_mapping", got.Source)
 		require.NoError(t, rig.mock.ExpectationsWereMet())
+	})
+
+	t.Run("blocks disconnected explicit mapping without falling through to org default", func(t *testing.T) {
+		t.Parallel()
+		rig := newResolverRig(t)
+		repoID := uuid.New()
+		expectMappingHit(t, rig.mock, rig.orgID, repoID, nil, "")
+		defaultRepoID := uuid.New()
+		rig.settings.settings = models.LinearAgentSettings{DefaultRepoID: &defaultRepoID}
+		rig.repos.byID[repoID] = models.Repository{
+			ID:       repoID,
+			FullName: "assembledhq/143",
+			Status:   models.RepositoryStatusDisconnected,
+		}
+
+		_, err := rig.resolver.Resolve(context.Background(), AgentRepoResolveInput{
+			OrgID:           rig.orgID,
+			LinearTeamID:    "team_X",
+			LinearProjectID: "proj_Y",
+		})
+		var disconnected *AgentRepoDisconnectedError
+		require.ErrorAs(t, err, &disconnected, "resolver should return the disconnected repository error")
+		require.Equal(t, "assembledhq/143", disconnected.RepositoryFullName, "error should include the mapped repository name")
+		require.Equal(t, repoID, disconnected.RepositoryID, "error should include the mapped repository id")
+		require.NoError(t, rig.mock.ExpectationsWereMet(), "stale mapping should not fall through to org default")
 	})
 
 	t.Run("falls through to org default when no mapping rows match", func(t *testing.T) {

@@ -14,6 +14,7 @@ const health: PullRequestHealthResponse = {
   head_sha: "head-sha",
   base_sha: "base-sha",
   health_version: 2,
+  sync_status: "synced",
   merge_state: "clean",
   has_conflicts: false,
   failing_test_count: 0,

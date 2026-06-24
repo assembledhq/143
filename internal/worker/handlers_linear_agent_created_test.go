@@ -33,12 +33,42 @@ type linearAgentCreatedFetchClient struct {
 	issue *linear.FetchedIssue
 }
 
+type linearAgentCreatedActivityFetchClient struct {
+	linear.Client
+
+	issue         *linear.FetchedIssue
+	activityCalls int
+	updateCalls   int
+	lastActivity  linear.AgentActivityInput
+	lastUpdate    linear.AgentSessionUpdateInput
+}
+
 func (c *linearAgentCreatedFetchClient) FetchIssue(_ context.Context, _ string) (*linear.FetchedIssue, error) {
 	return c.issue, nil
 }
 
 func (c *linearAgentCreatedFetchClient) FetchUser(context.Context, string) (*linear.FetchedUser, error) {
 	return nil, errors.New("FetchUser not configured")
+}
+
+func (c *linearAgentCreatedActivityFetchClient) FetchIssue(_ context.Context, _ string) (*linear.FetchedIssue, error) {
+	return c.issue, nil
+}
+
+func (c *linearAgentCreatedActivityFetchClient) FetchUser(context.Context, string) (*linear.FetchedUser, error) {
+	return nil, errors.New("FetchUser not configured")
+}
+
+func (c *linearAgentCreatedActivityFetchClient) AgentActivityCreate(_ context.Context, in linear.AgentActivityInput) (linear.AgentActivityResult, error) {
+	c.activityCalls++
+	c.lastActivity = in
+	return linear.AgentActivityResult{ActivityID: "act_created"}, nil
+}
+
+func (c *linearAgentCreatedActivityFetchClient) AgentSessionUpdate(_ context.Context, in linear.AgentSessionUpdateInput) error {
+	c.updateCalls++
+	c.lastUpdate = in
+	return nil
 }
 
 func (c *linearAgentCreatedDeadLetterClient) AgentActivityCreate(_ context.Context, in linear.AgentActivityInput) (linear.AgentActivityResult, error) {
@@ -467,6 +497,103 @@ func TestHandleLinearAgentCreatedResolvesRepoByTeamKey(t *testing.T) {
 	require.Contains(t, err.Error(), "upsert linear issue", "handler should reach issue upsert after resolving the VIR mapping")
 	require.NoError(t, mock.ExpectationsWereMet(),
 		"created handler should resolve linear_team_repo_mappings using the Linear team key, not the opaque team id")
+}
+
+func TestHandleLinearAgentCreatedClosesDisconnectedMappedRepository(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	integrationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now().UTC()
+	client := &linearAgentCreatedActivityFetchClient{issue: &linear.FetchedIssue{
+		ID:          "875be557-a8c3-487a-99aa-7da091e427f2",
+		Identifier:  "VIR-1584",
+		Title:       "Refresh PR health",
+		TeamID:      "715c282d-55a7-48d8-9d7d-d7f6fe4ebd7f",
+		TeamKey:     "VIR",
+		TeamName:    "Virtuous Cycle",
+		ProjectID:   "9df3176d-eba4-484b-9022-84633d529358",
+		Description: "PR health is stale.",
+	}}
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, linear_agent_session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "linear_agent_session_id",
+			"linear_issue_id", "linear_issue_identifier",
+			"linear_app_user_id", "linear_creator_user_id",
+			"session_id", "state", "last_event_received_at",
+			"created_at", "updated_at",
+		}).AddRow(
+			rowID, orgID, integrationID, "as_1",
+			"875be557-a8c3-487a-99aa-7da091e427f2", "VIR-1584",
+			"", "",
+			nil, "pending", &now,
+			now, now,
+		))
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("UPDATE linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("(?s)SELECT.*FROM linear_team_repo_mappings.*ORDER BY").
+		WithArgs(orgID, "VIR", "9df3176d-eba4-484b-9022-84633d529358").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "linear_team_id", "linear_project_id",
+			"repository_id", "default_branch", "priority",
+			"created_at", "updated_at",
+		}).AddRow(
+			uuid.New(), orgID, "VIR", nil,
+			repoID, "", 0, now, now,
+		))
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+			"private", "language", "description", "clone_url", "installation_id", "status",
+			"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}).AddRow(
+			repoID, orgID, integrationID, int64(1), "assembledhq/143", "main",
+			false, nil, nil, "https://github.com/assembledhq/143.git", int64(123), models.RepositoryStatusDisconnected,
+			nil, nil, []byte(`{}`), now, now,
+		))
+	mock.ExpectQuery("INSERT INTO linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "inserted"}).AddRow(uuid.New(), true))
+	mock.ExpectExec("UPDATE linear_agent_activity_log").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE linear_agent_sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = handleLinearAgentCreated(context.Background(), LinearAgentEventHandlerDeps{
+		Stores: &Stores{
+			Issues: db.NewIssueStore(mock),
+		},
+		RepoResolver: linear.NewAgentRepoResolver(db.NewLinearTeamRepoMappingStore(mock), nil, db.NewRepositoryStore(mock)),
+		ClientForOrg: func(context.Context, uuid.UUID) (linear.Client, error) {
+			return client, nil
+		},
+	}, db.NewLinearAgentSessionStore(mock), db.NewLinearAgentActivityLogStore(mock), linearAgentEventPayload{
+		OrgID:                orgID.String(),
+		AgentSessionRowID:    rowID.String(),
+		LinearAgentSessionID: "as_1",
+		LinearIssueID:        "875be557-a8c3-487a-99aa-7da091e427f2",
+	}, zerolog.Nop())
+	require.NoError(t, err, "disconnected mapped repository should close the Linear AgentSession without starting work")
+	require.NoError(t, mock.ExpectationsWereMet(), "created handler should not upsert an issue or create a session after a disconnected mapping")
+	require.Equal(t, 2, client.activityCalls, "worker should emit bootstrap plus disconnected-repo response")
+	require.Contains(t, client.lastActivity.Body, "mapped repository assembledhq/143 is disconnected", "Linear response should explain why no session started")
+	require.Equal(t, 1, client.updateCalls, "disconnected-repo response should pin the Linear AgentSession complete")
+	require.Equal(t, "complete", client.lastUpdate.State, "Linear AgentSession should close as complete")
 }
 
 func TestHandleLinearAgentCreatedMapsCreatorEmailToSessionTrigger(t *testing.T) {

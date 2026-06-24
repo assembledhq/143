@@ -166,7 +166,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks } from "@/lib/session-pr-action-state";
+import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { pollMs } from "@/lib/poll-intervals";
@@ -184,6 +184,7 @@ import {
   getDisplayStatus,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
+  getPullRequestHealthRefetchInterval,
   hasMeaningfulDuration,
   invalidateSessionHumanInputRequests,
   liveLogsForTimeline,
@@ -4006,16 +4007,13 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!pullRequestId && prData?.data?.status === "open",
     // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
     // below also reconciles once because Redis pub/sub does not replay PR row
-  // or health events missed while the tab was hidden or the EventSource was
-  // reconnecting.
-  staleTime: 30_000,
-    refetchInterval: (query) => {
-      const mergeState = query.state.data?.data?.merge_state;
-      const mergeWhenReadyState = query.state.data?.data?.merge_when_ready?.state;
-      return mergeState === "mergeability_pending" || mergeState === "unknown" || mergeWhenReadyState === "queued" || mergeWhenReadyState === "merging" ? pollMs(5_000) : false;
-    },
+    // or health events missed while the tab was hidden or the EventSource was
+    // reconnecting.
+    staleTime: 30_000,
+    refetchInterval: (query) => getPullRequestHealthRefetchInterval(query.state.data?.data),
   });
   const prHealth = prHealthData?.data;
+  const prHealthActionsBlocked = prHealthBlocksPRActions(prHealth);
   const rawPRStatus = prData?.data?.status;
   const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
   const prNumber = prData?.data?.github_pr_number;
@@ -5743,10 +5741,10 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
-      canFixTests: canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
-      canResolveConflicts: canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
-      canMerge: canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
+      canPush: !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canFixTests: !prHealthActionsBlocked && canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
+      canResolveConflicts: !prHealthActionsBlocked && canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
+      canMerge: !prHealthActionsBlocked && canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
       onCreate: createPRFromKeyboard,
       onView: viewPRFromKeyboard,
       onPush: pushChangesFromKeyboard,
@@ -5876,6 +5874,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     snapshotUnavailable,
     snapshotMessage,
     ghBlocked,
+    prHealthBlocked: prHealthActionsBlocked,
     queueingPush,
     pushingChanges,
     pushState,
