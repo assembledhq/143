@@ -481,6 +481,39 @@ type Thread struct {
 }
 
 // --------------------------------------------------------------------------
+// MessageSender — Slack, Teams, etc.
+// --------------------------------------------------------------------------
+
+// MessageSender lets sandbox agents send bounded notifications through a
+// connected collaboration provider while credentials stay in 143-controlled
+// server paths.
+type MessageSender interface {
+	Name() string
+	SendMessage(ctx context.Context, params SendMessageParams) (*SendMessageResult, error)
+}
+
+type SendMessageParams struct {
+	ChannelID string `json:"channel_id"`
+	Text      string `json:"text"`
+	ThreadTS  string `json:"thread_ts,omitempty"`
+}
+
+type SendMessageResult struct {
+	Status    string `json:"status"`
+	ChannelID string `json:"channel_id"`
+	MessageTS string `json:"message_ts,omitempty"`
+}
+
+type StubMessageSender struct {
+	ProviderName string
+}
+
+func (s *StubMessageSender) Name() string { return s.ProviderName }
+func (s *StubMessageSender) SendMessage(context.Context, SendMessageParams) (*SendMessageResult, error) {
+	return nil, fmt.Errorf("stub: use sandbox CLI tools (143-tools %s send) instead of direct API calls", s.ProviderName)
+}
+
+// --------------------------------------------------------------------------
 // IssueCreator — internal 143 issue creation
 // --------------------------------------------------------------------------
 

@@ -977,6 +977,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
+		internalSlackMessageHandler := handlers.NewInternalSlackMessageHandler(sessionStore, slackInstallationStore, credentialStore, db.NewSlackOutboundMessageStore(pool), cfg.SessionSecret, logger)
 		internalEvalHandler := handlers.NewInternalEvalHandler(evalBootstrapStore, sessionStore, cfg.SessionSecret, logger)
 		internalAutomationGoalImprovementHandler := handlers.NewInternalAutomationGoalImprovementHandler(automationGoalImprovementService, sessionStore, cfg.SessionSecret, logger)
 		internalAgentCapabilitiesHandler := handlers.NewInternalAgentCapabilitiesHandler(agentCapabilitySvc, sessionStore, cfg.SessionSecret)
@@ -985,6 +986,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		r.Route("/api/v1/internal", func(r chi.Router) {
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
+			r.Post("/slack/messages", internalSlackMessageHandler.Send)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
 			r.Post("/eval/candidates", internalEvalHandler.AddCandidate)
 			r.Post("/evals/bootstrap/{bootstrap_run_id}/candidates", internalEvalHandler.AddCandidate)

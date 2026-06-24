@@ -64,6 +64,12 @@ func TestRunCLI_NamespaceHelp(t *testing.T) {
 			notString: "session_tabs_",
 		},
 		{
+			name:      "slack namespace",
+			args:      []string{"slack", "--help"},
+			contains:  []string{"143-tools slack <action>", "search_messages", "get_thread", "send"},
+			notString: "slack_send",
+		},
+		{
 			name:      "automation goal improvement namespace",
 			args:      []string{"automation-goal-improvement", "--help"},
 			contains:  []string{"143-tools automation-goal-improvement <action>", "complete"},
@@ -139,6 +145,11 @@ func TestRunCLI_DispatchesHierarchicalCommands(t *testing.T) {
 			name:     "issue creator",
 			args:     []string{"issue", "create", "--title", "Follow-up", "--description", "Investigate more"},
 			expected: "Follow-up",
+		},
+		{
+			name:     "slack sender",
+			args:     []string{"slack", "send", "--channel-id", "C123", "--text", "Automation finished successfully."},
+			expected: "sent",
 		},
 		{
 			name: "automation goal improvement completer",

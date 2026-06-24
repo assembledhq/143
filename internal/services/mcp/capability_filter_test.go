@@ -86,3 +86,22 @@ func TestCapabilityFilteredToolSourceSeparatesPagerDutyReadsAndWrites(t *testing
 
 	require.Equal(t, []Tool{{Name: "pagerduty_add_note"}, {Name: "pagerduty_create_status_update"}}, writeSource.ListTools(), "external-comments capability should allow PagerDuty writebacks")
 }
+
+func TestCapabilityFilteredToolSourceAllowsSlackSendOnlyWithSlackNotificationGrant(t *testing.T) {
+	t.Parallel()
+
+	readSource := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "slack_search_messages"},
+		{Name: "slack_send"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityTeamDocs, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+	require.Equal(t, []Tool{{Name: "slack_search_messages"}}, readSource.ListTools(), "team docs should allow Slack reads but not message sending")
+
+	writeSource := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "slack_send"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilitySlackNotifications, AccessLevel: models.AgentCapabilityAccessWrite},
+	}})
+	require.Equal(t, []Tool{{Name: "slack_send"}}, writeSource.ListTools(), "Slack notification capability should allow slack send")
+}
