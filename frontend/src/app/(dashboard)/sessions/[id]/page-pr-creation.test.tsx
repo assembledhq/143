@@ -489,6 +489,10 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByText('Review before PR')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute(
+      'data-variant',
+      'outline',
+    );
     expect(screen.queryByText('Issue-less context')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('Maintenance follow-up requested in Slack')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save context' })).not.toBeInTheDocument();
