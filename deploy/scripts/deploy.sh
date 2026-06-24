@@ -1971,6 +1971,8 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     echo "--- Last 50 lines of $service logs ---"
     docker compose -f "$COMPOSE_FILE" logs --tail=50 "$service" 2>&1 || true
     if [ -n "$cid" ]; then
+      echo "--- Last 50 lines of container ${cid:0:12} logs ---"
+      docker logs --tail=50 "$cid" 2>&1 || true
       echo "--- Docker health check log ---"
       docker inspect --format '{{if .State.Health}}{{range .State.Health.Log}}--- {{.Start}} ---
 {{.Output}}
@@ -2050,16 +2052,18 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
 
     for i in $(seq 1 $((timeout / 2))); do
+      local state
+      state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo "missing")"
+      if [ "$state" = "exited" ] || [ "$state" = "dead" ] || [ "$state" = "missing" ]; then
+        echo "ERROR: container entered terminal state: $state"
+        dump_diagnostics "$cid" "$service"
+        return 1
+      fi
+
       HEALTH_STATUS="$(docker inspect --format '{{.State.Health.Status}}' "$cid")"
       if [ "$HEALTH_STATUS" = "healthy" ]; then
         echo "Health check passed."
         return 0
-      fi
-
-      if [ "$HEALTH_STATUS" = "unhealthy" ] || [ "$HEALTH_STATUS" = "exited" ] || [ "$HEALTH_STATUS" = "dead" ]; then
-        echo "ERROR: container entered terminal state: $HEALTH_STATUS"
-        dump_diagnostics "$cid" "$service"
-        return 1
       fi
 
       if [ "$i" -eq $((timeout / 2)) ]; then
@@ -2294,9 +2298,9 @@ rm -f "\$STATUS_FILE"
 cd /opt/143
 echo "[\$(date -u -Iseconds)] starting detached worker blue/green deploy (tag=$IMAGE_TAG)"
 deploy_worker_blue_green
-prune_docker_deploy_artifacts worker
 echo "[\$(date -u -Iseconds)] blue/green deploy succeeded"
 echo "ok" > "\$STATUS_FILE"
+prune_docker_deploy_artifacts worker
 EOS
       chmod 700 "$rollover_script"
 
