@@ -1312,6 +1312,39 @@ const tarStderrCap = 4 * 1024
 // idle sessions; matches the cadence Restore used historically.
 const execPollInterval = 50 * time.Millisecond
 
+// restoreDrainGrace bounds how long Restore will wait to drain tar's stderr
+// after a failed stdin write, so a half-open docker socket can't hang the
+// restore. tar's stderr is short and already buffered, so this is ample.
+const restoreDrainGrace = 5 * time.Second
+
+// Leading bytes that identify a snapshot archive's compression.
+var (
+	zstdMagic = [4]byte{0x28, 0xB5, 0x2F, 0xFD}
+	gzipMagic = [2]byte{0x1F, 0x8B}
+)
+
+// snapshotMagicLen is how many leading bytes Restore peeks to identify the
+// compression. Derived from the longest magic so the peek can never come up
+// short of what tarStdinDecompressFlag needs to match.
+const snapshotMagicLen = len(zstdMagic)
+
+// tarStdinDecompressFlag returns the explicit tar decompression flag for an
+// archive identified by its leading magic bytes, or "" when the bytes match no
+// known compression (uncompressed, or too few bytes to tell). GNU tar requires
+// this flag when reading an archive from a pipe; from a seekable file it
+// auto-detects and the flag is unnecessary. HasPrefix handles short input, so a
+// magic slice shorter than a given signature simply doesn't match it.
+func tarStdinDecompressFlag(magic []byte) string {
+	switch {
+	case bytes.HasPrefix(magic, zstdMagic[:]):
+		return "--zstd"
+	case bytes.HasPrefix(magic, gzipMagic[:]):
+		return "-z"
+	default:
+		return ""
+	}
+}
+
 // Snapshot tars the workspace and agent state directories from the container.
 // The returned reader streams a compressed tar archive; the caller must close it.
 //
@@ -1333,10 +1366,14 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 	// Stderr is intentionally NOT redirected to /dev/null inside the shell so
 	// diagnostic messages from a failing tar reach our caller via the docker
 	// multiplex stream. --ignore-failed-read keeps benign warnings silent.
+	// Compression and the regenerable-cache exclude list are shared with the
+	// preview snapshot path via the agent package so the two stay consistent;
+	// excludeGit=false because a session checkpoint must retain .git for resume.
 	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
 	homeDirRel := strings.TrimPrefix(sb.HomeDir, "/")
 	cmd := fmt.Sprintf(
-		"tar czf - --ignore-failed-read -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini'",
+		"tar -c %s -f - --ignore-failed-read %s -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini'",
+		agent.SnapshotTarCompressFlag, agent.SnapshotTarExcludeFlags(false),
 		workDirRel, homeDirRel, homeDirRel, homeDirRel, homeDirRel,
 	)
 
@@ -1389,8 +1426,24 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 		Str("container_id", sb.ID).
 		Msg("restoring snapshot into sandbox")
 
+	// GNU tar will NOT auto-detect compression on a streamed stdin — it errors
+	// with "Archive is compressed. Use -z/--zstd option" because it can't seek
+	// back over a pipe. (Auto-detection only works on a seekable -f FILE, which
+	// is why the preview snapshot path, which extracts from a temp file, can use
+	// a bare `tar xf`.) So we sniff the archive's magic bytes here and pass the
+	// matching decompression flag explicitly. Snapshots may be zstd (current) or
+	// gzip (legacy, or the fallback when the sandbox image lacks zstd), so both
+	// must be handled. See agent.SnapshotTarCompressFlag.
+	bufReader := bufio.NewReader(reader)
+	magic, _ := bufReader.Peek(snapshotMagicLen) // best-effort; a short/empty stream falls through to plain tar and fails loudly in the exec
+	tarCmd := []string{"tar"}
+	if flag := tarStdinDecompressFlag(magic); flag != "" {
+		tarCmd = append(tarCmd, flag)
+	}
+	tarCmd = append(tarCmd, "-x", "-f", "-", "-C", "/")
+
 	execCfg := container.ExecOptions{
-		Cmd:          []string{"tar", "xzf", "-", "-C", "/"},
+		Cmd:          tarCmd,
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
@@ -1407,13 +1460,29 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	}
 	defer attachResp.Close()
 
-	// Pipe the snapshot data into stdin.
-	if _, err := io.Copy(attachResp.Conn, reader); err != nil {
-		return fmt.Errorf("write snapshot to container: %w", err)
-	}
+	// Pipe the snapshot data into stdin. A write failure here ("broken pipe",
+	// "connection reset") most often means the tar process inside the container
+	// already exited — it ran out of disk, hit a decompress error, or the daemon
+	// killed the exec — and that close is what broke our write. We deliberately
+	// do NOT return immediately: tar's stderr and exit code carry the actionable
+	// cause, and returning the bare "broken pipe" (as we used to) buried it under
+	// a generic socket error. Capture the write error and fall through to drain
+	// stderr + inspect so we can surface the real reason when there is one.
+	_, writeErr := io.Copy(attachResp.Conn, bufReader)
+
 	// Intentionally ignored: CloseWrite signals EOF to the exec process; any error here
 	// does not affect the snapshot data already written.
 	_ = attachResp.CloseWrite()
+
+	// If the write broke, the read half of the hijacked connection may be
+	// half-open (the daemon went away), and StdCopy below is not ctx-aware — a
+	// dead-but-not-erroring socket could hang Restore indefinitely. Bound the
+	// drain with a read deadline so we can't hang; tar's stderr is tiny and
+	// already buffered, so this still captures the real diagnostic. The healthy
+	// path is untouched (tar closes stdout when extraction completes).
+	if writeErr != nil && attachResp.Conn != nil {
+		_ = attachResp.Conn.SetReadDeadline(time.Now().Add(restoreDrainGrace))
+	}
 
 	// Drain stdout/stderr so the exec process can finish writing. Stderr is
 	// captured in a bounded buffer so a non-zero exit surfaces tar's actual
@@ -1421,12 +1490,20 @@ func (d *DockerProvider) Restore(ctx context.Context, sb *agent.Sandbox, reader 
 	stderrBuf := newCappedBuffer(tarStderrCap)
 	_, _ = stdcopy.StdCopy(io.Discard, stderrBuf, attachResp.Reader)
 
-	inspect, err := waitForExecExit(ctx, d.client, execResp.ID)
-	if err != nil {
-		return fmt.Errorf("inspect restore exec: %w", err)
-	}
-	if inspect.ExitCode != 0 {
+	inspect, inspectErr := waitForExecExit(ctx, d.client, execResp.ID)
+
+	switch {
+	case inspectErr == nil && inspect.ExitCode != 0:
+		// tar reported a definite failure. This is the most actionable error
+		// even when the write also broke — tar closing stdin is what broke it.
 		return fmt.Errorf("restore tar exited with code %d%s", inspect.ExitCode, formatStderrSuffix(stderrBuf))
+	case writeErr != nil:
+		// The write broke and we couldn't pin it on a non-zero tar exit (the
+		// daemon connection itself failed, or inspect failed too). Surface the
+		// write error plus whatever tar managed to emit before dying.
+		return fmt.Errorf("write snapshot to container: %w%s", writeErr, formatStderrSuffix(stderrBuf))
+	case inspectErr != nil:
+		return fmt.Errorf("inspect restore exec: %w", inspectErr)
 	}
 	return nil
 }
