@@ -75,8 +75,15 @@ func (e *dependencyCacheExec) Exec(_ context.Context, _ *agent.Sandbox, cmd stri
 		return 0, nil
 	case strings.HasPrefix(cmd, "test -e "), strings.Contains(cmd, " && test -e "):
 		return 0, nil
-	case strings.Contains(cmd, "tar czf -"):
-		_, err := stdout.Write(e.payload)
+	case strings.Contains(cmd, "tar cf -"):
+		// Production compresses on the worker now, so the sandbox emits raw tar.
+		// Stream the gunzipped payload; the worker re-gzips it (same gzip.Writer
+		// settings as makeDependencyCacheTarGz) back to the identical blob.
+		raw, err := gunzipBytes(e.payload)
+		if err != nil {
+			return -1, err
+		}
+		_, err = stdout.Write(raw)
 		return 0, err
 	case strings.Contains(cmd, "tar tzf"):
 		if stderr != nil {
@@ -181,6 +188,20 @@ func (s dependencyCacheFailingLoadStore) Delete(context.Context, string) error {
 	return nil
 }
 
+// gunzipBytes reverses makeDependencyCacheTarGz so the exec mock can hand the
+// archive command a raw tar stream (the worker re-compresses it).
+func gunzipBytes(b []byte) ([]byte, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	gzr, err := gzip.NewReader(bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = gzr.Close() }()
+	return io.ReadAll(gzr)
+}
+
 func makeDependencyCacheTarGz(t *testing.T, files map[string]string) []byte {
 	t.Helper()
 
@@ -282,7 +303,7 @@ func TestSharedDependencyCache_SaveUploadsBlobChecksumAndReturnsSize(t *testing.
 	require.Equal(t, payload, blobStore.blobs[expectedBlobKey], "Save should upload archive bytes to a checksum-addressed object key")
 	require.NotEmpty(t, bytes.TrimSpace(blobStore.blobs[expectedBlobKey+".sha256"]), "Save should upload checksum sidecar next to the checksum-addressed blob")
 	require.Empty(t, blobStore.blobs["deps/"+orgID.String()+"/"+repoID.String()+"/install_artifact/"+cacheKey+".tar.gz"], "Save should not overwrite a shared mutable blob key")
-	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar czf -", "Save should stream tar output instead of creating a sandbox temp archive")
+	require.Contains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "tar cf -", "Save should stream raw tar output (compression happens on the worker) instead of creating a sandbox temp archive")
 	require.NotContains(t, strings.Join(cache.executor.(*dependencyCacheExec).calls(), "\n"), "cat /tmp/preview-dependency-cache-", "Save should not read back a sandbox temp archive")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
