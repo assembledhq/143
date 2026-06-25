@@ -1382,7 +1382,7 @@ describe('SessionSidebar', () => {
     expect(link).toHaveAttribute('href', '/sessions/s1');
   });
 
-  it('preserves the current filters in the new session link', async () => {
+  it('preserves non-repo filters in the new session link', async () => {
     serveSessions([
       makeSession({ id: 's1', result_summary: 'Linked session' }),
     ]);
@@ -1395,7 +1395,7 @@ describe('SessionSidebar', () => {
 
     expect(screen.getByRole('link', { name: 'New session' })).toHaveAttribute(
       'href',
-      '/sessions/new?people=all&status=active&repo=repo-1&search=Linked',
+      '/sessions/new?people=all&status=active&search=Linked',
     );
   });
 
@@ -1666,7 +1666,7 @@ describe('SessionSidebar', () => {
 
     await user.keyboard('{Escape}');
     await user.keyboard('n');
-    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/new?repo=repo-1');
+    expect(mockRouterPush).toHaveBeenCalledWith('/sessions/new');
 
     await user.keyboard('j');
     // Plain `a` is a no-op — archive requires Shift to avoid accidental fires.

@@ -717,6 +717,7 @@ export function SessionSidebar() {
   // Carry the sidebar's filters into detail-page links so opening a session
   // doesn't reset the scope back to "Mine".
   const filterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, repo, search || null);
+  const newSessionFilterSuffix = useFilterSuffix(serializedPeopleParam, activeFilter, null, search || null);
 
   const showDefaultEmptyState =
     currentFilter === "all" && !trimmedSearch && (!counts || counts.all === 0);
@@ -909,13 +910,13 @@ export function SessionSidebar() {
         focusSearch();
       } else if (event.key === "n") {
         event.preventDefault();
-        router.push(`/sessions/new${filterSuffix}`);
+        router.push(`/sessions/new${newSessionFilterSuffix}`);
       }
     }
 
     document.addEventListener("keydown", handleDocumentKeyDown);
     return () => document.removeEventListener("keydown", handleDocumentKeyDown);
-  }, [filterSuffix, focusSearch, moveActiveSession, router]);
+  }, [focusSearch, moveActiveSession, newSessionFilterSuffix, router]);
 
   const renderSavedSessionRow = (session: SessionListItem, renderKey: string) => {
     const isSelected = selectedId === session.id;
@@ -1095,9 +1096,9 @@ export function SessionSidebar() {
 
         {/* New session button */}
         <Link
-          href={`/sessions/new${filterSuffix}`}
-          onMouseEnter={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
-          onFocus={() => prefetchRoute(`/sessions/new${filterSuffix}`)}
+          href={`/sessions/new${newSessionFilterSuffix}`}
+          onMouseEnter={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
+          onFocus={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
           className="relative flex items-center justify-center gap-2 w-full h-9 rounded-md bg-primary bg-[image:var(--gradient-primary)] text-xs font-medium text-white shadow-sm hover:bg-[image:var(--gradient-primary-hover)] hover:shadow-[var(--glow-primary-sm)] transition-all"
         >
           <Plus className="h-4 w-4" />
@@ -1162,7 +1163,7 @@ export function SessionSidebar() {
               className={!currentActiveSessionId ? "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10" : undefined}
             >
               <SessionSidebarRowSurface
-                href={`/sessions/new${filterSuffix}`}
+                href={`/sessions/new${newSessionFilterSuffix}`}
                 ariaCurrent="page"
                 className={
                   !currentActiveSessionId

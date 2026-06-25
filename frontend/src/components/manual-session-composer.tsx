@@ -497,13 +497,18 @@ export function ManualSessionComposer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const { data: settingsResponse, isSuccess: settingsLoaded } = useQuery<SingleResponse<Organization>>({
+  const {
+    data: settingsResponse,
+    isPending: settingsPending,
+    isSuccess: settingsLoaded,
+  } = useQuery<SingleResponse<Organization>>({
     queryKey: queryKeys.settings.all,
     queryFn: () => api.settings.get(),
   });
 
   const settings = settingsResponse?.data?.settings as OrgSettings | undefined;
   const defaultAgentType = settings?.default_agent_type ?? "codex";
+  const defaultWorkRepositoryId = settings?.default_work_repository_id ?? "";
 
   const { data: reposResponse, isSuccess: reposLoaded } = useQuery<ListResponse<Repository>>({
     queryKey: queryKeys.repositories.all,
@@ -543,11 +548,17 @@ export function ManualSessionComposer({
     queryFn: () => api.integrations.list(),
   });
 
-  // Auto-select: user's choice > last used repo > first repo.
+  const isAutoRepoSelectionPending = userSelectedRepoId === null && repositories.length > 1 && settingsPending;
+
+  // Auto-select: user's explicit choice > org default work repo > last used repo > first repo.
   const selectedRepoId = useMemo(() => {
     if (userSelectedRepoId !== null) return userSelectedRepoId;
     if (repositories.length === 1) return repositories[0].id;
     if (repositories.length > 0) {
+      if (isAutoRepoSelectionPending) return "";
+      if (defaultWorkRepositoryId && repositories.some((r) => r.id === defaultWorkRepositoryId)) {
+        return defaultWorkRepositoryId;
+      }
       try {
         const lastUsed = localStorage.getItem("143:lastUsedRepoId");
         if (lastUsed && repositories.some((r) => r.id === lastUsed)) return lastUsed;
@@ -555,7 +566,7 @@ export function ManualSessionComposer({
       return repositories[0].id;
     }
     return "";
-  }, [userSelectedRepoId, repositories]);
+  }, [defaultWorkRepositoryId, isAutoRepoSelectionPending, userSelectedRepoId, repositories]);
 
   const selectedRepo = repositories.find((r) => r.id === selectedRepoId);
   // Derive branch: use user override if set, otherwise the repo's default.
@@ -770,6 +781,7 @@ export function ManualSessionComposer({
     if (submittingRef.current) return;
     if (!hasSubmittableInput) return;
     if (hasInvalidCommands) return;
+    if (isAutoRepoSelectionPending) return;
     submittingRef.current = true;
     createManualSessionMutation.mutate();
   }
@@ -1437,7 +1449,7 @@ export function ManualSessionComposer({
                         type="button"
                         size="icon"
                         onClick={submitManualSession}
-                        disabled={!hasSubmittableInput || isCreatingSession}
+                        disabled={!hasSubmittableInput || isCreatingSession || isAutoRepoSelectionPending}
                         className="ml-auto h-8 w-8 rounded-full"
                         aria-label="Start session"
                       >
@@ -1490,7 +1502,7 @@ export function ManualSessionComposer({
                       type="button"
                       size="icon"
                       onClick={submitManualSession}
-                      disabled={!hasSubmittableInput || isCreatingSession}
+                      disabled={!hasSubmittableInput || isCreatingSession || isAutoRepoSelectionPending}
                       className="ml-auto h-8 w-8 rounded-full"
                       aria-label="Start session"
                     >

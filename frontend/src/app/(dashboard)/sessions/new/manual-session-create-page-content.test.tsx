@@ -329,6 +329,154 @@ describe("ManualSessionCreatePageContent", () => {
     });
   });
 
+  it("uses the org default work repository before last-used or first alphabetical repo", async () => {
+    const user = userEvent.setup();
+    localStorage.setItem("143:lastUsedRepoId", "repo-docs");
+    mocks.settingsGetMock.mockResolvedValueOnce({
+      data: {
+        name: "Test Org",
+        settings: {
+          default_agent_type: "codex",
+          default_work_repository_id: "repo-app",
+        },
+      },
+    });
+    mocks.repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "repo-docs",
+          name: "apidocs",
+          full_name: "assembledhq/apidocs",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+        {
+          id: "repo-app",
+          name: "assembled",
+          full_name: "assembledhq/assembled",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+      ],
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const prompt = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(prompt, "Fix the forecast modal");
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        repository_id: "repo-app",
+        branch: "master",
+      }));
+    });
+  });
+
+  it("does not start with a last-used repository before org settings resolve", async () => {
+    const user = userEvent.setup();
+    const settings = deferred<Awaited<ReturnType<typeof mocks.settingsGetMock>>>();
+    localStorage.setItem("143:lastUsedRepoId", "repo-docs");
+    mocks.settingsGetMock.mockImplementationOnce(() => settings.promise);
+    mocks.repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "repo-docs",
+          name: "apidocs",
+          full_name: "assembledhq/apidocs",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+        {
+          id: "repo-app",
+          name: "assembled",
+          full_name: "assembledhq/assembled",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+      ],
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const prompt = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(prompt, "Fix the forecast modal");
+    const startButton = screen.getByRole("button", { name: "Start session" });
+    expect(startButton).toBeDisabled();
+    await user.click(startButton);
+    expect(mocks.createSessionMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      settings.resolve({
+        data: {
+          name: "Test Org",
+          settings: {
+            default_agent_type: "codex",
+            default_work_repository_id: "repo-app",
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start session" })).not.toBeDisabled();
+    });
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        repository_id: "repo-app",
+        branch: "master",
+      }));
+    });
+  });
+
+  it("keeps an explicit URL repository selection ahead of the org default work repository", async () => {
+    const user = userEvent.setup();
+    mocks.searchParamGetMock.mockImplementation((key: string) => (key === "repo" ? "repo-docs" : null));
+    mocks.settingsGetMock.mockResolvedValueOnce({
+      data: {
+        name: "Test Org",
+        settings: {
+          default_agent_type: "codex",
+          default_work_repository_id: "repo-app",
+        },
+      },
+    });
+    mocks.repositoriesListMock.mockResolvedValueOnce({
+      data: [
+        {
+          id: "repo-docs",
+          name: "apidocs",
+          full_name: "assembledhq/apidocs",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+        {
+          id: "repo-app",
+          name: "assembled",
+          full_name: "assembledhq/assembled",
+          default_branch: "master",
+          integration_id: "int-1",
+        },
+      ],
+    });
+
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const prompt = await screen.findByRole("textbox", { name: "Manual session prompt" });
+    await user.type(prompt, "Update docs");
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+
+    await waitFor(() => {
+      expect(mocks.createSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+        repository_id: "repo-docs",
+        branch: "master",
+      }));
+    });
+  });
+
   it("keeps model controls visible on desktop when there are no repositories", async () => {
     mocks.repositoriesListMock.mockResolvedValueOnce({ data: [] });
 
