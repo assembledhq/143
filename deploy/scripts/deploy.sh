@@ -1837,22 +1837,35 @@ SELECT COUNT(*) FROM endpoint_blockers;"
         --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
         --build-sha "${IMAGE_TAG:-}" \
         --json
+      local monitor_log monitor_lock
+      monitor_log="/var/log/143/drain-worker-${cid:0:12}.log"
+      monitor_lock="/var/log/143/drain-worker-${cid:0:12}.lock"
       nohup bash -c '
         set -euo pipefail
-        node_id="$1"
-        cid="$2"
-        compose_file="$3"
-        deploy_id="$4"
-        build_sha="$5"
-        requested_by="$6"
-        reason="$7"
-        health_service="$8"
+        monitor_lock="$1"
+        node_id="$2"
+        cid="$3"
+        compose_file="$4"
+        deploy_id="$5"
+        build_sha="$6"
+        requested_by="$7"
+        reason="$8"
+        health_service="$9"
+        exec 9>"$monitor_lock"
+        if ! flock -xn 9; then
+          echo "drain monitor already running for old worker container ${cid:0:12}; skipping duplicate."
+          exit 0
+        fi
         run_ctl() {
           docker compose -f "$compose_file" run --rm -T --no-deps \
             -e "IMAGE_TAG=$build_sha" \
             "$health_service" /bin/worker-deployctl "$@" < /dev/null
         }
         while true; do
+          if ! docker inspect --format "{{.State.Running}}" "$cid" 2>/dev/null | grep -q true; then
+            echo "old worker container ${cid:0:12} is no longer running; drain monitor exiting."
+            exit 0
+          fi
           run_ctl expire-budget \
             --node-id "$node_id" \
             --deploy-id "$deploy_id" \
@@ -1867,7 +1880,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
           fi
           sleep 30
         done
-      ' _ "$node_id" "$cid" "$COMPOSE_FILE" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" "$HEALTH_SERVICE" >"/var/log/143/drain-worker-${cid:0:12}.log" 2>&1 &
+      ' _ "$monitor_lock" "$node_id" "$cid" "$COMPOSE_FILE" "$deploy_id" "${IMAGE_TAG:-}" "${DEPLOY_REQUESTED_BY:-deploy-script}" "${DEPLOY_REASON:-routine worker rollout}" "$HEALTH_SERVICE" >"$monitor_log" 2>&1 &
     done
   }
 
