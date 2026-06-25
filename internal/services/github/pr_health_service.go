@@ -575,7 +575,41 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 	for _, pr := range queued {
 		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
+	s.reconcileStuckPublishActions(ctx, orgID, limit)
 	return nil
+}
+
+// stuckPublishActionAfter bounds how long a PR-level action column may sit in an
+// in-flight state before the reconciler force-fails it. Generous so it never
+// races a legitimately slow push (snapshot hydrate + build can take minutes) or
+// the worker-recovery loop that re-dispatches a lease-lost job.
+const stuckPublishActionAfter = 15 * time.Minute
+
+// reconcileStuckPublishActions is the server-side backstop for PR-level action
+// buttons (create PR / push / create branch). The handlers write a terminal
+// state inline on any error, so this only catches the gap where the worker died
+// mid-action without writing one, leaving the column wedged at 'queued'/
+// 'pushing' with no live backing job. It force-fails those columns so the
+// frontend spinner resolves to a retryable error instead of spinning forever.
+func (s *PRService) reconcileStuckPublishActions(ctx context.Context, orgID uuid.UUID, limit int) {
+	if s.sessions == nil {
+		return
+	}
+	stuck, err := s.sessions.ListStuckPublishActionSessions(ctx, orgID, time.Now().Add(-stuckPublishActionAfter), limit)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list stuck publish-action sessions")
+		return
+	}
+	for _, sessionID := range stuck {
+		changed, ferr := s.sessions.FailInFlightPublishActions(ctx, orgID, sessionID, PublishActionAbandonedMessage)
+		if ferr != nil {
+			s.logger.Warn().Err(ferr).Str("session_id", sessionID.String()).Msg("failed to reconcile stuck publish action")
+			continue
+		}
+		if changed {
+			s.logger.Info().Str("session_id", sessionID.String()).Msg("reconciled stuck PR-level action to failed: no live backing job")
+		}
+	}
 }
 
 func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error {

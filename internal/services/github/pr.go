@@ -358,6 +358,12 @@ const (
 	// GitHub permissions fallback because these failures are often runtime or
 	// auth-broker setup issues rather than user/repo access problems.
 	SandboxAuthUnavailablePRMessage = "143 could not prepare GitHub credentials for this push."
+	// PublishActionAbandonedMessage is written by the reconciler backstop when a
+	// PR-level action (create PR / push / create branch) is left wedged in an
+	// in-flight state because the worker handling it stopped before writing a
+	// terminal state (OOM/crash/lease loss). It clears the spinner and invites a
+	// retry rather than leaving the button stuck forever.
+	PublishActionAbandonedMessage = "This action stopped unexpectedly before it finished. Please try again."
 )
 
 // WaitForPostPRSnapshotUploads blocks until every in-flight post-PR snapshot
