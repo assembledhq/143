@@ -51,4 +51,9 @@ describe("command-palette-actions", () => {
     const projectsAction = staticActions.find((a) => a.id === "nav-projects");
     expect(projectsAction?.preserveRepo).toBe(true);
   });
+
+  it("global new session action does not preserve ambient repo context", () => {
+    const newSessionAction = staticActions.find((a) => a.id === "action-new-session");
+    expect(newSessionAction?.preserveRepo).toBeUndefined();
+  });
 });
