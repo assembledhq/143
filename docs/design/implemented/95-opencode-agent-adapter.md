@@ -88,29 +88,37 @@ Changes:
 - Include OpenCode in `AgentType.Validate()`.
 - Add OpenCode model constants as provider/model strings because OpenCode's model format is native `provider/model`.
 - Treat OpenCode as a cost-tiered agent, not just another flagship-model surface. The picker should make cheaper models obvious because OpenCode's biggest value for 143 is easy access to lower-cost provider/model combinations.
-- Suggested curated defaults, with exact provider/model IDs verified against Models.dev before implementation:
+- Suggested curated defaults, with exact provider/model IDs verified against OpenCode Zen's model catalog before implementation:
   - **Default inexpensive models**
     - `openai/gpt-5.4-mini`
     - `openai/gpt-5.3-codex-spark`
     - `anthropic/claude-haiku-4-5`
+    - `opencode/gemini-3.5-flash`
     - `google/gemini-3-flash`
-    - `google/gemini-2.5-flash`
-    - `minimax/minimax-m2.1`
-    - `qwen/qwen3-coder`
-    - `deepseek/deepseek-chat`
+    - `opencode/minimax-m2.7`
+    - `opencode/minimax-m2.5`
+    - `opencode/qwen3.7-plus`
+    - `opencode/qwen3.6-plus`
+    - `opencode/deepseek-v4-flash`
+    - `opencode/deepseek-v4-pro`
+    - `opencode/glm-5.2`
+    - `opencode/glm-5.1`
+    - `opencode/kimi-k2.5`
   - **Balanced models**
     - `openai/gpt-5.4`
-    - `openai/gpt-5.2-codex`
     - `anthropic/claude-sonnet-4-6`
-    - `google/gemini-3-pro`
-    - `moonshot/kimi-k2`
+    - `opencode/gemini-3.1-pro`
+    - `opencode/qwen3.7-max`
+    - `opencode/kimi-k2.6`
   - **Premium models**
-    - `opencode/gpt-5.2` or the current OpenCode Zen flagship model if we add OpenCode-native auth.
-    - `opencode/gpt-5.1-codex`
+    - `opencode/gpt-5.2`
+    - `opencode/gpt-5.5`
+    - `opencode/gpt-5.5-pro`
     - `anthropic/claude-opus-4-8`
     - `anthropic/claude-opus-4-7`
-    - `openai/gpt-5.5`
+    - `opencode/claude-fable-5`
 - Avoid baking a large static catalog into v1. Start with the curated cost-tiered list above plus a custom `provider/model` override, then refresh the curated list as part of normal model maintenance.
+- Model maintenance note (2026-06-24): OpenCode Zen lists `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `claude-sonnet-4`, `glm-5`, `minimax-m2.1`, `glm-4.7`, `glm-4.6`, `gemini-3-pro`, `kimi-k2-thinking`, `kimi-k2`, `claude-3-5-haiku`, and `qwen3-coder-480b` as deprecated. Keep those out of the curated picker unless there is a deliberate compatibility reason to re-add them.
 - Add `OPENCODE_MODEL` as the model env var returned by `ModelEnvVarForAgentType`.
 - Add OpenCode to `AgentTypeForModel` and PM model validation.
 - Add a slash-command catalog for OpenCode's common commands only after probing exact names. For v1, rely on pass-through user-entered slash tokens.

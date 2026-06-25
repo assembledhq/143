@@ -99,7 +99,7 @@ export const AGENTS: readonly AgentMeta[] = [
       {
         name: "PI_MODEL_CUSTOM",
         label: "Custom model override",
-        placeholder: "provider/model (e.g. moonshot/kimi-k2)",
+        placeholder: "provider/model (e.g. moonshot/kimi-k2.6)",
         advanced: true,
         helpText: "Wins over Default model. Pi accepts any provider/model the upstream supports.",
       },

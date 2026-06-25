@@ -310,8 +310,8 @@ func TestPiAdapter_ShellModelResolution(t *testing.T) {
 		},
 		{
 			name: "PI_MODEL_CUSTOM wins over PI_MODEL",
-			env:  []string{"PI_MODEL=openai/gpt-5.4", "PI_MODEL_CUSTOM=moonshot/kimi-k2"},
-			want: "moonshot/kimi-k2",
+			env:  []string{"PI_MODEL=openai/gpt-5.4", "PI_MODEL_CUSTOM=moonshot/kimi-k2.6"},
+			want: "moonshot/kimi-k2.6",
 		},
 		{
 			name: "injection attempt stays inside the argument",
