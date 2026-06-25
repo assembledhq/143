@@ -703,6 +703,21 @@ type CompleteAutomationGoalImprovementResult struct {
 }
 
 // --------------------------------------------------------------------------
+// AutomationManager — internal 143 automation management
+// --------------------------------------------------------------------------
+
+// AutomationManager allows sandbox agents to create and manage repo-scoped
+// automations through the 143 internal API.
+type AutomationManager interface {
+	Name() string
+	CreateAutomation(ctx context.Context, payload json.RawMessage) (json.RawMessage, error)
+	UpdateAutomation(ctx context.Context, id string, payload json.RawMessage) (json.RawMessage, error)
+	RunAutomation(ctx context.Context, id string) (json.RawMessage, error)
+	PauseAutomation(ctx context.Context, id string) (json.RawMessage, error)
+	ResumeAutomation(ctx context.Context, id string) (json.RawMessage, error)
+}
+
+// --------------------------------------------------------------------------
 // ProjectProposer — internal 143 project proposal creation
 // --------------------------------------------------------------------------
 
