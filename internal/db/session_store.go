@@ -2366,6 +2366,140 @@ func (s *SessionStore) UpdateBranchCreationState(ctx context.Context, orgID, ses
 	return nil
 }
 
+// publishActionJobTypes are the worker job types that drive the three
+// PR-level publish columns (pr_creation_state / pr_push_state /
+// branch_creation_state) through queued -> pushing -> succeeded/failed.
+const publishActionJobTypes = `'open_pr', 'push_pr_changes', 'create_branch'`
+
+// ListStuckPublishActionSessions returns sessions whose PR-level action column
+// is wedged in an in-flight state ('queued' or 'pushing') with no backing job
+// that can still make progress.
+//
+// The handlers write a terminal state inline on every error, so a clean
+// failure already lands as 'failed'. The gap this closes is a job that dies
+// *without* its handler returning — a worker OOM/crash/lease-loss mid-push.
+// ReclaimLostRunningJobs requeues such a job and ClaimNextRunnable increments
+// `attempts` on every re-dispatch, but a job that kills its worker on each
+// attempt is never dead-lettered (the handler never reaches the dead-letter
+// path), so `attempts` climbs past `max_attempts` while the column stays
+// 'pushing' forever.
+//
+// A backing job counts as "still working" — and so blocks reconciliation — when
+// either it has retry budget left (pending/running AND attempts < max_attempts)
+// or a worker is provably on it right now (running with an unexpired lease). The
+// live-lease clause matters because `attempts` is incremented at claim time, so
+// the final attempt runs with attempts == max_attempts; without it a slow but
+// healthy last attempt (a push can take minutes) would be force-failed mid-run.
+// The OOM loop is still caught: it spends ~all its time either pending without
+// budget or running with an expired lease, so a sweep lands on a moment where
+// neither clause holds.
+//
+// The second EXISTS clause requires a backing job older than stuckBefore so we
+// never race a brand-new action whose job is mid-enqueue, and bounds the scan
+// to genuinely-aged rows.
+func (s *SessionStore) ListStuckPublishActionSessions(ctx context.Context, orgID uuid.UUID, stuckBefore time.Time, limit int) ([]uuid.UUID, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `
+		SELECT s.id
+		FROM sessions s
+		WHERE s.org_id = @org_id
+		  AND s.deleted_at IS NULL
+		  AND (
+		    s.pr_creation_state IN ('queued', 'pushing')
+		    OR s.pr_push_state IN ('queued', 'pushing')
+		    OR s.branch_creation_state IN ('queued', 'pushing')
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM jobs j
+		    WHERE j.org_id = s.org_id
+		      AND j.job_type IN (` + publishActionJobTypes + `)
+		      AND NULLIF(j.payload->>'session_id', '') = s.id::text
+		      AND (
+		        -- Still has retry budget: will run (or run again) and terminalize.
+		        (j.status IN ('pending', 'running') AND j.attempts < j.max_attempts)
+		        -- Or a worker is provably on it right now. attempts is bumped at
+		        -- claim time, so the final attempt runs with attempts ==
+		        -- max_attempts; the live lease keeps us from force-failing a slow
+		        -- but healthy last attempt mid-run.
+		        OR (j.status = 'running' AND j.lease_expires_at IS NOT NULL AND j.lease_expires_at > now())
+		      )
+		  )
+		  AND EXISTS (
+		    SELECT 1 FROM jobs j2
+		    WHERE j2.org_id = s.org_id
+		      AND j2.job_type IN (` + publishActionJobTypes + `)
+		      AND NULLIF(j2.payload->>'session_id', '') = s.id::text
+		      AND j2.created_at < @stuck_before
+		  )
+		ORDER BY s.id
+		LIMIT @limit`
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"org_id":       orgID,
+		"stuck_before": stuckBefore,
+		"limit":        limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+// FailInFlightPublishActions force-transitions any of the three PR-level
+// publish columns that are still in flight ('queued'/'pushing') to 'failed'
+// with errMsg, leaving already-terminal columns untouched. It is the durable
+// backstop for ListStuckPublishActionSessions: a guarded CAS that cannot
+// clobber a state that legitimately advanced between the scan and this write,
+// and a no-op (returns false) when nothing is in flight. On a real transition
+// it publishes the session status SSE so connected clients converge.
+func (s *SessionStore) FailInFlightPublishActions(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (bool, error) {
+	query := `UPDATE sessions
+		SET pr_creation_state = CASE WHEN pr_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE pr_creation_state END,
+		    pr_creation_error = CASE WHEN pr_creation_state IN ('queued', 'pushing') THEN @err ELSE pr_creation_error END,
+		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN 'failed' ELSE pr_push_state END,
+		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN @err ELSE pr_push_error END,
+		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE branch_creation_state END,
+		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN @err ELSE branch_creation_error END
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		  AND (
+		    pr_creation_state IN ('queued', 'pushing')
+		    OR pr_push_state IN ('queued', 'pushing')
+		    OR branch_creation_state IN ('queued', 'pushing')
+		  )
+		RETURNING ` + sessionSelectColumns
+	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+		"err":    errMsg,
+	})
+	if err != nil {
+		return false, err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return true, nil
+}
+
 // ClearSnapshotKey NULLs the snapshot_key column and transitions sandbox_state
 // to 'destroyed'. Called after the snapshot file has been removed from storage
 // — on PR merge, session archive, or reaper expiry. Idempotent: calling it on
