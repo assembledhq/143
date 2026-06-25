@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
+	"github.com/assembledhq/143/internal/services/externalidentity"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
@@ -484,6 +485,8 @@ type Stores struct {
 	SlackBotSettings    *db.SlackBotSettingsStore
 	SlackUserLinks      *db.SlackUserLinkStore
 	LinearUserLinks     *db.LinearUserLinkStore
+	ExternalUserLinks   *db.ExternalUserLinkStore
+	ExternalSuggestions *db.ExternalUserLinkSuggestionStore
 	SlackChannels       *db.SlackChannelSettingsStore
 	SlackSessionLinks   *db.SlackSessionLinkStore
 	SlackInboundEvents  *db.SlackInboundEventStore
@@ -2271,13 +2274,22 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		userResolver := newSlackCachedUserDisplayResolver(slackClient, slackRedisClient(services), slackCfg.AccessToken, payload.TeamID, logger)
 
 		var mappedUserID *uuid.UUID
+		if payload.SlackUserID != "" {
+			if resolved, resolveErr := resolveExternalSlackUser(ctx, stores, orgID, payload.TeamID, payload.SlackUserID, nil, nil, logger); resolveErr != nil {
+				logger.Warn().Err(resolveErr).Str("slack_user_id", payload.SlackUserID).Msg("failed to resolve unified Slack user mapping")
+			} else if resolved != nil {
+				mappedUserID = resolved
+			}
+		}
 		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
 			link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, payload.TeamID, payload.SlackUserID)
 			if linkErr == nil && link.UserID != nil {
-				mappedUserID = link.UserID
+				if mappedUserID == nil {
+					mappedUserID = link.UserID
+				}
 			} else if linkErr != nil && !errors.Is(linkErr, pgx.ErrNoRows) {
 				logger.Warn().Err(linkErr).Str("slack_user_id", payload.SlackUserID).Msg("failed to resolve Slack user mapping")
-			} else if errors.Is(linkErr, pgx.ErrNoRows) && stores.Users != nil {
+			} else if mappedUserID == nil && errors.Is(linkErr, pgx.ErrNoRows) && stores.Users != nil {
 				if matchedID := resolveSlackUserByEmail(ctx, stores, slackClient, slackCfg.AccessToken, orgID, installationID, payload.TeamID, payload.SlackUserID, logger); matchedID != nil {
 					mappedUserID = matchedID
 				}
@@ -2727,9 +2739,24 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home automation runs")
 		}
 	}
-	if stores != nil && stores.SlackUserLinks != nil && stores.Memberships != nil {
-		if link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, teamID, slackUserID); err == nil && link.UserID != nil {
-			if userMemberships, membershipErr := stores.Memberships.ListByUser(ctx, *link.UserID); membershipErr == nil {
+	if stores != nil && stores.Memberships != nil {
+		var mappedUserID *uuid.UUID
+		if stores.ExternalUserLinks != nil {
+			if externalUserID, externalErr := lookupExternalSlackMappedUserID(ctx, stores.ExternalUserLinks, orgID, teamID, slackUserID); externalErr == nil && externalUserID != nil {
+				mappedUserID = externalUserID
+			} else if externalErr != nil {
+				logger.Warn().Err(externalErr).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home external org memberships")
+			}
+		}
+		if stores.SlackUserLinks != nil {
+			if link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, teamID, slackUserID); err == nil && link.UserID != nil {
+				if mappedUserID == nil {
+					mappedUserID = link.UserID
+				}
+			}
+		}
+		if mappedUserID != nil {
+			if userMemberships, membershipErr := stores.Memberships.ListByUser(ctx, *mappedUserID); membershipErr == nil {
 				memberships = userMemberships
 			} else {
 				logger.Warn().Err(membershipErr).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home org memberships")
@@ -4225,7 +4252,7 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 }
 
 func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil || stores.SlackUserLinks == nil || stores.Memberships == nil || stores.SlackInstallations == nil || stores.SlackOrgSelections == nil {
+	if stores == nil || stores.Credentials == nil || stores.Memberships == nil || stores.SlackInstallations == nil || stores.SlackOrgSelections == nil {
 		return fmt.Errorf("slack org selection dependencies are not configured")
 	}
 	selectedOrgID, err := uuid.Parse(input.Value)
@@ -4236,14 +4263,24 @@ func handleSlackSelectOrg(ctx context.Context, stores *Stores, services *Service
 	if err != nil {
 		return fmt.Errorf("parse org_id: %w", err)
 	}
-	link, err := stores.SlackUserLinks.GetBySlackUser(ctx, currentOrgID, input.TeamID, input.UserID)
-	if err != nil {
-		return fmt.Errorf("resolve slack user link for org selection: %w", err)
+	var mappedUserID *uuid.UUID
+	if stores.ExternalUserLinks != nil {
+		mappedUserID, err = lookupExternalSlackMappedUserID(ctx, stores.ExternalUserLinks, currentOrgID, input.TeamID, input.UserID)
+		if err != nil {
+			return fmt.Errorf("resolve external slack user link for org selection: %w", err)
+		}
 	}
-	if link.UserID == nil {
+	if mappedUserID == nil && stores.SlackUserLinks != nil {
+		link, err := stores.SlackUserLinks.GetBySlackUser(ctx, currentOrgID, input.TeamID, input.UserID)
+		if err != nil {
+			return fmt.Errorf("resolve slack user link for org selection: %w", err)
+		}
+		mappedUserID = link.UserID
+	}
+	if mappedUserID == nil {
 		return fmt.Errorf("slack org selection requires a linked 143 user")
 	}
-	if _, err := stores.Memberships.Get(ctx, *link.UserID, selectedOrgID); err != nil {
+	if _, err := stores.Memberships.Get(ctx, *mappedUserID, selectedOrgID); err != nil {
 		return fmt.Errorf("selected Slack org is not available to mapped user: %w", err)
 	}
 	currentInstall, err := stores.SlackInstallations.GetActiveByOrg(ctx, currentOrgID)
@@ -5223,7 +5260,12 @@ func handleSlackOpenPreview(ctx context.Context, stores *Stores, services *Servi
 	url := slackPreviewURL(services, previewID)
 	if services != nil && services.SlackPreviewControl != nil {
 		actor := models.SlackActor{SlackTeamID: input.TeamID, SlackUserID: input.UserID}
-		if stores.SlackUserLinks != nil {
+		if stores.ExternalUserLinks != nil {
+			if externalUserID, externalErr := lookupExternalSlackMappedUserID(ctx, stores.ExternalUserLinks, orgID, input.TeamID, input.UserID); externalErr == nil && externalUserID != nil {
+				actor.UserID = *externalUserID
+			}
+		}
+		if actor.UserID == uuid.Nil && stores.SlackUserLinks != nil {
 			if link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID); linkErr == nil && link.UserID != nil {
 				actor.UserID = *link.UserID
 			}
@@ -5748,7 +5790,7 @@ func handleSlackHumanInputFreeformModal(ctx context.Context, stores *Stores, ser
 }
 
 func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.HumanInputRequests == nil || stores.SlackUserLinks == nil || stores.Jobs == nil {
+	if stores == nil || stores.HumanInputRequests == nil || stores.Jobs == nil || (stores.SlackUserLinks == nil && stores.ExternalUserLinks == nil) {
 		return fmt.Errorf("slack human-input dependencies are not configured")
 	}
 	var value struct {
@@ -5769,10 +5811,11 @@ func handleSlackHumanInputAnswer(ctx context.Context, stores *Stores, services *
 		return fmt.Errorf("parse human input request id: %w", err)
 	}
 	decision, err := authorizeSlackHumanInputAnswer(ctx, workerSlackHumanInputAuthStores{
-		sessionLinks: stores.SlackSessionLinks,
-		userLinks:    stores.SlackUserLinks,
-		memberships:  stores.Memberships,
-		requests:     stores.HumanInputRequests,
+		sessionLinks:  stores.SlackSessionLinks,
+		userLinks:     stores.SlackUserLinks,
+		externalLinks: stores.ExternalUserLinks,
+		memberships:   stores.Memberships,
+		requests:      stores.HumanInputRequests,
 	}, orgID, sessionID, requestID, input)
 	if err != nil {
 		return err
@@ -5891,6 +5934,9 @@ type workerSlackHumanInputAuthStores struct {
 	userLinks interface {
 		GetBySlackUser(ctx context.Context, orgID uuid.UUID, teamID, slackUserID string) (models.SlackUserLink, error)
 	}
+	externalLinks interface {
+		GetActiveByExternal(ctx context.Context, orgID uuid.UUID, provider models.ExternalIdentityProvider, workspaceID, providerUserID string) (models.ExternalUserLink, error)
+	}
 	memberships interface {
 		Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 	}
@@ -5905,20 +5951,31 @@ type slackHumanInputAuthorizationDecision struct {
 }
 
 func authorizeSlackHumanInputAnswer(ctx context.Context, stores workerSlackHumanInputAuthStores, orgID, sessionID, requestID uuid.UUID, input models.SlackInteractionJobPayload) (slackHumanInputAuthorizationDecision, error) {
-	if stores.userLinks == nil {
+	if stores.userLinks == nil && stores.externalLinks == nil {
 		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input authorization requires user links")
 	}
-	link, err := stores.userLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID)
-	if err != nil {
-		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("resolve slack user link for human input: %w", err)
+	var mappedUserID *uuid.UUID
+	if stores.externalLinks != nil {
+		externalUserID, err := lookupExternalSlackMappedUserID(ctx, stores.externalLinks, orgID, input.TeamID, input.UserID)
+		if err != nil {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("resolve external slack user link for human input: %w", err)
+		}
+		mappedUserID = externalUserID
 	}
-	if link.UserID == nil {
+	if mappedUserID == nil && stores.userLinks != nil {
+		link, err := stores.userLinks.GetBySlackUser(ctx, orgID, input.TeamID, input.UserID)
+		if err != nil {
+			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("resolve slack user link for human input: %w", err)
+		}
+		mappedUserID = link.UserID
+	}
+	if mappedUserID == nil {
 		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack user is not linked to a 143 user")
 	}
 	if stores.memberships == nil {
 		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("slack human-input authorization requires memberships")
 	}
-	membership, err := stores.memberships.Get(ctx, *link.UserID, orgID)
+	membership, err := stores.memberships.Get(ctx, *mappedUserID, orgID)
 	if err != nil {
 		return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load slack human-input membership: %w", err)
 	}
@@ -5930,11 +5987,11 @@ func authorizeSlackHumanInputAnswer(ctx context.Context, stores workerSlackHuman
 		if err != nil {
 			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("load human-input request for authorization: %w", err)
 		}
-		if req.AssignedUserID != nil && *req.AssignedUserID != *link.UserID {
+		if req.AssignedUserID != nil && *req.AssignedUserID != *mappedUserID {
 			return slackHumanInputAuthorizationDecision{}, fmt.Errorf("human-input request is assigned to another user")
 		}
 	}
-	decision := slackHumanInputAuthorizationDecision{AnsweredByUserID: *link.UserID}
+	decision := slackHumanInputAuthorizationDecision{AnsweredByUserID: *mappedUserID}
 	if stores.sessionLinks != nil {
 		sessionLink, err := stores.sessionLinks.GetBySession(ctx, orgID, sessionID)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -6739,6 +6796,15 @@ func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *i
 	if email == "" {
 		return nil
 	}
+	displayName := strings.TrimSpace(slackUser.Profile.DisplayName)
+	if displayName == "" {
+		displayName = strings.TrimSpace(slackUser.RealName)
+	}
+	if resolved, resolveErr := resolveExternalSlackUser(ctx, stores, orgID, teamID, slackUserID, &email, &displayName, logger); resolveErr != nil {
+		logger.Warn().Err(resolveErr).Str("slack_user_id", slackUserID).Msg("failed to resolve unified Slack email mapping")
+	} else if resolved != nil {
+		return resolved
+	}
 	user, err := stores.Users.GetByEmail(ctx, email)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -6748,10 +6814,6 @@ func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *i
 	}
 	if user.OrgID != orgID {
 		return nil
-	}
-	displayName := strings.TrimSpace(slackUser.Profile.DisplayName)
-	if displayName == "" {
-		displayName = strings.TrimSpace(slackUser.RealName)
 	}
 	link := &models.SlackUserLink{
 		OrgID:               orgID,
@@ -6766,6 +6828,46 @@ func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *i
 		logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to persist Slack email match")
 	}
 	return &user.ID
+}
+
+func resolveExternalSlackUser(ctx context.Context, stores *Stores, orgID uuid.UUID, teamID, slackUserID string, email, displayName *string, logger zerolog.Logger) (*uuid.UUID, error) {
+	if stores == nil || stores.ExternalUserLinks == nil || stores.Users == nil {
+		return nil, nil
+	}
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, nil, stores.Users, externalidentity.Options{})
+	input := externalidentity.ExternalActorInput{
+		Provider:            models.ExternalIdentityProviderSlack,
+		ProviderWorkspaceID: strings.TrimSpace(teamID),
+		ProviderUserID:      strings.TrimSpace(slackUserID),
+		Email:               email,
+		EmailVerified:       false,
+		DisplayName:         displayName,
+	}
+	resolution, err := resolver.ResolveExternalActor(ctx, orgID, input)
+	if err != nil {
+		return nil, err
+	}
+	if resolution.MappedUserID == nil {
+		return nil, nil
+	}
+	return resolution.MappedUserID, nil
+}
+
+func lookupExternalSlackMappedUserID(ctx context.Context, links interface {
+	GetActiveByExternal(ctx context.Context, orgID uuid.UUID, provider models.ExternalIdentityProvider, workspaceID, providerUserID string) (models.ExternalUserLink, error)
+}, orgID uuid.UUID, teamID, slackUserID string) (*uuid.UUID, error) {
+	if links == nil {
+		return nil, nil
+	}
+	link, err := links.GetActiveByExternal(ctx, orgID, models.ExternalIdentityProviderSlack, strings.TrimSpace(teamID), strings.TrimSpace(slackUserID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	userID := link.UserID
+	return &userID, nil
 }
 
 func slackSessionTitle(text string) string {

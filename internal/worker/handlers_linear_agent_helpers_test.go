@@ -348,6 +348,47 @@ func TestApplyLinearAgentCreatorAttributionNoMatch(t *testing.T) {
 	}
 }
 
+func TestApplyLinearAgentCreatorAttributionUsesUnifiedExternalIdentityLink(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery(`FROM external_user_links\s+WHERE org_id = @org_id\s+AND provider = @provider\s+AND provider_workspace_id = @provider_workspace_id\s+AND provider_user_id = @provider_user_id\s+AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "provider", "provider_workspace_id", "provider_user_id", "user_id",
+			"source", "status", "confidence", "external_email", "external_handle",
+			"external_display_name", "linked_by_user_id", "created_at", "revoked_at",
+		}).AddRow(
+			linkID, orgID, models.ExternalIdentityProviderLinear, "lin_ws", "lin_user", userID,
+			models.ExternalUserLinkSourceSelfLinked, models.ExternalUserLinkStatusActive, 100,
+			nil, nil, nil, nil, now, nil,
+		))
+
+	session := &models.Session{OrgID: orgID}
+	stores := &Stores{
+		Users:             db.NewUserStore(mock),
+		ExternalUserLinks: db.NewExternalUserLinkStore(mock),
+		LinearUserLinks:   db.NewLinearUserLinkStore(mock),
+	}
+
+	err = applyLinearAgentCreatorAttribution(context.Background(), stores, nil, session, &db.LinearAgentSession{OrgID: orgID}, linearAgentEventPayload{
+		LinearCreatorUserID: "lin_user",
+	}, &linear.FetchedIssue{WorkspaceID: "lin_ws"}, zerolog.Nop())
+
+	require.NoError(t, err, "unified external identity lookup should not fail")
+	require.NotNil(t, session.TriggeredByUserID, "unified external identity link should populate the triggering user")
+	require.Equal(t, userID, *session.TriggeredByUserID, "unified external identity link should win before legacy Linear lookup")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestResolveLinearAgentSessionAgentType(t *testing.T) {
 	t.Parallel()
 

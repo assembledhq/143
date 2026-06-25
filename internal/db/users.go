@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -286,6 +287,44 @@ func (s *UserStore) GetByOrgAndEmail(ctx context.Context, orgID uuid.UUID, email
 		return models.User{}, fmt.Errorf("query user by org and email: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.User])
+}
+
+func (s *UserStore) SuggestByOrgHint(ctx context.Context, orgID uuid.UUID, handle, displayName string) (*uuid.UUID, error) {
+	handle = strings.TrimPrefix(strings.TrimSpace(strings.ToLower(handle)), "@")
+	displayName = strings.TrimSpace(strings.ToLower(displayName))
+	if handle == "" && displayName == "" {
+		return nil, nil
+	}
+
+	query := `
+		SELECT u.id
+		FROM users u
+		LEFT JOIN organization_memberships m ON m.user_id = u.id AND m.org_id = @org_id
+		WHERE (u.org_id = @org_id OR m.org_id IS NOT NULL)
+		  AND (
+		    (@handle <> '' AND LOWER(COALESCE(u.github_login, '')) = @handle)
+		    OR (@handle <> '' AND LOWER(split_part(u.email, '@', 1)) = @handle)
+		    OR (@display_name <> '' AND LOWER(u.name) = @display_name)
+		  )
+		ORDER BY
+		  (@handle <> '' AND LOWER(COALESCE(u.github_login, '')) = @handle) DESC,
+		  (@handle <> '' AND LOWER(split_part(u.email, '@', 1)) = @handle) DESC,
+		  u.created_at ASC,
+		  u.id ASC
+		LIMIT 1`
+
+	var userID uuid.UUID
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":       orgID,
+		"handle":       handle,
+		"display_name": displayName,
+	}).Scan(&userID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query user by org hint: %w", err)
+	}
+	return &userID, nil
 }
 
 // AddSecondaryEmail appends email (lowercased) to the user's secondary_emails

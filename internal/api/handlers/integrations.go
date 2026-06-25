@@ -22,6 +22,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/externalidentity"
 	ghapp "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	linearservice "github.com/assembledhq/143/internal/services/linear"
@@ -239,6 +240,8 @@ type IntegrationHandler struct {
 	slackAuthTestClient    slackAuthTestClient
 	slackbotMetrics        *metrics.SlackbotMetrics
 	webhookDeliveryStore   *db.WebhookDeliveryStore
+	externalUserLinks      *db.ExternalUserLinkStore
+	externalSuggestions    *db.ExternalUserLinkSuggestionStore
 
 	// PM context auto-trigger (nil-safe: disabled if not configured)
 	pmAutoTriggerJobs   pmAutoTriggerJobStore
@@ -447,6 +450,13 @@ func WithSlackBotSettingsStore(store *db.SlackBotSettingsStore) IntegrationHandl
 func WithSlackUserLinkStore(store *db.SlackUserLinkStore) IntegrationHandlerOption {
 	return func(h *IntegrationHandler) {
 		h.slackUserLinkStore = store
+	}
+}
+
+func WithExternalUserIdentityStores(links *db.ExternalUserLinkStore, suggestions *db.ExternalUserLinkSuggestionStore) IntegrationHandlerOption {
+	return func(h *IntegrationHandler) {
+		h.externalUserLinks = links
+		h.externalSuggestions = suggestions
 	}
 }
 
@@ -2652,6 +2662,24 @@ func (h *IntegrationHandler) UpsertSlackUserLinkAdmin(w http.ResponseWriter, r *
 		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to upsert slack user link", err)
 		return
 	}
+	if h.externalUserLinks != nil {
+		externalLink, err := h.externalUserLinks.UpsertAdminActive(r.Context(), models.ExternalUserLink{
+			OrgID:               orgID,
+			Provider:            models.ExternalIdentityProviderSlack,
+			ProviderWorkspaceID: installation.TeamID,
+			ProviderUserID:      body.SlackUserID,
+			UserID:              body.UserID,
+			Confidence:          90,
+			ExternalEmail:       emailPtr,
+			ExternalDisplayName: trimOptional(&body.SlackDisplayName),
+		})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_FAILED", "failed to upsert external user link", err)
+			return
+		}
+		resourceID := externalLink.ID.String()
+		emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkCreated, models.AuditResourceExternalUserLink, &resourceID, nil)
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
 }
 
@@ -2686,6 +2714,15 @@ func (h *IntegrationHandler) DeleteSlackUserLinkAdmin(w http.ResponseWriter, r *
 		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "id must be a valid UUID")
 		return
 	}
+	link, err := h.slackUserLinkStore.GetByID(r.Context(), orgID, linkID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SLACK_USER_LINK_NOT_FOUND", "slack user link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_LOOKUP_FAILED", "failed to load slack user link", err)
+		return
+	}
 	if err := h.slackUserLinkStore.DeleteByID(r.Context(), orgID, linkID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "SLACK_USER_LINK_NOT_FOUND", "slack user link not found")
@@ -2694,7 +2731,300 @@ func (h *IntegrationHandler) DeleteSlackUserLinkAdmin(w http.ResponseWriter, r *
 		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_DELETE_FAILED", "failed to delete slack user link", err)
 		return
 	}
+	if h.externalUserLinks != nil {
+		if err := h.externalUserLinks.RevokeActiveByExternal(r.Context(), orgID, models.ExternalIdentityProviderSlack, link.SlackTeamID, link.SlackUserID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_REVOKE_FAILED", "failed to revoke external slack user link", err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type externalUserLinkRequest struct {
+	Provider            models.ExternalIdentityProvider `json:"provider"`
+	ProviderWorkspaceID string                          `json:"provider_workspace_id"`
+	ProviderUserID      string                          `json:"provider_user_id"`
+	UserID              uuid.UUID                       `json:"user_id"`
+	ExternalEmail       *string                         `json:"external_email,omitempty"`
+	ExternalHandle      *string                         `json:"external_handle,omitempty"`
+	ExternalDisplayName *string                         `json:"external_display_name,omitempty"`
+}
+
+func (req *externalUserLinkRequest) Validate() error {
+	if err := req.Provider.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(req.ProviderWorkspaceID) == "" {
+		return errors.New("provider_workspace_id is required")
+	}
+	if strings.TrimSpace(req.ProviderUserID) == "" {
+		return errors.New("provider_user_id is required")
+	}
+	if req.UserID == uuid.Nil {
+		return errors.New("user_id is required")
+	}
+	return nil
+}
+
+func (h *IntegrationHandler) ListExternalUserLinks(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	links, err := h.externalUserLinks.ListByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINKS_FAILED", "failed to list external user links", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ExternalUserLink]{Data: links, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) CreateExternalUserLink(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	if h.memberships == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "MEMBERSHIP_STORE_NOT_CONFIGURED", "membership validation is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	var req externalUserLinkRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body", err)
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		return
+	}
+	if _, err := h.memberships.Get(r.Context(), req.UserID, orgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusBadRequest, "USER_NOT_IN_ORG", "user_id must belong to the current org")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "MEMBERSHIP_LOOKUP_FAILED", "failed to validate user membership", err)
+		return
+	}
+	var linkedBy *uuid.UUID
+	if user != nil {
+		linkedBy = &user.ID
+	}
+	link, err := h.externalUserLinks.UpsertAdminActive(r.Context(), models.ExternalUserLink{
+		OrgID:               orgID,
+		Provider:            req.Provider,
+		ProviderWorkspaceID: strings.TrimSpace(req.ProviderWorkspaceID),
+		ProviderUserID:      strings.TrimSpace(req.ProviderUserID),
+		UserID:              req.UserID,
+		Confidence:          90,
+		ExternalEmail:       trimOptional(req.ExternalEmail),
+		ExternalHandle:      trimOptional(req.ExternalHandle),
+		ExternalDisplayName: trimOptional(req.ExternalDisplayName),
+		LinkedByUserID:      linkedBy,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_FAILED", "failed to create external user link", err)
+		return
+	}
+	resourceID := link.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkCreated, models.AuditResourceExternalUserLink, &resourceID, nil)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ExternalUserLink]{Data: link})
+}
+
+func (h *IntegrationHandler) DeleteExternalUserLink(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	linkID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "invalid link id", err)
+		return
+	}
+	if err := h.externalUserLinks.Revoke(r.Context(), orgID, linkID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "EXTERNAL_USER_LINK_NOT_FOUND", "external user link not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_REVOKE_FAILED", "failed to revoke external user link", err)
+		return
+	}
+	resourceID := linkID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkRevoked, models.AuditResourceExternalUserLink, &resourceID, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *IntegrationHandler) ListExternalUserLinkSuggestions(w http.ResponseWriter, r *http.Request) {
+	if h.externalSuggestions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINK_SUGGESTIONS_NOT_CONFIGURED", "external user link suggestions are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	suggestions, err := h.externalSuggestions.ListOpenByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_SUGGESTIONS_FAILED", "failed to list external user link suggestions", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ExternalUserLinkSuggestion]{Data: suggestions, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) ApproveExternalUserLinkSuggestion(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil || h.externalSuggestions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	suggestionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SUGGESTION_ID", "invalid suggestion id", err)
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	var linkedBy *uuid.UUID
+	if user != nil {
+		linkedBy = &user.ID
+	}
+	link, err := h.externalUserLinks.ApproveSuggestion(r.Context(), orgID, suggestionID, linkedBy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "EXTERNAL_USER_LINK_SUGGESTION_NOT_FOUND", "external user link suggestion not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_FAILED", "failed to approve external user link suggestion", err)
+		return
+	}
+	resourceID := link.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkSuggestionApproved, models.AuditResourceExternalUserLink, &resourceID, nil)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ExternalUserLink]{Data: link})
+}
+
+func (h *IntegrationHandler) DismissExternalUserLinkSuggestion(w http.ResponseWriter, r *http.Request) {
+	if h.externalSuggestions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINK_SUGGESTIONS_NOT_CONFIGURED", "external user link suggestions are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	suggestionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SUGGESTION_ID", "invalid suggestion id", err)
+		return
+	}
+	if err := h.externalSuggestions.Dismiss(r.Context(), orgID, suggestionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "EXTERNAL_USER_LINK_SUGGESTION_NOT_FOUND", "external user link suggestion not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_SUGGESTION_DISMISS_FAILED", "failed to dismiss external user link suggestion", err)
+		return
+	}
+	resourceID := suggestionID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkSuggestionDismissed, models.AuditResourceExternalUserLinkSuggestion, &resourceID, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *IntegrationHandler) ListMyExternalIdentities(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	links, err := h.externalUserLinks.ListActiveByUser(r.Context(), orgID, user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_IDENTITIES_FAILED", "failed to list external identities", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ExternalUserLink]{Data: links, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) DeleteMyExternalIdentity(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	linkID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_LINK_ID", "invalid link id", err)
+		return
+	}
+	link, err := h.externalUserLinks.GetByID(r.Context(), orgID, linkID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "EXTERNAL_IDENTITY_NOT_FOUND", "external identity not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_IDENTITY_FAILED", "failed to load external identity", err)
+		return
+	}
+	if link.UserID != user.ID {
+		writeError(w, r, http.StatusNotFound, "EXTERNAL_IDENTITY_NOT_FOUND", "external identity not found")
+		return
+	}
+	if link.Source == models.ExternalUserLinkSourceAdminLinked {
+		writeError(w, r, http.StatusForbidden, "ADMIN_MANAGED_EXTERNAL_IDENTITY", "admin-managed external identities must be removed by an admin")
+		return
+	}
+	if err := h.externalUserLinks.Revoke(r.Context(), orgID, linkID); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_IDENTITY_REVOKE_FAILED", "failed to disconnect external identity", err)
+		return
+	}
+	resourceID := linkID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkRevoked, models.AuditResourceExternalUserLink, &resourceID, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *IntegrationHandler) ClaimExternalUserLink(w http.ResponseWriter, r *http.Request) {
+	if h.externalUserLinks == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external user links are not configured")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHENTICATED", "authentication required")
+		return
+	}
+	token := strings.TrimSpace(chi.URLParam(r, "token"))
+	if token == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CLAIM_TOKEN", "claim token is required")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	link, err := h.externalUserLinks.ClaimSelfLink(r.Context(), orgID, externalidentity.HashClaimToken(token), user.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusGone, "EXTERNAL_USER_LINK_CLAIM_INVALID", "claim link is invalid, expired, already used, or unavailable in this org")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_CLAIM_FAILED", "failed to claim external user link", err)
+		return
+	}
+	resourceID := link.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkClaimed, models.AuditResourceExternalUserLink, &resourceID, nil)
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ExternalUserLink]{Data: link})
+}
+
+func trimOptional(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 func (h *IntegrationHandler) LinkSlackUserMe(w http.ResponseWriter, r *http.Request) {
@@ -2767,6 +3097,25 @@ func (h *IntegrationHandler) LinkSlackUserMe(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_LINK_FAILED", "failed to link slack user", err)
 		return
 	}
+	if h.externalUserLinks != nil {
+		externalLink, err := h.externalUserLinks.UpsertSelfActive(r.Context(), models.ExternalUserLink{
+			OrgID:               orgID,
+			Provider:            models.ExternalIdentityProviderSlack,
+			ProviderWorkspaceID: installation.TeamID,
+			ProviderUserID:      body.SlackUserID,
+			UserID:              user.ID,
+			Confidence:          100,
+			ExternalEmail:       emailPtr,
+			ExternalDisplayName: trimOptional(&displayName),
+			LinkedByUserID:      &user.ID,
+		})
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_FAILED", "failed to link external slack user", err)
+			return
+		}
+		resourceID := externalLink.ID.String()
+		emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkCreated, models.AuditResourceExternalUserLink, &resourceID, nil)
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SlackUserLink]{Data: *link})
 }
 
@@ -2801,6 +3150,12 @@ func (h *IntegrationHandler) UnlinkSlackUserMe(w http.ResponseWriter, r *http.Re
 	if err := h.slackUserLinkStore.DeleteSelfLink(r.Context(), orgID, user.ID, installation.TeamID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "SLACK_USER_UNLINK_FAILED", "failed to unlink slack user", err)
 		return
+	}
+	if h.externalUserLinks != nil {
+		if err := h.externalUserLinks.RevokeSelfLinkedByUser(r.Context(), orgID, user.ID, models.ExternalIdentityProviderSlack, installation.TeamID); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_REVOKE_FAILED", "failed to unlink external slack user", err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

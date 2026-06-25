@@ -429,6 +429,8 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
 		SlackUserLinks:      db.NewSlackUserLinkStore(pool),
 		LinearUserLinks:     db.NewLinearUserLinkStore(pool),
+		ExternalUserLinks:   db.NewExternalUserLinkStore(pool),
+		ExternalSuggestions: db.NewExternalUserLinkSuggestionStore(pool),
 		SlackChannels:       db.NewSlackChannelSettingsStore(pool),
 		SlackSessionLinks:   db.NewSlackSessionLinkStore(pool),
 		SlackInboundEvents:  db.NewSlackInboundEventStore(pool),
