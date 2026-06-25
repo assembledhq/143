@@ -61,6 +61,16 @@ describe("CommandPalette", () => {
     expect(screen.getByText("Log out")).toBeInTheDocument();
   });
 
+  it("starts a global new session without preserving ambient repo context", async () => {
+    const user = userEvent.setup();
+    renderPalette({ searchParams: { repo: "repo-1" } });
+
+    const newSessionItem = await screen.findByText("New session");
+    await user.click(newSessionItem);
+
+    expect(pushMock).toHaveBeenCalledWith("/sessions/new");
+  });
+
   it("excludes admin-only items for non-admin users", async () => {
     renderPalette({ userRole: "member" });
     await screen.findByText("Account");
@@ -221,7 +231,7 @@ describe("CommandPalette", () => {
     await user.keyboard("[ArrowDown][Enter]");
 
     expect(pushMock).toHaveBeenCalledWith(
-      "/sessions/new?prompt=nonexistent-thing-xyz&repo=repo-1"
+      "/sessions/new?prompt=nonexistent-thing-xyz"
     );
   });
 
