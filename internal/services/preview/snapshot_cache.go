@@ -30,15 +30,10 @@ const (
 	DefaultMaxCacheBytes int64 = 20 * 1024 * 1024 * 1024
 
 	// snapshotTmpFile is the temporary path inside the sandbox where the
-	// snapshot tar.gz is staged during create/restore.
-	snapshotTmpFile = "/tmp/snapshot.tar.gz"
-
-	// tarExcludeFlags are the directories excluded from the workspace snapshot.
-	// .git is reconstructed from the repo clone. Framework build caches
-	// (.next/cache, node_modules/.cache) are deliberately INCLUDED: they are
-	// exactly what makes a restored workspace's next build/dev-server boot
-	// fast, and regenerating them costs the bulk of a cold start.
-	tarExcludeFlags = `--exclude=.git --exclude='__pycache__' --exclude='.pytest_cache'`
+	// snapshot archive is staged during create/restore. tar auto-detects the
+	// compression on extract, so the name is cosmetic — it does not have to
+	// match the actual (zstd or legacy gzip) format of the bytes.
+	snapshotTmpFile = "/tmp/snapshot.tar.zst"
 )
 
 // =============================================================================
@@ -205,14 +200,18 @@ func (sc *SnapshotCache) CreateSnapshot(
 	log.Info().Msg("creating filesystem snapshot")
 	start := time.Now()
 
-	// 1. Create the tar.gz inside the sandbox.
+	// 1. Create the archive inside the sandbox.
 	//    Using shell tar is significantly faster than Go's archive/tar for
 	//    large node_modules trees (parallel I/O, kernel-level buffering).
+	//    Compression and the exclude list are shared with the session-checkpoint
+	//    path via the agent package; excludeGit=true because preview workspaces
+	//    rebuild .git from the clone.
 	tarCmd := fmt.Sprintf(
-		"tar czf %s -C %s %s -- .",
+		"tar -c %s -f %s -C %s %s -- .",
+		agent.SnapshotTarCompressFlag,
 		snapshotTmpFile,
 		shellQuote(sb.WorkDir),
-		tarExcludeFlags,
+		agent.SnapshotTarExcludeFlags(true),
 	)
 
 	var stderr bytes.Buffer
@@ -515,8 +514,9 @@ func (sc *SnapshotCache) RestoreSnapshot(
 			Msg("failed to clean workspace before restore — proceeding with overlay extraction")
 	}
 
-	// 4. Extract inside the sandbox.
-	extractCmd := fmt.Sprintf("tar xzf %s -C %s", snapshotTmpFile, shellQuote(sb.WorkDir))
+	// 4. Extract inside the sandbox. `xf` (not `xzf`) so tar auto-detects the
+	//    compression — restores both new zstd archives and pre-switch gzip ones.
+	extractCmd := fmt.Sprintf("tar xf %s -C %s", snapshotTmpFile, shellQuote(sb.WorkDir))
 
 	var stderr bytes.Buffer
 	exitCode, err := sc.executor.Exec(ctx, sb, extractCmd, io.Discard, &stderr)
