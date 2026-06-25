@@ -387,7 +387,10 @@ describe("PreviewPanel component", () => {
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
 
     await waitFor(() => {
-      expect(screen.getByText("Preparing preview")).toBeInTheDocument();
+      expect(screen.getByText("Preparing preview")).toHaveClass(
+        "text-sm",
+        "font-medium",
+      );
     });
 
     expect(screen.getByText("Provisioning postgres")).toBeInTheDocument();
@@ -395,7 +398,7 @@ describe("PreviewPanel component", () => {
     expect(screen.getByText("postgres is provisioning")).toBeInTheDocument();
     expect(screen.getByText("Services")).toBeInTheDocument();
     expect(screen.getByText("Waiting for services to boot.")).toBeInTheDocument();
-    expect(screen.getByText("Updating preview...")).toBeInTheDocument();
+    expect(screen.queryByText("Updating preview...")).not.toBeInTheDocument();
     expect(screen.getByText("Preview")).toBeInTheDocument();
     expect(screen.getByText("Waiting for the preview URL to become reachable.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop preview" })).toBeInTheDocument();
