@@ -639,6 +639,36 @@ func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
 // StopPreview
 // =============================================================================
 
+// previewStopBackgroundWaitCap bounds how long StopPreview blocks on background
+// work — chiefly the post-ready build-cache uploads it deliberately awaits so a
+// prewarm persists its cache. It sits below the saves' own 10-minute timeout so
+// an interactive stop can't hang on a wedged blob store, yet is generous enough
+// that a normal prewarm save (seconds) completes.
+const previewStopBackgroundWaitCap = 3 * time.Minute
+
+// waitForGroupBounded blocks until wg is done, ctx is cancelled, or maxWait
+// elapses — whichever first — returning a non-nil error only when it gives up
+// before wg completed. The detached goroutine finishes wg and exits; closing
+// done after the receiver moved on is harmless, and the saves run under
+// context.WithoutCancel so they keep going regardless of which branch wins.
+func waitForGroupBounded(ctx context.Context, wg *sync.WaitGroup, maxWait time.Duration) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("timed out after %s waiting for preview background work", maxWait)
+	}
+}
+
 func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) error {
 	d.mu.RLock()
 	state, ok := d.previews[handle]
@@ -648,10 +678,18 @@ func (d *DockerPreviewProvider) StopPreview(ctx context.Context, handle string) 
 		return nil // already stopped — idempotent
 	}
 
-	// Cancel all service goroutines and wait for background work to finish.
+	// Cancel all service goroutines and wait for background work to finish. The
+	// wait is bounded: it intentionally blocks on the post-ready build-cache
+	// uploads (so a prewarm, which stops the moment the preview is ready,
+	// persists its cache), but an interactive stop must not hang on a slow blob
+	// store. The cap sits well under the saves' own 10-minute self-timeout, and a
+	// caller (e.g. a prewarm job) with a longer-lived ctx still gets the full cap.
 	state.cancelFn()
 	d.terminateServiceProcesses(state)
-	state.wg.Wait()
+	if err := waitForGroupBounded(ctx, &state.wg, previewStopBackgroundWaitCap); err != nil {
+		d.logger.Warn().Err(err).Str("handle", handle).
+			Msg("stop preview: proceeding before background work finished; an in-flight build cache save may be aborted by teardown")
+	}
 
 	// Tear down infrastructure containers.
 	for name, ih := range state.infra {
@@ -1814,7 +1852,17 @@ func (d *DockerPreviewProvider) saveBuildCacheSet(ctx context.Context, state *pr
 // runs asynchronously so it does not delay reporting the ready preview.
 func (d *DockerPreviewProvider) savePreviewBuildCache(ctx context.Context, state *previewState, install *models.PreviewInstallConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) {
 	state.buildCacheSaveOnce.Do(func() {
-		go d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootWorkDir, state.buildCacheKey, state.buildCachePaths, state.buildCacheRestoredChecksum)
+		// Register on the wait group so StopPreview's wg.Wait() blocks until the
+		// upload finishes. saveBuildCacheSet detaches from ctx (WithoutCancel +
+		// its own timeout), so this never delays a normal serving launch — the
+		// save almost always completes long before a user stop — but it does
+		// guarantee a prewarm, which stops the preview the instant it is ready,
+		// leaves a durably-saved build cache behind instead of racing teardown.
+		state.wg.Add(1)
+		go func() {
+			defer state.wg.Done()
+			d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootWorkDir, state.buildCacheKey, state.buildCachePaths, state.buildCacheRestoredChecksum)
+		}()
 	})
 }
 
@@ -1832,7 +1880,13 @@ func (d *DockerPreviewProvider) savePreviewBuildCacheHome(ctx context.Context, s
 		if state.buildCacheHomeKey == "" {
 			return
 		}
-		go d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
+		// Registered on the wait group (see savePreviewBuildCache) so a prewarm's
+		// StopPreview awaits the GOCACHE/GOMODCACHE upload before completing.
+		state.wg.Add(1)
+		go func() {
+			defer state.wg.Done()
+			d.saveBuildCacheSet(ctx, state, opts, observer, install, models.PreviewCacheRootHomeDir, state.buildCacheHomeKey, state.buildCacheHomePaths, state.buildCacheHomeRestoredChecksum)
+		}()
 	})
 }
 
