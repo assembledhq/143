@@ -29,6 +29,7 @@ type Registry struct {
 	sessionTabManagers                  map[string]SessionTabManager
 	projectProposers                    map[string]ProjectProposer
 	evalReporters                       map[string]EvalCandidateReporter
+	automationManagers                  map[string]AutomationManager
 	automationGoalImprovementCompleters map[string]AutomationGoalImprovementCompleter
 	ciTestInsights                      map[string]CITestInsights
 	logProviders                        map[string]LogProvider
@@ -49,6 +50,7 @@ func NewRegistry() *Registry {
 		sessionTabManagers:                  make(map[string]SessionTabManager),
 		projectProposers:                    make(map[string]ProjectProposer),
 		evalReporters:                       make(map[string]EvalCandidateReporter),
+		automationManagers:                  make(map[string]AutomationManager),
 		automationGoalImprovementCompleters: make(map[string]AutomationGoalImprovementCompleter),
 		ciTestInsights:                      make(map[string]CITestInsights),
 		logProviders:                        make(map[string]LogProvider),
@@ -390,6 +392,35 @@ func (r *Registry) ProjectProposer(name string) (ProjectProposer, error) {
 	return pp, nil
 }
 
+// RegisterAutomationManager adds an automation manager (e.g. internal 143 API).
+func (r *Registry) RegisterAutomationManager(provider AutomationManager) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.automationManagers[provider.Name()] = provider
+}
+
+// AutomationManagers returns all registered automation managers.
+func (r *Registry) AutomationManagers() []AutomationManager {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]AutomationManager, 0, len(r.automationManagers))
+	for _, manager := range r.automationManagers {
+		result = append(result, manager)
+	}
+	return result
+}
+
+// AutomationManager returns a specific automation manager by name.
+func (r *Registry) AutomationManager(name string) (AutomationManager, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	manager, ok := r.automationManagers[name]
+	if !ok {
+		return nil, fmt.Errorf("automation manager %q not registered", name)
+	}
+	return manager, nil
+}
+
 // RegisterCITestInsights adds a CI test insights provider (e.g. CircleCI).
 func (r *Registry) RegisterCITestInsights(provider CITestInsights) {
 	r.mu.Lock()
@@ -464,6 +495,7 @@ func (r *Registry) HasAny() bool {
 		len(r.sessionTabManagers) > 0 ||
 		len(r.projectProposers) > 0 ||
 		len(r.ciTestInsights) > 0 ||
+		len(r.automationManagers) > 0 ||
 		len(r.logProviders) > 0
 }
 
@@ -504,6 +536,9 @@ func (r *Registry) Summary() map[string][]string {
 	}
 	for name := range r.projectProposers {
 		m["project_proposers"] = append(m["project_proposers"], name)
+	}
+	for name := range r.automationManagers {
+		m["automation_managers"] = append(m["automation_managers"], name)
 	}
 	for name := range r.ciTestInsights {
 		m["ci_test_insights"] = append(m["ci_test_insights"], name)

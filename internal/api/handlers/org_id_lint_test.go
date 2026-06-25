@@ -75,6 +75,11 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalSessionHistoryHandler.Search":              "internal API, uses signed tool token claims.OrgID and claims.SessionID",
 		"InternalSessionHistoryHandler.Get":                 "internal API, uses signed tool token claims.OrgID and claims.SessionID",
 		"InternalSessionHistoryHandler.Messages":            "internal API, uses signed tool token claims.OrgID and claims.SessionID",
+		"InternalAutomationHandler.Create":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts repository_id to claims.RepoID",
+		"InternalAutomationHandler.Update":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",
+		"InternalAutomationHandler.RunNow":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",
+		"InternalAutomationHandler.Pause":                   "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",
+		"InternalAutomationHandler.Resume":                  "internal sandbox API, uses signed tool token claims.OrgID and restricts automation repository_id to claims.RepoID",
 
 		// Authenticated but legitimately no org-scoped data access.
 		"AuthHandler.Me":                       "returns user from context only",

@@ -83,6 +83,8 @@ func addAllowedToolPaths(allowed map[string]bool, capability models.AgentCapabil
 		add(CLINamespace("pagerduty"), CLIAction("add_note"), CLIAction("create_status_update"))
 	case models.AgentCapabilitySlackNotifications:
 		add(CLINamespace("slack"), ActionSend)
+	case models.AgentCapabilityAutomationManagement:
+		add(NamespaceAutomation, ActionCreate, ActionUpdate, ActionRun, ActionPause, ActionResume)
 	case models.AgentCapabilityProjectProposals:
 		add(NamespaceProject, ActionPropose)
 	case models.AgentCapabilityEvalAuthoring:
