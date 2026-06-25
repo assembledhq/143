@@ -148,7 +148,7 @@ function CommandPaletteContent({
       params.set("prompt", query);
     }
     const qs = params.toString();
-    navigate(`/sessions/new${qs ? `?${qs}` : ""}`, true);
+    navigate(`/sessions/new${qs ? `?${qs}` : ""}`);
   }, [navigate, query]);
 
   const normalizedQuery = query.trim().toLowerCase();
