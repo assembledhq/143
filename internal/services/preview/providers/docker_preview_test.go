@@ -869,6 +869,9 @@ type fakeDependencyCache struct {
 	restoreRoots    []models.PreviewCacheRoot
 	saveSpecs       []preview.PreviewPathCacheSaveSpec
 	saveStarted     chan models.PreviewCacheKind
+	// buildSaveBlock, when set, makes the workdir build-artifact save block until
+	// the channel is closed — used to prove StopPreview awaits the save.
+	buildSaveBlock chan struct{}
 }
 
 func (f *fakeDependencyCache) Find(context.Context, uuid.UUID, uuid.UUID, string) (*preview.DependencyCacheHit, error) {
@@ -939,6 +942,9 @@ func (f *fakeDependencyCache) SavePathCache(_ context.Context, _ *agent.Sandbox,
 		case f.saveStarted <- spec.Kind:
 		default:
 		}
+	}
+	if f.buildSaveBlock != nil && spec.Kind == models.PreviewCacheKindBuildArtifact && spec.Root == models.PreviewCacheRootWorkDir {
+		<-f.buildSaveBlock
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -3063,6 +3069,157 @@ func TestStartPreview_BuildCacheRestoresAfterInstallAndSavesPostReady(t *testing
 
 	close(release)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
+// TestStopPreview_AwaitsBuildCacheSave proves the prewarm coordination
+// guarantee: StopPreview blocks until the post-ready build-cache save finishes,
+// so a session prewarm (which stops the preview the instant it is ready) leaves
+// a durably-saved build cache behind instead of racing teardown.
+func TestStopPreview_AwaitsBuildCacheSave(t *testing.T) {
+	t.Parallel()
+
+	// The service "process" must stay running until cancelled so readiness
+	// succeeds via the dialer; an immediate return would look like a crashed
+	// service and divert to the synchronous failure-path cache flush.
+	release := make(chan struct{})
+	defer close(release)
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn:     func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, _ string) ([]byte, error) { return []byte(`{"lockfileVersion":3}`), nil },
+	}
+	saveStarted := make(chan models.PreviewCacheKind, 8)
+	buildSaveBlock := make(chan struct{})
+	cache := &fakeDependencyCache{
+		findHit: &preview.DependencyCacheHit{},
+		buildFindHit: &preview.DependencyCacheHit{
+			Entry: models.PreviewDependencyCache{
+				CacheKind: models.PreviewCacheKindBuildArtifact,
+				SizeBytes: 999,
+				Metadata:  []byte(`{"checksum_sha256":"prior-checksum"}`),
+			},
+		},
+		saveStarted:    saveStarted,
+		buildSaveBlock: buildSaveBlock,
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, nil)
+	require.NoError(t, err, "StartPreview should succeed with a build cache hit")
+	require.NotNil(t, handle)
+
+	// Wait until the workdir build-cache save goroutine has started and is
+	// blocked inside SavePathCache on buildSaveBlock.
+	waitForBuildArtifactSave := func() {
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case kind := <-saveStarted:
+				if kind == models.PreviewCacheKindBuildArtifact {
+					return
+				}
+			case <-deadline:
+				t.Fatal("build cache save never started")
+			}
+		}
+	}
+	waitForBuildArtifactSave()
+
+	// StopPreview must not return while the save is still in flight.
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- d.StopPreview(context.Background(), handle.Handle) }()
+	select {
+	case <-stopErr:
+		t.Fatal("StopPreview returned before the build cache save completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release the save; StopPreview should now complete and the save be recorded.
+	close(buildSaveBlock)
+	select {
+	case err := <-stopErr:
+		require.NoError(t, err, "StopPreview should clean up the started preview")
+	case <-time.After(5 * time.Second):
+		t.Fatal("StopPreview did not return after the build cache save was released")
+	}
+	_, _, saves, _, _ := cache.pathCounts()
+	require.Equal(t, 1, saves[models.PreviewCacheKindBuildArtifact], "the awaited build cache save should have completed before StopPreview returned")
+}
+
+// TestStopPreview_BoundedByContextWhenSaveStalls proves the other half of the
+// trade-off: an interactive stop must not hang on a slow/stuck build-cache
+// upload. With a stalled save, StopPreview returns when the caller's context
+// expires instead of blocking on the save's full timeout.
+func TestStopPreview_BoundedByContextWhenSaveStalls(t *testing.T) {
+	t.Parallel()
+
+	// Keep the service "process" running until cancelled so readiness succeeds
+	// (see TestStopPreview_AwaitsBuildCacheSave).
+	release := make(chan struct{})
+	defer close(release)
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn:     func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, _ string) ([]byte, error) { return []byte(`{"lockfileVersion":3}`), nil },
+	}
+	saveStarted := make(chan models.PreviewCacheKind, 8)
+	buildSaveBlock := make(chan struct{})
+	// Release the stalled save at the end so the detached save goroutine exits.
+	defer close(buildSaveBlock)
+	cache := &fakeDependencyCache{
+		findHit: &preview.DependencyCacheHit{},
+		buildFindHit: &preview.DependencyCacheHit{
+			Entry: models.PreviewDependencyCache{
+				CacheKind: models.PreviewCacheKindBuildArtifact,
+				SizeBytes: 999,
+				Metadata:  []byte(`{"checksum_sha256":"prior-checksum"}`),
+			},
+		},
+		saveStarted:    saveStarted,
+		buildSaveBlock: buildSaveBlock,
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, previewInstallTestConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+	}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, handle)
+
+	deadline := time.After(5 * time.Second)
+	for sawBuild := false; !sawBuild; {
+		select {
+		case kind := <-saveStarted:
+			sawBuild = kind == models.PreviewCacheKindBuildArtifact
+		case <-deadline:
+			t.Fatal("build cache save never started")
+		}
+	}
+
+	// The save is stalled; a stop with a short-lived ctx must still return.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	require.NoError(t, d.StopPreview(ctx, handle.Handle), "StopPreview should proceed (best-effort) when the save stalls")
+	require.Less(t, time.Since(start), 3*time.Second, "StopPreview must not block on a stalled save once the caller ctx expires")
 }
 
 func TestStartPreview_DependencyCacheSaveExcludesBuildCachePaths(t *testing.T) {
