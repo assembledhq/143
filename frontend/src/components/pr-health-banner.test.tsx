@@ -584,6 +584,43 @@ describe("PRHealthBanner", () => {
     expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
   });
 
+  it("shows failed commit-status checks in the PR details card when no test-category counter is present", async () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          failing_test_count: 0,
+          checks: [
+            {
+              name: "ci/circleci: frontend_lint_format_license",
+              category: "lint",
+              status: "failed",
+              provider: "circleci",
+              details_url: "https://circleci.com/gh/acme/widgets/123",
+              summary: "Your tests failed on CircleCI",
+            },
+            { name: "github-actions / unit", category: "test", status: "passed", details_url: "https://github.com/acme/widgets/actions/runs/456" },
+          ],
+        }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.hover(screen.getByText("1/2 failed"));
+
+    expect(await screen.findByText("CI jobs")).toBeInTheDocument();
+    expect(screen.getByText("ci/circleci: frontend_lint_format_license")).toBeInTheDocument();
+    expect(screen.getByText("github-actions / unit")).toBeInTheDocument();
+    expect(screen.getAllByText("Failed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
+  });
+
   it("renders each hover-card check as an external link when details URLs are available", async () => {
     renderWithProviders(
       <PRHealthBanner
