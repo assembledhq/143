@@ -116,6 +116,7 @@ export function PRHealthBanner({
     canShowPushChanges ||
     (canShowSnapshotDetails && !!activeRepairState.openSessionID);
   const failedChecks = orderedChecks.filter((check) => check.status === "failed").length;
+  const hasFailedCheckDetails = failedChecks > 0 || health.failing_test_count > 0;
   const failedSummaryLabel = orderedChecks.length > 0
     ? `${failedChecks}/${orderedChecks.length} failed`
     : `${health.failing_test_count} failing test${health.failing_test_count === 1 ? "" : "s"}`;
@@ -153,7 +154,7 @@ export function PRHealthBanner({
                   Repository disconnected
                 </Badge>
               )}
-              {canShowSnapshotDetails && health.failing_test_count > 0 && (
+              {canShowSnapshotDetails && hasFailedCheckDetails && (
                 orderedChecks.length > 0 ? (
                   <HoverCard openDelay={100} closeDelay={100}>
                     <HoverCardTrigger asChild>
