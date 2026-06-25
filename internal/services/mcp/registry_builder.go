@@ -73,6 +73,10 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 				slackSender := integration.NewInternalSlackMessageSender(token, apiURL)
 				reg.RegisterMessageSender(slackSender)
 				fmt.Fprintln(logger, "143-tools: registered Slack message sender")
+
+				automationManager := integration.NewInternalAutomationManager(token, apiURL)
+				reg.RegisterAutomationManager(automationManager)
+				fmt.Fprintln(logger, "143-tools: registered automation manager")
 			}
 
 			tabManager := integration.NewInternalSessionTabManager(token, apiURL)

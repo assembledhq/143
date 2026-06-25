@@ -105,3 +105,26 @@ func TestCapabilityFilteredToolSourceAllowsSlackSendOnlyWithSlackNotificationGra
 	}})
 	require.Equal(t, []Tool{{Name: "slack_send"}}, writeSource.ListTools(), "Slack notification capability should allow slack send")
 }
+
+func TestCapabilityFilteredToolSourceAllowsAutomationManagementTools(t *testing.T) {
+	t.Parallel()
+
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "automation_create"},
+		{Name: "automation_update"},
+		{Name: "automation_run"},
+		{Name: "automation_pause"},
+		{Name: "automation_resume"},
+		{Name: "slack_send"},
+	}}, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityAutomationManagement, AccessLevel: models.AgentCapabilityAccessWrite},
+	}})
+
+	require.Equal(t, []Tool{
+		{Name: "automation_create"},
+		{Name: "automation_update"},
+		{Name: "automation_run"},
+		{Name: "automation_pause"},
+		{Name: "automation_resume"},
+	}, source.ListTools(), "automation management capability should allow automation tools only")
+}

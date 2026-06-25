@@ -85,6 +85,8 @@ export type AgentCapabilityID =
   | 'team_docs'
   | 'production_diagnostics'
   | 'external_comments'
+  | 'slack_notifications'
+  | 'automation_management'
   | 'project_proposals'
   | 'eval_authoring'
   | 'publishing';

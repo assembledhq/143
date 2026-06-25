@@ -228,6 +228,46 @@ func (m *mockAutomationGoalImprovementCompleter) CompleteGoalImprovement(_ conte
 	}, nil
 }
 
+type mockAutomationManager struct {
+	name string
+}
+
+func (m *mockAutomationManager) Name() string {
+	return m.name
+}
+
+func (m *mockAutomationManager) CreateAutomation(_ context.Context, payload json.RawMessage) (json.RawMessage, error) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(fmt.Sprintf(`{"data":{"id":"automation-mock-123","name":%q}}`, body.Name)), nil
+}
+
+func (m *mockAutomationManager) UpdateAutomation(_ context.Context, id string, payload json.RawMessage) (json.RawMessage, error) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(payload, &body); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"name":%q}}`, id, body.Name)), nil
+}
+
+func (m *mockAutomationManager) RunAutomation(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"data":{"status":"queued"}}`), nil
+}
+
+func (m *mockAutomationManager) PauseAutomation(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"data":{"enabled":false}}`), nil
+}
+
+func (m *mockAutomationManager) ResumeAutomation(context.Context, string) (json.RawMessage, error) {
+	return json.RawMessage(`{"data":{"enabled":true}}`), nil
+}
+
 // --------------------------------------------------------------------------
 // Mock: CITestInsights
 // --------------------------------------------------------------------------
@@ -287,6 +327,7 @@ func buildFullTestRegistry() *integration.Registry {
 	reg.RegisterPullRequestCreator(&mockPullRequestCreator{name: "session"})
 	reg.RegisterSessionTabManager(&mockSessionTabManager{name: "session_tabs"})
 	reg.RegisterProjectProposer(&mockProjectProposer{name: "project"})
+	reg.RegisterAutomationManager(&mockAutomationManager{name: "automation"})
 	reg.RegisterAutomationGoalImprovementCompleter(&mockAutomationGoalImprovementCompleter{name: "automation_goal_improvement"})
 	reg.RegisterCITestInsights(&mockCITestInsights{name: "circleci"})
 	return reg
@@ -709,13 +750,13 @@ func TestListToolsAllIntegrations(t *testing.T) {
 	tr := NewToolRegistry(buildFullTestRegistry())
 	tools := tr.ListTools()
 
-	// 4 error tracker + 9 incident response + 5 task manager + 2 document store + 2 code review + 2 message source + 1 message sender + 1 issue creator + 1 PR creator + 5 session tab tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 37
-	if len(tools) != 37 {
+	// 4 error tracker + 9 incident response + 5 task manager + 2 document store + 2 code review + 2 message source + 1 message sender + 1 issue creator + 1 PR creator + 5 session tab tools + 5 automation management tools + 1 automation goal improvement completer + 1 project proposer + 3 ci test insights = 42
+	if len(tools) != 42 {
 		names := make([]string, len(tools))
 		for i, tool := range tools {
 			names[i] = tool.Name
 		}
-		t.Fatalf("expected 37 tools, got %d: %v", len(tools), names)
+		t.Fatalf("expected 42 tools, got %d: %v", len(tools), names)
 	}
 
 	expected := map[string]bool{
@@ -742,6 +783,11 @@ func TestListToolsAllIntegrations(t *testing.T) {
 		"session_tabs_create":                  false,
 		"session_tabs_send":                    false,
 		"session_tabs_messages":                false,
+		"automation_create":                    false,
+		"automation_update":                    false,
+		"automation_run":                       false,
+		"automation_pause":                     false,
+		"automation_resume":                    false,
 		"automation_goal_improvement_complete": false,
 		"project_propose":                      false,
 		"circleci_list_flaky_tests":            false,

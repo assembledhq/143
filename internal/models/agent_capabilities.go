@@ -21,6 +21,7 @@ const (
 	AgentCapabilityProductionDiagnostics AgentCapabilityID = "production_diagnostics"
 	AgentCapabilityExternalComments      AgentCapabilityID = "external_comments"
 	AgentCapabilitySlackNotifications    AgentCapabilityID = "slack_notifications"
+	AgentCapabilityAutomationManagement  AgentCapabilityID = "automation_management"
 	AgentCapabilityProjectProposals      AgentCapabilityID = "project_proposals"
 	AgentCapabilityEvalAuthoring         AgentCapabilityID = "eval_authoring"
 	AgentCapabilityPublishing            AgentCapabilityID = "publishing"
@@ -38,6 +39,7 @@ func (id AgentCapabilityID) Validate() error {
 		AgentCapabilityProductionDiagnostics,
 		AgentCapabilityExternalComments,
 		AgentCapabilitySlackNotifications,
+		AgentCapabilityAutomationManagement,
 		AgentCapabilityProjectProposals,
 		AgentCapabilityEvalAuthoring,
 		AgentCapabilityPublishing:

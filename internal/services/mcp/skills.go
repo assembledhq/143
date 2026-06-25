@@ -84,6 +84,7 @@ func skillsExamples(commands []CLICommand) []string {
 		{"circleci", "list_flaky_tests", "143-tools circleci list_flaky_tests --limit 25"},
 		{"slack", "search_messages", "143-tools slack search_messages --query \"checkout timeout\" --limit 10"},
 		{"slack", "send", "143-tools slack send --channel-id C123 --text \"Automation completed successfully.\""},
+		{NamespaceAutomation, ActionCreate, "143-tools automation create --payload '{\"name\":\"Weekly cleanup\",\"goal\":\"Clean stale state\",\"repository_id\":\"<repo-uuid>\",\"schedule_type\":\"cron\",\"cron_expression\":\"0 9 * * 1\"}'"},
 		{NamespacePR, ActionCreate, "143-tools pr create --draft false"},
 		{NamespaceTabs, ActionList, "143-tools session-tabs list"},
 		{NamespaceTabs, ActionSend, "143-tools session-tabs send --tab-id <uuid> --message \"Run focused tests and summarize failures.\""},

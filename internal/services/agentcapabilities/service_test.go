@@ -105,6 +105,25 @@ func TestServiceDefinitionsIncludesSlackNotificationsCapability(t *testing.T) {
 	require.Equal(t, models.AgentCapabilityScopeIntegration, found.Scope, "Slack notification sending should be integration-scoped")
 }
 
+func TestServiceDefinitionsIncludesAutomationManagementCapability(t *testing.T) {
+	t.Parallel()
+
+	svc := NewService(nil)
+	var found *models.AgentCapabilityDefinition
+	for _, def := range svc.Definitions() {
+		if def.ID == models.AgentCapabilityAutomationManagement {
+			copy := def
+			found = &copy
+			break
+		}
+	}
+
+	require.NotNil(t, found, "catalog should expose an automation management capability")
+	require.Equal(t, models.AgentCapabilityAccessWrite, found.MaxAccessLevel, "automation management should require write access")
+	require.Equal(t, models.AgentCapabilityRiskHigh, found.Risk, "automation management should be high risk")
+	require.Equal(t, models.AgentCapabilityScopeRepository, found.Scope, "automation management should be repository-scoped")
+}
+
 func TestServiceRequestGrantCreatesHumanInputApproval(t *testing.T) {
 	t.Parallel()
 
