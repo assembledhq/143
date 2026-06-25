@@ -1,6 +1,6 @@
 # Design: External User Identity Attribution
 
-> **Status:** Proposed | **Last reviewed:** 2026-06-24
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-25
 >
 > **Depends on:** [../implemented/69-linear-agent.md](../implemented/69-linear-agent.md), [../implemented/101-slackbot-implementation-plan.md](../implemented/101-slackbot-implementation-plan.md), [./92-slackbot-product-surface.md](./92-slackbot-product-surface.md), [./50-multi-organization-membership.md](./50-multi-organization-membership.md)
 
@@ -137,15 +137,18 @@ linking feel like an upgrade for tracking, credit, and personal defaults.
 
 ## Rollout
 
-1. Ship unified data model and resolution service behind existing Slack/Linear
-   paths.
+1. **Shipped 2026-06-25:** unified data model, Linear-link backfill migration,
+   typed Go models, direct pgx stores, resolver service, admin/user API
+   endpoints, suggestion queue actions, audit enum coverage, and tenancy tests.
 2. Add self-link claim links for Slack App Home, Slack mention fallback, and
    Linear-started session fallback.
 3. Add settings table for mappings, suggestions, scope health, and unlinking.
 4. Route personal capabilities through trusted mappings and provide team
    fallbacks where policy allows.
-5. Migrate existing `linear_user_links` and Slack mapping rows into the unified
-   table, leaving compatibility views/helpers until callers move.
+5. Migrate Slack mapping rows into the unified table and continue moving
+   Slack/Linear callers from provider-specific stores to the resolver. Existing
+   `linear_user_links` rows with resolved users are backfilled into
+   `external_user_links`; compatibility helpers remain for older callers.
 
 ## Non-Goals
 
