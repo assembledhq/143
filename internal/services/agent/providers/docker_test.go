@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -187,6 +188,27 @@ func (c *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 // The data should be in Docker's multiplexed stream format, or empty.
 func newMockHijackedResponse(data string) types.HijackedResponse {
 	conn := newMockConn(data)
+	return types.HijackedResponse{
+		Conn:   conn,
+		Reader: bufio.NewReader(conn),
+	}
+}
+
+// failWriteConn serves canned stream data on Read (so StdCopy can still drain
+// tar's stderr) but fails every Write — modelling the docker socket dropping
+// the connection mid-stream while the snapshot bytes are being piped in.
+type failWriteConn struct {
+	*mockConn
+	writeErr error
+}
+
+func (c *failWriteConn) Write(p []byte) (int, error) { return 0, c.writeErr }
+func (c *failWriteConn) CloseWrite() error           { return nil }
+
+// newFailWriteHijackedResponse wires a failWriteConn so a test can drive a
+// write failure while still serving the given multiplexed stream on Read.
+func newFailWriteHijackedResponse(data string, writeErr error) types.HijackedResponse {
+	conn := &failWriteConn{mockConn: newMockConn(data), writeErr: writeErr}
 	return types.HijackedResponse{
 		Conn:   conn,
 		Reader: bufio.NewReader(conn),
@@ -1462,6 +1484,10 @@ func TestDockerProvider_Snapshot(t *testing.T) {
 		require.Contains(t, tarCmd, "'home/sandbox/.codex'", "tar should include the .codex dir under HomeDir")
 		require.Contains(t, tarCmd, "'home/sandbox/.gemini'", "tar should include the .gemini dir under HomeDir")
 		require.NotContains(t, tarCmd, "2>/dev/null", "tar stderr must not be silenced — we capture it for diagnostics")
+		require.Contains(t, tarCmd, "--exclude=__pycache__", "regenerable caches are excluded, shared with the preview path")
+		require.Contains(t, tarCmd, "--exclude=.pytest_cache", "regenerable caches are excluded, shared with the preview path")
+		require.NotContains(t, tarCmd, "--exclude=.git", "session checkpoints must retain .git for resume")
+		require.Contains(t, tarCmd, agent.SnapshotTarCompressFlag, "snapshot should select zstd compression (gzip fallback) via the shared flag")
 	})
 
 	t.Run("returns error from Read when tar exits non-zero", func(t *testing.T) {
@@ -1552,15 +1578,62 @@ func TestDockerProvider_Restore(t *testing.T) {
 	t.Run("succeeds when tar exits zero", func(t *testing.T) {
 		t.Parallel()
 
+		var gotCmd []string
 		mock := &mockDockerClient{}
+		mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+			gotCmd = config.Cmd
+			return container.ExecCreateResponse{ID: "restore-exec"}, nil
+		}
 		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
 			return container.ExecInspect{Running: false, ExitCode: 0}, nil
 		}
 		p := NewDockerProvider(mock, newTestLogger())
 		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
 
+		// Uncompressed/unrecognized bytes → no decompression flag.
 		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("archive-bytes")))
 		require.NoError(t, err)
+		require.Equal(t, []string{"tar", "-x", "-f", "-", "-C", "/"}, gotCmd)
+	})
+
+	t.Run("selects the decompression flag from the archive's magic bytes", func(t *testing.T) {
+		t.Parallel()
+
+		// GNU tar can't auto-detect compression on a piped stdin, so Restore
+		// must sniff the magic and pass the flag explicitly.
+		cases := []struct {
+			name     string
+			magic    []byte
+			wantFlag string
+		}{
+			{"zstd", []byte{0x28, 0xB5, 0x2F, 0xFD}, "--zstd"},
+			{"gzip", []byte{0x1F, 0x8B, 0x08, 0x00}, "-z"},
+			{"uncompressed", []byte("ustar-ish-plain-bytes"), ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				var gotCmd []string
+				mock := &mockDockerClient{}
+				mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+					gotCmd = config.Cmd
+					return container.ExecCreateResponse{ID: "restore-exec"}, nil
+				}
+				mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+					return container.ExecInspect{Running: false, ExitCode: 0}, nil
+				}
+				p := NewDockerProvider(mock, newTestLogger())
+				sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+				err := p.Restore(context.Background(), sb, bytes.NewReader(tc.magic))
+				require.NoError(t, err)
+				if tc.wantFlag == "" {
+					require.Equal(t, []string{"tar", "-x", "-f", "-", "-C", "/"}, gotCmd)
+				} else {
+					require.Equal(t, []string{"tar", tc.wantFlag, "-x", "-f", "-", "-C", "/"}, gotCmd)
+				}
+			})
+		}
 	})
 
 	t.Run("error includes captured stderr when tar exits non-zero", func(t *testing.T) {
@@ -1585,6 +1658,55 @@ func TestDockerProvider_Restore(t *testing.T) {
 		require.Contains(t, err.Error(), "unexpected end of file", "tar's stderr should be in the error message — this is the diagnostic we lost before")
 	})
 
+	t.Run("surfaces tar's complaint when the write breaks because tar died", func(t *testing.T) {
+		t.Parallel()
+
+		// The classic disk-full shape: tar aborts, closing its stdin, which
+		// breaks our write. The actionable cause is tar's stderr + non-zero
+		// exit, not the bare "broken pipe" the write produced.
+		stderr := []byte("tar: /workspace/big: Cannot write: No space left on device\n")
+		brokenPipe := &net.OpError{Op: "write", Net: "unix", Err: syscall.EPIPE}
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newFailWriteHijackedResponse(dockerMultiplexed(nil, stderr), brokenPipe), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 2}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("archive-bytes")))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "restore tar exited with code 2")
+		require.Contains(t, err.Error(), "No space left on device", "tar's stderr is the real cause and must win over the bare write error")
+	})
+
+	t.Run("surfaces the write error when the daemon connection itself broke", func(t *testing.T) {
+		t.Parallel()
+
+		// Daemon-side failure: the write breaks AND inspect can't reach the
+		// daemon either. We have no tar exit to lean on, so the write error is
+		// the best we can report — but it must stay retryable (EPIPE intact).
+		brokenPipe := &net.OpError{Op: "write", Net: "unix", Err: syscall.EPIPE}
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newFailWriteHijackedResponse("", brokenPipe), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{}, fmt.Errorf("Cannot connect to the Docker daemon")
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("archive-bytes")))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "write snapshot to container")
+		require.ErrorIs(t, err, syscall.EPIPE, "underlying EPIPE must stay inspectable so the hydrate retry classifier can see it")
+	})
+
 	t.Run("returns ctx error when context is cancelled before exec exits", func(t *testing.T) {
 		t.Parallel()
 
@@ -1603,6 +1725,30 @@ func TestDockerProvider_Restore(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "inspect restore exec")
 	})
+}
+
+func TestTarStdinDecompressFlag(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		magic []byte
+		want  string
+	}{
+		{"zstd", []byte{0x28, 0xB5, 0x2F, 0xFD}, "--zstd"},
+		{"gzip", []byte{0x1F, 0x8B}, "-z"},
+		{"gzip with trailing bytes", []byte{0x1F, 0x8B, 0x08, 0x00, 0x00}, "-z"},
+		{"plain tar (ustar)", []byte("ustar\x00"), ""},
+		{"empty", []byte{}, ""},
+		{"one byte", []byte{0x28}, ""},
+		{"three bytes of zstd magic", []byte{0x28, 0xB5, 0x2F}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, tarStdinDecompressFlag(tc.magic))
+		})
+	}
 }
 
 func TestCappedBuffer(t *testing.T) {

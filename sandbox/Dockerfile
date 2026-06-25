@@ -42,6 +42,10 @@ RUN echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 #     Node module has C bindings (ring, openssl-sys, node-gyp native
 #     addons, cgo with C deps). Without it, `go build` / `cargo build` /
 #     `npm install` fails opaquely on compile.
+#   - zstd: snapshot create/restore uses `tar --zstd` for materially smaller
+#     workspace archives than gzip. tar shells out to this binary, and agents
+#     can't apt-install at runtime, so it must be baked in. Snapshot create
+#     falls back to gzip when this is absent (see agent.SnapshotTarCompressFlag).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -52,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     build-essential \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 24 LTS via NodeSource.
