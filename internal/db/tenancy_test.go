@@ -86,6 +86,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		{"jobs", "where id = $2"},                                       // fenced worker terminal writes by job id
 		{"jobs", "where id = $3"},                                       // fenced worker retry writes by job id
 		{"jobs", "count(*) filter"},                                     // QueueHealthSamples: platform-wide queue pressure sampler
+		{"jobs", "group by coalesce(nullif(locked_by_node_id"},          // RunningJobSamples: platform-wide running jobs grouped by worker and type
 		{"jobs", "left join dead_nodes"},                                // ReclaimLostRunningJobs: cross-org recovery loop
 		{"jobs", "where status = 'running' and locked_by_node_id = $1"}, // CountRunningOwnedByNode: node-scoped drain status
 		{"jobs", "locked_by_node_id = @node_id"},                        // WorkerDeployStatus: node-scoped deploy drain status

@@ -1,0 +1,233 @@
+{
+  "uid": "worker-runtime",
+  "title": "143 - Worker Runtime",
+  "tags": ["143", "operations", "workers", "runtime"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Current snapshot",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Running jobs",
+      "description": "Current running jobs across the fleet from the latest total sample.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: running job total sample\" | stats max(running_jobs) as running_jobs",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active containers",
+      "description": "Session sandbox containers recorded on active sessions.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(sandbox_containers) as active_containers | stats sum(active_containers) as active_containers",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Allocated RAM",
+      "description": "Current memory allocation across active container usage events.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(active_memory_allocated_mb) as memory_mb | stats sum(memory_mb) as memory_mb",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Active previews",
+      "description": "Current active previews by worker ownership.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(active_previews) as active_previews | stats sum(active_previews) as active_previews",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "orientation": "auto", "textMode": "auto", "wideLayout": true },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Worker runtime",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Running jobs by worker and type",
+      "description": "Current running jobs grouped by owning worker and job type.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: running job sample\" | stats by (worker_node_id, job_type) max(running) as running | sort by (worker_node_id asc, running desc)",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "showHeader": true },
+      "gridPos": { "h": 8, "w": 10, "x": 0, "y": 6 }
+    },
+    {
+      "id": 12,
+      "type": "table",
+      "title": "Container allocation by worker",
+      "description": "Current active container allocation totals from container usage events, grouped by session worker owner.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id, node_status) max(active_usage_containers) as active_usage_containers, max(sandbox_containers) as session_containers, max(active_memory_allocated_mb) as active_memory_allocated_mb, max(active_cpu_allocated) as active_cpu_allocated, max(active_disk_allocated_mb) as active_disk_allocated_mb, max(running_sessions) as running_sessions, max(active_previews) as active_previews | sort by (active_memory_allocated_mb desc, active_usage_containers desc)",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "showHeader": true },
+      "gridPos": { "h": 8, "w": 14, "x": 10, "y": 6 }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Allocated RAM by worker",
+      "description": "Memory allocated to active sandbox containers over time.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(active_memory_allocated_mb) as active_memory_allocated_mb",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "decmbytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Active containers by worker",
+      "description": "Session container ownership over time.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: worker load sample\" | stats by (worker_node_id) max(sandbox_containers) as active_containers",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Host resources",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Host CPU utilization",
+      "description": "Worker host CPU utilization from /proc samples.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) max(host_cpu_util) as host_cpu_util",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Host RAM utilization",
+      "description": "Worker host memory utilization from /proc samples.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: host resource sample\" | stats by (worker_node_id) max(host_memory_util) as host_memory_util",
+          "step": "$__interval"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 }
+    },
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Queue pressure",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 }
+    },
+    {
+      "id": 31,
+      "type": "table",
+      "title": "Queue by type",
+      "description": "Ready, delayed, running, and dead-letter jobs by type.",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victorialogs" },
+      "targets": [
+        {
+          "refId": "A",
+          "queryType": "statsRange",
+          "expr": "_msg:\"platform health: job queue sample\" | stats by (queue, job_type) max(pending_runnable) as ready, max(pending_deferred) as delayed, max(running) as running, max(dead_letter) as dead_letter, max(oldest_runnable_age_seconds) as oldest_wait_seconds | sort by (running desc, ready desc, dead_letter desc)",
+          "step": "$__interval"
+        }
+      ],
+      "options": { "showHeader": true },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 32 }
+    }
+  ]
+}
