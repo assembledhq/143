@@ -1317,21 +1317,29 @@ const execPollInterval = 50 * time.Millisecond
 // restore. tar's stderr is short and already buffered, so this is ample.
 const restoreDrainGrace = 5 * time.Second
 
-// snapshotMagicLen is how many leading bytes we peek to identify a snapshot
-// archive's compression. 4 covers the longest magic we check (zstd).
-const snapshotMagicLen = 4
+// Leading bytes that identify a snapshot archive's compression.
+var (
+	zstdMagic = [4]byte{0x28, 0xB5, 0x2F, 0xFD}
+	gzipMagic = [2]byte{0x1F, 0x8B}
+)
+
+// snapshotMagicLen is how many leading bytes Restore peeks to identify the
+// compression. Derived from the longest magic so the peek can never come up
+// short of what tarStdinDecompressFlag needs to match.
+const snapshotMagicLen = len(zstdMagic)
 
 // tarStdinDecompressFlag returns the explicit tar decompression flag for an
 // archive identified by its leading magic bytes, or "" when the bytes match no
 // known compression (uncompressed, or too few bytes to tell). GNU tar requires
 // this flag when reading an archive from a pipe; from a seekable file it
-// auto-detects and the flag is unnecessary.
+// auto-detects and the flag is unnecessary. HasPrefix handles short input, so a
+// magic slice shorter than a given signature simply doesn't match it.
 func tarStdinDecompressFlag(magic []byte) string {
 	switch {
-	case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xB5 && magic[2] == 0x2F && magic[3] == 0xFD:
-		return "--zstd" // zstd magic: 28 B5 2F FD
-	case len(magic) >= 2 && magic[0] == 0x1F && magic[1] == 0x8B:
-		return "-z" // gzip magic: 1F 8B
+	case bytes.HasPrefix(magic, zstdMagic[:]):
+		return "--zstd"
+	case bytes.HasPrefix(magic, gzipMagic[:]):
+		return "-z"
 	default:
 		return ""
 	}

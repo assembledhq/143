@@ -1611,7 +1611,6 @@ func TestDockerProvider_Restore(t *testing.T) {
 			{"uncompressed", []byte("ustar-ish-plain-bytes"), ""},
 		}
 		for _, tc := range cases {
-			tc := tc
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 				var gotCmd []string
@@ -1745,7 +1744,6 @@ func TestTarStdinDecompressFlag(t *testing.T) {
 		{"three bytes of zstd magic", []byte{0x28, 0xB5, 0x2F}, ""},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tc.want, tarStdinDecompressFlag(tc.magic))
