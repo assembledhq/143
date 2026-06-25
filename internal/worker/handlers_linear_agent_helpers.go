@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/externalidentity"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -118,6 +119,9 @@ func applyLinearAgentCreatorAttribution(
 		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
 	}
 	if creatorID != "" {
+		if matched, err := applyExternalLinearUserAttribution(ctx, stores, session, workspaceID, creatorID, payload.LinearCreatorEmail, payload.LinearCreatorName); err != nil || matched {
+			return err
+		}
 		if stores.LinearUserLinks != nil {
 			link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, creatorID)
 			if err == nil && link.UserID != nil {
@@ -151,6 +155,9 @@ func applyLinearAgentCreatorAttribution(
 		return nil
 	}
 	issueCreatorID := strings.TrimSpace(fetched.CreatorID)
+	if matched, err := applyExternalLinearUserAttribution(ctx, stores, session, workspaceID, issueCreatorID, fetched.CreatorEmail, fetched.CreatorName); err != nil || matched {
+		return err
+	}
 	if issueCreatorID != "" && stores.LinearUserLinks != nil {
 		link, err := stores.LinearUserLinks.GetByLinearUser(ctx, session.OrgID, workspaceID, issueCreatorID)
 		if err == nil && link.UserID != nil {
@@ -165,6 +172,39 @@ func applyLinearAgentCreatorAttribution(
 		return err
 	}
 	return nil
+}
+
+func applyExternalLinearUserAttribution(ctx context.Context, stores *Stores, session *models.Session, workspaceID, linearUserID, email, displayName string) (bool, error) {
+	if stores == nil || stores.ExternalUserLinks == nil || stores.Users == nil || session == nil || strings.TrimSpace(linearUserID) == "" {
+		return false, nil
+	}
+	email = strings.TrimSpace(email)
+	displayName = strings.TrimSpace(displayName)
+	var emailPtr *string
+	if email != "" {
+		emailPtr = &email
+	}
+	var displayNamePtr *string
+	if displayName != "" {
+		displayNamePtr = &displayName
+	}
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, nil, stores.Users, externalidentity.Options{})
+	resolution, err := resolver.ResolveExternalActor(ctx, session.OrgID, externalidentity.ExternalActorInput{
+		Provider:            models.ExternalIdentityProviderLinear,
+		ProviderWorkspaceID: strings.TrimSpace(workspaceID),
+		ProviderUserID:      strings.TrimSpace(linearUserID),
+		Email:               emailPtr,
+		EmailVerified:       false,
+		DisplayName:         displayNamePtr,
+	})
+	if err != nil {
+		return false, err
+	}
+	if resolution.MappedUserID == nil {
+		return false, nil
+	}
+	session.TriggeredByUserID = resolution.MappedUserID
+	return true, nil
 }
 
 func applyLinearUserEmailAttribution(

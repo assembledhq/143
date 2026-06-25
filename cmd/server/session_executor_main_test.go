@@ -77,6 +77,8 @@ func TestSessionExecutorStoresWireSlackLifecycleDependencies(t *testing.T) {
 	require.True(t, fields["SlackOrgSelections"], "session executor stores should include Slack org selections")
 	require.True(t, fields["SlackBotSettings"], "session executor stores should include Slack bot settings")
 	require.True(t, fields["SlackUserLinks"], "session executor stores should include Slack user links")
+	require.True(t, fields["ExternalUserLinks"], "session executor stores should include unified external user links")
+	require.True(t, fields["ExternalSuggestions"], "session executor stores should include unified external identity suggestions")
 	require.True(t, fields["SlackChannels"], "session executor stores should include Slack channel settings")
 	require.True(t, fields["SlackSessionLinks"], "session executor stores should include Slack session links for lifecycle enqueue hooks")
 	require.True(t, fields["SlackInboundEvents"], "session executor stores should include Slack inbound events")

@@ -492,6 +492,20 @@ func (s *SlackUserLinkStore) GetByUser(ctx context.Context, orgID, userID uuid.U
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackUserLink])
 }
 
+func (s *SlackUserLinkStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (models.SlackUserLink, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT id, org_id, slack_installation_id, user_id, slack_team_id, slack_user_id,
+			slack_email, slack_display_name, source, linked_at, created_at, updated_at
+		FROM slack_user_links
+		WHERE org_id = @org_id
+		  AND id = @id`,
+		pgx.NamedArgs{"org_id": orgID, "id": id})
+	if err != nil {
+		return models.SlackUserLink{}, fmt.Errorf("query slack user link by id: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SlackUserLink])
+}
+
 func (s *SlackUserLinkStore) ListByOrg(ctx context.Context, orgID uuid.UUID) ([]models.SlackUserLink, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT id, org_id, slack_installation_id, user_id, slack_team_id, slack_user_id,
