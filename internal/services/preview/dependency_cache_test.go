@@ -697,7 +697,7 @@ func TestSharedDependencyCache_RestoreStreamsExtractWithoutSandboxTempBlob(t *te
 	require.NoError(t, err, "Restore should stream and extract a valid cache blob")
 	calls := strings.Join(exec.calls(), "\n")
 	require.Contains(t, calls, "tar xzf -", "Restore should extract the archive from stdin")
-	require.Contains(t, calls, "chmod -R u+w", "Restore should make read-only paths (e.g. Go's module cache) writable before rm -rf")
+	require.Contains(t, calls, "chmod -R u+rwX", "Restore should make read-only paths (e.g. Go's module cache) and their directories writable+traversable before rm -rf")
 	require.NotContains(t, calls, "/tmp/preview-dependency-cache-", "Restore should not stage a compressed blob in sandbox /tmp")
 	require.NotContains(t, strings.Join(exec.writtenFilePaths(), "\n"), "/tmp/preview-dependency-cache-", "Restore should not write the compressed blob as a sandbox file")
 }
