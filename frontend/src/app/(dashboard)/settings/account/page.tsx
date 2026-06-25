@@ -5,7 +5,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, PERSONAL_PROVIDER_OPTIONS, personalProviderToAgent, type OpenCodeBackingProvider, type PersonalProvider } from "@/lib/coding-auth-metadata";
+import {
+  apiKeyHelp,
+  detectOpenCodeKeyPreset,
+  OPENCODE_BACKING_PROVIDER_OPTIONS,
+  openCodeAgentDefaults,
+  openCodeCredentialLabel,
+  openCodeDefaultModelForBackingProvider,
+  openCodeModelsForBackingProvider,
+  PERSONAL_PROVIDER_OPTIONS,
+  personalProviderToAgent,
+  type OpenCodeBackingProvider,
+  type PersonalProvider,
+} from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { APIKeyHelpTooltip } from "@/components/api-key-help-tooltip";
 import { ClaudeCodeAuthModal } from "@/components/claude-code-auth-modal";
@@ -222,9 +234,25 @@ export default function AccountPage() {
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
   const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
   const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
-  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
+  const openCodeKeyDetection = useMemo(
+    () => provider === "opencode" ? detectOpenCodeKeyPreset(apiKey) : null,
+    [apiKey, provider],
+  );
+  const effectiveOpenCodeBackingProvider = provider === "opencode" && !openCodeBackingProviderTouched
+    ? openCodeKeyDetection?.provider ?? openCodeBackingProvider
+    : openCodeBackingProvider;
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(effectiveOpenCodeBackingProvider), [effectiveOpenCodeBackingProvider]);
+  const effectiveOpenCodeModel = !openCodeModelTouched
+    ? openCodeDefaultModelForBackingProvider(effectiveOpenCodeBackingProvider)
+    : (
+        openCodeModelOptions.includes(openCodeModel)
+          ? openCodeModel
+          : openCodeDefaultModelForBackingProvider(effectiveOpenCodeBackingProvider)
+      );
   // Subscription OAuth modal dispatch — only one is open at a time.
   // The dialog itself closes when these open so the OAuth modal owns the
   // user's attention during the device-code or paste-back flow.
@@ -259,10 +287,10 @@ export default function AccountPage() {
         scope: "personal",
         agent: personalProviderToAgent(provider),
         auth_type: "api_key",
-        label: authLabel.trim() || undefined,
+        label: authLabel.trim() || (provider === "opencode" ? openCodeCredentialLabel(effectiveOpenCodeBackingProvider) : undefined),
         api_key: apiKey,
-        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
-        ...(provider === "opencode" ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) } : {}),
+        ...(provider === "opencode" ? { api_type: effectiveOpenCodeBackingProvider } : {}),
+        ...(provider === "opencode" ? { agent_defaults: openCodeAgentDefaults(effectiveOpenCodeModel, openCodeCustomModel) } : {}),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
@@ -378,11 +406,13 @@ export default function AccountPage() {
   // "Claude Code API key" / etc) so the two flows feel consistent.
   function defaultLabelFor(p: PersonalProvider, type: PersonalAuthType): string {
     const agent = personalProviderToAgent(p);
+    if (agent === "opencode") {
+      return openCodeCredentialLabel(effectiveOpenCodeBackingProvider);
+    }
     const base = agent === "codex" ? "Codex"
       : agent === "claude_code" ? "Claude Code"
       : agent === "amp" ? "Amp"
       : agent === "pi" ? "Pi"
-      : agent === "opencode" ? "OpenCode"
       : agent;
     return type === "subscription" ? `${base} subscription` : `${base} API key`;
   }
@@ -394,14 +424,27 @@ export default function AccountPage() {
     setProvider("openai");
     setAuthType("subscription");
     setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProviderTouched(false);
     setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }
 
-  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider, touched = true) {
+    if (touched) setOpenCodeBackingProviderTouched(true);
     setOpenCodeBackingProvider(value);
     setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeModel(value: string) {
+    setOpenCodeModelTouched(true);
+    setOpenCodeModel(value);
+  }
+
+  function updateApiKey(next: string) {
+    setApiKey(next);
   }
 
   function closeAddModal() {
@@ -641,7 +684,7 @@ export default function AccountPage() {
             id="personal-auth-label"
             value={authLabel}
             onChange={(event) => setAuthLabel(event.target.value)}
-            placeholder={`Optional — defaults to "${defaultLabelFor(provider, effectiveAuthType)}"`}
+            placeholder={`Optional — defaults to "${generatedLabel}"`}
           />
         </div>
 
@@ -651,7 +694,7 @@ export default function AccountPage() {
               <>
                 <div className="space-y-2">
                   <Label htmlFor="personal-opencode-backing-provider">OpenCode provider</Label>
-                  <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                  <Select value={effectiveOpenCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
                     <SelectTrigger id="personal-opencode-backing-provider">
                       <SelectValue />
                     </SelectTrigger>
@@ -661,10 +704,17 @@ export default function AccountPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  {openCodeKeyDetection && apiKey.trim() ? (
+                    <p className="text-xs text-muted-foreground">
+                      {openCodeBackingProviderTouched
+                        ? "Provider set manually. Change it if this key should use a different OpenCode route."
+                        : openCodeKeyDetection.message}
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="personal-opencode-model">Default model</Label>
-                  <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                  <Select value={effectiveOpenCodeModel} onValueChange={updateOpenCodeModel}>
                     <SelectTrigger id="personal-opencode-model">
                       <SelectValue />
                     </SelectTrigger>
@@ -700,7 +750,7 @@ export default function AccountPage() {
                 id="personal-api-key"
                 type="password"
                 value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
+                onChange={(event) => updateApiKey(event.target.value)}
 	                placeholder={
 	                  provider === "anthropic"
 	                    ? "sk-ant-..."

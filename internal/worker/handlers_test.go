@@ -9831,7 +9831,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := models.OpenCodeModelGemini25Flash
+	threadModel := models.OpenCodeModelGemini3Flash
 	continuationErr := errors.New("sandbox hydrate failed")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -9935,7 +9935,7 @@ func TestContinueSessionHandler_ResetsThreadEvenWhenCtxCancelled(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := models.OpenCodeModelGemini25Flash
+	threadModel := models.OpenCodeModelGemini3Flash
 	continuationErr := errors.New("worker drain cancelled mid-turn")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -9987,7 +9987,7 @@ func TestContinueSessionHandler_DoesNotResetThreadAfterUserCancel(t *testing.T) 
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := models.OpenCodeModelGemini25Flash
+	threadModel := models.OpenCodeModelGemini3Flash
 	cancelErr := fmt.Errorf("%w: %w", agent.ErrSessionCancelled, context.Canceled)
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -10032,7 +10032,7 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	sessionID := uuid.New()
 	threadID := uuid.New()
 	issueID := uuid.New()
-	threadModel := models.OpenCodeModelGemini25Flash
+	threadModel := models.OpenCodeModelGemini3Flash
 
 	const sessionTurnBefore = 5
 	const expectedThreadTurnAfter = 2 // workerSessionThreadRow seeds current_turn=1, so +1=2.
@@ -10554,5 +10554,5 @@ func TestLegacyEvalRunAgentType(t *testing.T) {
 	require.Equal(t, models.AgentTypeCodex, legacyEvalRunAgentType("codex"))
 	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
 	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
-	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, legacyEvalRunAgentType(models.OpenCodeModelDeepSeekV4Flash), "OpenCode models should dispatch to the OpenCode adapter")
 }

@@ -1,0 +1,2 @@
+./golangci_lint.go
+./sandboxdeps.go

@@ -37,7 +37,7 @@ func TestEvalAllowedModelsIncludesOpenCode(t *testing.T) {
 
 	require.True(t, allowedModels[models.OpenCodeModelGPT54Mini], "eval runs should allow the default inexpensive OpenCode model")
 	require.True(t, allowedModels[models.OpenCodeModelClaudeHaiku45], "eval runs should allow a cheap Anthropic-backed OpenCode model")
-	require.True(t, allowedModels[models.OpenCodeModelDeepSeekChat], "eval runs should allow a cheap non-flagship OpenCode model")
+	require.True(t, allowedModels[models.OpenCodeModelDeepSeekV4Flash], "eval runs should allow a cheap non-flagship OpenCode model")
 }
 
 var evalTaskColumns = []string{
@@ -3070,5 +3070,5 @@ func TestEvalRunAgentType(t *testing.T) {
 	require.Equal(t, models.AgentTypeCodex, evalRunAgentType("codex"))
 	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelGPT54Mini), "OpenCode models should dispatch to the OpenCode adapter")
 	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelClaudeHaiku45), "OpenCode models should dispatch to the OpenCode adapter")
-	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelDeepSeekChat), "OpenCode models should dispatch to the OpenCode adapter")
+	require.Equal(t, models.AgentTypeOpenCode, evalRunAgentType(models.OpenCodeModelDeepSeekV4Flash), "OpenCode models should dispatch to the OpenCode adapter")
 }

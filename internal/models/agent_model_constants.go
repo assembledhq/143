@@ -98,42 +98,56 @@ const (
 	OpenCodeModelGPT54Mini       = "openai/gpt-5.4-mini"
 	OpenCodeModelGPT53CodexSpark = "openai/gpt-5.3-codex-spark"
 	OpenCodeModelClaudeHaiku45   = "anthropic/claude-haiku-4-5"
+	OpenCodeModelGemini35Flash   = "opencode/gemini-3.5-flash"
 	OpenCodeModelGemini3Flash    = "google/gemini-3-flash"
-	OpenCodeModelGemini25Flash   = "google/gemini-2.5-flash"
-	OpenCodeModelMiniMaxM21      = "minimax/minimax-m2.1"
-	OpenCodeModelQwen3Coder      = "qwen/qwen3-coder"
-	OpenCodeModelDeepSeekChat    = "deepseek/deepseek-chat"
+	OpenCodeModelMiniMaxM27      = "opencode/minimax-m2.7"
+	OpenCodeModelMiniMaxM25      = "opencode/minimax-m2.5"
+	OpenCodeModelQwen37Plus      = "opencode/qwen3.7-plus"
+	OpenCodeModelQwen36Plus      = "opencode/qwen3.6-plus"
+	OpenCodeModelDeepSeekV4Flash = "opencode/deepseek-v4-flash"
+	OpenCodeModelDeepSeekV4Pro   = "opencode/deepseek-v4-pro"
+	OpenCodeModelGLM52           = "opencode/glm-5.2"
+	OpenCodeModelGLM51           = "opencode/glm-5.1"
+	OpenCodeModelKimiK25         = "opencode/kimi-k2.5"
 	OpenCodeModelGPT54           = "openai/gpt-5.4"
-	OpenCodeModelGPT52Codex      = "openai/gpt-5.2-codex"
 	OpenCodeModelClaudeSonnet46  = "anthropic/claude-sonnet-4-6"
-	OpenCodeModelGemini3Pro      = "google/gemini-3-pro"
-	OpenCodeModelKimiK2          = "moonshot/kimi-k2"
+	OpenCodeModelGemini31Pro     = "opencode/gemini-3.1-pro"
+	OpenCodeModelQwen37Max       = "opencode/qwen3.7-max"
+	OpenCodeModelKimiK26         = "opencode/kimi-k2.6"
 	OpenCodeModelGPT52           = "opencode/gpt-5.2"
-	OpenCodeModelGPT51Codex      = "opencode/gpt-5.1-codex"
+	OpenCodeModelGPT55           = "opencode/gpt-5.5"
+	OpenCodeModelGPT55Pro        = "opencode/gpt-5.5-pro"
 	OpenCodeModelClaudeOpus48    = "anthropic/claude-opus-4-8"
 	OpenCodeModelClaudeOpus47    = "anthropic/claude-opus-4-7"
-	OpenCodeModelGPT55           = "openai/gpt-5.5"
+	OpenCodeModelClaudeFable5    = "opencode/claude-fable-5"
 )
 
 var AvailableOpenCodeModels = []string{
 	OpenCodeModelGPT54Mini,
 	OpenCodeModelGPT53CodexSpark,
 	OpenCodeModelClaudeHaiku45,
+	OpenCodeModelGemini35Flash,
 	OpenCodeModelGemini3Flash,
-	OpenCodeModelGemini25Flash,
-	OpenCodeModelMiniMaxM21,
-	OpenCodeModelQwen3Coder,
-	OpenCodeModelDeepSeekChat,
+	OpenCodeModelMiniMaxM27,
+	OpenCodeModelMiniMaxM25,
+	OpenCodeModelQwen37Plus,
+	OpenCodeModelQwen36Plus,
+	OpenCodeModelDeepSeekV4Flash,
+	OpenCodeModelDeepSeekV4Pro,
+	OpenCodeModelGLM52,
+	OpenCodeModelGLM51,
+	OpenCodeModelKimiK25,
 	OpenCodeModelGPT54,
-	OpenCodeModelGPT52Codex,
 	OpenCodeModelClaudeSonnet46,
-	OpenCodeModelGemini3Pro,
-	OpenCodeModelKimiK2,
+	OpenCodeModelGemini31Pro,
+	OpenCodeModelQwen37Max,
+	OpenCodeModelKimiK26,
 	OpenCodeModelGPT52,
-	OpenCodeModelGPT51Codex,
+	OpenCodeModelGPT55,
+	OpenCodeModelGPT55Pro,
 	OpenCodeModelClaudeOpus48,
 	OpenCodeModelClaudeOpus47,
-	OpenCodeModelGPT55,
+	OpenCodeModelClaudeFable5,
 }
 
 // CodexRuntimeSpec is the resolved execution spec for a Codex model alias.

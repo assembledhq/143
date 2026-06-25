@@ -1,0 +1,8 @@
+./anthropic.go
+./client.go
+./gemini.go
+./openai_chat.go
+./openai_responses.go
+./openrouter.go
+./provider.go
+./registry.go

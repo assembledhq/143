@@ -513,7 +513,7 @@ func TestSettingsHandler_Update(t *testing.T) {
 		},
 		{
 			name: "updates successfully with supported models",
-			body: `{"settings":{"pm_model":"claude-sonnet-4-5","agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"opencode":{"OPENCODE_MODEL":"google/gemini-2.5-flash"}}}}`,
+			body: `{"settings":{"pm_model":"claude-sonnet-4-5","agent_config":{"codex":{"OPENAI_MODEL":"gpt-5.3-codex"},"claude_code":{"ANTHROPIC_MODEL":"claude-sonnet-4-5"},"opencode":{"OPENCODE_MODEL":"google/gemini-3-flash"}}}}`,
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID uuid.UUID) {
 				now := time.Now()
 				mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
