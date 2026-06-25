@@ -176,7 +176,7 @@ var ErrInvalidPaste = fmt.Errorf("pasted code is invalid or expired")
 
 // ErrInvalidOAuthToken is returned when a pasted setup-token value is empty,
 // expired, or otherwise structurally unusable.
-var ErrInvalidOAuthToken = fmt.Errorf("Claude Code OAuth token is invalid")
+var ErrInvalidOAuthToken = fmt.Errorf("claude code OAuth token is invalid")
 
 // InitiateResponse is returned by the /initiate endpoint. The caller hands
 // AuthorizeURL to the user's browser; State is echoed back to the UI so the

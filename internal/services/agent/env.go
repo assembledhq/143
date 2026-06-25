@@ -1908,10 +1908,6 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID
 	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub, model)
 }
 
-func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string) (bool, error) {
-	return e.injectPickedClaudeCodeAuthWithEnv(ctx, orgID, sandbox, picked, model, nil)
-}
-
 func (e *AgentEnv) injectPickedClaudeCodeAuthWithEnv(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string, env map[string]string) (bool, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
 		return false, nil
