@@ -96,8 +96,11 @@ func TestHydrateSandboxFromSnapshot_LoadFailsDestroysSandbox(t *testing.T) {
 	require.Equal(t, 1, provider.GetDestroyCalls())
 }
 
+//nolint:paralleltest // mutates the package-global hydrateRetryBackoff; must run serially
 func TestHydrateSandboxFromSnapshot_RetriesTransientRestoreFailure(t *testing.T) {
-	t.Parallel()
+	// Not parallel: shrinks the package-global retry backoff to keep the test
+	// instant, which mutates shared state.
+	defer agent.SetHydrateRetryBackoffForTest(0)()
 
 	var restoreCalls int32
 	provider := testutil.NewMockSandboxProvider()
@@ -118,8 +121,10 @@ func TestHydrateSandboxFromSnapshot_RetriesTransientRestoreFailure(t *testing.T)
 	require.Equal(t, 2, provider.GetDestroyCalls(), "each failed attempt destroys its half-built sandbox")
 }
 
+//nolint:paralleltest // mutates the package-global hydrateRetryBackoff; must run serially
 func TestHydrateSandboxFromSnapshot_ExhaustsRetriesOnPersistentTransientFailure(t *testing.T) {
-	t.Parallel()
+	// Not parallel: see SetHydrateRetryBackoffForTest note above.
+	defer agent.SetHydrateRetryBackoffForTest(0)()
 
 	var restoreCalls int32
 	provider := testutil.NewMockSandboxProvider()

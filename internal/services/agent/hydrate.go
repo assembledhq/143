@@ -87,6 +87,10 @@ func HydrateSandboxFromSnapshot(
 		// destroyed its half-built sandbox, so a retry is a clean fresh start
 		// (new container + new download). Deterministic failures — missing or
 		// corrupt snapshot, full disk — are not retried; they would recur.
+		//
+		// Note each retry re-downloads the whole snapshot from storage, so the
+		// worst case is hydrateMaxAttempts full transfers — a reason to keep
+		// that bound small rather than chasing a flaky daemon indefinitely.
 		if attempt >= hydrateMaxAttempts || !isRetryableRestoreError(err) {
 			return nil, err
 		}

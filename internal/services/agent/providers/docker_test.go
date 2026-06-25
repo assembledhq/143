@@ -1590,9 +1590,51 @@ func TestDockerProvider_Restore(t *testing.T) {
 		p := NewDockerProvider(mock, newTestLogger())
 		sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
 
+		// Uncompressed/unrecognized bytes → no decompression flag.
 		err := p.Restore(context.Background(), sb, bytes.NewReader([]byte("archive-bytes")))
 		require.NoError(t, err)
-		require.Equal(t, []string{"tar", "xf", "-", "-C", "/"}, gotCmd, "restore must use xf so tar auto-detects gzip or zstd")
+		require.Equal(t, []string{"tar", "-x", "-f", "-", "-C", "/"}, gotCmd)
+	})
+
+	t.Run("selects the decompression flag from the archive's magic bytes", func(t *testing.T) {
+		t.Parallel()
+
+		// GNU tar can't auto-detect compression on a piped stdin, so Restore
+		// must sniff the magic and pass the flag explicitly.
+		cases := []struct {
+			name     string
+			magic    []byte
+			wantFlag string
+		}{
+			{"zstd", []byte{0x28, 0xB5, 0x2F, 0xFD}, "--zstd"},
+			{"gzip", []byte{0x1F, 0x8B, 0x08, 0x00}, "-z"},
+			{"uncompressed", []byte("ustar-ish-plain-bytes"), ""},
+		}
+		for _, tc := range cases {
+			tc := tc
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				var gotCmd []string
+				mock := &mockDockerClient{}
+				mock.containerExecCreateFn = func(ctx context.Context, containerID string, config container.ExecOptions) (container.ExecCreateResponse, error) {
+					gotCmd = config.Cmd
+					return container.ExecCreateResponse{ID: "restore-exec"}, nil
+				}
+				mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+					return container.ExecInspect{Running: false, ExitCode: 0}, nil
+				}
+				p := NewDockerProvider(mock, newTestLogger())
+				sb := &agent.Sandbox{ID: "restore-container", Provider: "docker", WorkDir: "/workspace"}
+
+				err := p.Restore(context.Background(), sb, bytes.NewReader(tc.magic))
+				require.NoError(t, err)
+				if tc.wantFlag == "" {
+					require.Equal(t, []string{"tar", "-x", "-f", "-", "-C", "/"}, gotCmd)
+				} else {
+					require.Equal(t, []string{"tar", tc.wantFlag, "-x", "-f", "-", "-C", "/"}, gotCmd)
+				}
+			})
+		}
 	})
 
 	t.Run("error includes captured stderr when tar exits non-zero", func(t *testing.T) {
@@ -1684,6 +1726,31 @@ func TestDockerProvider_Restore(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "inspect restore exec")
 	})
+}
+
+func TestTarStdinDecompressFlag(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		magic []byte
+		want  string
+	}{
+		{"zstd", []byte{0x28, 0xB5, 0x2F, 0xFD}, "--zstd"},
+		{"gzip", []byte{0x1F, 0x8B}, "-z"},
+		{"gzip with trailing bytes", []byte{0x1F, 0x8B, 0x08, 0x00, 0x00}, "-z"},
+		{"plain tar (ustar)", []byte("ustar\x00"), ""},
+		{"empty", []byte{}, ""},
+		{"one byte", []byte{0x28}, ""},
+		{"three bytes of zstd magic", []byte{0x28, 0xB5, 0x2F}, ""},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, tarStdinDecompressFlag(tc.magic))
+		})
+	}
 }
 
 func TestCappedBuffer(t *testing.T) {
