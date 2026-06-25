@@ -1031,6 +1031,33 @@ func TestCompleteOAuth_ProfileFailureDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestStoreOAuthToken_StoresSetupTokenCredential(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	store := newMockCredentialStore()
+	svc := NewService(store, zerolog.Nop())
+	before := time.Now()
+
+	resp, err := svc.StoreOAuthToken(context.Background(), scope, &userID, "personal claude", "claude-setup-token")
+
+	require.NoError(t, err, "StoreOAuthToken should store a valid setup token")
+	require.NotNil(t, resp, "StoreOAuthToken should return an API-safe response")
+	cred, err := store.GetByProviderAndLabel(context.Background(), scope, models.ProviderAnthropicSubscription, "personal claude")
+	require.NoError(t, err, "stored setup-token credential should be retrievable by label")
+	require.Equal(t, models.CredentialStatusActive, cred.Status, "stored setup-token credential should be active")
+	require.Equal(t, &userID, cred.CreatedBy, "stored setup-token credential should record the creator")
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	require.True(t, ok, "stored setup-token credential should use AnthropicSubscriptionConfig")
+	require.Equal(t, models.AnthropicSubscriptionAuthModeSetupToken, cfg.AuthMode, "stored setup-token credential should mark setup-token auth mode")
+	require.Equal(t, "claude-setup-token", cfg.OAuthToken, "stored setup-token credential should preserve the token")
+	require.True(t, cfg.OAuthTokenExpiresAt.After(before.Add(364*24*time.Hour)), "stored setup-token credential should default to roughly one year of validity")
+	require.Empty(t, cfg.AccessToken, "stored setup-token credential should not carry rotating access token material")
+	require.Empty(t, cfg.RefreshToken, "stored setup-token credential should not carry rotating refresh token material")
+}
+
 func TestDisconnectForOrg_WrongOrgNotFound(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
