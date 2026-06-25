@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -30,6 +31,79 @@ import (
 
 const dependencyCacheMaxBlobBytes int64 = 2 * 1024 * 1024 * 1024
 const dependencyCacheTouchInterval = 10 * time.Minute
+
+// Sandbox exec steps in the cache save/restore path (probe, archive, pre-extract
+// cleanup) share a preview sandbox with the running app and agent, so they are
+// subject to transient memory pressure: Docker reports 128+signal (>=129, e.g.
+// 137 = SIGKILL from the cgroup OOM killer) for a signal-killed process and 128
+// when an exec cannot start against a momentarily-unavailable container, while
+// our executor returns a negative code when the exec could not be run at all.
+// Each step is idempotent, so we retry once after a short backoff to ride out a
+// momentary spike before degrading to a cold launch.
+const dependencyCacheExecRetries = 1
+const dependencyCacheExecRetryBackoff = 500 * time.Millisecond
+
+// dependencyCacheExitTransient reports whether a sandbox exec exit code denotes
+// a transient failure worth a retry rather than a deterministic one.
+func dependencyCacheExitTransient(exitCode int) bool {
+	return exitCode < 0 || exitCode >= 128
+}
+
+// dependencyCacheStderrSuffix trims and tail-truncates captured stderr for
+// inclusion in an error. The fatal line of a tar/rm/shell failure is almost
+// always last, so we keep the tail; truncating bounds log volume on a runaway
+// stream. Returns "" when there is nothing useful to add.
+func dependencyCacheStderrSuffix(stderr string) string {
+	stderr = strings.TrimSpace(stderr)
+	if stderr == "" {
+		return ""
+	}
+	const maxStderr = 2048
+	if len(stderr) > maxStderr {
+		truncated := stderr[len(stderr)-maxStderr:]
+		// Drop a possibly-partial leading rune so the kept tail is valid UTF-8.
+		for len(truncated) > 0 && !utf8.RuneStart(truncated[0]) {
+			truncated = truncated[1:]
+		}
+		stderr = "..." + truncated
+	}
+	return ": " + stderr
+}
+
+// dependencyCacheExecError builds an exec failure error that surfaces the
+// captured stderr and avoids the "%!w(<nil>)" noise that `: %w` produces when a
+// non-zero exit code carries no wrapped error.
+func dependencyCacheExecError(stage string, exitCode int, err error, stderr string) error {
+	suffix := dependencyCacheStderrSuffix(stderr)
+	if err != nil {
+		return fmt.Errorf("%s exited %d: %w%s", stage, exitCode, err, suffix)
+	}
+	return fmt.Errorf("%s exited %d%s", stage, exitCode, suffix)
+}
+
+// execWithTransientRetry runs an idempotent sandbox exec, retrying once on a
+// transient failure (signal kill / unavailable container). fn owns resetting any
+// per-attempt buffers and returns the exec's (exitCode, err).
+func (c *SharedDependencyCache) execWithTransientRetry(ctx context.Context, op string, fn func() (int, error)) (int, error) {
+	var exitCode int
+	var err error
+	for attempt := 0; ; attempt++ {
+		exitCode, err = fn()
+		if err == nil && exitCode == 0 {
+			return exitCode, nil
+		}
+		if attempt >= dependencyCacheExecRetries || !dependencyCacheExitTransient(exitCode) {
+			return exitCode, err
+		}
+		c.logger.Warn().Str("op", op).Int("exit_code", exitCode).Int("attempt", attempt+1).
+			Msg("retrying transient preview cache sandbox exec")
+		select {
+		case <-ctx.Done():
+			return exitCode, ctx.Err()
+		case <-time.After(dependencyCacheExecRetryBackoff):
+		}
+	}
+}
 
 type DependencyCache interface {
 	Find(ctx context.Context, orgID, repoID uuid.UUID, cacheKey string) (*DependencyCacheHit, error)
@@ -343,14 +417,15 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 		probes = append(probes, fmt.Sprintf("if %s; then printf '%%s\\n' %s; fi", existsCmd, dependencyCacheShellPathArg(clean)))
 	}
 	if len(probes) > 0 {
-		var probeOut bytes.Buffer
+		var probeOut, probeErr bytes.Buffer
 		probeCmd := fmt.Sprintf("cd %s && { %s; }", shellQuote(rootDir), strings.Join(probes, "; "))
-		exitCode, err := c.executor.Exec(ctx, sb, probeCmd, &probeOut, io.Discard)
-		if err != nil {
-			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: probe effective paths exited %d: %w", exitCode, err)
-		}
-		if exitCode != 0 {
-			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: probe effective paths exited %d", exitCode)
+		exitCode, err := c.execWithTransientRetry(ctx, "save_probe", func() (int, error) {
+			probeOut.Reset()
+			probeErr.Reset()
+			return c.executor.Exec(ctx, sb, probeCmd, &probeOut, &probeErr)
+		})
+		if err != nil || exitCode != 0 {
+			return DependencyCacheSaveResult{}, fmt.Errorf("dependency cache save: %w", dependencyCacheExecError("probe effective paths", exitCode, err, probeErr.String()))
 		}
 		for _, line := range strings.Split(probeOut.String(), "\n") {
 			clean := strings.TrimSpace(line)
@@ -382,9 +457,13 @@ func (c *SharedDependencyCache) SavePathCache(ctx context.Context, sb *agent.San
 	if len(excludeArgs) > 0 {
 		excludeExpr = strings.Join(excludeArgs, " ") + " "
 	}
-	archiveCmd := fmt.Sprintf("cd %s && tar czf - %s-- %s", shellQuote(rootDir), excludeExpr, strings.Join(args, " "))
-	var stderr bytes.Buffer
-	staged, err := c.stageSandboxArchive(ctx, sb, archiveCmd, &stderr)
+	// Stream an UNcompressed `tar cf -` and gzip on the worker (see
+	// stageSandboxArchiveAttempt) rather than `tar czf -`: keeping the gzip
+	// compressor off the memory-capped, shared session sandbox trims the
+	// sandbox-side work at save time. The stored blob is still gzip (.tar.gz), so
+	// restore (`tar xzf`) and validation are unchanged.
+	archiveCmd := fmt.Sprintf("cd %s && tar cf - %s-- %s", shellQuote(rootDir), excludeExpr, strings.Join(args, " "))
+	staged, err := c.stageSandboxArchive(ctx, sb, archiveCmd)
 	if err != nil {
 		return DependencyCacheSaveResult{}, err
 	}
@@ -579,37 +658,67 @@ func (c *SharedDependencyCache) stageLocalBlob(path string) (*dependencyCacheSta
 	}, nil
 }
 
-func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *agent.Sandbox, archiveCmd string, stderr io.Writer) (*dependencyCacheStagedBlob, error) {
+// stageSandboxArchive streams the sandbox `tar` archive to a gzip-compressed
+// staged blob on the worker, retrying once on a transient sandbox-exec failure
+// (OOM/SIGKILL or a momentarily-unavailable container) via the shared
+// execWithTransientRetry policy. Each attempt recreates its own temp file, so a
+// retry never reuses a partially-written archive.
+func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *agent.Sandbox, archiveCmd string) (*dependencyCacheStagedBlob, error) {
+	var blob *dependencyCacheStagedBlob
+	_, err := c.execWithTransientRetry(ctx, "save_archive", func() (int, error) {
+		b, exitCode, attemptErr := c.stageSandboxArchiveAttempt(ctx, sb, archiveCmd)
+		if attemptErr == nil {
+			blob = b
+		}
+		return exitCode, attemptErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return blob, nil
+}
+
+// stageSandboxArchiveAttempt performs a single archive stream, gzip-compressing
+// the sandbox's raw `tar` output on the worker. It returns the sandbox exec exit
+// code alongside any error so execWithTransientRetry can classify a transient
+// failure; setup/compress errors return exit code 0, which is never treated as
+// transient.
+func (c *SharedDependencyCache) stageSandboxArchiveAttempt(ctx context.Context, sb *agent.Sandbox, archiveCmd string) (*dependencyCacheStagedBlob, int, error) {
 	dir, err := c.makeStagingDir("preview-dependency-cache-save-*")
 	if err != nil {
-		return nil, fmt.Errorf("dependency cache save: temp dir: %w", err)
+		return nil, 0, fmt.Errorf("dependency cache save: temp dir: %w", err)
 	}
 	path := filepath.Join(dir, "blob.tar.gz")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is under a private temp dir.
 	if err != nil {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: temp blob: %w", err)
+		return nil, 0, fmt.Errorf("dependency cache save: temp blob: %w", err)
 	}
 	hasher := sha256.New()
 	counter := &cappedCountingWriter{limit: dependencyCacheMaxBlobBytes}
-	stream := io.MultiWriter(file, hasher, counter)
-	exitCode, execErr := c.executor.Exec(ctx, sb, archiveCmd, stream, stderr)
+	// Compress on the worker: the sandbox streams a raw `tar cf -` and gzip runs
+	// here. The hasher and size counter sit downstream of gzip so they observe
+	// the final compressed blob, matching the restore path's `tar xzf`.
+	gzw := gzip.NewWriter(io.MultiWriter(file, hasher, counter))
+	var stderr bytes.Buffer
+	exitCode, execErr := c.executor.Exec(ctx, sb, archiveCmd, gzw, &stderr)
+	gzErr := gzw.Close()
 	closeErr := file.Close()
-	if execErr != nil {
+	if execErr != nil || exitCode != 0 {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: archive stream exited %d: %w", exitCode, execErr)
+		return nil, exitCode, fmt.Errorf("dependency cache save: %w", dependencyCacheExecError("archive stream", exitCode, execErr, stderr.String()))
 	}
-	if exitCode != 0 {
+	if gzErr != nil {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: archive stream exited %d", exitCode)
+		return nil, 0, fmt.Errorf("dependency cache save: compress archive: %w", gzErr)
 	}
 	if closeErr != nil {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: close temp blob: %w", closeErr)
+		return nil, 0, fmt.Errorf("dependency cache save: close temp blob: %w", closeErr)
 	}
 	if counter.exceeded {
 		_ = os.RemoveAll(dir)
-		return nil, fmt.Errorf("dependency cache save: archive too large (>%d bytes max)", dependencyCacheMaxBlobBytes)
+		return nil, 0, fmt.Errorf("dependency cache save: archive too large (>%d bytes max)", dependencyCacheMaxBlobBytes)
 	}
 	return &dependencyCacheStagedBlob{
 		path:      path,
@@ -617,7 +726,7 @@ func (c *SharedDependencyCache) stageSandboxArchive(ctx context.Context, sb *age
 		checksum:  hex.EncodeToString(hasher.Sum(nil)),
 		fromLocal: false,
 		cleanup:   func() { _ = os.RemoveAll(dir) },
-	}, nil
+	}, 0, nil
 }
 
 type dependencyCacheArchiveStats struct {
