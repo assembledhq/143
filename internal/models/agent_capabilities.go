@@ -66,6 +66,28 @@ func (a AgentCapabilityAccessLevel) Validate() error {
 	}
 }
 
+// Rank returns a comparable ordering for access levels (read < write < publish).
+// Unknown levels rank 0 so they never satisfy a ceiling comparison.
+func (a AgentCapabilityAccessLevel) Rank() int {
+	switch a {
+	case AgentCapabilityAccessRead:
+		return 1
+	case AgentCapabilityAccessWrite:
+		return 2
+	case AgentCapabilityAccessPublish:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// AtMost reports whether this access level does not exceed the ceiling level.
+func (a AgentCapabilityAccessLevel) AtMost(ceiling AgentCapabilityAccessLevel) bool {
+	rank := a.Rank()
+	ceilingRank := ceiling.Rank()
+	return rank > 0 && ceilingRank > 0 && rank <= ceilingRank
+}
+
 type AgentCapabilityRisk string
 
 const (

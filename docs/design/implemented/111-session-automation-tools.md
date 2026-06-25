@@ -28,11 +28,21 @@ Session automation tools are intentionally narrower than browser-authenticated
 or external API automation management:
 
 - The caller must use a valid session-scoped internal token.
+- The session's effective capability snapshot must grant `automation_management`
+  at write access. This is enforced server-side, not only by the sandbox CLI's
+  client-side capability filter, so a session holding the raw internal token
+  cannot bypass the grant by calling the endpoint directly.
 - Automation goal-improvement sessions cannot use the general automation
   management tool.
 - `create` requires `repository_id`.
 - `create`, `update`, `run`, `pause`, and `resume` are limited to automations
   whose `repository_id` matches the session token repository.
+- `update`, `run`, `pause`, and `resume` only apply to org-identity automations;
+  personal-identity automations (which execute as a specific human user) cannot
+  be managed from a repo-scoped session.
+- A session may only grant an automation capabilities it holds itself, and never
+  above its own access level. This prevents capability laundering (minting a
+  high-capability automation and then running it).
 - Org-wide automations remain managed through browser auth or scoped external
   API tokens, not through repo-scoped sandbox tokens.
 

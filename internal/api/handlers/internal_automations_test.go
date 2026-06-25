@@ -70,6 +70,16 @@ func newInternalAutomationToken(t *testing.T, orgID, repoID, sessionID uuid.UUID
 	return token
 }
 
+// automationManagementSnapshot returns a session capability snapshot granting
+// automation_management at the given access level, mirroring what the server
+// would resolve for a session allowed to use the automation tools.
+func automationManagementSnapshot(access models.AgentCapabilityAccessLevel, extra ...models.AgentCapabilitySnapshotItem) []models.AgentCapabilitySnapshotItem {
+	snapshot := []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityAutomationManagement, AccessLevel: access},
+	}
+	return append(snapshot, extra...)
+}
+
 func newInternalAutomationRequest(t *testing.T, method, path, token string, body string, params map[string]string) *http.Request {
 	t.Helper()
 	req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
@@ -93,7 +103,7 @@ func TestInternalAutomationHandler_Create_ForwardsSameRepoAutomation(t *testing.
 	delegate := &fakeInternalAutomationDelegate{}
 	handler := NewInternalAutomationHandler(
 		delegate,
-		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}},
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(models.AgentCapabilityAccessWrite)}},
 		fakeInternalAutomationLookup{},
 		internalAutomationSecret,
 	)
@@ -123,8 +133,8 @@ func TestInternalAutomationHandler_RunRejectsCrossRepoAutomation(t *testing.T) {
 	delegate := &fakeInternalAutomationDelegate{}
 	handler := NewInternalAutomationHandler(
 		delegate,
-		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &sessionRepoID}},
-		fakeInternalAutomationLookup{automation: models.Automation{ID: automationID, OrgID: orgID, RepositoryID: &automationRepoID}},
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &sessionRepoID, CapabilitySnapshot: automationManagementSnapshot(models.AgentCapabilityAccessWrite)}},
+		fakeInternalAutomationLookup{automation: models.Automation{ID: automationID, OrgID: orgID, RepositoryID: &automationRepoID, IdentityScope: models.AutomationIdentityScopeOrg}},
 		internalAutomationSecret,
 	)
 	token := newInternalAutomationToken(t, orgID, sessionRepoID, sessionID, models.SessionOriginManual)
@@ -146,7 +156,7 @@ func TestInternalAutomationHandler_CreateRejectsPersonalIdentityScope(t *testing
 	delegate := &fakeInternalAutomationDelegate{}
 	handler := NewInternalAutomationHandler(
 		delegate,
-		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}},
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(models.AgentCapabilityAccessWrite)}},
 		fakeInternalAutomationLookup{},
 		internalAutomationSecret,
 	)
@@ -161,4 +171,144 @@ func TestInternalAutomationHandler_CreateRejectsPersonalIdentityScope(t *testing
 
 	require.Equal(t, http.StatusBadRequest, rr.Code, "personal identity automation create should be rejected")
 	require.False(t, delegate.createCalled, "delegate create should not be called")
+}
+
+func TestInternalAutomationHandler_CreateRejectsWithoutManagementCapability(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	delegate := &fakeInternalAutomationDelegate{}
+	handler := NewInternalAutomationHandler(
+		delegate,
+		// Session has no automation_management grant in its effective snapshot.
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID}},
+		fakeInternalAutomationLookup{},
+		internalAutomationSecret,
+	)
+	token := newInternalAutomationToken(t, orgID, repoID, sessionID, models.SessionOriginManual)
+	req := newInternalAutomationRequest(t, http.MethodPost, "/api/v1/internal/automations", token,
+		`{"name":"Nightly","goal":"Run cleanup","repository_id":"`+repoID.String()+`","schedule_type":"none","github_event_triggers":["pull_request_opened"]}`,
+		nil,
+	)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "create without automation_management capability should be rejected")
+	require.False(t, delegate.createCalled, "delegate create should not be called")
+}
+
+func TestInternalAutomationHandler_CreateRejectsCapabilityNotHeld(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	delegate := &fakeInternalAutomationDelegate{}
+	handler := NewInternalAutomationHandler(
+		delegate,
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(models.AgentCapabilityAccessWrite)}},
+		fakeInternalAutomationLookup{},
+		internalAutomationSecret,
+	)
+	token := newInternalAutomationToken(t, orgID, repoID, sessionID, models.SessionOriginManual)
+	// The session only holds automation_management, but tries to grant the
+	// automation production_diagnostics — a capability it does not hold.
+	req := newInternalAutomationRequest(t, http.MethodPost, "/api/v1/internal/automations", token,
+		`{"name":"Nightly","goal":"Run cleanup","repository_id":"`+repoID.String()+`","schedule_type":"none","github_event_triggers":["pull_request_opened"],"capabilities":[{"capability_id":"production_diagnostics","access_level":"read","enabled":true}]}`,
+		nil,
+	)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "granting an unheld capability should be rejected")
+	require.False(t, delegate.createCalled, "delegate create should not be called")
+}
+
+func TestInternalAutomationHandler_CreateRejectsCapabilityAccessAboveSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	delegate := &fakeInternalAutomationDelegate{}
+	handler := NewInternalAutomationHandler(
+		delegate,
+		// Session holds external_comments at write only.
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(
+			models.AgentCapabilityAccessWrite,
+			models.AgentCapabilitySnapshotItem{ID: models.AgentCapabilityPublishing, AccessLevel: models.AgentCapabilityAccessWrite},
+		)}},
+		fakeInternalAutomationLookup{},
+		internalAutomationSecret,
+	)
+	token := newInternalAutomationToken(t, orgID, repoID, sessionID, models.SessionOriginManual)
+	// Session holds publishing at write, but tries to grant publish access.
+	req := newInternalAutomationRequest(t, http.MethodPost, "/api/v1/internal/automations", token,
+		`{"name":"Nightly","goal":"Run cleanup","repository_id":"`+repoID.String()+`","schedule_type":"none","github_event_triggers":["pull_request_opened"],"capabilities":[{"capability_id":"publishing","access_level":"publish","enabled":true}]}`,
+		nil,
+	)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "granting access above the session's own level should be rejected")
+	require.False(t, delegate.createCalled, "delegate create should not be called")
+}
+
+func TestInternalAutomationHandler_CreateAllowsCapabilityWithinSession(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	delegate := &fakeInternalAutomationDelegate{}
+	handler := NewInternalAutomationHandler(
+		delegate,
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(
+			models.AgentCapabilityAccessWrite,
+			models.AgentCapabilitySnapshotItem{ID: models.AgentCapabilityProductionDiagnostics, AccessLevel: models.AgentCapabilityAccessRead},
+		)}},
+		fakeInternalAutomationLookup{},
+		internalAutomationSecret,
+	)
+	token := newInternalAutomationToken(t, orgID, repoID, sessionID, models.SessionOriginManual)
+	req := newInternalAutomationRequest(t, http.MethodPost, "/api/v1/internal/automations", token,
+		`{"name":"Nightly","goal":"Run cleanup","repository_id":"`+repoID.String()+`","schedule_type":"none","github_event_triggers":["pull_request_opened"],"capabilities":[{"capability_id":"production_diagnostics","access_level":"read","enabled":true}]}`,
+		nil,
+	)
+	rr := httptest.NewRecorder()
+
+	handler.Create(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, "granting a held capability within access level should be forwarded")
+	require.True(t, delegate.createCalled, "delegate create should be called")
+}
+
+func TestInternalAutomationHandler_RunRejectsPersonalIdentityAutomation(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	delegate := &fakeInternalAutomationDelegate{}
+	handler := NewInternalAutomationHandler(
+		delegate,
+		fakeInternalSessionLookup{session: models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repoID, CapabilitySnapshot: automationManagementSnapshot(models.AgentCapabilityAccessWrite)}},
+		// Same repo, but the automation runs under a specific user's identity.
+		fakeInternalAutomationLookup{automation: models.Automation{ID: automationID, OrgID: orgID, RepositoryID: &repoID, IdentityScope: models.AutomationIdentityScopePersonal}},
+		internalAutomationSecret,
+	)
+	token := newInternalAutomationToken(t, orgID, repoID, sessionID, models.SessionOriginManual)
+	req := newInternalAutomationRequest(t, http.MethodPost, "/api/v1/internal/automations/"+automationID.String()+"/run", token, `{}`, map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	handler.RunNow(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "running a personal-identity automation should be rejected")
+	require.False(t, delegate.runCalled, "delegate run should not be called")
 }
