@@ -349,16 +349,24 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	if err != nil {
 		return fmt.Errorf("dependency cache restore: %w", err)
 	}
-	// chmod -R u+w before removing: Go marks its module cache
-	// ($HOME/go/pkg/mod) read-only — both the files (0444) and the containing
-	// directories (0555) — so a plain `rm -rf` can't unlink them and exits 1,
-	// which previously failed the home-rooted Go cache restore and forced a
-	// cold rebuild every launch. Errors are suppressed because the paths may
-	// not exist yet on a first restore.
+	// Restore write+execute before removing: Go marks its module cache
+	// ($HOME/go/pkg/mod) read-only — files 0444 and their containing directories
+	// 0555 — and unlinking a file requires write+execute on its parent dir, not
+	// just the file. `u+rwX` grants execute only to directories (capital X), so a
+	// plain `rm -rf` can actually unlink the tree; a plain `u+w` left directories
+	// non-traversable and the rm still exited 1, failing the home-rooted Go cache
+	// restore and forcing a cold rebuild every launch. chmod's own errors are
+	// suppressed (paths may not exist on a first restore), but rm's stderr is
+	// captured so a genuine failure is diagnosable instead of a bare "exited 1".
 	pathArgs := strings.Join(cleanArgs, " ")
-	cleanCmd := fmt.Sprintf("cd %s && chmod -R u+w -- %s 2>/dev/null; rm -rf -- %s", shellQuote(rootDir), pathArgs, pathArgs)
-	if exitCode, err := c.executor.Exec(ctx, sb, cleanCmd, io.Discard, io.Discard); err != nil || exitCode != 0 {
-		return fmt.Errorf("dependency cache restore: remove existing paths exited %d: %w", exitCode, err)
+	cleanCmd := fmt.Sprintf("cd %s && chmod -R u+rwX -- %s 2>/dev/null; rm -rf -- %s", shellQuote(rootDir), pathArgs, pathArgs)
+	var cleanErr bytes.Buffer
+	exitCode, cleanExecErr := c.execWithTransientRetry(ctx, "restore_cleanup", func() (int, error) {
+		cleanErr.Reset()
+		return c.executor.Exec(ctx, sb, cleanCmd, io.Discard, &cleanErr)
+	})
+	if cleanExecErr != nil || exitCode != 0 {
+		return fmt.Errorf("dependency cache restore: %w", dependencyCacheExecError("remove existing paths", exitCode, cleanExecErr, cleanErr.String()))
 	}
 	if err := blob.rewind(); err != nil {
 		return fmt.Errorf("dependency cache restore: %w", err)
