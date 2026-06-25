@@ -169,6 +169,7 @@ import { prMergedAccent } from "@/lib/pr-status-styles";
 import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
+import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
 import { pollMs } from "@/lib/poll-intervals";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
@@ -3484,11 +3485,22 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [localBranchActionError, setLocalBranchActionError] = useState<PRActionErrorState | null>(null);
   const [localPushState, setLocalPushState] = useState<"idle" | "submitting" | "queued">("idle");
   const [localPushActionError, setLocalPushActionError] = useState<PRActionErrorState | null>(null);
+  // True while any PR-level action (create PR / push / create branch) is mid
+  // flight from this tab. Drives background reconciliation on the session
+  // detail query (see Fix below) so a backgrounded or refocused tab still
+  // converges to the action's terminal state instead of spinning forever.
+  // Mirrored from the optimistic phases via an effect because the detail query
+  // is declared before those phases are reconciled against the server.
+  const [anyActionInFlight, setAnyActionInFlight] = useState(false);
   const [pendingPRAction, setPendingPRAction] = useState<"fix_tests" | "resolve_conflicts" | "merge" | null>(null);
   const [pendingMergeWhenReady, setPendingMergeWhenReady] = useState(false);
   const [repairActionError, setRepairActionError] = useState<string | null>(null);
   const [prAuthPrompt, setPRAuthPrompt] = useState<PRAuthPromptState | null>(null);
   const resumeAttemptRef = useRef<string | null>(null);
+  useEffect(() => {
+    const inFlight = localPRState !== "idle" || localPushState !== "idle" || localBranchState !== "idle";
+    setAnyActionInFlight((prev) => (prev === inFlight ? prev : inFlight));
+  }, [localPRState, localPushState, localBranchState]);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const isDocumentVisible = useDocumentVisible();
 
@@ -3554,6 +3566,15 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
     },
+    // While a PR-level action is in flight, keep converging even if the tab is
+    // backgrounded or refocused. For a terminal (completed) session there is no
+    // live SSE channel — the only signal that the action settled is this poll,
+    // and the global defaults (refetchIntervalInBackground=false,
+    // refetchOnWindowFocus=false) would otherwise pause it and leave the button
+    // spinning until a manual reload. Scoped to the in-flight window so idle
+    // sessions keep the original no-background-work behavior.
+    refetchIntervalInBackground: anyActionInFlight,
+    refetchOnWindowFocus: anyActionInFlight,
   });
 
   const { data: membersData } = useQuery({
@@ -4096,6 +4117,34 @@ export function SessionDetailContent({ id }: { id: string }) {
   useSessionScopedReset(id, [
     { name: "session transition refs", reset: resetSessionTransitionRefs },
   ]);
+
+  // Optimistically mark a PR-level action's server column in flight in the
+  // detail cache the moment the request is accepted (202). This keeps the
+  // cached state consistent with reality (the server CAS'd the column to
+  // queued) so the optimistic-action reconcile arms deterministically and a
+  // stale prior terminal value (e.g. a previous failed push) doesn't briefly
+  // flash through the button before the next fetch lands.
+  const markSessionActionInFlight = useCallback(
+    (field: "pr_creation_state" | "pr_push_state" | "branch_creation_state") => {
+      queryClient.setQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id), (old) => {
+        if (!old?.data) return old;
+        if (old.data[field] === "queued" || old.data[field] === "pushing") return old;
+        return { ...old, data: { ...old.data, [field]: "queued" } };
+      });
+    },
+    [queryClient, id],
+  );
+  // Level-triggered reconciliation: clear each optimistic phase once the server
+  // settles, independent of whether the client witnessed the transition edge.
+  // This is what prevents a missed SSE event or a paused background poll from
+  // stranding an action button on a spinner.
+  const resolvePRAction = useCallback(() => setLocalPRState("idle"), []);
+  const resolvePushAction = useCallback(() => setLocalPushState("idle"), []);
+  const resolveBranchAction = useCallback(() => setLocalBranchState("idle"), []);
+  useReconcileOptimisticAction({ phase: localPRState, serverState: session?.pr_creation_state, onResolved: resolvePRAction });
+  useReconcileOptimisticAction({ phase: localPushState, serverState: session?.pr_push_state, onResolved: resolvePushAction });
+  useReconcileOptimisticAction({ phase: localBranchState, serverState: session?.branch_creation_state, onResolved: resolveBranchAction });
+
   const prUrl = prData?.data?.github_pr_url;
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
@@ -4135,9 +4184,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   // React to pr_push_state transitions with toast feedback. Mirrors the
   // pr_creation_state effect above; kept separate so the two operations'
   // success/error messages don't collide when both fire on the same render.
-  // Also clears localPushState when the server transitions out of in-flight
-  // so the button returns to "Push changes" promptly without waiting for the
-  // next polling tick.
+  // Edge-triggered (one toast per transition); clearing the optimistic phase is
+  // owned by useReconcileOptimisticAction above, which is level-triggered and
+  // therefore robust to a missed transition.
   useEffect(() => {
     const prev = prevPRPushStateRef.current;
     const current = session?.pr_push_state;
@@ -4147,12 +4196,10 @@ export function SessionDetailContent({ id }: { id: string }) {
         if (pullRequestId) {
           queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
         }
-        setLocalPushState("idle");
         toast.success("Changes pushed to PR", prUrl ? {
           action: { label: "View \u2197", onClick: () => window.open(prUrl, "_blank", "noopener,noreferrer") },
         } : undefined);
       } else if (current === "failed") {
-        setLocalPushState("idle");
         toast.error(session?.pr_push_error || "Push to PR failed", { duration: PR_ERROR_TOAST_DURATION_MS });
       }
     }
@@ -4161,25 +4208,17 @@ export function SessionDetailContent({ id }: { id: string }) {
   useEffect(() => {
     const prev = prevBranchStateRef.current;
     const current = session?.branch_creation_state;
-    if (current === "succeeded") {
-      if (localBranchState !== "idle") {
-        setLocalBranchState("idle");
-      }
-      if (prev && prev !== current) {
+    if (prev && prev !== current) {
+      if (current === "succeeded") {
         toast.success("Branch created", session?.branch_url ? {
           action: { label: "View \u2197", onClick: () => window.open(session.branch_url, "_blank", "noopener,noreferrer") },
         } : undefined);
-      }
-    } else if (current === "failed") {
-      if (localBranchState !== "idle") {
-        setLocalBranchState("idle");
-      }
-      if (prev && prev !== current) {
+      } else if (current === "failed") {
         toast.error(session?.branch_creation_error || "Failed to create branch", { duration: PR_ERROR_TOAST_DURATION_MS });
       }
     }
     prevBranchStateRef.current = current;
-  }, [localBranchState, session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
+  }, [session?.branch_creation_state, session?.branch_creation_error, session?.branch_url]);
   const startRepairMutation = useMutation({
     mutationFn: async ({ action, pushChanges }: { action: "fix_tests" | "resolve_conflicts"; pushChanges: boolean }) => {
       if (!pullRequestId) {
@@ -4520,6 +4559,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       }
       setLocalPRActionError(null);
       setLocalPRState("queued");
+      markSessionActionInFlight("pr_creation_state");
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
@@ -4559,6 +4599,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: (_data, options) => {
       setLocalBranchActionError(null);
       setLocalBranchState("queued");
+      markSessionActionInFlight("branch_creation_state");
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
@@ -4754,6 +4795,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     onSuccess: (_data, options) => {
       setLocalPushActionError(null);
       setLocalPushState("queued");
+      markSessionActionInFlight("pr_push_state");
       if (options?.resumeToken) {
         clearPRResumeParams();
       }
