@@ -44,3 +44,29 @@ func TestAgentCapabilityEnumsValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentCapabilityAccessLevelAtMost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		level    AgentCapabilityAccessLevel
+		ceiling  AgentCapabilityAccessLevel
+		expected bool
+	}{
+		{name: "read within read", level: AgentCapabilityAccessRead, ceiling: AgentCapabilityAccessRead, expected: true},
+		{name: "read within write", level: AgentCapabilityAccessRead, ceiling: AgentCapabilityAccessWrite, expected: true},
+		{name: "write exceeds read", level: AgentCapabilityAccessWrite, ceiling: AgentCapabilityAccessRead, expected: false},
+		{name: "publish within publish", level: AgentCapabilityAccessPublish, ceiling: AgentCapabilityAccessPublish, expected: true},
+		{name: "invalid level rejected", level: AgentCapabilityAccessLevel("admin"), ceiling: AgentCapabilityAccessRead, expected: false},
+		{name: "invalid ceiling rejected", level: AgentCapabilityAccessRead, ceiling: AgentCapabilityAccessLevel("admin"), expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, tt.level.AtMost(tt.ceiling), "access level comparison should match the expected ordering")
+		})
+	}
+}

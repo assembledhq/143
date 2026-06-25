@@ -416,6 +416,10 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		tools = append(tools, sessionTabToolDefinitions()...)
 	}
 
+	if len(tr.integrations.AutomationManagers()) > 0 {
+		tools = append(tools, automationToolDefinitions()...)
+	}
+
 	if len(tr.integrations.EvalCandidateReporters()) > 0 {
 		tools = append(tools, Tool{
 			Name:        "eval_add",
@@ -599,6 +603,12 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("session tab manager not registered")
 		}
 		return tr.callSessionTabs(ctx, managers[0], name, args)
+	case "automation_create", "automation_update", "automation_run", "automation_pause", "automation_resume":
+		managers := tr.integrations.AutomationManagers()
+		if len(managers) == 0 {
+			return ErrorResult("automation manager not registered")
+		}
+		return tr.callAutomationManager(ctx, managers[0], name, args)
 	case "eval_add":
 		reporters := tr.integrations.EvalCandidateReporters()
 		if len(reporters) == 0 {
@@ -1541,6 +1551,124 @@ func (tr *ToolRegistry) callAutomationGoalImprovementCompleter(ctx context.Conte
 	default:
 		return ErrorResult(fmt.Sprintf("unknown automation goal improvement completer method: %s", method))
 	}
+}
+
+func automationToolDefinitions() []Tool {
+	return []Tool{
+		{
+			Name:        "automation_create",
+			Description: "Create a repo-scoped automation from a JSON payload. The payload uses the same flat fields as the automation create API and must set repository_id to the current session repository.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"payload": {Type: "string", Description: "JSON automation create payload"},
+			}, Required: []string{"payload"}},
+		},
+		{
+			Name:        "automation_update",
+			Description: "Update a repo-scoped automation from a JSON payload. The target automation must belong to the current session repository.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"automation_id": {Type: "string", Description: "Automation UUID"},
+				"payload":       {Type: "string", Description: "JSON automation update payload"},
+			}, Required: []string{"automation_id", "payload"}},
+		},
+		{
+			Name:        "automation_run",
+			Description: "Queue an immediate run for a repo-scoped automation in the current session repository.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"automation_id": {Type: "string", Description: "Automation UUID"},
+			}, Required: []string{"automation_id"}},
+		},
+		{
+			Name:        "automation_pause",
+			Description: "Pause a repo-scoped automation in the current session repository.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"automation_id": {Type: "string", Description: "Automation UUID"},
+			}, Required: []string{"automation_id"}},
+		},
+		{
+			Name:        "automation_resume",
+			Description: "Resume a repo-scoped automation in the current session repository.",
+			InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{
+				"automation_id": {Type: "string", Description: "Automation UUID"},
+			}, Required: []string{"automation_id"}},
+		},
+	}
+}
+
+func (tr *ToolRegistry) callAutomationManager(ctx context.Context, manager integration.AutomationManager, name string, args json.RawMessage) *ToolCallResult {
+	var p struct {
+		AutomationID string `json:"automation_id"`
+		Payload      string `json:"payload"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil && len(args) > 0 {
+		return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+	}
+	automationID := strings.TrimSpace(p.AutomationID)
+	switch name {
+	case "automation_create":
+		payload, err := parseAutomationToolPayload(p.Payload)
+		if err != nil {
+			return ErrorResult(err.Error())
+		}
+		raw, err := manager.CreateAutomation(ctx, payload)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("create automation failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "automation_update":
+		if automationID == "" {
+			return ErrorResult("automation_id is required")
+		}
+		payload, err := parseAutomationToolPayload(p.Payload)
+		if err != nil {
+			return ErrorResult(err.Error())
+		}
+		raw, err := manager.UpdateAutomation(ctx, automationID, payload)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("update automation failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "automation_run":
+		if automationID == "" {
+			return ErrorResult("automation_id is required")
+		}
+		raw, err := manager.RunAutomation(ctx, automationID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("run automation failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "automation_pause":
+		if automationID == "" {
+			return ErrorResult("automation_id is required")
+		}
+		raw, err := manager.PauseAutomation(ctx, automationID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("pause automation failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	case "automation_resume":
+		if automationID == "" {
+			return ErrorResult("automation_id is required")
+		}
+		raw, err := manager.ResumeAutomation(ctx, automationID)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("resume automation failed: %s", err))
+		}
+		return TextResult(string(unwrapResponseData(raw)))
+	default:
+		return ErrorResult(fmt.Sprintf("unknown automation tool: %s", name))
+	}
+}
+
+func parseAutomationToolPayload(raw string) (json.RawMessage, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, fmt.Errorf("payload is required")
+	}
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+		return nil, fmt.Errorf("payload must be a JSON object")
+	}
+	return json.RawMessage(raw), nil
 }
 
 func sessionTabToolDefinitions() []Tool {

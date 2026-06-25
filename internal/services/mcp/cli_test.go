@@ -75,6 +75,12 @@ func TestRunCLI_NamespaceHelp(t *testing.T) {
 			contains:  []string{"143-tools automation-goal-improvement <action>", "complete"},
 			notString: "automation_goal_improvement_complete",
 		},
+		{
+			name:      "automation namespace",
+			args:      []string{"automation", "--help"},
+			contains:  []string{"143-tools automation <action>", "create", "update", "run", "pause", "resume"},
+			notString: "automation_create",
+		},
 	}
 
 	for _, tt := range tests {
@@ -163,6 +169,22 @@ func TestRunCLI_DispatchesHierarchicalCommands(t *testing.T) {
 				"--confidence", "medium",
 			},
 			expected: "completed",
+		},
+		{
+			name: "automation create",
+			args: []string{
+				"automation", "create",
+				"--payload", `{"name":"Nightly cleanup","goal":"Clean up stale work","repository_id":"repo-1","schedule_type":"none","github_event_triggers":["pull_request_opened"]}`,
+			},
+			expected: "Nightly cleanup",
+		},
+		{
+			name: "automation run",
+			args: []string{
+				"automation", "run",
+				"--automation-id", "00000000-0000-0000-0000-000000000001",
+			},
+			expected: "queued",
 		},
 	}
 
@@ -412,6 +434,7 @@ func TestDetectOldFlatCommand(t *testing.T) {
 		{name: "logs", input: "log_query", expected: "143-tools logs query"},
 		{name: "pull request", input: "create_pr", expected: "143-tools pr create"},
 		{name: "session tabs", input: "session_tabs_send", expected: "143-tools session-tabs send"},
+		{name: "automation", input: "automation_create", expected: "143-tools automation create"},
 		{name: "not flat", input: "sentry", expected: ""},
 		{name: "unknown underscore name", input: "foo_bar", expected: ""},
 	}
