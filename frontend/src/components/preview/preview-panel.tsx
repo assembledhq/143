@@ -434,7 +434,7 @@ function freshnessLabel(
   mutationPending: boolean,
 ): string | undefined {
   if (mutationPending || freshness === "updating") {
-    return "Updating preview...";
+    return undefined;
   }
   if (freshness === "live_updated") {
     return "Updated live";
@@ -932,8 +932,6 @@ export function PreviewPanel({
         : previewRecoveryAction === "retry"
           ? "Retry the preview to use the latest session changes."
           : undefined;
-  const startupFreshnessText =
-    showStartupCanvas && freshnessState === "updating" ? freshnessText : undefined;
   const startupEstimate = previewStatus?.startup_estimate;
   const startupEstimateLabel =
     startupEstimate && startupEstimate.sample_count >= 5
@@ -1205,17 +1203,12 @@ export function PreviewPanel({
                 <Loader2 className="size-5 animate-spin text-primary" />
               </div>
               <div className="space-y-1">
-                <p className="text-lg font-semibold text-foreground">
+                <p className="text-sm font-medium text-foreground">
                   Preparing preview
                 </p>
-                <p className="text-sm text-muted-foreground">
+                <p className="text-sm font-medium text-muted-foreground">
                   {startupSubtitle}
                 </p>
-                {startupFreshnessText && (
-                  <p className="text-xs font-medium text-muted-foreground">
-                    {startupFreshnessText}
-                  </p>
-                )}
                 {startupEstimateLabel && (
                   <p className="text-xs font-medium text-muted-foreground">
                     {startupEstimateLabel}
