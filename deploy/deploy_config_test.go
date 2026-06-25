@@ -1974,6 +1974,21 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 
+func TestWorkerDrainMonitorDeduplicatesPerContainer(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy script")
+	deployText := string(deployScript)
+
+	require.Contains(t, deployText, `monitor_lock="/var/log/143/drain-worker-${cid:0:12}.lock"`, "worker drain should use a stable per-container lock file")
+	require.Contains(t, deployText, `exec 9>"$monitor_lock"`, "worker drain monitor should open the per-container lock file")
+	require.Contains(t, deployText, `flock -xn 9`, "worker drain monitor should refuse to start a duplicate loop for the same old container")
+	require.Contains(t, deployText, `drain monitor already running`, "worker drain should log when a duplicate monitor is skipped")
+	require.Contains(t, deployText, `docker inspect --format '{{.State.Running}}' "$cid"`, "worker drain monitor should check whether the old container still exists")
+	require.Contains(t, deployText, `old worker container ${cid:0:12} is no longer running; drain monitor exiting`, "worker drain monitor should exit once the old container is gone")
+}
+
 func TestDetachedWorkerDeployMarksSuccessBeforePrune(t *testing.T) {
 	t.Parallel()
 
