@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Plus, Pause, Play, MoreHorizontal, Search, Trash2 } from "lucide-react";
+import { ArrowRight, Pause, Play, MoreHorizontal, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/utils";
@@ -71,133 +71,121 @@ function formatTemplateCadence(template: AutomationTemplate) {
   return `Every ${template.defaultInterval} ${unit}`;
 }
 
-function EmptyAutomationTemplateGallery({ canManage }: { canManage: boolean }) {
+function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
   const [query, setQuery] = useState("");
   const categories = [popularCategory, ...automationTemplateCategories];
 
   return (
     <section className="space-y-4">
-      <div className="space-y-4 rounded-lg border border-dashed border-border bg-muted/10 p-4">
-        <div className="grid gap-4 sm:grid-cols-[1fr_auto] sm:items-start">
-          <div className="space-y-1.5">
-            <h2 className="text-sm font-medium text-foreground">Create your first automation</h2>
-            <p className="text-sm text-muted-foreground">
-              Start with a recurring agent template, then customize the goal, repository, schedule, and model before it runs.
-            </p>
-          </div>
-          {canManage ? (
-            <Button asChild variant="outline" size="sm" className="w-full shrink-0 sm:w-auto sm:justify-self-end">
-              <Link href="/automations/new">
-                <Plus className="mr-1.5 h-4 w-4" />
-                Start from blank
-              </Link>
-            </Button>
-          ) : null}
+      <div className="space-y-1.5">
+        <h2 className="text-sm font-medium text-foreground">Automation templates</h2>
+        <p className="text-sm text-muted-foreground">
+          Start with a recurring agent template, then customize the goal, repository, schedule, and model before it runs.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search templates..."
+            className="pl-9"
+          />
         </div>
 
-        <div className="space-y-4">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search templates..."
-              className="pl-9"
-            />
-          </div>
+        <Tabs defaultValue={popularCategory.id}>
+          <TabsList className="max-w-full overflow-x-auto overflow-y-hidden">
+            {categories.map((category) => (
+              <TabsTrigger key={category.id} value={category.id}>
+                {category.name}
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-          <Tabs defaultValue={popularCategory.id}>
-            <TabsList className="max-w-full overflow-x-auto overflow-y-hidden">
-              {categories.map((category) => (
-                <TabsTrigger key={category.id} value={category.id}>
-                  {category.name}
-                </TabsTrigger>
-              ))}
-            </TabsList>
+          {categories.map((category) => {
+            const templates = templatesForCategory(category.id)
+              .filter((template) => templateMatchesSearch(template, query));
 
-            {categories.map((category) => {
-              const templates = templatesForCategory(category.id)
-                .filter((template) => templateMatchesSearch(template, query));
+            return (
+              <TabsContent key={category.id} value={category.id} className="mt-4 space-y-4">
+                <div className="space-y-1">
+                  <h3 className="text-sm font-medium text-foreground">{category.name}</h3>
+                  <p className="text-sm text-muted-foreground">{category.description}</p>
+                </div>
 
-              return (
-                <TabsContent key={category.id} value={category.id} className="mt-4 space-y-4">
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-medium text-foreground">{category.name}</h3>
-                    <p className="text-sm text-muted-foreground">{category.description}</p>
-                  </div>
+                {templates.length > 0 ? (
+                  <div className="grid gap-3 lg:grid-cols-2">
+                    {templates.map((template) => {
+                      const Icon = template.icon;
 
-                  {templates.length > 0 ? (
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      {templates.map((template) => {
-                        const Icon = template.icon;
-
-                        return (
-                          <Card key={template.id} className="h-full">
-                            <CardHeader className="space-y-3">
-                              <div className="flex items-start gap-3">
-                                <div className="rounded-md border border-border bg-muted/50 p-2">
-                                  <Icon className="h-4 w-4 text-foreground" />
-                                </div>
-                                <div className="min-w-0 flex-1 space-y-1">
-                                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                    <CardTitle className="text-base leading-5">
-                                      <h4>{template.name}</h4>
-                                    </CardTitle>
-                                    <Badge variant="secondary" className="w-fit shrink-0">
-                                      {formatTemplateCadence(template)}
-                                    </Badge>
-                                  </div>
-                                  <CardDescription className="leading-5">
-                                    {template.summary}
-                                  </CardDescription>
-                                </div>
+                      return (
+                        <Card key={template.id} className="h-full">
+                          <CardHeader className="space-y-3">
+                            <div className="flex items-start gap-3">
+                              <div className="rounded-md border border-border bg-muted/50 p-2">
+                                <Icon className="h-4 w-4 text-foreground" />
                               </div>
-                              <div className="flex flex-wrap gap-2">
-                                {template.tags.slice(0, 3).map((tag) => (
-                                  <Badge key={tag} variant="outline">
-                                    {tag}
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                  <CardTitle className="text-base leading-5">
+                                    <h4>{template.name}</h4>
+                                  </CardTitle>
+                                  <Badge variant="secondary" className="w-fit shrink-0">
+                                    {formatTemplateCadence(template)}
                                   </Badge>
+                                </div>
+                                <CardDescription className="leading-5">
+                                  {template.summary}
+                                </CardDescription>
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {template.tags.slice(0, 3).map((tag) => (
+                                <Badge key={tag} variant="outline">
+                                  {tag}
+                                </Badge>
+                              ))}
+                            </div>
+                          </CardHeader>
+                          <CardContent className="space-y-4">
+                            <div className="space-y-2">
+                              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                                Expected output
+                              </p>
+                              <ul className="space-y-1 text-sm text-muted-foreground">
+                                {template.outcomes.slice(0, 2).map((outcome) => (
+                                  <li key={outcome}>• {outcome}</li>
                                 ))}
-                              </div>
-                            </CardHeader>
-                            <CardContent className="space-y-4">
-                              <div className="space-y-2">
-                                <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                  Expected output
-                                </p>
-                                <ul className="space-y-1 text-sm text-muted-foreground">
-                                  {template.outcomes.slice(0, 2).map((outcome) => (
-                                    <li key={outcome}>• {outcome}</li>
-                                  ))}
-                                </ul>
-                              </div>
+                              </ul>
+                            </div>
 
-                              {canManage ? (
-                                <Button asChild variant="outline" size="sm">
-                                  <Link
-                                    href={`/automations/new?template=${template.id}`}
-                                    aria-label={`Use ${template.name}`}
-                                  >
-                                    Use template
-                                    <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-                                  </Link>
-                                </Button>
-                              ) : null}
-                            </CardContent>
-                          </Card>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
-                      No templates match your search.
-                    </div>
-                  )}
-                </TabsContent>
-              );
-            })}
-          </Tabs>
-        </div>
+                            {canManage ? (
+                              <Button asChild variant="outline" size="sm">
+                                <Link
+                                  href={`/automations/new?template=${template.id}`}
+                                  aria-label={`Use ${template.name}`}
+                                >
+                                  Use template
+                                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                                </Link>
+                              </Button>
+                            ) : null}
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                    No templates match your search.
+                  </div>
+                )}
+              </TabsContent>
+            );
+          })}
+        </Tabs>
       </div>
     </section>
   );
@@ -347,24 +335,12 @@ export default function AutomationsPage() {
         <PageHeader
           title="Automations"
           description="Recurring agents that run on a schedule for your team."
-          action={canManage ? (
-            <Button asChild size="sm">
-              <Link href="/automations/new">
-                <Plus className="h-4 w-4 mr-1.5" />
-                New
-              </Link>
-            </Button>
-          ) : undefined}
         />
 
         {isLoading && (
           <div className="text-center py-12 text-sm text-muted-foreground">
             Loading automations...
           </div>
-        )}
-
-        {!isLoading && automations.length === 0 && (
-          <EmptyAutomationTemplateGallery canManage={canManage} />
         )}
 
         {enabled.length > 0 && (
@@ -391,6 +367,10 @@ export default function AutomationsPage() {
               ))}
             </div>
           </section>
+        )}
+
+        {!isLoading && (
+          <AutomationTemplateGallery canManage={canManage} />
         )}
       </div>
     </PageContainer>
