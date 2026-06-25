@@ -617,7 +617,7 @@ func TestOpenCodeRuntimeConfigContent_ReferencesSelectedProviderEnv(t *testing.T
 		},
 		{
 			name:           "gemini backing",
-			cfg:            models.OpenCodeConfig{APIKey: "gem-key", BackingProvider: models.ProviderGemini, Model: models.OpenCodeModelGemini25Flash},
+			cfg:            models.OpenCodeConfig{APIKey: "gem-key", BackingProvider: models.ProviderGemini, Model: models.OpenCodeModelGemini3Flash},
 			provider:       "google",
 			expectedEnvRef: "{env:GEMINI_API_KEY}",
 		},
@@ -1354,10 +1354,10 @@ func TestAgentEnvResolveForModel_OpenCodeThirdPartyModelsRouteToOpenRouter(t *te
 	})
 
 	thirdPartyModels := []string{
-		models.OpenCodeModelMiniMaxM21,
-		models.OpenCodeModelKimiK2,
-		models.OpenCodeModelQwen3Coder,
-		models.OpenCodeModelDeepSeekChat,
+		"minimax/minimax-m2.7",
+		"moonshot/kimi-k2.6",
+		"qwen/qwen3.7-plus",
+		"deepseek/deepseek-v4-flash",
 	}
 	for _, model := range thirdPartyModels {
 		model := model

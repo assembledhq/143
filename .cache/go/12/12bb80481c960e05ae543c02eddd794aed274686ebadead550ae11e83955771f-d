@@ -1,0 +1,13 @@
+./amp.go
+./claude_code.go
+./codex.go
+./human_input_events.go
+./interactive_runtime.go
+./opencode.go
+./pi.go
+./prompt_builders.go
+./registry.go
+./shell_escape.go
+./slash_commands.go
+./stream_parser.go
+./token_usage_helpers.go

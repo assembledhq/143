@@ -196,12 +196,12 @@ var validGitRef = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
 // allowedModels is the set of models that can be used for eval runs.
 var allowedModels = map[string]bool{
-	"claude-opus-4-6":                 true,
-	"claude-sonnet-4-6":               true,
-	"codex":                           true,
-	models.OpenCodeModelGPT54Mini:     true,
-	models.OpenCodeModelClaudeHaiku45: true,
-	models.OpenCodeModelDeepSeekChat:  true,
+	"claude-opus-4-6":                   true,
+	"claude-sonnet-4-6":                 true,
+	"codex":                             true,
+	models.OpenCodeModelGPT54Mini:       true,
+	models.OpenCodeModelClaudeHaiku45:   true,
+	models.OpenCodeModelDeepSeekV4Flash: true,
 }
 
 const (
@@ -872,7 +872,7 @@ func (h *EvalHandler) StartRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowedModels[req.Model] {
-		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", "model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, deepseek/deepseek-chat")
+		writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", "model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, opencode/deepseek-v4-flash")
 		return
 	}
 	if req.ConfigRef != nil && *req.ConfigRef != "" {
@@ -965,7 +965,7 @@ func evalRunAgentType(model string) models.AgentType {
 	switch model {
 	case "claude-opus-4-6", "claude-sonnet-4-6":
 		return models.AgentTypeClaudeCode
-	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekV4Flash:
 		return models.AgentTypeOpenCode
 	default:
 		return models.AgentTypeCodex
@@ -1116,7 +1116,7 @@ func (h *EvalHandler) StartBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		if !allowedModels[cfg.Model] {
 			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL",
-				fmt.Sprintf("configs[%d].model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, deepseek/deepseek-chat", i))
+				fmt.Sprintf("configs[%d].model must be one of: claude-opus-4-6, claude-sonnet-4-6, codex, openai/gpt-5.4-mini, anthropic/claude-haiku-4-5, opencode/deepseek-v4-flash", i))
 			return
 		}
 		if cfg.ConfigRef != nil && *cfg.ConfigRef != "" {

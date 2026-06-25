@@ -7804,7 +7804,7 @@ func legacyEvalRunAgentType(model string) models.AgentType {
 	switch model {
 	case "claude-opus-4-6", "claude-sonnet-4-6":
 		return models.AgentTypeClaudeCode
-	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekChat:
+	case models.OpenCodeModelGPT54Mini, models.OpenCodeModelClaudeHaiku45, models.OpenCodeModelDeepSeekV4Flash:
 		return models.AgentTypeOpenCode
 	default:
 		return models.AgentTypeCodex

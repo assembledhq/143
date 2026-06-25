@@ -282,7 +282,7 @@ func TestServiceFinalizeSandboxEnv(t *testing.T) {
 	require.Contains(t, err.Error(), "AMP_API_KEY", "finalizeSandboxEnv should surface the missing Amp credential")
 
 	piEnv := map[string]string{
-		"PI_MODEL_CUSTOM": "moonshot/kimi-k2",
+		"PI_MODEL_CUSTOM": "moonshot/kimi-k2.6",
 		"PI_API_KEY":      "pi-key",
 	}
 	require.NoError(t, svc.finalizeSandboxEnv(models.AgentTypePi, piEnv), "finalizeSandboxEnv should allow Pi runs with PI_API_KEY configured")
