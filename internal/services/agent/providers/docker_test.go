@@ -1865,6 +1865,30 @@ func TestDockerProvider_Exec(t *testing.T) {
 		require.NotContains(t, logs.String(), "c2VjcmV0", "debug logs should not contain encoded secret file content")
 		require.Contains(t, logs.String(), "[redacted preview secret file write]", "debug logs should explain that a secret command was redacted")
 	})
+
+	t.Run("redacts Claude Code OAuth token assignments from debug logs", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newMockHijackedResponse(""), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{ExitCode: 0}, nil
+		}
+		var logs bytes.Buffer
+		logger := zerolog.New(&logs).Level(zerolog.DebugLevel)
+		p := NewDockerProvider(mock, logger)
+		sb := &agent.Sandbox{ID: "test-container", Provider: "docker", WorkDir: "/workspace"}
+
+		var stdout, stderr bytes.Buffer
+		code, err := p.Exec(context.Background(), sb, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-token claude auth status", &stdout, &stderr)
+
+		require.NoError(t, err, "Exec should not fail for a redacted Claude Code OAuth token command")
+		require.Equal(t, 0, code, "redacted command should return the inspect exit code")
+		require.NotContains(t, logs.String(), "claude-secret-token", "debug logs should not contain the Claude Code OAuth token")
+		require.Contains(t, logs.String(), "CLAUDE_CODE_OAUTH_TOKEN=***", "debug logs should preserve the redacted env var name for debugging")
+	})
 }
 
 // TestDockerHandle_StartInteractiveCommand_NoTTY_WrapsWithSignalShim verifies

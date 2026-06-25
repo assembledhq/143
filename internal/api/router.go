@@ -1305,6 +1305,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Post("/api/v1/settings/claude-code-auth/initiate", claudeCodeAuthHandler.Initiate)
 				r.Post("/api/v1/settings/claude-code-auth/complete", claudeCodeAuthHandler.Complete)
+				r.Post("/api/v1/settings/claude-code-auth/oauth-token", claudeCodeAuthHandler.StoreOAuthToken)
 				r.Post("/api/v1/settings/claude-code-auth/disconnect", claudeCodeAuthHandler.DisconnectAll) // legacy compat
 				r.Delete("/api/v1/settings/claude-code-auth/subscriptions/{id}", claudeCodeAuthHandler.DisconnectByPath)
 

@@ -45,6 +45,8 @@ func TestScopeHelpers(t *testing.T) {
 
 func TestAnthropicSubscriptionConfigValidate(t *testing.T) {
 	t.Parallel()
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Hour)
 	cases := []struct {
 		name string
 		cfg  AnthropicSubscriptionConfig
@@ -61,6 +63,11 @@ func TestAnthropicSubscriptionConfigValidate(t *testing.T) {
 			true,
 		},
 		{
+			"setup token",
+			AnthropicSubscriptionConfig{AuthMode: AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "claude-oauth-token", OAuthTokenExpiresAt: future},
+			true,
+		},
+		{
 			"empty",
 			AnthropicSubscriptionConfig{},
 			false,
@@ -68,6 +75,16 @@ func TestAnthropicSubscriptionConfigValidate(t *testing.T) {
 		{
 			"partial tokens",
 			AnthropicSubscriptionConfig{AccessToken: "a"},
+			false,
+		},
+		{
+			"setup token missing token",
+			AnthropicSubscriptionConfig{AuthMode: AnthropicSubscriptionAuthModeSetupToken, OAuthTokenExpiresAt: future},
+			false,
+		},
+		{
+			"setup token expired",
+			AnthropicSubscriptionConfig{AuthMode: AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "claude-oauth-token", OAuthTokenExpiresAt: past},
 			false,
 		},
 	}
@@ -143,6 +160,18 @@ func TestAnthropicSubscriptionConfigMetadata(t *testing.T) {
 	expired := valid
 	expired.ExpiresAt = past
 	require.True(t, expired.IsExpired(), "past Anthropic subscription token should be expired")
+
+	setupToken := AnthropicSubscriptionConfig{
+		AuthMode:            AnthropicSubscriptionAuthModeSetupToken,
+		OAuthToken:          "claude-oauth-token",
+		OAuthTokenExpiresAt: future,
+		AccountType:         "claude_max",
+	}
+	require.NoError(t, setupToken.Validate(), "setup-token Anthropic subscription config should validate")
+	require.False(t, setupToken.IsExpired(), "future setup-token credential should not be expired")
+	require.False(t, setupToken.NeedsRefresh(2*time.Hour), "setup-token credentials should never use backend refresh")
+	require.Equal(t, ProviderAnthropicSubscription, setupToken.MaskedSummary().Provider, "setup-token summary should use subscription provider")
+	require.Equal(t, "claude_max", setupToken.MaskedSummary().AccountType, "setup-token summary should preserve account type")
 }
 
 func TestParseCodingProviderConfig(t *testing.T) {

@@ -973,6 +973,11 @@ export const api = {
         '/api/v1/settings/claude-code-auth/complete',
         { label, code, ...(scope ? { scope } : {}) },
       ),
+    storeOAuthToken: (label: string, oauthToken: string, scope?: 'org' | 'personal') =>
+      post<import('./types').SingleResponse<import('./types').ClaudeCodeCompleteResponse>>(
+        '/api/v1/settings/claude-code-auth/oauth-token',
+        { label, oauth_token: oauthToken, ...(scope ? { scope } : {}) },
+      ),
     listSubscriptions: () => get<import('./types').ListResponse<import('./types').ClaudeCodeSubscription>>('/api/v1/settings/claude-code-auth/subscriptions'),
     removeSubscription: (id: string) => del(`/api/v1/settings/claude-code-auth/subscriptions/${id}`),
     // Disconnects every Claude subscription for the org while leaving any

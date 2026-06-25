@@ -76,6 +76,22 @@ func testAnyArgs(n int) []any {
 	return out
 }
 
+func TestHasAutomationAgentConfigKey_ClaudeCodeSetupToken(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.AgentEnvConfig{
+		string(models.AgentTypeClaudeCode): {
+			"CLAUDE_CODE_OAUTH_TOKEN": "setup-token",
+		},
+	}
+
+	require.True(
+		t,
+		hasAutomationAgentConfigKey(cfg, models.AgentTypeClaudeCode),
+		"Claude Code setup-token env entries should be treated as sensitive configured auth",
+	)
+}
+
 func newAutomationRow(mock pgxmock.PgxPoolIface, a models.Automation) *pgxmock.Rows {
 	metadata := a.ExternalMetadata
 	if len(metadata) == 0 {

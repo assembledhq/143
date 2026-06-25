@@ -2090,6 +2090,8 @@ export interface ClaudeCodeSubscription {
   id: string;
   label: string;
   account_type?: string;
+  auth_mode?: "rotating_oauth" | "setup_token";
+  expires_at?: string;
   status: ClaudeCodeSubscriptionStatus;
   last_used_at?: string;
   created_by?: string;

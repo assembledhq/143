@@ -1079,12 +1079,14 @@ func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, c
 // machine-findable — the log layer must therefore strip them before
 // shipping.
 var cliTokenPattern = regexp.MustCompile(`143[uj]_[A-Za-z0-9_-]{8,}`)
+var claudeCodeOAuthTokenAssignmentPattern = regexp.MustCompile(`CLAUDE_CODE_OAUTH_TOKEN=("[^"]*"|'[^']*'|[^\s]+)`)
 
 func redactSandboxCommandForLog(cmd string) string {
 	if strings.Contains(cmd, "__143_SECRET_FILE__") {
 		return "[redacted preview secret file write]"
 	}
-	return cliTokenPattern.ReplaceAllString(cmd, "143?_***")
+	cmd = cliTokenPattern.ReplaceAllString(cmd, "143?_***")
+	return claudeCodeOAuthTokenAssignmentPattern.ReplaceAllString(cmd, "CLAUDE_CODE_OAUTH_TOKEN=***")
 }
 
 // ReadFile reads a file from the sandbox filesystem by exec-ing cat.

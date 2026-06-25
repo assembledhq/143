@@ -1108,6 +1108,69 @@ func TestHarvestClaudeCodeCredentials_LegacyInjectedUnchangedTokenNoOps(t *testi
 	require.Nil(t, auth.storedSub, "harvesting should not store unchanged legacy credentials")
 }
 
+func TestEnsureClaudeCodeAuth_SetupTokenInjectsEnvAndSkipsHarvest(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("babababa-baba-baba-baba-babababababa")
+	userID := uuid.MustParse("cacacaca-caca-caca-caca-cacacacacaca")
+	credID := uuid.MustParse("dadadada-dada-dada-dada-dadadadadada")
+	sandbox := &Sandbox{ID: "sandbox-setup-token", HomeDir: "/home/sandbox"}
+	provider := &testInternalSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{},
+		Provider:          provider,
+		Logger:            zerolog.Nop(),
+	})
+	picked := models.DecryptedCodingCredential{
+		ID:       credID,
+		OrgID:    orgID,
+		UserID:   &userID,
+		Provider: models.ProviderAnthropicSubscription,
+		Status:   models.CodingCredentialStatusActive,
+		Config: models.AnthropicSubscriptionConfig{
+			AuthMode:            models.AnthropicSubscriptionAuthModeSetupToken,
+			OAuthToken:          "claude-setup-token",
+			OAuthTokenExpiresAt: time.Now().Add(365 * 24 * time.Hour),
+			AccountType:         "claude_max",
+		},
+	}
+	env.recordCredentialPick(orgID, &userID, models.ProviderAnthropic, picked)
+	orch := &Orchestrator{
+		env:            env,
+		provider:       provider,
+		logger:         zerolog.Nop(),
+		claudeCodeAuth: &testInternalClaudeCodeAuthProvider{},
+	}
+	run := &models.Session{
+		ID:                uuid.MustParse("eaeaeaea-eaea-eaea-eaea-eaeaeaeaeaea"),
+		OrgID:             orgID,
+		AgentType:         models.AgentTypeClaudeCode,
+		TriggeredByUserID: &userID,
+	}
+	envVars := map[string]string{
+		"ANTHROPIC_API_KEY":     "sk-ant-fallback",
+		"ANTHROPIC_AUTH_TOKEN":  "anthropic-auth-token",
+		"ANTHROPIC_MODEL":       models.ClaudeCodeModelSonnet46,
+		"UNRELATED_ENV":         "keep-me",
+		"CLAUDE_CODE_MAX_THINK": "1",
+	}
+
+	billingMode, err := orch.ensureClaudeCodeAuth(context.Background(), run, sandbox, envVars)
+
+	require.NoError(t, err, "setup-token auth should prepare Claude Code without refreshing")
+	require.Equal(t, TokenBillingModeSubscription, billingMode, "setup-token auth should use subscription billing mode")
+	require.Equal(t, "claude-setup-token", envVars["CLAUDE_CODE_OAUTH_TOKEN"], "setup-token auth should inject the Claude Code OAuth token env var")
+	require.NotContains(t, envVars, "ANTHROPIC_API_KEY", "setup-token auth should clear higher-precedence Anthropic API-key auth")
+	require.NotContains(t, envVars, "ANTHROPIC_AUTH_TOKEN", "setup-token auth should clear higher-precedence Anthropic auth token")
+	require.Equal(t, "keep-me", envVars["UNRELATED_ENV"], "setup-token auth should leave unrelated env vars untouched")
+	require.Contains(t, provider.execCalls, "rm -f '/home/sandbox/.claude/.credentials.json'", "setup-token auth should remove stale Claude credentials")
+
+	stored, harvestErr := orch.harvestClaudeCodeCredentials(context.Background(), run, sandbox, TokenBillingModeSubscription, zerolog.Nop())
+
+	require.NoError(t, harvestErr, "setup-token credentials should skip sandbox credential harvest")
+	require.False(t, stored, "setup-token credentials should not persist harvested rotating tokens")
+}
+
 func TestCreateAssistantMessage_CarriesThreadID(t *testing.T) {
 	t.Parallel()
 

@@ -130,17 +130,26 @@ function SubscriptionRow({
             icon: AlertCircle,
           };
   const Icon = badge.icon;
+  const renewalHint =
+    sub.auth_mode === "setup_token" && sub.expires_at
+      ? `Setup token renews by ${formatSubscriptionDate(sub.expires_at)}`
+      : "";
 
   return (
     <div className="flex items-center justify-between rounded-md border px-3 py-2">
-      <div className="flex items-center gap-2">
-        <Badge variant="outline" className={badge.className}>
-          <Icon className="mr-1 h-3.5 w-3.5" />
-          {badge.label}
-        </Badge>
-        <span className="text-sm font-medium">{sub.label}</span>
-        {sub.account_type && (
-          <span className="text-xs text-muted-foreground">({sub.account_type})</span>
+      <div className="min-w-0 space-y-1">
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className={badge.className}>
+            <Icon className="mr-1 h-3.5 w-3.5" />
+            {badge.label}
+          </Badge>
+          <span className="text-sm font-medium">{sub.label}</span>
+          {sub.account_type && (
+            <span className="text-xs text-muted-foreground">({sub.account_type})</span>
+          )}
+        </div>
+        {renewalHint && (
+          <p className="text-xs text-muted-foreground">{renewalHint}</p>
         )}
       </div>
       {onRemove && (
@@ -156,4 +165,16 @@ function SubscriptionRow({
       )}
     </div>
   );
+}
+
+function formatSubscriptionDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "the stored expiry date";
+  }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }

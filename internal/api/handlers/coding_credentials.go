@@ -600,6 +600,12 @@ func codingStatusFor(cred models.DecryptedCodingCredential) models.CodingAuthSta
 func usageNoteFor(cred models.DecryptedCodingCredential) string {
 	switch cfg := cred.Config.(type) {
 	case models.AnthropicSubscriptionConfig:
+		if cfg.IsSetupToken() {
+			if !cfg.OAuthTokenExpiresAt.IsZero() {
+				return "Setup token renews by " + cfg.OAuthTokenExpiresAt.Format("Jan 2, 2006")
+			}
+			return "Claude Code setup token"
+		}
 		return coalesce(cfg.AccountType, "Claude subscription")
 	case models.OpenAISubscriptionConfig:
 		return coalesce(cfg.AccountType, "ChatGPT subscription")
