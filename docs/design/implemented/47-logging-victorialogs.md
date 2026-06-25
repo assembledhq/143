@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-05-06
 >
-> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, `make logs` / `make logs-query`, provisioned Grafana error and platform health dashboards, and repo-owned `vmalert` alert rules are implemented. Scheduler heartbeat alerts are tracked as ongoing operational work outside this doc.
+> **Implementation notes:** VictoriaLogs/Grafana Docker Compose, Vector collector config, logging-node cloud-init, deploy/provision script support, `make logs` / `make logs-query`, provisioned Grafana error, platform health, primary operations, preview health, worker deploy, and worker runtime dashboards, and repo-owned `vmalert` alert rules are implemented. Scheduler heartbeat alerts are tracked as ongoing operational work outside this doc.
 
 Self-hosted VictoriaLogs + Grafana stack on a dedicated Hetzner logging server, with Vector collectors on the app, worker, and logging servers.
 
@@ -352,10 +352,12 @@ Provisioning workflow:
 
 1. The provisioned error drilldown dashboard lives at `deploy/grafana/provisioning/dashboards/errors.json` and covers PR creation/push failures, session problems, worker fatal jobs, API 5xxs, reaper errors, top error messages, and raw recent error logs.
 2. The provisioned platform health dashboard lives at `deploy/grafana/provisioning/dashboards/platform-health.json` and is organized around actionable queue and worker-capacity signals first: ready jobs waiting, oldest wait, dead-letter jobs, active sandbox containers, and lowest CPU/RAM headroom from runtime samples. API health and session failure drilldowns remain below the headline operational snapshot.
-3. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
-4. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
-5. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys. App, worker, and logging deploys wait for Vector's Docker healthcheck to leave the initial `starting` state before deciding whether log collection is healthy.
-6. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
+3. The primary operations dashboard lives at `deploy/grafana/provisioning/dashboards/primary-operations.json` and gives the broad fleet view: active sessions, previews, containers, queue pressure, host CPU/RAM, and worker load.
+4. The worker runtime dashboard lives at `deploy/grafana/provisioning/dashboards/worker-runtime.json` and is the preferred Grafana view for current worker execution: running jobs by worker and type, active sandbox containers by worker, and active container CPU/RAM/disk allocation by worker. It uses DB-backed low-cardinality structured samples (`platform health: worker load sample` and `platform health: running job sample`) instead of raw Docker log metadata, because Docker stdout does not contain authoritative job ownership or cgroup allocation state.
+5. The Grafana dashboard provider uses `disableDeletion: false`, so removed dashboard JSON files are deleted from Grafana after provisioning resync.
+6. The repo-owned alert rules live at `deploy/vmalert/rules/production-alerts.yml` and are evaluated by `vmalert` against VictoriaLogs, then routed through Alertmanager.
+7. `deploy-logging` syncs `deploy/grafana/provisioning/`, `deploy/vmalert/rules`, `docker-compose.vector.yml`, and `deploy/vector.yaml` before recreating the logging stack. This makes dashboard, datasource, Vector, and alert rule edits apply through normal deploys. App, worker, and logging deploys wait for Vector's Docker healthcheck to leave the initial `starting` state before deciding whether log collection is healthy.
+8. Scheduler heartbeat alerts should wait for dedicated heartbeat signals so the rules are not guesswork.
 
 Vector's API is enabled in `deploy/vector.yaml` via top-level `api.enabled` and
 `api.address`; do not pass API settings as CLI flags in compose. Deploy

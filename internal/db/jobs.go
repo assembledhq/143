@@ -85,6 +85,18 @@ type WorkerLoadSample struct {
 	PreviewHeldContainers int64
 	RunningJobs           int64
 	RunningSessionJobs    int64
+	ActiveUsageContainers int64
+	ActiveMemoryAllocated int64
+	ActiveCPUAllocated    float64
+	ActiveDiskAllocated   int64
+}
+
+// RunningJobSample is an ops-oriented snapshot of currently running jobs,
+// grouped by worker node and job type.
+type RunningJobSample struct {
+	WorkerNodeID string
+	JobType      string
+	Running      int64
 }
 
 type SandboxCapacitySummary struct {
@@ -379,6 +391,18 @@ func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, e
 			WHERE status = 'running'
 			GROUP BY COALESCE(NULLIF(locked_by_node_id, ''), 'unassigned')
 		),
+		active_usage_counts AS (
+			SELECT
+				COALESCE(NULLIF(s.worker_node_id, ''), 'unassigned') AS worker_node_id,
+				COUNT(*) AS active_usage_containers,
+				COALESCE(SUM(e.memory_limit_mb), 0) AS active_memory_allocated_mb,
+				COALESCE(SUM(e.cpu_limit), 0)::double precision AS active_cpu_allocated,
+				COALESCE(SUM(e.disk_limit_mb), 0) AS active_disk_allocated_mb
+			FROM container_usage_events e
+			JOIN sessions s ON s.org_id = e.org_id AND s.id = e.session_id
+			WHERE e.stopped_at IS NULL
+			GROUP BY COALESCE(NULLIF(s.worker_node_id, ''), 'unassigned')
+		),
 		worker_ids AS (
 			SELECT worker_node_id FROM worker_nodes
 			UNION
@@ -387,6 +411,8 @@ func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, e
 			SELECT worker_node_id FROM preview_counts
 			UNION
 			SELECT worker_node_id FROM job_counts
+			UNION
+			SELECT worker_node_id FROM active_usage_counts
 		)
 		SELECT
 			worker_ids.worker_node_id,
@@ -397,12 +423,17 @@ func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, e
 			COALESCE(preview_counts.active_previews, 0) AS active_previews,
 			COALESCE(preview_counts.preview_held_containers, 0) AS preview_held_containers,
 			COALESCE(job_counts.running_jobs, 0) AS running_jobs,
-			COALESCE(job_counts.running_session_jobs, 0) AS running_session_jobs
+			COALESCE(job_counts.running_session_jobs, 0) AS running_session_jobs,
+			COALESCE(active_usage_counts.active_usage_containers, 0) AS active_usage_containers,
+			COALESCE(active_usage_counts.active_memory_allocated_mb, 0) AS active_memory_allocated_mb,
+			COALESCE(active_usage_counts.active_cpu_allocated, 0) AS active_cpu_allocated,
+			COALESCE(active_usage_counts.active_disk_allocated_mb, 0) AS active_disk_allocated_mb
 		FROM worker_ids
 		LEFT JOIN worker_nodes USING (worker_node_id)
 		LEFT JOIN session_counts USING (worker_node_id)
 		LEFT JOIN preview_counts USING (worker_node_id)
 		LEFT JOIN job_counts USING (worker_node_id)
+		LEFT JOIN active_usage_counts USING (worker_node_id)
 		ORDER BY running_sessions DESC, active_previews DESC, running_jobs DESC, worker_ids.worker_node_id ASC`, activeStatusFilter, activeStatusFilter))
 	if err != nil {
 		return nil, fmt.Errorf("worker load samples: %w", err)
@@ -422,6 +453,10 @@ func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, e
 			&sample.PreviewHeldContainers,
 			&sample.RunningJobs,
 			&sample.RunningSessionJobs,
+			&sample.ActiveUsageContainers,
+			&sample.ActiveMemoryAllocated,
+			&sample.ActiveCPUAllocated,
+			&sample.ActiveDiskAllocated,
 		); err != nil {
 			return nil, fmt.Errorf("scan worker load sample: %w", err)
 		}
@@ -429,6 +464,37 @@ func (s *JobStore) WorkerLoadSamples(ctx context.Context) ([]WorkerLoadSample, e
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("worker load samples rows: %w", err)
+	}
+	return samples, nil
+}
+
+// RunningJobSamples returns currently running jobs grouped by worker and type.
+// lint:allow-no-orgid reason="platform health sampler intentionally aggregates running jobs across orgs"
+func (s *JobStore) RunningJobSamples(ctx context.Context) ([]RunningJobSample, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT
+			COALESCE(NULLIF(locked_by_node_id, ''), 'unassigned') AS worker_node_id,
+			job_type,
+			COUNT(*) AS running
+		FROM jobs
+		WHERE status = 'running'
+		GROUP BY COALESCE(NULLIF(locked_by_node_id, ''), 'unassigned'), job_type
+		ORDER BY worker_node_id ASC, running DESC, job_type ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("running job samples: %w", err)
+	}
+	defer rows.Close()
+
+	var samples []RunningJobSample
+	for rows.Next() {
+		var sample RunningJobSample
+		if err := rows.Scan(&sample.WorkerNodeID, &sample.JobType, &sample.Running); err != nil {
+			return nil, fmt.Errorf("scan running job sample: %w", err)
+		}
+		samples = append(samples, sample)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("running job samples rows: %w", err)
 	}
 	return samples, nil
 }

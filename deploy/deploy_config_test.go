@@ -1621,6 +1621,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["preview-health.json"], "preview health dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["worker-runtime.json"], "worker runtime dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -1800,6 +1801,44 @@ func TestPrimaryOperationsDashboardTracksWorkerLoad(t *testing.T) {
 			require.Contains(t, panel.Targets[0].Expr, exprFragment, "panel %q should query the expected field or log message", title)
 		}
 		require.True(t, found, "primary operations dashboard should include panel %q", title)
+	}
+}
+
+func TestWorkerRuntimeDashboardUsesWorkerRuntimeLogs(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/worker-runtime.json")
+	require.NoError(t, err, "test should read the worker runtime dashboard")
+
+	var dashboard struct {
+		Title  string `json:"title"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "worker runtime dashboard should be valid JSON")
+	require.Equal(t, "143 - Worker Runtime", dashboard.Title, "worker runtime dashboard should have the expected title")
+
+	required := map[string]string{
+		"Running jobs":                    `platform health: running job total sample`,
+		"Running jobs by worker and type": `platform health: running job sample`,
+		"Container allocation by worker":  `active_memory_allocated_mb`,
+		"Allocated RAM by worker":         `active_memory_allocated_mb`,
+	}
+	for title, exprFragment := range required {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title != title {
+				continue
+			}
+			found = true
+			require.NotEmpty(t, panel.Targets, "panel %q should have a LogsQL target", title)
+			require.Contains(t, panel.Targets[0].Expr, exprFragment, "panel %q should query the expected log message or field", title)
+		}
+		require.True(t, found, "worker runtime dashboard should include panel %q", title)
 	}
 }
 

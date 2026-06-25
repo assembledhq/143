@@ -21,6 +21,15 @@ type workerLoadStore interface {
 	WorkerLoadSamples(ctx context.Context) ([]db.WorkerLoadSample, error)
 }
 
+type runningJobStore interface {
+	RunningJobSamples(ctx context.Context) ([]db.RunningJobSample, error)
+}
+
+type runningJobSampleKey struct {
+	workerNodeID string
+	jobType      string
+}
+
 type workerHeartbeatHealthStore interface {
 	WorkerHeartbeatHealth(ctx context.Context, staleBefore time.Time) (db.WorkerHeartbeatHealth, error)
 }
@@ -206,6 +215,10 @@ func emitWorkerLoadSample(ctx context.Context, store workerLoadStore, logger zer
 		total.PreviewHeldContainers += sample.PreviewHeldContainers
 		total.RunningJobs += sample.RunningJobs
 		total.RunningSessionJobs += sample.RunningSessionJobs
+		total.ActiveUsageContainers += sample.ActiveUsageContainers
+		total.ActiveMemoryAllocated += sample.ActiveMemoryAllocated
+		total.ActiveCPUAllocated += sample.ActiveCPUAllocated
+		total.ActiveDiskAllocated += sample.ActiveDiskAllocated
 		logger.Info().
 			Str("worker_node_id", sample.WorkerNodeID).
 			Str("node_status", sample.NodeStatus).
@@ -216,6 +229,10 @@ func emitWorkerLoadSample(ctx context.Context, store workerLoadStore, logger zer
 			Int64("preview_held_containers", sample.PreviewHeldContainers).
 			Int64("running_jobs", sample.RunningJobs).
 			Int64("running_session_jobs", sample.RunningSessionJobs).
+			Int64("active_usage_containers", sample.ActiveUsageContainers).
+			Int64("active_memory_allocated_mb", sample.ActiveMemoryAllocated).
+			Float64("active_cpu_allocated", sample.ActiveCPUAllocated).
+			Int64("active_disk_allocated_mb", sample.ActiveDiskAllocated).
 			Msg("platform health: worker load sample")
 	}
 	logger.Info().
@@ -226,7 +243,66 @@ func emitWorkerLoadSample(ctx context.Context, store workerLoadStore, logger zer
 		Int64("preview_held_containers", total.PreviewHeldContainers).
 		Int64("running_jobs", total.RunningJobs).
 		Int64("running_session_jobs", total.RunningSessionJobs).
+		Int64("active_usage_containers", total.ActiveUsageContainers).
+		Int64("active_memory_allocated_mb", total.ActiveMemoryAllocated).
+		Float64("active_cpu_allocated", total.ActiveCPUAllocated).
+		Int64("active_disk_allocated_mb", total.ActiveDiskAllocated).
 		Msg("platform health: worker load total sample")
+}
+
+// RunRunningJobSampler emits current running jobs grouped by worker and job
+// type. This complements RunWorkerLoadSampler's per-worker totals with enough
+// dimensionality for Grafana action tables.
+func RunRunningJobSampler(ctx context.Context, store runningJobStore, logger zerolog.Logger, interval time.Duration) {
+	if store == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	previous := make(map[runningJobSampleKey]struct{})
+	previous = emitRunningJobSamples(ctx, store, logger, previous)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			previous = emitRunningJobSamples(ctx, store, logger, previous)
+		}
+	}
+}
+
+func emitRunningJobSamples(ctx context.Context, store runningJobStore, logger zerolog.Logger, previous map[runningJobSampleKey]struct{}) map[runningJobSampleKey]struct{} {
+	samples, err := store.RunningJobSamples(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Msg("platform health: failed to sample running jobs")
+		return previous
+	}
+	current := make(map[runningJobSampleKey]struct{}, len(samples))
+	var total int64
+	for _, sample := range samples {
+		key := runningJobSampleKey{workerNodeID: sample.WorkerNodeID, jobType: sample.JobType}
+		current[key] = struct{}{}
+		total += sample.Running
+		logger.Info().
+			Str("worker_node_id", sample.WorkerNodeID).
+			Str("job_type", sample.JobType).
+			Int64("running", sample.Running).
+			Msg("platform health: running job sample")
+	}
+	for key := range previous {
+		if _, ok := current[key]; ok {
+			continue
+		}
+		logger.Info().
+			Str("worker_node_id", key.workerNodeID).
+			Str("job_type", key.jobType).
+			Int64("running", 0).
+			Msg("platform health: running job sample")
+	}
+	logger.Info().
+		Int64("running_jobs", total).
+		Msg("platform health: running job total sample")
+	return current
 }
 
 type hostResourceReader interface {
