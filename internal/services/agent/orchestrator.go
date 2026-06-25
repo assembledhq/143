@@ -6121,6 +6121,9 @@ func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session
 		}
 		scope = rec.credential.Scope()
 		if cfg, ok := rec.credential.Config.(models.AnthropicSubscriptionConfig); ok {
+			if cfg.IsSetupToken() {
+				return false, nil
+			}
 			existing = &models.AnthropicSubscription{
 				AccessToken:   cfg.AccessToken,
 				RefreshToken:  cfg.RefreshToken,
@@ -6246,13 +6249,13 @@ func anthropicSubscriptionChanged(existing, next models.AnthropicSubscription) b
 	return false
 }
 
-func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
+func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, string, error) {
 	if o.env == nil || o.env.codingCredentials == nil {
 		return false, "", nil
 	}
 
 	if picked, ok := o.env.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
-		return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, picked)
+		return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, env, picked)
 	}
 
 	_, picked, handled := o.env.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
@@ -6262,15 +6265,36 @@ func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uu
 	if !handled || picked == nil {
 		return false, "", nil
 	}
-	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, *picked)
+	return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, env, *picked)
 }
 
-func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential) (bool, string, error) {
+func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, env map[string]string, picked models.DecryptedCodingCredential) (bool, string, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
 		return false, "", nil
 	}
 	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
-	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+	if !ok {
+		return false, "", nil
+	}
+	if cfg.IsSetupToken() {
+		if cfg.OAuthToken == "" || cfg.IsExpired() {
+			return false, "", nil
+		}
+		if env == nil {
+			return false, "", fmt.Errorf("sandbox env is required for Claude Code setup-token auth")
+		}
+		if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+			return false, "", err
+		}
+		env["CLAUDE_CODE_OAUTH_TOKEN"] = cfg.OAuthToken
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_AUTH_TOKEN")
+		o.logger.Debug().
+			Str("org_id", orgID.String()).
+			Msg("injected claude setup-token auth into sandbox env")
+		return true, cfg.AccountType, nil
+	}
+	if cfg.AccessToken == "" || cfg.RefreshToken == "" {
 		return false, "", nil
 	}
 	sub := models.AnthropicSubscription{
@@ -6337,7 +6361,7 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		return TokenBillingModeAPIKey, nil
 	}
 
-	injected, accountType, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
+	injected, accountType, err := o.injectUnifiedClaudeCodeAuth(ctx, run.OrgID, run.TriggeredByUserID, sandbox, env)
 	if err != nil {
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 			o.logger.Warn().
@@ -6474,6 +6498,8 @@ func (o *Orchestrator) prepareClaudeCodeAPIKeyFallback(ctx context.Context, run 
 	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
+	delete(env, "ANTHROPIC_AUTH_TOKEN")
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
 
 	if err := o.removeClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
@@ -7518,7 +7544,9 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
 		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_AUTH_TOKEN")
 		delete(env, "ANTHROPIC_BASE_URL")
+		delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
 	case models.AgentTypeCodex:
 		delete(env, "OPENAI_API_KEY")
 		delete(env, "OPENAI_BASE_URL")

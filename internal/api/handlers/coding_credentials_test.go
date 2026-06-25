@@ -713,6 +713,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	userID := uuid.New()
 	orgID := uuid.New()
 	verifiedAt := now.Add(-time.Hour)
+	setupTokenExpiry := time.Date(2027, time.January, 15, 10, 30, 0, 0, time.UTC)
 	rows := []models.DecryptedCodingCredential{
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAI, Label: "Codex", Config: models.OpenAIConfig{APIKey: "sk-openai-123456"}, Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenAISubscription, Config: models.OpenAISubscriptionConfig{AccessToken: "tok", RefreshToken: "refresh", AccountType: "plus"}, Priority: 2, Status: models.CodingCredentialStatusInvalid, CreatedAt: now, UpdatedAt: now},
@@ -720,6 +721,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderGemini, Config: models.GeminiConfig{APIKey: "gemini-key"}, Priority: 2, Status: models.CodingCredentialStatusPendingAuth, CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAmp, Config: models.AmpConfig{APIKey: "amp-key"}, Priority: 3, Status: "disabled", CreatedAt: now, UpdatedAt: now},
 		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderPi, Config: models.PiConfig{APIKey: "pi-key"}, Priority: 4, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Config: models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "setup-token", OAuthTokenExpiresAt: setupTokenExpiry}, Priority: 5, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now},
 	}
 
 	personal := summariesForScope(rows, models.Scope{OrgID: orgID, UserID: &userID})
@@ -728,7 +730,7 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.Len(t, personal, 2, "summariesForScope should keep only personal rows for a personal scope")
 	require.True(t, personal[0].IsDefault, "first runnable personal row should be marked default")
 	require.False(t, personal[1].IsDefault, "invalid personal row should not be marked default")
-	require.Len(t, orgRows, 4, "summariesForScope should keep only org rows for org scope")
+	require.Len(t, orgRows, 5, "summariesForScope should keep only org rows for org scope")
 	require.False(t, orgRows[0].IsDefault, "rate-limited org row should not be marked default")
 	require.Equal(t, models.AgentTypeClaudeCode, orgRows[0].Agent, "anthropic subscription should map to Claude Code")
 	require.Equal(t, models.CodingAuthTypeSubscription, orgRows[0].AuthType, "subscription provider should map to subscription auth")
@@ -738,6 +740,8 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.True(t, orgRows[3].IsDefault, "first non-rate-limited runnable org row should be marked default")
 	require.Equal(t, models.CodingAuthStatusNeedsReauth, orgRows[1].Status, "pending_auth row should need reauth")
 	require.Equal(t, "max", orgRows[0].UsageNote, "subscription usage note should prefer account type")
+	require.Equal(t, models.CodingAuthStatusHealthy, orgRows[4].Status, "setup-token subscription should be healthy")
+	require.Equal(t, "Setup token renews by Jan 15, 2027", orgRows[4].UsageNote, "setup-token usage note should show the stored expiry")
 	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
 	require.Equal(t, "OpenCode API key", defaultLabelFor(models.AgentTypeOpenCode, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover opencode")
 	require.Equal(t, "Coding auth", defaultLabelFor("", ""), "defaultLabelFor should cover unknown agents")

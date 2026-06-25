@@ -260,7 +260,7 @@ func automationAgentConfigSecretKeys(agentType models.AgentType) []string {
 	case models.AgentTypeCodex:
 		return []string{"OPENAI_API_KEY"}
 	case models.AgentTypeClaudeCode:
-		return []string{"ANTHROPIC_API_KEY"}
+		return []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
 	case models.AgentTypeAmp:
 		return []string{"AMP_API_KEY"}
 	case models.AgentTypePi:
