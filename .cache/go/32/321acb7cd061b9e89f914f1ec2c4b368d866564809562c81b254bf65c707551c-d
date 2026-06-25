@@ -1,0 +1,6 @@
+./file.go
+./s3.go
+./s3_client.go
+./snapshot.go
+./upload_reaper.go
+./uploads.go

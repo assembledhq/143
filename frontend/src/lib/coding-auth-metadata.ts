@@ -133,6 +133,13 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
 }
 
 export type OpenCodeBackingProvider = "opencode" | "anthropic" | "openai" | "gemini" | "openrouter";
+export type OpenCodePresetConfidence = "high" | "medium" | "low";
+
+export interface OpenCodeKeyPresetDetection {
+  provider: OpenCodeBackingProvider;
+  confidence: OpenCodePresetConfidence;
+  message: string;
+}
 
 export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingProvider; label: string }> = [
   { value: "opencode", label: "OpenCode native" },
@@ -141,6 +148,53 @@ export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingPr
   { value: "gemini", label: "OpenCode via Gemini" },
   { value: "openrouter", label: "OpenCode via OpenRouter" },
 ];
+
+export function openCodeBackingProviderLabel(provider: OpenCodeBackingProvider): string {
+  return OPENCODE_BACKING_PROVIDER_OPTIONS.find((option) => option.value === provider)?.label ?? "OpenCode native";
+}
+
+export function openCodeCredentialLabel(provider: OpenCodeBackingProvider): string {
+  return `${openCodeBackingProviderLabel(provider)} key`;
+}
+
+export function detectOpenCodeKeyPreset(apiKey: string): OpenCodeKeyPresetDetection {
+  const trimmed = apiKey.trim();
+  if (/^sk-or[-_]/i.test(trimmed) || /^sk-or-v\d+-/i.test(trimmed)) {
+    return {
+      provider: "openrouter",
+      confidence: "high",
+      message: "Detected OpenRouter key from the sk-or prefix.",
+    };
+  }
+  if (/^sk-ant[-_]/i.test(trimmed)) {
+    return {
+      provider: "anthropic",
+      confidence: "high",
+      message: "Detected Anthropic key from the sk-ant prefix.",
+    };
+  }
+  if (/^AIza/i.test(trimmed)) {
+    return {
+      provider: "gemini",
+      confidence: "high",
+      message: "Detected Gemini key from the AIza prefix.",
+    };
+  }
+  if (/^sk-proj[-_]/i.test(trimmed)) {
+    return {
+      provider: "openai",
+      confidence: "medium",
+      message: "Detected OpenAI project key from the sk-proj prefix.",
+    };
+  }
+  return {
+    provider: "opencode",
+    confidence: "low",
+    message: trimmed
+      ? "This key shape is ambiguous. Defaulting to OpenCode native; you can change the provider."
+      : "Paste a key to detect the provider preset.",
+  };
+}
 
 export function openCodeModelsForBackingProvider(provider: OpenCodeBackingProvider): string[] {
   switch (provider) {

@@ -1,0 +1,9 @@
+./argument.go
+./batch.go
+./driver.go
+./expectations.go
+./options.go
+./pgxmock.go
+./query.go
+./result.go
+./rows.go

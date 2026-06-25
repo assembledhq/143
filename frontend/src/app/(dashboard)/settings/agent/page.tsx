@@ -6,7 +6,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldAlert, Trash2 } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
-import { apiKeyHelp, OPENCODE_BACKING_PROVIDER_OPTIONS, openCodeAgentDefaults, openCodeDefaultModelForBackingProvider, openCodeModelsForBackingProvider, ORG_PROVIDER_OPTIONS, type OpenCodeBackingProvider } from "@/lib/coding-auth-metadata";
+import {
+  apiKeyHelp,
+  detectOpenCodeKeyPreset,
+  OPENCODE_BACKING_PROVIDER_OPTIONS,
+  openCodeAgentDefaults,
+  openCodeCredentialLabel,
+  openCodeDefaultModelForBackingProvider,
+  openCodeModelsForBackingProvider,
+  ORG_PROVIDER_OPTIONS,
+  type OpenCodeBackingProvider,
+} from "@/lib/coding-auth-metadata";
 import { captureError } from "@/lib/errors";
 import { useAuth } from "@/hooks/use-auth";
 import {
@@ -156,9 +166,25 @@ export default function AgentPage() {
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
   const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
   const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
-  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(openCodeBackingProvider), [openCodeBackingProvider]);
+  const openCodeKeyDetection = useMemo(
+    () => provider === "opencode" ? detectOpenCodeKeyPreset(apiKey) : null,
+    [apiKey, provider],
+  );
+  const effectiveOpenCodeBackingProvider = provider === "opencode" && !openCodeBackingProviderTouched
+    ? openCodeKeyDetection?.provider ?? openCodeBackingProvider
+    : openCodeBackingProvider;
+  const openCodeModelOptions = useMemo(() => openCodeModelsForBackingProvider(effectiveOpenCodeBackingProvider), [effectiveOpenCodeBackingProvider]);
+  const effectiveOpenCodeModel = !openCodeModelTouched
+    ? openCodeDefaultModelForBackingProvider(effectiveOpenCodeBackingProvider)
+    : (
+        openCodeModelOptions.includes(openCodeModel)
+          ? openCodeModel
+          : openCodeDefaultModelForBackingProvider(effectiveOpenCodeBackingProvider)
+      );
 
   const { data: codingCredentialsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
     queryKey: queryKeys.codingCredentials.list("org"),
@@ -240,7 +266,11 @@ export default function AgentPage() {
 
   const stackCreateMutation = useMutation({
     mutationFn: async () => {
-      const nextLabel = label.trim() || defaultLabel(provider, authType);
+      const nextLabel = label.trim() || (
+        provider === "opencode"
+          ? openCodeCredentialLabel(effectiveOpenCodeBackingProvider)
+          : defaultLabel(provider, authType)
+      );
       // The unified create endpoint returns the new row unwrapped (no
       // SingleResponse envelope).
       return api.codingCredentials.create({
@@ -249,13 +279,13 @@ export default function AgentPage() {
         auth_type: "api_key",
         label: nextLabel,
         api_key: apiKey,
-        ...(provider === "opencode" ? { api_type: openCodeBackingProvider } : {}),
+        ...(provider === "opencode" ? { api_type: effectiveOpenCodeBackingProvider } : {}),
         ...(provider === "amp"
           ? { agent_defaults: { AMP_MODE: ampMode } }
           : provider === "pi"
             ? { agent_defaults: { PI_MODEL: piModel } }
             : provider === "opencode"
-              ? { agent_defaults: openCodeAgentDefaults(openCodeModel, openCodeCustomModel) }
+              ? { agent_defaults: openCodeAgentDefaults(effectiveOpenCodeModel, openCodeCustomModel) }
             : {}),
       });
     },
@@ -303,7 +333,11 @@ export default function AgentPage() {
 
   const selectedProvider = PROVIDER_OPTIONS.find((option) => option.key === provider) ?? PROVIDER_OPTIONS[0];
   const effectiveAuthType = selectedProvider.supportsSubscription ? authType : "api_key";
-  const generatedLabel = label.trim() || defaultLabel(provider, effectiveAuthType);
+  const generatedLabel = label.trim() || (
+    provider === "opencode"
+      ? openCodeCredentialLabel(effectiveOpenCodeBackingProvider)
+      : defaultLabel(provider, effectiveAuthType)
+  );
   const showInsertionSelect = selectedProvider.supportsStackOrder;
   const showAuthTypeSelector = selectedProvider.supportsSubscription;
   const addBusy = stackCreateMutation.isPending;
@@ -318,14 +352,27 @@ export default function AgentPage() {
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
     setPiModel(PI_MODEL_CLAUDE_OPUS_48);
     setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProviderTouched(false);
     setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }
 
-  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider) {
+  function updateOpenCodeBackingProvider(value: OpenCodeBackingProvider, touched = true) {
+    if (touched) setOpenCodeBackingProviderTouched(true);
     setOpenCodeBackingProvider(value);
     setOpenCodeModel(openCodeDefaultModelForBackingProvider(value));
+    setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
+  }
+
+  function updateOpenCodeModel(value: string) {
+    setOpenCodeModelTouched(true);
+    setOpenCodeModel(value);
+  }
+
+  function updateApiKey(next: string) {
+    setApiKey(next);
   }
 
   function openAddModal(nextProvider: ModalProvider) {
@@ -690,7 +737,7 @@ export default function AgentPage() {
                   <>
                     <div className="space-y-2">
                       <Label htmlFor="opencode-backing-provider">OpenCode provider</Label>
-                      <Select value={openCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
+                      <Select value={effectiveOpenCodeBackingProvider} onValueChange={(value) => updateOpenCodeBackingProvider(value as OpenCodeBackingProvider)}>
                         <SelectTrigger id="opencode-backing-provider">
                           <SelectValue />
                         </SelectTrigger>
@@ -700,10 +747,17 @@ export default function AgentPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                      {openCodeKeyDetection && apiKey.trim() ? (
+                        <p className="text-xs text-muted-foreground">
+                          {openCodeBackingProviderTouched
+                            ? "Provider set manually. Change it if this key should use a different OpenCode route."
+                            : openCodeKeyDetection.message}
+                        </p>
+                      ) : null}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="opencode-model">Default model</Label>
-                      <Select value={openCodeModel} onValueChange={setOpenCodeModel}>
+                      <Select value={effectiveOpenCodeModel} onValueChange={updateOpenCodeModel}>
                         <SelectTrigger id="opencode-model">
                           <SelectValue />
                         </SelectTrigger>
@@ -739,7 +793,7 @@ export default function AgentPage() {
                     id="auth-api-key-input"
                     type="password"
                     value={apiKey}
-                    onChange={(event) => setApiKey(event.target.value)}
+                    onChange={(event) => updateApiKey(event.target.value)}
                     placeholder={provider === "amp" ? "amp_..." : provider === "pi" ? "pi_..." : provider === "opencode" ? "OpenCode or provider key" : provider === "claude_code" ? "sk-ant-..." : "sk-..."}
                   />
                 </div>

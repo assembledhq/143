@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AccountPage from "./page";
 
@@ -259,7 +259,7 @@ describe("Account settings page", () => {
     });
 	  });
 
-	  it("posts personal OpenCode auth with an explicit backing provider", { timeout: 12_000 }, async () => {
+	  it("posts personal OpenCode auth with a detected backing provider and custom model override", { timeout: 12_000 }, async () => {
 	    const user = userEvent.setup();
 	    let createBody: Record<string, unknown> | null = null;
 	    server.use(
@@ -287,23 +287,81 @@ describe("Account settings page", () => {
 	    renderWithProviders(<AccountPage />);
 
 	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
-	    await user.click(await screen.findByLabelText("OpenCode"));
-	    await user.click(screen.getByRole("combobox", { name: "OpenCode provider" }));
-	    await user.click(await screen.findByRole("option", { name: "OpenCode via OpenRouter" }));
-	    await user.type(screen.getByLabelText("Custom model override"), "xai/grok-code-fast");
-	    await user.type(screen.getByPlaceholderText("OpenCode or provider key"), "sk-or-opencode");
-	    await user.click(screen.getByRole("button", { name: "Save auth" }));
+	    const dialog = await screen.findByRole("dialog");
+	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
+	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
+	      target: { value: "sk-or-opencode" },
+	    });
+	    await within(dialog).findByText("Detected OpenRouter key from the sk-or prefix.");
+	    fireEvent.change(within(dialog).getByLabelText("Custom model override"), {
+	      target: { value: "xai/grok-code-fast" },
+	    });
+	    await user.click(within(dialog).getByRole("button", { name: "Save auth" }));
 
 	    await waitFor(() => {
 	      expect(createBody).toEqual({
 	        scope: "personal",
 	        agent: "opencode",
 	        auth_type: "api_key",
+	        label: "OpenCode via OpenRouter key",
 	        api_key: "sk-or-opencode",
 	        api_type: "openrouter",
 	        agent_defaults: {
 	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
 	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
+	        },
+	      });
+	    });
+	  });
+
+	  it("detects a personal OpenRouter OpenCode key and saves the detected preset", { timeout: 12_000 }, async () => {
+	    const user = userEvent.setup();
+	    let createBody: Record<string, unknown> | null = null;
+	    server.use(
+	      ...emptyCodingCredentialsHandlers(),
+	      http.post("/api/v1/coding-credentials", async ({ request }) => {
+	        createBody = await request.json() as Record<string, unknown>;
+	        return HttpResponse.json({
+	          id: "p-opencode",
+	          org_id: "org-1",
+	          user_id: "user-1",
+	          scope: "personal",
+	          priority: 1,
+	          agent: "opencode",
+	          auth_type: "api_key",
+	          provider: "opencode",
+	          label: "OpenCode via OpenRouter key",
+	          status: "healthy",
+	          is_default: true,
+	          created_at: "2026-01-01T00:00:00Z",
+	          updated_at: "2026-01-01T00:00:00Z",
+	        });
+	      }),
+	    );
+
+	    renderWithProviders(<AccountPage />);
+
+	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
+	    const dialog = await screen.findByRole("dialog");
+	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
+	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
+	      target: { value: "sk-or-v1-personal" },
+	    });
+
+	    expect(await within(dialog).findByText("Detected OpenRouter key from the sk-or prefix.")).toBeInTheDocument();
+
+	    await user.click(within(dialog).getByRole("button", { name: "Save auth" }));
+
+	    await waitFor(() => {
+	      expect(createBody).toEqual({
+	        scope: "personal",
+	        agent: "opencode",
+	        auth_type: "api_key",
+	        label: "OpenCode via OpenRouter key",
+	        api_key: "sk-or-v1-personal",
+	        api_type: "openrouter",
+	        agent_defaults: {
+	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
 	        },
 	      });
 	    });

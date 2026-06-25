@@ -236,7 +236,7 @@ func TestOpenCodeConfigValidate(t *testing.T) {
 		{name: "native opencode model matches native key", cfg: OpenCodeConfig{APIKey: "oc_key", BackingProvider: ProviderOpenCode, Model: OpenCodeModelGPT52}},
 		{name: "anthropic model matches anthropic backed key", cfg: OpenCodeConfig{APIKey: "sk-ant", BackingProvider: ProviderAnthropic, Model: OpenCodeModelClaudeHaiku45}},
 		{name: "openai model matches openai backed key", cfg: OpenCodeConfig{APIKey: "sk-openai", BackingProvider: ProviderOpenAI, Model: OpenCodeModelGPT54Mini}},
-		{name: "gemini model matches gemini backed key", cfg: OpenCodeConfig{APIKey: "gem-key", BackingProvider: ProviderGemini, Model: OpenCodeModelGemini25Flash}},
+		{name: "gemini model matches gemini backed key", cfg: OpenCodeConfig{APIKey: "gem-key", BackingProvider: ProviderGemini, Model: OpenCodeModelGemini3Flash}},
 		{name: "openrouter allows arbitrary provider model", cfg: OpenCodeConfig{APIKey: "sk-or", BackingProvider: ProviderOpenRouter, Model: OpenCodeModelClaudeHaiku45}},
 		{name: "missing key", cfg: OpenCodeConfig{BackingProvider: ProviderOpenCode}, wantErr: true},
 		{name: "unsupported backing provider", cfg: OpenCodeConfig{APIKey: "key", BackingProvider: ProviderSentry}, wantErr: true},

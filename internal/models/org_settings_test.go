@@ -188,7 +188,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	raw := json.RawMessage(`{
 		"agent_config": {
 			"claude_code": {"ANTHROPIC_MODEL": "claude-opus-4-7", "ANTHROPIC_API_KEY": "sk-ant-org"},
-			"opencode": {"OPENCODE_MODEL": "google/gemini-2.5-flash"}
+			"opencode": {"OPENCODE_MODEL": "google/gemini-3-flash"}
 		}
 	}`)
 
@@ -198,7 +198,7 @@ func TestParseOrgSettings_AgentConfig(t *testing.T) {
 	require.NotNil(t, s.AgentConfig, "should parse agent_config")
 	require.Equal(t, "claude-opus-4-7", s.AgentConfig["claude_code"]["ANTHROPIC_MODEL"])
 	require.Equal(t, "sk-ant-org", s.AgentConfig["claude_code"]["ANTHROPIC_API_KEY"])
-	require.Equal(t, "google/gemini-2.5-flash", s.AgentConfig["opencode"]["OPENCODE_MODEL"])
+	require.Equal(t, "google/gemini-3-flash", s.AgentConfig["opencode"]["OPENCODE_MODEL"])
 	require.NotContains(t, s.AgentConfig, "codex", "codex should not be present when not configured")
 }
 
