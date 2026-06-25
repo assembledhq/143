@@ -237,6 +237,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		handlers.WithSlackInstallationStore(slackInstallationStore),
 		handlers.WithSlackBotSettingsStore(slackBotSettingsStore),
 		handlers.WithSlackUserLinkStore(slackUserLinkStore),
+		handlers.WithExternalUserIdentityStores(db.NewExternalUserLinkStore(pool), db.NewExternalUserLinkSuggestionStore(pool)),
 		handlers.WithSlackChannelSettingsStore(slackChannelSettingsStore),
 		handlers.WithSlackbotMetrics(slackMetrics),
 		handlers.WithWebhookDeliveryStore(webhookDeliveryStore),
@@ -1331,6 +1332,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				// Personal credential management
 				r.Put("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
 				r.Delete("/api/v1/settings/credentials/personal/{provider}", handlers.LegacyCredentialsGone)
+				r.Get("/api/v1/users/me/external-identities", integrationHandler.ListMyExternalIdentities)
+				r.Delete("/api/v1/users/me/external-identities/{id}", integrationHandler.DeleteMyExternalIdentity)
+				r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/integrations/external-user-link-claims/{token}/claim", integrationHandler.ClaimExternalUserLink)
 				r.Post("/api/v1/integrations/slack/user-links/me", integrationHandler.LinkSlackUserMe)
 				r.Delete("/api/v1/integrations/slack/user-links/me", integrationHandler.UnlinkSlackUserMe)
 
@@ -1596,6 +1600,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/team/domains/{id}", orgDomainsHandler.Delete)
 				r.Get("/api/v1/team/github-orgs", integrationHandler.ListGitHubOrgAutoJoin)
 				r.Patch("/api/v1/team/github-orgs/{installation_id}", integrationHandler.UpdateGitHubOrgAutoJoin)
+				r.Get("/api/v1/integrations/external-user-links", integrationHandler.ListExternalUserLinks)
+				r.Post("/api/v1/integrations/external-user-links", integrationHandler.CreateExternalUserLink)
+				r.Delete("/api/v1/integrations/external-user-links/{id}", integrationHandler.DeleteExternalUserLink)
+				r.Get("/api/v1/integrations/external-user-link-suggestions", integrationHandler.ListExternalUserLinkSuggestions)
+				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/approve", integrationHandler.ApproveExternalUserLinkSuggestion)
+				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/dismiss", integrationHandler.DismissExternalUserLinkSuggestion)
 
 				// Integration management (OAuth flows + connect/disconnect/sync).
 				// Connecting an integration is an org-wide trust decision, so members

@@ -1703,6 +1703,29 @@ func TestSlackHumanInputAuthorizationAllowsTeamSessionClaim(t *testing.T) {
 	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the mapped 143 user")
 }
 
+func TestSlackHumanInputAuthorizationAllowsExternalUserLink(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	requestID := uuid.New()
+	membership := models.OrganizationMembership{UserID: userID, OrgID: orgID, Role: models.RoleMember}
+
+	decision, err := authorizeSlackHumanInputAnswer(context.Background(), workerSlackHumanInputAuthStores{
+		externalLinks: workerExternalUserLinkLookup{link: models.ExternalUserLink{
+			UserID: userID,
+		}},
+		memberships: workerSlackMembershipLookup{membership: membership},
+	}, orgID, sessionID, requestID, models.SlackInteractionJobPayload{
+		TeamID: "T123",
+		UserID: "U123",
+	})
+
+	require.NoError(t, err, "authorized external Slack links should be able to answer human input without a legacy Slack link")
+	require.Equal(t, userID, decision.AnsweredByUserID, "human input should be answered as the externally mapped 143 user")
+}
+
 func TestSlackHumanInputAuthorizationRejectsWrongAssignedUser(t *testing.T) {
 	t.Parallel()
 
@@ -1833,6 +1856,18 @@ type workerSlackUserLinkLookup struct {
 func (s workerSlackUserLinkLookup) GetBySlackUser(context.Context, uuid.UUID, string, string) (models.SlackUserLink, error) {
 	if s.err != nil {
 		return models.SlackUserLink{}, s.err
+	}
+	return s.link, nil
+}
+
+type workerExternalUserLinkLookup struct {
+	link models.ExternalUserLink
+	err  error
+}
+
+func (s workerExternalUserLinkLookup) GetActiveByExternal(context.Context, uuid.UUID, models.ExternalIdentityProvider, string, string) (models.ExternalUserLink, error) {
+	if s.err != nil {
+		return models.ExternalUserLink{}, s.err
 	}
 	return s.link, nil
 }

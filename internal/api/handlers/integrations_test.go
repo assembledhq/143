@@ -1633,6 +1633,75 @@ func TestIntegrationHandler_LinkSlackUserMeRejectsEmailMismatch(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "Slack self-link should not upsert a mismatched Slack identity")
 }
 
+func TestIntegrationHandler_LinkSlackUserMeUsesSelfLinkedExternalIdentity(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	installationID := uuid.New()
+	integrationID := uuid.New()
+	linkID := uuid.New()
+	externalLinkID := uuid.New()
+	now := time.Now()
+	email := "user@example.com"
+	displayName := "Slack User"
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		fakeIntegrationCredentialStore{credentials: map[models.ProviderName]*models.DecryptedCredential{
+			models.ProviderSlack: {
+				OrgID:    orgID,
+				Provider: models.ProviderSlack,
+				Config:   models.SlackConfig{AccessToken: "xoxb-token", TeamID: "T123"},
+			},
+		}},
+		"", "", "http://localhost:8080", "http://localhost:3000",
+		WithSlackUserInfoClient(fakeSlackUserInfoClient{user: slackTestUser("U123", email)}),
+	)
+	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
+	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+	handler.externalUserLinks = db.NewExternalUserLinkStore(mock)
+
+	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
+	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_team_id, slack_user_id\)\s+DO UPDATE SET[\s\S]*source = 'self_linked'`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}).AddRow(
+			linkID, orgID, installationID, &userID, "T123", "U123", &email, displayName,
+			models.SlackUserLinkSourceSelfLinked, &now, now, now,
+		))
+	mock.ExpectQuery(`ON CONFLICT \(org_id, provider, provider_workspace_id, provider_user_id\)\s+WHERE status = 'active'\s+DO UPDATE SET[\s\S]*source = 'self_linked'`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(externalUserLinkRowsForHandler().
+			AddRow(externalLinkID, orgID, models.ExternalIdentityProviderSlack, "T123", "U123", userID,
+				models.ExternalUserLinkSourceSelfLinked, models.ExternalUserLinkStatusActive, 100,
+				&email, nil, &displayName, &userID, now, nil))
+
+	body := strings.NewReader(`{"slack_user_id":"U123"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links/me", body)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: email})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.LinkSlackUserMe(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "Slack self-link should return OK")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack self-link should use self-link semantics for the unified identity")
+}
+
 func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -1659,6 +1728,7 @@ func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
 	)
 	handler.slackInstallationStore = db.NewSlackInstallationStore(mock)
 	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+	handler.externalUserLinks = db.NewExternalUserLinkStore(mock)
 
 	expectSlackInstallationByOrg(mock, orgID, installationID, integrationID)
 	mock.ExpectQuery(`ON CONFLICT \(org_id, slack_team_id, slack_user_id\)`).
@@ -1673,6 +1743,16 @@ func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
 			linkID, orgID, installationID, &userID, "T123", "U123", &email, "Eng User",
 			models.SlackUserLinkSourceAdminLinked, &now, now, now,
 		))
+	mock.ExpectQuery(`ON CONFLICT \(org_id, provider, provider_workspace_id, provider_user_id\)\s+WHERE status = 'active'\s+DO UPDATE SET[\s\S]*source = 'admin_linked'`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(externalUserLinkRowsForHandler().
+			AddRow(uuid.New(), orgID, models.ExternalIdentityProviderSlack, "T123", "U123", userID,
+				models.ExternalUserLinkSourceAdminLinked, models.ExternalUserLinkStatusActive, 90,
+				&email, nil, externalIdentityPtrString("Eng User"), nil, now, nil))
 
 	body := strings.NewReader(fmt.Sprintf(`{"user_id":%q,"slack_user_id":"U123","slack_email":"eng@example.com","slack_display_name":"Eng User"}`, userID.String()))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/slack/user-links", body)
@@ -1689,6 +1769,43 @@ func TestIntegrationHandler_UpsertSlackUserLinkAdmin(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "admin Slack user-link upsert should satisfy database expectations")
 }
 
+func TestIntegrationHandler_DeleteMyExternalIdentityRejectsAdminManagedLink(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	linkID := uuid.New()
+	now := time.Now()
+	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
+	handler.externalUserLinks = db.NewExternalUserLinkStore(mock)
+
+	mock.ExpectQuery(`FROM external_user_links\s+WHERE org_id = @org_id\s+AND id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(externalUserLinkRowsForHandler().
+			AddRow(linkID, orgID, models.ExternalIdentityProviderSlack, "T123", "U123", userID,
+				models.ExternalUserLinkSourceAdminLinked, models.ExternalUserLinkStatusActive, 90,
+				nil, nil, nil, nil, now, nil))
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/users/me/external-identities/"+linkID.String(), nil)
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Email: "user@example.com"})
+	req = req.WithContext(ctx)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", linkID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	rr := httptest.NewRecorder()
+
+	handler.DeleteMyExternalIdentity(rr, req)
+
+	require.Equal(t, http.StatusForbidden, rr.Code, "self-service external identity delete should not revoke admin-managed links")
+	require.Contains(t, rr.Body.String(), "ADMIN_MANAGED_EXTERNAL_IDENTITY", "response should identify admin-managed identity protection")
+	require.NoError(t, mock.ExpectationsWereMet(), "admin-managed self-delete should only load the link")
+}
+
 func TestIntegrationHandler_DeleteSlackUserLinkAdmin(t *testing.T) {
 	t.Parallel()
 
@@ -1698,12 +1815,30 @@ func TestIntegrationHandler_DeleteSlackUserLinkAdmin(t *testing.T) {
 
 	orgID := uuid.New()
 	linkID := uuid.New()
+	installationID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	email := "eng@example.com"
 	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
+	handler.externalUserLinks = db.NewExternalUserLinkStore(mock)
+
+	mock.ExpectQuery(`FROM slack_user_links\s+WHERE org_id = @org_id\s+AND id = @id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}).AddRow(
+			linkID, orgID, installationID, &userID, "T123", "U123", &email, "Eng User",
+			models.SlackUserLinkSourceAdminLinked, &now, now, now,
+		))
 
 	mock.ExpectExec(`DELETE FROM slack_user_links`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectExec(`UPDATE external_user_links\s+SET status = 'revoked',\s+revoked_at = now\(\)\s+WHERE org_id = @org_id\s+AND provider = @provider\s+AND provider_workspace_id = @provider_workspace_id\s+AND provider_user_id = @provider_user_id\s+AND status = 'active'`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -1730,9 +1865,12 @@ func TestIntegrationHandler_DeleteSlackUserLinkAdmin_NotFound(t *testing.T) {
 	handler := NewIntegrationHandler(db.NewIntegrationStore(mock), nil, "", "", "http://localhost:8080", "http://localhost:3000")
 	handler.slackUserLinkStore = db.NewSlackUserLinkStore(mock)
 
-	mock.ExpectExec(`DELETE FROM slack_user_links`).
+	mock.ExpectQuery(`FROM slack_user_links\s+WHERE org_id = @org_id\s+AND id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "user_id", "slack_team_id", "slack_user_id",
+			"slack_email", "slack_display_name", "source", "linked_at", "created_at", "updated_at",
+		}))
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/integrations/slack/user-links/"+linkID.String(), nil)
 	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
@@ -4216,6 +4354,45 @@ func TestSlackUserLinkRequestsValidate(t *testing.T) {
 	}
 }
 
+func TestIntegrationHandler_CreateExternalUserLinkRejectsUserOutsideOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	adminID := uuid.New()
+	targetUserID := uuid.New()
+	handler := NewIntegrationHandler(
+		db.NewIntegrationStore(mock),
+		nil,
+		"",
+		"",
+		"http://localhost:8080",
+		"http://localhost:3000",
+		WithIntegrationMembershipStore(db.NewOrganizationMembershipStore(mock)),
+		WithExternalUserIdentityStores(db.NewExternalUserLinkStore(mock), db.NewExternalUserLinkSuggestionStore(mock)),
+	)
+
+	mock.ExpectQuery(`FROM organization_memberships\s+WHERE user_id = @user_id AND org_id = @org_id`).
+		WithArgs(targetUserID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}))
+
+	body := fmt.Sprintf(`{"provider":"slack","provider_workspace_id":"T123","provider_user_id":"U123","user_id":%q}`, targetUserID.String())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/external-user-links", strings.NewReader(body))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: adminID, OrgID: orgID, Email: "admin@example.com", Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.CreateExternalUserLink(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "external link creation should reject users outside the active org")
+	require.Contains(t, rr.Body.String(), "USER_NOT_IN_ORG", "response should identify the membership validation failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "membership lookup should be the only database operation")
+}
+
 func TestSlackChannelSettingsPatchRequestToSettings(t *testing.T) {
 	t.Parallel()
 
@@ -4248,6 +4425,18 @@ func TestSlackChannelSettingsPatchRequestToSettings(t *testing.T) {
 	require.Equal(t, models.SlackResponseVisibilityThread, *settings.ResponseVisibility, "ToSettings should convert response visibility")
 	require.Equal(t, models.SlackNotificationPresetQuiet, *settings.NotificationPreset, "ToSettings should convert notification preset")
 	require.JSONEq(t, `{"preview.ready":{"channel":true}}`, string(settings.NotificationSubscriptions), "ToSettings should preserve notification subscriptions")
+}
+
+func externalUserLinkRowsForHandler() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "provider", "provider_workspace_id", "provider_user_id", "user_id",
+		"source", "status", "confidence", "external_email", "external_handle",
+		"external_display_name", "linked_by_user_id", "created_at", "revoked_at",
+	})
+}
+
+func externalIdentityPtrString(v string) *string {
+	return &v
 }
 
 func TestSlackChannelSettingsPatchRequestApplyPreservesOmittedFields(t *testing.T) {
