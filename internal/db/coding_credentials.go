@@ -672,6 +672,9 @@ func (s *CodingCredentialStore) filterAvailable(creds []models.DecryptedCodingCr
 		if credentialRateLimitedAt(cred, now) {
 			continue
 		}
+		if credentialSetupTokenExpiredAt(cred, now) {
+			continue
+		}
 		out = append(out, cred)
 	}
 	return out
@@ -681,6 +684,14 @@ func credentialRateLimitedAt(cred models.DecryptedCodingCredential, now time.Tim
 	return cred.Status == models.CodingCredentialStatusActive &&
 		cred.RateLimitedUntil != nil &&
 		cred.RateLimitedUntil.After(now)
+}
+
+func credentialSetupTokenExpiredAt(cred models.DecryptedCodingCredential, now time.Time) bool {
+	cfg, ok := cred.Config.(models.AnthropicSubscriptionConfig)
+	if !ok || !cfg.IsSetupToken() {
+		return false
+	}
+	return cfg.OAuthToken == "" || cfg.OAuthTokenExpiresAt.IsZero() || !now.Before(cfg.OAuthTokenExpiresAt)
 }
 
 // ----- Mutation -----

@@ -789,6 +789,8 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 			if ac.BaseURL != "" {
 				merged["ANTHROPIC_BASE_URL"] = ac.BaseURL
 			}
+		} else if sub, ok := cfg.(models.AnthropicSubscriptionConfig); ok && sub.IsSetupToken() && sub.OAuthToken != "" && !sub.IsExpired() {
+			merged["CLAUDE_CODE_OAUTH_TOKEN"] = sub.OAuthToken
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAnthropic); ok {
 			setAuthBlockedEnv(merged, block)
 		}
@@ -1596,7 +1598,23 @@ func compatibleCodingProviderConfig(provider models.ProviderName, cfg models.Pro
 		return openAI, true
 	case models.ProviderAnthropicSubscription:
 		sub, ok := cfg.(models.AnthropicSubscriptionConfig)
-		if !ok || sub.AccessToken == "" || sub.RefreshToken == "" {
+		if !ok {
+			return nil, false
+		}
+		if sub.IsSetupToken() {
+			if sub.OAuthToken == "" || sub.IsExpired() {
+				return nil, false
+			}
+			return models.AnthropicSubscriptionConfig{
+				AuthMode:            models.AnthropicSubscriptionAuthModeSetupToken,
+				OAuthToken:          sub.OAuthToken,
+				OAuthTokenExpiresAt: sub.OAuthTokenExpiresAt,
+				AccountType:         sub.AccountType,
+				RateLimitTier:       sub.RateLimitTier,
+				Scopes:              sub.Scopes,
+			}, true
+		}
+		if sub.AccessToken == "" || sub.RefreshToken == "" {
 			return nil, false
 		}
 		// Drop PKCE-only fields (State, CodeVerifier, AuthorizeURL) when
@@ -1863,7 +1881,7 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID
 	}
 	if e.codingCredentials != nil {
 		if picked, ok := e.lookupRecentCredential(orgID, userID, models.ProviderAnthropic); ok {
-			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, picked, model)
+			return e.injectPickedClaudeCodeAuthWithEnv(ctx, orgID, sandbox, picked, model, env)
 		}
 		_, picked, handled := e.pickFromCodingProviderSet(ctx, orgID, userID, models.ProviderAnthropic, []models.ProviderName{
 			models.ProviderAnthropic,
@@ -1873,7 +1891,7 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID
 			if picked == nil {
 				return false, nil
 			}
-			return e.injectPickedClaudeCodeAuth(ctx, orgID, sandbox, *picked, model)
+			return e.injectPickedClaudeCodeAuthWithEnv(ctx, orgID, sandbox, *picked, model, env)
 		}
 	}
 
@@ -1890,12 +1908,32 @@ func (e *AgentEnv) InjectClaudeCodeAuthForUserWithEnv(ctx context.Context, orgID
 	return e.writeClaudeCodeAuth(ctx, orgID, sandbox, *sub, model)
 }
 
-func (e *AgentEnv) injectPickedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string) (bool, error) {
+func (e *AgentEnv) injectPickedClaudeCodeAuthWithEnv(ctx context.Context, orgID uuid.UUID, sandbox *Sandbox, picked models.DecryptedCodingCredential, model string, env map[string]string) (bool, error) {
 	if picked.Provider != models.ProviderAnthropicSubscription {
 		return false, nil
 	}
 	cfg, ok := picked.Config.(models.AnthropicSubscriptionConfig)
-	if !ok || cfg.AccessToken == "" || cfg.RefreshToken == "" {
+	if !ok {
+		return false, nil
+	}
+	if cfg.IsSetupToken() {
+		if cfg.OAuthToken == "" || cfg.IsExpired() {
+			return false, nil
+		}
+		if env == nil {
+			return false, fmt.Errorf("sandbox env is required for Claude Code setup-token auth")
+		}
+		if err := e.RemoveClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
+			return false, err
+		}
+		env["CLAUDE_CODE_OAUTH_TOKEN"] = cfg.OAuthToken
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_AUTH_TOKEN")
+		version := e.detectClaudeCodeVersion(ctx, sandbox)
+		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, cfg.AccountType, model, version))
+		return true, nil
+	}
+	if cfg.AccessToken == "" || cfg.RefreshToken == "" {
 		return false, nil
 	}
 	sub := models.AnthropicSubscription{
@@ -1989,6 +2027,8 @@ func (e *AgentEnv) PrepareClaudeCodeAPIKeyFallback(ctx context.Context, sandbox 
 	if env["ANTHROPIC_API_KEY"] == "" {
 		return errClaudeCodeFallbackUnavailable
 	}
+	delete(env, "ANTHROPIC_AUTH_TOKEN")
+	delete(env, "CLAUDE_CODE_OAUTH_TOKEN")
 	if err := e.RemoveClaudeCodeCredentialsFile(ctx, sandbox); err != nil {
 		return err
 	}

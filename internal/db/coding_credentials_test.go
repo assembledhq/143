@@ -719,6 +719,51 @@ func TestCodingCredentialStorePickRunnableMulti_SkipsPersistedRateLimitedProvide
 	}
 }
 
+func TestCodingCredentialStorePickRunnableMulti_SkipsExpiredSetupTokenProviderTwin(t *testing.T) {
+	t.Parallel()
+
+	store, mock := newMockCodingCredentialStore(t)
+	defer mock.Close()
+
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time { return now })
+	orgID := uuid.New()
+	userID := uuid.New()
+	personalSetupTokenID := uuid.New()
+	orgAPIKeyID := uuid.New()
+	scope := models.Scope{OrgID: orgID, UserID: &userID}
+	providers := []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}
+
+	personalRows := pgxmock.NewRows(codingCredentialTestColumns)
+	personalRows = addCodingCredentialRow(personalRows,
+		codingCredentialRow(t, store, orgID, &userID, personalSetupTokenID, models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{
+			AuthMode:            models.AnthropicSubscriptionAuthModeSetupToken,
+			OAuthToken:          "expired-setup-token",
+			OAuthTokenExpiresAt: now.Add(-time.Minute),
+		}, 1, models.CodingCredentialStatusActive),
+	)
+	orgRows := pgxmock.NewRows(codingCredentialTestColumns)
+	orgRows = addCodingCredentialRow(orgRows,
+		codingCredentialRow(t, store, orgID, nil, orgAPIKeyID, models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant-org"}, 1, models.CodingCredentialStatusActive),
+	)
+
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(3)...).
+		WillReturnRows(personalRows)
+	mock.ExpectQuery(`FROM coding_credentials`).
+		WithArgs(codingAnyArgs(2)...).
+		WillReturnRows(orgRows)
+
+	resolved, err := store.ListResolvableMulti(context.Background(), orgID, &userID, providers)
+	require.NoError(t, err, "ListResolvableMulti should return expired setup-token rows for visibility")
+	require.Equal(t, personalSetupTokenID, resolved[models.ProviderAnthropicSubscription][0].ID, "resolver should keep the expired setup-token row visible")
+
+	picked, err := store.PickRunnableMulti(context.Background(), scope, providers)
+	require.NoError(t, err, "PickRunnableMulti should skip expired setup-token credentials")
+	require.Equal(t, orgAPIKeyID, picked.ID, "PickRunnableMulti should fall back to the org API key when the setup token expired")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodingCredentialStorePickRunnable_PersistedRateLimitExpiry(t *testing.T) {
 	t.Parallel()
 

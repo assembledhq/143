@@ -1017,6 +1017,41 @@ func TestAgentEnvResolveProviderConfig_UsesUnifiedSubscriptionTwin(t *testing.T)
 	}
 }
 
+func TestAgentEnvResolve_ClaudeCodeSetupTokenUsesOAuthTokenEnv(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	credID := uuid.New()
+	env := NewAgentEnv(AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropicSubscription: {
+					{
+						ID:       credID,
+						OrgID:    orgID,
+						UserID:   &userID,
+						Provider: models.ProviderAnthropicSubscription,
+						Status:   models.CodingCredentialStatusActive,
+						Config: models.AnthropicSubscriptionConfig{
+							AuthMode:            models.AnthropicSubscriptionAuthModeSetupToken,
+							OAuthToken:          "claude-setup-token",
+							OAuthTokenExpiresAt: time.Now().Add(time.Hour),
+						},
+					},
+				},
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	})
+
+	got := env.Resolve(context.Background(), orgID, models.AgentTypeClaudeCode, &userID)
+
+	require.Equal(t, "claude-setup-token", got["CLAUDE_CODE_OAUTH_TOKEN"], "Resolve should inject the Claude Code setup token before sandbox creation")
+	require.NotContains(t, got, "ANTHROPIC_API_KEY", "Resolve should not inject Anthropic API-key auth for a setup-token subscription")
+}
+
 func TestAgentEnvResolveProviderConfig_UnifiedPersonalRowsBeatOrgRowsAcrossAuthTypes(t *testing.T) {
 	t.Parallel()
 
@@ -1160,6 +1195,7 @@ func TestAgentEnvResolveOrgProviderConfigAndCompatibility(t *testing.T) {
 
 		assertIncompatible(models.ProviderAnthropic, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}, "compatibleCodingProviderConfig should reject subscription configs for the API-key provider")
 		assertCompatible(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AccessToken: "sub", RefreshToken: "refresh"}, "compatibleCodingProviderConfig should accept Anthropic subscription rows for the subscription twin")
+		assertCompatible(models.ProviderAnthropicSubscription, models.AnthropicSubscriptionConfig{AuthMode: models.AnthropicSubscriptionAuthModeSetupToken, OAuthToken: "setup-token", OAuthTokenExpiresAt: time.Now().Add(time.Hour)}, "compatibleCodingProviderConfig should accept Claude Code setup-token subscription rows for the subscription twin")
 		assertCompatible(models.ProviderOpenAISubscription, models.OpenAISubscriptionConfig{AccessToken: "openai-sub", RefreshToken: "openai-refresh"}, "compatibleCodingProviderConfig should accept OpenAI subscription rows for the subscription twin")
 		assertCompatible(models.ProviderAnthropic, models.AnthropicConfig{APIKey: "sk-ant"}, "compatibleCodingProviderConfig should accept Anthropic API keys")
 		assertCompatible(models.ProviderOpenAI, models.OpenAIConfig{APIKey: "sk-openai"}, "compatibleCodingProviderConfig should accept OpenAI API keys")

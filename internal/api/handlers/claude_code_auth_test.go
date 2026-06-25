@@ -3,12 +3,15 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -42,14 +45,27 @@ func claudeAddOrgContext(r *http.Request) *http.Request {
 // rest return zero/error defaults.
 type claudeStoreStub struct {
 	insertPendingAuthErr        error
+	upsertWithLabelErr          error
+	upsertWithLabelScope        models.Scope
+	upsertWithLabelCreatedBy    *uuid.UUID
+	upsertWithLabelLabel        string
+	upsertWithLabelConfig       models.ProviderConfig
 	disableErr                  error
 	disabled                    bool
 	existsForProviderByIDResult bool
 	getByIDCredential           *models.DecryptedCredential
 }
 
-func (s *claudeStoreStub) UpsertWithLabel(context.Context, models.Scope, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
-	return nil, errors.New("not implemented")
+func (s *claudeStoreStub) UpsertWithLabel(_ context.Context, scope models.Scope, createdBy *uuid.UUID, label string, cfg models.ProviderConfig) (*uuid.UUID, error) {
+	if s.upsertWithLabelErr != nil {
+		return nil, s.upsertWithLabelErr
+	}
+	s.upsertWithLabelScope = scope
+	s.upsertWithLabelCreatedBy = createdBy
+	s.upsertWithLabelLabel = label
+	s.upsertWithLabelConfig = cfg
+	id := uuid.New()
+	return &id, nil
 }
 func (s *claudeStoreStub) InsertPendingAuth(context.Context, models.Scope, *uuid.UUID, string, models.ProviderConfig) (*uuid.UUID, error) {
 	if s.insertPendingAuthErr != nil {
@@ -111,6 +127,14 @@ func (s *claudeStoreStub) DisableLabeled(context.Context, models.Scope, models.P
 }
 func (s *claudeStoreStub) HasActiveLabeled(context.Context, models.Scope, models.ProviderName) (bool, error) {
 	return false, nil
+}
+
+func claudeTestJWTWithExp(t *testing.T, exp time.Time) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix())))
+	signature := base64.RawURLEncoding.EncodeToString([]byte("signature"))
+	return header + "." + payload + "." + signature
 }
 
 func TestClaudeCodeAuthHandler_Initiate_RequiresLabel(t *testing.T) {
@@ -177,6 +201,60 @@ func TestClaudeCodeAuthHandler_Initiate_ReturnsAuthorizeURL(t *testing.T) {
 	require.NotEmpty(t, resp.Data.State)
 	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge=")
 	require.Contains(t, resp.Data.AuthorizeURL, "code_challenge_method=S256")
+}
+
+func TestClaudeCodeAuthHandler_StoreOAuthToken_StoresSetupToken(t *testing.T) {
+	t.Parallel()
+
+	store := &claudeStoreStub{}
+	svc := claudecodeauth.NewService(store, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	token := claudeTestJWTWithExp(t, time.Now().Add(24*time.Hour))
+	body := strings.NewReader(fmt.Sprintf(`{"label":"personal claude","scope":"personal","oauth_token":%q}`, token))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/oauth-token", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.StoreOAuthToken(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "valid setup token should be accepted")
+	require.Equal(t, "personal claude", store.upsertWithLabelLabel, "setup-token endpoint should store the provided label")
+	require.True(t, store.upsertWithLabelScope.IsPersonal(), "setup-token endpoint should honor personal scope")
+	require.NotNil(t, store.upsertWithLabelCreatedBy, "setup-token endpoint should record the creator")
+	cfg, ok := store.upsertWithLabelConfig.(models.AnthropicSubscriptionConfig)
+	require.True(t, ok, "setup-token endpoint should store an Anthropic subscription config")
+	require.Equal(t, models.AnthropicSubscriptionAuthModeSetupToken, cfg.AuthMode, "setup-token endpoint should mark the auth mode")
+	require.Equal(t, token, cfg.OAuthToken, "setup-token endpoint should store the pasted token")
+	require.True(t, cfg.OAuthTokenExpiresAt.After(time.Now()), "setup-token endpoint should store a future token expiration")
+	require.Empty(t, cfg.AccessToken, "setup-token endpoint should not store rotating access tokens")
+	require.Empty(t, cfg.RefreshToken, "setup-token endpoint should not store rotating refresh tokens")
+	require.NotContains(t, w.Body.String(), token, "setup-token response should not echo token material")
+}
+
+func TestClaudeCodeAuthHandler_StoreOAuthToken_RejectsExpiredJWT(t *testing.T) {
+	t.Parallel()
+
+	store := &claudeStoreStub{}
+	svc := claudecodeauth.NewService(store, claudeTestLogger())
+	handler := NewClaudeCodeAuthHandler(svc, claudeTestLogger())
+
+	token := claudeTestJWTWithExp(t, time.Now().Add(-time.Hour))
+	body := strings.NewReader(fmt.Sprintf(`{"label":"team-a","oauth_token":%q}`, token))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/settings/claude-code-auth/oauth-token", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.ContentLength = int64(body.Len())
+	req = claudeAddOrgContext(req)
+	w := httptest.NewRecorder()
+
+	handler.StoreOAuthToken(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "expired setup-token JWT should be rejected")
+	require.Contains(t, w.Body.String(), "INVALID_TOKEN", "expired setup-token response should identify the invalid token")
+	require.Nil(t, store.upsertWithLabelConfig, "expired setup token should not be stored")
+	require.NotContains(t, w.Body.String(), token, "expired setup-token response should not echo token material")
 }
 
 func TestClaudeCodeAuthHandler_Complete_MissingBody(t *testing.T) {
