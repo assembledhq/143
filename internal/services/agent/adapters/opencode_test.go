@@ -133,11 +133,12 @@ func TestOpenCodeStreamingConfigBuildsRunCommands(t *testing.T) {
 	require.Contains(t, run, "--format json", "OpenCode command should request JSON output")
 	require.Contains(t, run, "--dangerously-skip-permissions", "OpenCode command should disable interactive permission prompts inside the sandbox")
 	require.Contains(t, run, "--agent build", "OpenCode command should use the deterministic build agent")
-	require.Contains(t, run, "--model \"${OPENCODE_MODEL:-"+models.OpenCodeModelGPT54Mini+"}\"", "OpenCode command should default to the inexpensive model tier")
+	require.Contains(t, run, "--model \"${OPENCODE_MODEL:-"+models.OpenCodeModelGLM52+"}\"", "OpenCode command should default to GLM 5.2")
 	require.Contains(t, run, "--dir \"$PWD\"", "OpenCode command should bind execution to the sandbox workspace directory")
 	require.Contains(t, run, "$(cat '/tmp/prompt.md')", "OpenCode command should pass the rendered prompt content")
 
 	resume := openCodeStreamingConfig.BuildResumeCmd("/tmp/prompt.md", "sess_123")
+	require.Contains(t, resume, "--model \"${OPENCODE_MODEL:-"+models.OpenCodeModelGLM52+"}\"", "OpenCode resume command should default to GLM 5.2")
 	require.Contains(t, resume, "--session 'sess_123'", "OpenCode resume command should target the explicit prior session id")
 	require.Contains(t, resume, "--dir \"$PWD\"", "OpenCode resume command should bind execution to the sandbox workspace directory")
 	require.NotContains(t, resume, "--continue", "OpenCode resume should not use nondeterministic latest-session continuation")
