@@ -88,6 +88,8 @@ import type {
   AgentCapabilityDefinition,
   AutomationEventTriggerInput,
   AutomationGitHubEventFilters,
+  LinearEventTriggerFilter,
+  LinearEventType,
   ListResponse,
   PagerDutyEventType,
   PagerDutyEventTriggerFilter,
@@ -125,6 +127,23 @@ const pagerDutyEventTypeOptions: Array<{
     value: "incident.resolved",
     label: "Resolved",
     ariaLabel: "PagerDuty resolved events",
+  },
+];
+
+const linearEventTypeOptions: Array<{
+  value: LinearEventType;
+  label: string;
+  ariaLabel: string;
+}> = [
+  {
+    value: "issue.created",
+    label: "Created",
+    ariaLabel: "Linear issue created events",
+  },
+  {
+    value: "issue.updated",
+    label: "Updated",
+    ariaLabel: "Linear issue updated events",
   },
 ];
 
@@ -246,6 +265,15 @@ export default function NewAutomationPage() {
     pagerDutyTitleContains,
     pagerDutyCustomFields,
     pagerDutyCooldownMinutes,
+    linearEnabled,
+    linearEventTypes,
+    linearTeamKeys,
+    linearLabels,
+    linearIssueTypes,
+    linearStateTypes,
+    linearPriorities,
+    linearTitleContains,
+    linearCooldownMinutes,
     baseBranchByRepoId,
     model,
     identityScope,
@@ -275,6 +303,13 @@ export default function NewAutomationPage() {
   });
   const pagerDutyConnected = (pagerDutyResp?.data ?? []).some(
     (integration) => integration.status === "active",
+  );
+  const { data: integrationsResp } = useQuery({
+    queryKey: queryKeys.integrations.all,
+    queryFn: () => api.integrations.list(),
+  });
+  const linearConnected = (integrationsResp?.data ?? []).some(
+    (integration) => integration.provider === "linear" && integration.status === "active",
   );
 
   const { data: capabilityCatalogResponse } = useQuery<
@@ -449,6 +484,19 @@ export default function NewAutomationPage() {
       return { ...current, pagerDutyEventTypes: nextEventTypes };
     });
   };
+  const toggleLinearEventType = (
+    eventType: LinearEventType,
+    checked: boolean,
+  ) => {
+    setForm((current) => {
+      const nextEventTypes = checked
+        ? current.linearEventTypes.includes(eventType)
+          ? current.linearEventTypes
+          : [...current.linearEventTypes, eventType]
+        : current.linearEventTypes.filter((item) => item !== eventType);
+      return { ...current, linearEventTypes: nextEventTypes };
+    });
+  };
 
   const githubEventFilters: AutomationGitHubEventFilters = useMemo(
     () => ({
@@ -480,14 +528,36 @@ export default function NewAutomationPage() {
     pagerDutyCooldownMinutes,
     repoId,
   );
+  const linearEventTriggers = buildLinearEventTriggers(
+    linearEnabled,
+    linearEventTypes,
+    linearTeamKeys,
+    linearLabels,
+    linearIssueTypes,
+    linearStateTypes,
+    linearPriorities,
+    linearTitleContains,
+    linearCooldownMinutes,
+    repoId,
+  );
   const pagerDutyTriggerValid =
     !pagerDutyEnabled ||
     (pagerDutyEventTypes.length > 0 &&
       commaList(pagerDutyServiceIDs).length > 0 &&
       (pagerDutyUrgency.length > 0 ||
         commaList(pagerDutyPriorityNames).length > 0));
+  const linearTriggerValid =
+    !linearEnabled ||
+    (linearEventTypes.length > 0 &&
+      (commaList(linearTeamKeys).length > 0 ||
+        commaList(linearLabels).length > 0 ||
+        commaList(linearIssueTypes).length > 0 ||
+        commaList(linearStateTypes).length > 0 ||
+        priorityList(linearPriorities).length > 0 ||
+        linearTitleContains.trim().length > 0));
+  const eventTriggers = [...pagerDutyEventTriggers, ...linearEventTriggers];
   const hasEventTriggers =
-    productTriggers.length > 0 || pagerDutyEventTriggers.length > 0;
+    productTriggers.length > 0 || eventTriggers.length > 0;
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -509,8 +579,8 @@ export default function NewAutomationPage() {
         timezone,
         triggers: productTriggers,
         github_event_filters: githubEventFilters,
-        ...(pagerDutyEventTriggers.length > 0
-          ? { event_triggers: pagerDutyEventTriggers }
+        ...(eventTriggers.length > 0
+          ? { event_triggers: eventTriggers }
           : {}),
         model,
         identity_scope: identityScope,
@@ -559,6 +629,7 @@ export default function NewAutomationPage() {
     !goalLength.isTooLong &&
     repoId.length > 0 &&
     pagerDutyTriggerValid &&
+    linearTriggerValid &&
     (scheduleEnabled || hasEventTriggers);
   const submitDisabledReason = createMutation.isPending || redirecting
     ? undefined
@@ -568,6 +639,7 @@ export default function NewAutomationPage() {
         goalTooLong: goalLength.isTooLong,
         hasRepository: repoId.length > 0,
         pagerDutyTriggerValid,
+        linearTriggerValid,
         scheduleEnabled,
         hasEventTriggers,
       });
@@ -603,7 +675,7 @@ export default function NewAutomationPage() {
                 schedule_type: scheduleEnabled ? "interval" : "none",
                 triggers: productTriggers,
                 github_event_filters: githubEventFilters,
-                event_triggers: pagerDutyEventTriggers,
+                event_triggers: eventTriggers,
                 base_branch: selectedBaseBranch.trim() || undefined,
                 agent_type: effectiveAgentType,
                 model,
@@ -931,6 +1003,129 @@ export default function NewAutomationPage() {
                     {pagerDutyEnabled && !pagerDutyTriggerValid ? (
                       <p className="text-xs text-destructive">
                         Add at least one PagerDuty service ID.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="space-y-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Issue events
+                    </span>
+                    <Label className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal">
+                      <Checkbox
+                        checked={linearEnabled}
+                        disabled={!linearConnected}
+                        onCheckedChange={(checked) =>
+                          setFormField("linearEnabled", checked === true)
+                        }
+                        aria-label="Linear issues"
+                      />
+                      <span className="min-w-0 leading-snug">
+                        Linear issues
+                      </span>
+                    </Label>
+                    {!linearConnected ? (
+                      <p className="text-xs text-muted-foreground">
+                        Connect Linear in settings to use issue triggers.
+                      </p>
+                    ) : null}
+                    {linearEnabled ? (
+                      <div className="space-y-3">
+                        <div className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                          {linearEventTypeOptions.map((option) => (
+                            <Label
+                              key={option.value}
+                              className="flex min-h-6 cursor-pointer items-center gap-2 text-sm font-normal"
+                            >
+                              <Checkbox
+                                checked={linearEventTypes.includes(
+                                  option.value,
+                                )}
+                                onCheckedChange={(checked) =>
+                                  toggleLinearEventType(
+                                    option.value,
+                                    checked === true,
+                                  )
+                                }
+                                aria-label={option.ariaLabel}
+                              />
+                              <span className="min-w-0 leading-snug">
+                                {option.label}
+                              </span>
+                            </Label>
+                          ))}
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <Input
+                            aria-label="Linear team keys"
+                            placeholder="Team keys: ENG, OPS"
+                            value={linearTeamKeys}
+                            onChange={(event) =>
+                              setFormField("linearTeamKeys", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear labels"
+                            placeholder="Labels or tags, comma-separated"
+                            value={linearLabels}
+                            onChange={(event) =>
+                              setFormField("linearLabels", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear issue types"
+                            placeholder="Issue types: Bug, Feature"
+                            value={linearIssueTypes}
+                            onChange={(event) =>
+                              setFormField("linearIssueTypes", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear state types"
+                            placeholder="State types: unstarted, started"
+                            value={linearStateTypes}
+                            onChange={(event) =>
+                              setFormField("linearStateTypes", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear priorities"
+                            placeholder="Priorities: 1, 2"
+                            value={linearPriorities}
+                            onChange={(event) =>
+                              setFormField("linearPriorities", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear cooldown minutes"
+                            type="number"
+                            min={0}
+                            max={10080}
+                            value={linearCooldownMinutes}
+                            onChange={(event) =>
+                              setFormField("linearCooldownMinutes", event.target.value)
+                            }
+                            className="h-8"
+                          />
+                          <Input
+                            aria-label="Linear title contains"
+                            placeholder="Title contains"
+                            value={linearTitleContains}
+                            onChange={(event) =>
+                              setFormField("linearTitleContains", event.target.value)
+                            }
+                            className="h-8 sm:col-span-2"
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                    {linearEnabled && !linearTriggerValid ? (
+                      <p className="text-xs text-destructive">
+                        Add at least one Linear filter.
                       </p>
                     ) : null}
                   </div>
@@ -1288,6 +1483,7 @@ function getCreateDisabledReason({
   goalTooLong,
   hasRepository,
   pagerDutyTriggerValid,
+  linearTriggerValid,
   scheduleEnabled,
   hasEventTriggers,
 }: {
@@ -1296,6 +1492,7 @@ function getCreateDisabledReason({
   goalTooLong: boolean;
   hasRepository: boolean;
   pagerDutyTriggerValid: boolean;
+  linearTriggerValid: boolean;
   scheduleEnabled: boolean;
   hasEventTriggers: boolean;
 }): string | undefined {
@@ -1319,6 +1516,9 @@ function getCreateDisabledReason({
   }
   if (!pagerDutyTriggerValid) {
     return "Add at least one PagerDuty service ID before creating the automation.";
+  }
+  if (!linearTriggerValid) {
+    return "Add at least one Linear filter before creating the automation.";
   }
   return undefined;
 }
@@ -1400,6 +1600,13 @@ function statusList(
     );
 }
 
+function priorityList(value: string): number[] {
+  const priorities = commaList(value)
+    .map((item) => Number.parseInt(item, 10))
+    .filter((item) => Number.isInteger(item) && item >= 0 && item <= 4);
+  return [...new Set(priorities)];
+}
+
 function parseCooldownMinutes(value: string): number | undefined {
   const trimmed = value.trim();
   if (trimmed.length === 0) return undefined;
@@ -1469,6 +1676,62 @@ function buildPagerDutyEventTriggers(
   return [
     {
       provider: "pagerduty",
+      event_types: normalizedEventTypes,
+      filter,
+      repository_id: repositoryID || undefined,
+      enabled: true,
+    },
+  ];
+}
+
+function buildLinearEventTriggers(
+  enabled: boolean,
+  eventTypes: LinearEventType[],
+  teamKeyInput: string,
+  labelInput: string,
+  issueTypeInput: string,
+  stateTypeInput: string,
+  priorityInput: string,
+  titleContainsInput: string,
+  cooldownMinutesInput: string,
+  repositoryID: string,
+): AutomationEventTriggerInput[] {
+  if (!enabled) return [];
+
+  const normalizedEventTypes = eventTypes.filter((eventType, index) =>
+    eventTypes.indexOf(eventType) === index,
+  );
+  if (normalizedEventTypes.length === 0) {
+    return [];
+  }
+
+  const teamKeys = commaList(teamKeyInput);
+  const labels = commaList(labelInput);
+  const issueTypes = commaList(issueTypeInput);
+  const stateTypes = commaList(stateTypeInput);
+  const priorities = priorityList(priorityInput);
+  const titleContains = titleContainsInput.trim();
+  const cooldownMinutes = parseCooldownMinutes(cooldownMinutesInput);
+
+  const filter: LinearEventTriggerFilter = {};
+  if (teamKeys.length > 0) filter.team_keys = teamKeys;
+  if (labels.length > 0) {
+    filter.labels = labels;
+    filter.tags = labels;
+  }
+  if (issueTypes.length > 0) filter.issue_types = issueTypes;
+  if (stateTypes.length > 0) filter.state_types = stateTypes;
+  if (priorities.length > 0) filter.priorities = priorities;
+  if (titleContains.length > 0) filter.title_contains = titleContains;
+  if (cooldownMinutes !== undefined) filter.cooldown_minutes = cooldownMinutes;
+
+  if (Object.keys(filter).length === 0) {
+    return [];
+  }
+
+  return [
+    {
+      provider: "linear",
       event_types: normalizedEventTypes,
       filter,
       repository_id: repositoryID || undefined,
