@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -170,7 +171,7 @@ var sessionColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
@@ -279,7 +280,7 @@ const (
 	// right pad helper, then sessionTestRow pads the four trailing linear
 	// columns and the two trailing identity nils at the end.
 	preLinearSessionColumnsLen                  = 76
-	sessionColumnsWithLegacyResultConfidenceLen = 93
+	sessionColumnsWithLegacyResultConfidenceLen = 94
 )
 
 // TestPreLinearSessionColumnsLenStaysInSync trips when a future migration
@@ -293,7 +294,7 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const linearFieldsAdded = 4
 	const capabilitySnapshotFieldsAdded = 1
 	const identityFieldsAdded = 2
-	const prPushFieldsAdded = 2
+	const prPushFieldsAdded = 3
 	const branchCreationFieldsAdded = 3
 	const workspaceGenerationFieldAdded = 1
 	const workspaceRevisionFieldsAdded = 2
@@ -664,14 +665,16 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 		return row
 	}
 	if len(row) == sessionColumnsWithLegacyResultConfidenceLen-3 {
-		const branchCreationStateIndex = 76
+		const branchCreationStateIndex = 77
 		padded := make([]interface{}, 0, sessionColumnsWithLegacyResultConfidenceLen)
 		padded = append(padded, row[:branchCreationStateIndex]...)
 		padded = append(padded, "idle", (*string)(nil), (*string)(nil))
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != sessionColumnsWithLegacyResultConfidenceLen-10 {
+	legacyPreWorkspaceLen := sessionColumnsWithLegacyResultConfidenceLen - 11
+	legacyPostWorkspaceLen := sessionColumnsWithLegacyResultConfidenceLen - 10
+	if len(row) != legacyPreWorkspaceLen && len(row) != legacyPostWorkspaceLen {
 		// Some other length we don't recognize — let the row through
 		// unchanged so the AddRow call surfaces the real mismatch.
 		return row
@@ -690,12 +693,12 @@ func padSessionIdentityColumns(row []interface{}) []interface{} {
 	// PRPushState — a NULL would fail pgx scanning. The migration mirrors
 	// this with NOT NULL DEFAULT 'idle'.
 	const prPushStateIndex = 74
-	withPRPush := make([]interface{}, 0, len(withPending)+2)
+	withPRPush := make([]interface{}, 0, len(withPending)+3)
 	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
-	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, "idle", (*string)(nil), (*string)(nil)) // pr_push_state, pr_push_error, pr_push_error_code
 	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
 
-	const branchCreationStateIndex = prPushStateIndex + 2
+	const branchCreationStateIndex = prPushStateIndex + 3
 	withBranch := make([]interface{}, 0, len(withPRPush)+3)
 	withBranch = append(withBranch, withPRPush[:branchCreationStateIndex]...)
 	withBranch = append(withBranch, "idle", (*string)(nil), (*string)(nil))
@@ -829,6 +832,7 @@ func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, sn
 		"pr_creation_error":              nil,
 		"pr_push_state":                  models.PRPushStateIdle,
 		"pr_push_error":                  nil,
+		"pr_push_error_code":             nil,
 		"branch_creation_state":          models.BranchCreationStateIdle,
 		"branch_creation_error":          nil,
 		"branch_url":                     nil,
@@ -8805,6 +8809,8 @@ type pushSessionRowOpts struct {
 	sandboxState       string // defaults to "none"
 	prCreationState    string // defaults to "idle"
 	pushState          string // defaults to "idle"
+	pushError          string // defaults to NULL
+	pushErrorCode      string // defaults to NULL
 	branchState        string // defaults to "idle"
 	status             string // defaults to "completed"
 	diff               *string
@@ -8839,6 +8845,14 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 	pushState := opts.pushState
 	if pushState == "" {
 		pushState = "idle"
+	}
+	var pushError any = (*string)(nil)
+	if opts.pushError != "" {
+		pushError = &opts.pushError
+	}
+	var pushErrorCode any
+	if opts.pushErrorCode != "" {
+		pushErrorCode = opts.pushErrorCode
 	}
 	prCreationState := opts.prCreationState
 	if prCreationState == "" {
@@ -8926,7 +8940,8 @@ func pushSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time, opts pus
 		"pr_creation_state":              prCreationState,
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  pushState,
-		"pr_push_error":                  (*string)(nil),
+		"pr_push_error":                  pushError,
+		"pr_push_error_code":             pushErrorCode,
 		"branch_creation_state":          branchState,
 		"branch_creation_error":          (*string)(nil),
 		"branch_url":                     (*string)(nil),
@@ -9425,6 +9440,43 @@ func TestSessionHandler_PushChangesToPR_InFlightRejectsDuplicateSubmit(t *testin
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestSessionHandler_PushChangesToPR_BranchDivergedRejectsWithoutEnqueue(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	handler := newSessionHandler(t, mock)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
+			pushState:     string(models.PRPushStateFailed),
+			pushError:     ghservice.PushBranchDivergedPRMessage,
+			pushErrorCode: string(models.PRPushErrorCodeBranchDiverged),
+		}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/pr/push", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.PushChangesToPR(w, req)
+
+	require.Equal(t, http.StatusConflict, w.Code, "known branch-diverged push failures should return 409: %s", w.Body.String())
+	require.Contains(t, w.Body.String(), "PR_BRANCH_DIVERGED", "response should expose the branch-diverged error code")
+	require.Contains(t, w.Body.String(), ghservice.PushBranchDivergedPRMessage, "response should include the corrective push message")
+	require.NoError(t, mock.ExpectationsWereMet(), "handler should not query PRs or enqueue jobs for known branch divergence")
 }
 
 func TestSessionHandler_PushChangesToPR_SnapshotExpired(t *testing.T) {

@@ -169,8 +169,8 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		r.abort(ctx, reservation, "", "preview reservation no longer matches target")
 		return fmt.Errorf("reserved branch preview target mismatch")
 	}
-	if err := r.reassignReservationWorkerIfNeeded(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
-		return fmt.Errorf("reassign branch preview worker: %w", err)
+	if err := r.ensureReservationRuntimeForClaimingWorker(ctx, payload.OrgID, payload.PreviewID, reservation); err != nil {
+		return fmt.Errorf("ensure branch preview worker runtime: %w", err)
 	}
 
 	target, err := r.previews.GetPreviewTarget(ctx, payload.OrgID, payload.PreviewTargetID)
@@ -239,6 +239,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	})
 	token, err := r.github.GetInstallationToken(ctx, repo.InstallationID)
 	if err != nil {
+		if IsPreviewStartupInterrupted(err) {
+			return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "get_github_token", err)
+		}
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("get GitHub token: %v", err))
 		return fmt.Errorf("get github token: %w", err)
 	}
@@ -252,6 +255,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	})
 	if err := r.sandboxProvider.CloneRepo(ctx, sb, repo.CloneURL, target.Branch, token); err != nil {
 		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "clone")
+		if IsPreviewStartupInterrupted(err) {
+			return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "clone", err)
+		}
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("clone repository: %v", err))
 		return fmt.Errorf("clone repository: %w", err)
 	}
@@ -267,6 +273,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	exitCode, err := r.sandboxProvider.Exec(ctx, sb, "git checkout --detach "+target.CommitSHA, io.Discard, &checkoutErr)
 	if err != nil {
 		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "checkout")
+		if IsPreviewStartupInterrupted(err) {
+			return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "checkout", err)
+		}
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("checkout commit: %v", err))
 		return fmt.Errorf("checkout commit: %w", err)
 	}
@@ -296,6 +305,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		cfg, err = r.readWorkspacePreviewConfig(ctx, sb, uuid.Nil, target.PreviewConfigName)
 		if err != nil {
 			metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "config")
+			if IsPreviewStartupInterrupted(err) {
+				return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "config", err)
+			}
 			r.abort(ctx, reservation, sb.ID, fmt.Sprintf("read workspace config: %v", err))
 			return fmt.Errorf("PREVIEW_CONFIG_READ_FAILED: %w", err)
 		}
@@ -338,6 +350,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 		// restore that could not be re-checked-out from git). Launching from
 		// an inconsistent tree would serve wrong code — fail the start.
 		metrics.RecordBranchPreviewStartupFailure(ctx, payload.OrgID.String(), string(target.SourceType), repo.FullName, "startup_cache_recovery")
+		if IsPreviewStartupInterrupted(cacheErr) {
+			return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "startup_cache_recovery", cacheErr)
+		}
 		r.abort(ctx, reservation, sb.ID, fmt.Sprintf("restore startup cache: %v", cacheErr))
 		return fmt.Errorf("restore startup cache: %w", cacheErr)
 	}
@@ -348,6 +363,9 @@ func (r *StartRunner) StartReservedBranchPreview(ctx context.Context, payload St
 	})
 	_, err = r.manager.LaunchPreview(ctx, reservation, input)
 	if err != nil {
+		if IsPreviewStartupInterrupted(err) {
+			return r.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", err)
+		}
 		classified := ClassifyLaunchFailure(err, reservation.MemoryLimitMB)
 		r.abort(ctx, reservation, sb.ID, classified.Message)
 		r.logger.Warn().Err(err).Str("preview_id", payload.PreviewID.String()).Msg("branch preview launch failed")
@@ -1239,6 +1257,36 @@ func (r *StartRunner) createStartupLog(ctx context.Context, orgID, previewID uui
 	}
 }
 
+func (r *StartRunner) ensureReservationRuntimeForClaimingWorker(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
+	if reservation == nil || r.nodeID == "" {
+		return nil
+	}
+	endpointURL := ""
+	if r.manager != nil {
+		endpointURL = r.manager.previewInternalBaseURL
+	}
+	if shouldReassignPreviewWorker("", reservation.WorkerNodeID, r.nodeID) {
+		if err := r.previews.ReassignPreviewWorker(ctx, orgID, previewID, r.nodeID, endpointURL); err != nil {
+			return err
+		}
+		reservation.WorkerNodeID = r.nodeID
+		return nil
+	}
+	if endpointURL == "" {
+		return nil
+	}
+	if _, err := r.previews.GetActivePreviewRuntime(ctx, orgID, previewID); err == nil {
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if _, err := r.previews.CreateNextPreviewRuntime(ctx, orgID, previewID, r.nodeID, endpointURL); err != nil {
+		return err
+	}
+	reservation.WorkerNodeID = r.nodeID
+	return nil
+}
+
 func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, orgID, previewID uuid.UUID, reservation *models.PreviewInstance) error {
 	if reservation == nil || !shouldReassignPreviewWorker("", reservation.WorkerNodeID, r.nodeID) {
 		return nil
@@ -1256,6 +1304,71 @@ func (r *StartRunner) reassignReservationWorkerIfNeeded(ctx context.Context, org
 
 func shouldReassignPreviewWorker(_ string, reservationWorkerNode, claimingWorkerNode string) bool {
 	return claimingWorkerNode != "" && claimingWorkerNode != reservationWorkerNode
+}
+
+func (r *StartRunner) retryBranchPreviewStartupInterruption(ctx context.Context, payload StartBranchPreviewJobPayload, reservation *models.PreviewInstance, sb *agent.Sandbox, phase string, cause error) error {
+	reason := fmt.Sprintf("preview startup interrupted during %s: %v", phase, cause)
+	r.logger.Warn().
+		Err(cause).
+		Str("preview_id", payload.PreviewID.String()).
+		Str("preview_target_id", payload.PreviewTargetID.String()).
+		Str("phase", phase).
+		Msg("branch preview startup interrupted; requeueing with fresh sandbox")
+	r.createStartupLog(ctx, payload.OrgID, payload.PreviewID, "warn", models.PreviewLogStepStart, reason, map[string]any{
+		"phase": "startup_interrupted",
+		"stage": phase,
+	})
+	if err := r.previews.ResetStartingBranchPreviewForRetry(ctx, payload.OrgID, payload.PreviewID, reason, models.PreviewUnavailableReasonOwnerLost); err != nil {
+		r.abort(ctx, reservation, sandboxID(sb), fmt.Sprintf("reset preview startup after interruption: %v", err))
+		return fmt.Errorf("reset branch preview after startup interruption: %w", err)
+	}
+	r.registerStartupInterruptionDeadLetter(ctx, reservation)
+	r.destroyBranchPreviewSandboxAfterInterruption(ctx, payload.PreviewID, sb)
+	return fmt.Errorf("%w: %s", ErrPreviewStartupInterrupted, reason)
+}
+
+func (r *StartRunner) destroyBranchPreviewSandboxAfterInterruption(ctx context.Context, previewID uuid.UUID, sb *agent.Sandbox) {
+	if r == nil || r.sandboxProvider == nil || sb == nil || sb.ID == "" {
+		return
+	}
+	destroyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if err := r.sandboxProvider.Destroy(destroyCtx, sb); err != nil {
+		r.logger.Warn().
+			Err(err).
+			Str("preview_id", previewID.String()).
+			Str("sandbox_id", sb.ID).
+			Msg("failed to destroy interrupted branch preview sandbox")
+	}
+}
+
+func sandboxID(sb *agent.Sandbox) string {
+	if sb == nil {
+		return ""
+	}
+	return sb.ID
+}
+
+func uuidValueString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+func (r *StartRunner) registerStartupInterruptionDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
+	if r == nil || r.manager == nil || reservation == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if deadLetterErr != nil {
+			r.logger.Warn().Err(deadLetterErr).
+				Str("preview_id", reservation.ID.String()).
+				Str("preview_target_id", uuidValueString(reservation.PreviewTargetID)).
+				Msg("branch preview start dead-lettered after startup interruption retries")
+		}
+		r.manager.AbortReservation(hookCtx, reservation, "", "Preview could not start because the sandbox was interrupted repeatedly. Try starting the preview again.")
+	})
 }
 
 func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {

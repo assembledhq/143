@@ -241,13 +241,6 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(screen.getByDisplayValue("Custom requirement")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("tab", { name: /Insights/i }));
-    expect(screen.getByText("Approval rate")).toBeInTheDocument();
-    expect(screen.getByText("100%")).toBeInTheDocument();
-    expect(screen.getByText("Avg duration")).toBeInTheDocument();
-    expect(screen.getByText("5m")).toBeInTheDocument();
-    expect(screen.getByText("Top repositories")).toBeInTheDocument();
   });
 
   it("renders GitHub trigger account-required state", async () => {

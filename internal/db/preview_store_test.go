@@ -4422,6 +4422,44 @@ func TestPreviewStore_UpdatePreviewReservationConfig_ExecError(t *testing.T) {
 	require.Contains(t, err.Error(), "update preview reservation config")
 }
 
+func TestPreviewStore_ResetStartingBranchPreviewForRetryClearsRecycleInput(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	store := NewPreviewStore(mock)
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`(?s)UPDATE preview_instances.*recycle_config = NULL.*recycle_sandbox = NULL`).
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(previewAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("DELETE FROM preview_services").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 2))
+	mock.ExpectExec("DELETE FROM preview_infrastructure").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectCommit()
+
+	err = store.ResetStartingBranchPreviewForRetry(
+		context.Background(),
+		orgID,
+		previewID,
+		"lost sandbox during launch",
+		models.PreviewUnavailableReasonOwnerLost,
+	)
+
+	require.NoError(t, err, "retry reset should clear stale recycle input and transient startup rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
 	t.Parallel()
 

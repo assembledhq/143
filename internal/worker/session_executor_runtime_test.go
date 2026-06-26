@@ -458,6 +458,58 @@ func TestSessionExecutorRuntime_RetryableErrorRequeuesJob(t *testing.T) {
 	require.Equal(t, 0, jobs.succeededCalls, "runtime should not mark retryable jobs succeeded")
 }
 
+func TestSessionExecutorRuntime_AttemptConsumingRetryableErrorDeadLettersAtMaxAttempts(t *testing.T) {
+	t.Parallel()
+
+	executorID := uuid.New()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	jobs := &executorRuntimeJobStoreStub{
+		active: true,
+		job: &models.Job{
+			ID:          jobID,
+			OrgID:       orgID,
+			JobType:     "continue_session",
+			Payload:     json.RawMessage(`{}`),
+			Status:      "running",
+			Attempts:    3,
+			MaxAttempts: 3,
+			LockToken:   &lockToken,
+			CreatedAt:   time.Now(),
+		},
+	}
+	executors := &executorRuntimeExecutorStoreStub{
+		executor: models.SessionExecutor{
+			ID:        executorID,
+			OrgID:     orgID,
+			SessionID: sessionID,
+			JobID:     jobID,
+			JobType:   "continue_session",
+			LockToken: lockToken,
+			Status:    models.SessionExecutorStatusStarting,
+		},
+		markRunningOK: true,
+	}
+	runtime := &SessionExecutorRuntime{
+		Executors: executors,
+		Jobs:      jobs,
+		Handlers: map[string]JobHandler{
+			"continue_session": func(context.Context, string, json.RawMessage) error {
+				return &RetryableError{Err: errors.New("preview startup interrupted"), ConsumeAttempt: true}
+			},
+		},
+		Logger: zerolog.Nop(),
+	}
+
+	err := runtime.Run(context.Background(), executorID)
+	require.NoError(t, err, "runtime should treat terminal retry exhaustion as handled")
+	require.Equal(t, 1, jobs.deadLetterCalls, "attempt-consuming retryable errors should dead-letter at max attempts")
+	require.Equal(t, 0, jobs.retryCalls, "attempt-consuming retryable errors should not requeue past max attempts")
+	require.Equal(t, models.SessionExecutorStatusFailed, executors.terminalStatus, "executor should be marked failed when retry attempts are exhausted")
+}
+
 func TestSessionExecutorRuntime_RetryableErrorClearsTargetNode(t *testing.T) {
 	t.Parallel()
 
