@@ -42,6 +42,7 @@ const (
 	SlackRepositoryResolutionSourceInstallDefault    SlackRepositoryResolutionSource = "slack_install_default"
 	SlackRepositoryResolutionSourceOrgDefault        SlackRepositoryResolutionSource = "org_default"
 	SlackRepositoryResolutionSourceSingleRepo        SlackRepositoryResolutionSource = "single_repo_fallback"
+	SlackRepositoryResolutionSourceFirstRepo         SlackRepositoryResolutionSource = "first_repo_fallback"
 	SlackRepositoryResolutionSourceMissing           SlackRepositoryResolutionSource = "missing"
 )
 

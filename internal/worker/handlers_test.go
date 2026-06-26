@@ -668,6 +668,68 @@ func TestSlackRepositoryDefaultsForContextUsesMatchingInstallationDefault(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "helper should scope Slack install default lookup to installation id")
 }
 
+func TestSlackRepositoryDefaultsForContextFallsBackToFirstRepo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	firstRepoID := uuid.New()
+	secondRepoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	stores := &Stores{
+		SlackChannels:    db.NewSlackChannelSettingsStore(mock),
+		SlackBotSettings: db.NewSlackBotSettingsStore(mock),
+		Repositories:     db.NewRepositoryStore(mock),
+	}
+
+	// No channel default configured.
+	mock.ExpectQuery("SELECT id, org_id, slack_installation_id").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "slack_channel_id", "slack_channel_name",
+			"channel_type", "default_repository_id", "default_branch", "routing_mode", "response_visibility", "allowed_actions",
+			"notification_preset", "notification_subscriptions", "active", "created_at", "updated_at",
+		}))
+	// No install default configured.
+	mock.ExpectQuery("FROM slack_bot_settings").
+		WithArgs(orgID, installationID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "default_repository_id", "default_branch",
+			"routing_mode", "response_visibility", "allowed_actions", "notification_preset",
+			"notification_subscriptions", "active", "created_at", "updated_at",
+		}))
+	// Org has multiple connected repos; ListByOrg returns them ordered by full_name.
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+			"private", "language", "description", "clone_url", "installation_id", "status",
+			"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}).AddRow(
+			firstRepoID, orgID, integrationID, int64(1), "assembledhq/aardvark", "main",
+			false, nil, nil, "https://github.com/assembledhq/aardvark.git", int64(123), models.RepositoryStatusActive,
+			nil, nil, []byte(`{}`), now, now,
+		).AddRow(
+			secondRepoID, orgID, integrationID, int64(2), "assembledhq/zebra", "main",
+			false, nil, nil, "https://github.com/assembledhq/zebra.git", int64(123), models.RepositoryStatusActive,
+			nil, nil, []byte(`{}`), now, now,
+		))
+
+	defaults := slackRepositoryDefaultsForContext(context.Background(), stores, zerolog.Nop(), orgID, installationID, "T123", "C123")
+
+	require.Len(t, defaults, 1, "with no configured default the helper should fall back to the first repo")
+	require.Equal(t, firstRepoID, defaults[0].RepositoryID, "fallback should attach the first repository in the list")
+	require.Equal(t, "assembledhq/aardvark", defaults[0].RepositoryName, "fallback should carry the repo name")
+	require.Equal(t, "main", defaults[0].Branch, "fallback should default to the repo's default branch")
+	require.Equal(t, slackbotsvc.SlackRepositoryResolutionSourceFirstRepo, defaults[0].Source, "multi-repo fallback should be tagged as first_repo_fallback")
+	require.NoError(t, mock.ExpectationsWereMet(), "fallback should query repositories once defaults are exhausted")
+}
+
 func TestSlackContextReferencesForSessionInput(t *testing.T) {
 	t.Parallel()
 

@@ -2652,17 +2652,25 @@ func slackRepositoryDefaultsForContext(ctx context.Context, stores *Stores, logg
 		}
 	}
 	if stores.Repositories != nil {
+		// Last-resort fallback: when no channel/install/org default is configured,
+		// attach the org's first connected repository so a Slack session still has
+		// code context instead of dropping to research-only mode. ListByOrg returns
+		// active repos ordered by full_name, so repos[0] is deterministic.
 		repos, err := stores.Repositories.ListByOrg(ctx, orgID, db.RepositoryFilters{})
-		if err == nil && len(repos) == 1 {
+		if err == nil && len(repos) > 0 {
 			repo := repos[0]
+			source := slackbotsvc.SlackRepositoryResolutionSourceFirstRepo
+			if len(repos) == 1 {
+				source = slackbotsvc.SlackRepositoryResolutionSourceSingleRepo
+			}
 			defaults = append(defaults, slackbotsvc.SlackRepositoryDefault{
 				RepositoryID:   repo.ID,
 				RepositoryName: repo.FullName,
 				Branch:         repo.DefaultBranch,
-				Source:         slackbotsvc.SlackRepositoryResolutionSourceSingleRepo,
+				Source:         source,
 			})
 		} else if err != nil {
-			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list repositories for Slack single-repo fallback")
+			logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list repositories for Slack repository fallback")
 		}
 	}
 	return defaults
