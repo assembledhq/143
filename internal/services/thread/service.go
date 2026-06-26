@@ -188,6 +188,8 @@ type CreateThreadInput struct {
 	Label             string
 	Instructions      string
 	FileScope         []string
+	ExecutionMode     models.ThreadExecutionMode
+	FilesystemMode    models.ThreadFilesystemMode
 	CreatedBySource   models.ThreadCreatedBySource
 	CreatedByThreadID *uuid.UUID
 }
@@ -415,6 +417,20 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		}
 		modelOverride = &input.Model
 	}
+	executionMode := input.ExecutionMode
+	if executionMode == "" {
+		executionMode = models.ThreadExecutionModeWork
+	}
+	if err := executionMode.Validate(); err != nil {
+		return nil, err
+	}
+	filesystemMode := input.FilesystemMode
+	if filesystemMode == "" {
+		filesystemMode = models.ThreadFilesystemModeReadWrite
+	}
+	if err := filesystemMode.Validate(); err != nil {
+		return nil, err
+	}
 
 	var instructions *string
 	if input.Instructions != "" {
@@ -432,6 +448,8 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		Status:            models.ThreadStatusIdle,
 		CreatedBySource:   input.CreatedBySource,
 		CreatedByThreadID: input.CreatedByThreadID,
+		ExecutionMode:     executionMode,
+		FilesystemMode:    filesystemMode,
 	}
 
 	createErr := s.createThread(ctx, thread, models.MaxThreadsPerSession)

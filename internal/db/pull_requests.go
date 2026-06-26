@@ -25,10 +25,19 @@ type PullRequestFilters struct {
 	Cursor string
 }
 
+type PullRequestGitHubSnapshot struct {
+	GitHubPRURL string
+	Title       string
+	Body        *string
+	HeadSHA     *string
+	HeadRef     *string
+	BaseSHA     *string
+}
+
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
 	query := `
-		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref)
-		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha, @head_ref)
+		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref, base_sha)
+		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha, @head_ref, @base_sha)
 		RETURNING id, created_at, updated_at`
 
 	authoredBy := pr.AuthoredBy
@@ -48,6 +57,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 		"authored_by":      authoredBy,
 		"head_sha":         pr.HeadSHA,
 		"head_ref":         pr.HeadRef,
+		"base_sha":         pr.BaseSHA,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -118,6 +128,42 @@ func (s *PullRequestStore) UpdateTitle(ctx context.Context, orgID, id uuid.UUID,
 		"title":  title,
 	})
 	return err
+}
+
+func (s *PullRequestStore) UpdateGitHubSnapshot(ctx context.Context, orgID, id uuid.UUID, snapshot PullRequestGitHubSnapshot) error {
+	query := `UPDATE pull_requests
+		SET github_pr_url = @github_pr_url,
+		    title = @title,
+		    body = @body,
+		    head_sha = @head_sha,
+		    head_ref = @head_ref,
+		    base_sha = @base_sha,
+		    github_state_synced_at = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN NULL ELSE github_state_synced_at END,
+		    health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE health_version END,
+		    merge_state = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN @merge_state ELSE merge_state END,
+		    has_conflicts = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE has_conflicts END,
+		    failing_test_count = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE failing_test_count END,
+		    needs_agent_action = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE needs_agent_action END,
+		    updated_at = now()
+		WHERE id = @id AND org_id = @org_id`
+	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+		"id":            id,
+		"org_id":        orgID,
+		"github_pr_url": snapshot.GitHubPRURL,
+		"title":         snapshot.Title,
+		"body":          snapshot.Body,
+		"head_sha":      snapshot.HeadSHA,
+		"head_ref":      snapshot.HeadRef,
+		"base_sha":      snapshot.BaseSHA,
+		"merge_state":   models.PullRequestMergeStateUnknown,
+	})
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 // UpdateHeadSHA persists the SHA of the most recent commit pushed to the PR's

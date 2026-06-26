@@ -78,6 +78,22 @@ export interface UserSettingsUpdateRequest {
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
 export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
 export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
+export type CodeReviewDescriptionApplicabilityKind =
+  | "all"
+  | "nontrivial"
+  | "frontend_or_ui_visible"
+  | "paths"
+  | "categories"
+  | "tests_changed";
+
+export interface CodeReviewDescriptionApplicability {
+  kind?: CodeReviewDescriptionApplicabilityKind;
+  min_files_changed?: number;
+  min_lines_changed?: number;
+  path_patterns?: string[];
+  categories?: string[];
+  require_test_files_changed?: boolean;
+}
 
 export interface CodeReviewDescriptionRequirement {
   key: string;
@@ -85,6 +101,7 @@ export interface CodeReviewDescriptionRequirement {
   prompt: string;
   required: boolean;
   applicability?: string;
+  applies_when?: CodeReviewDescriptionApplicability;
 }
 
 export interface CodeReviewPolicyConfig {
@@ -99,6 +116,8 @@ export interface CodeReviewPolicyConfig {
     require_passing_checks: boolean;
     exclude_sensitive_paths: boolean;
     sensitive_paths?: string[];
+    allowed_path_patterns?: string[];
+    blocked_path_patterns?: string[];
     exclude_categories?: string[];
     require_mergeable: boolean;
     require_up_to_date: boolean;
@@ -118,6 +137,10 @@ export interface CodeReviewPolicyConfig {
   };
   inline_comment_limit: number;
   final_review_template?: string;
+  inheritance?: {
+    inherit_org_defaults: boolean;
+    override_fields?: string[];
+  };
 }
 
 export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
@@ -134,6 +157,7 @@ export interface CodeReviewResolvedPolicy {
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
+  inherited_policy?: CodeReviewPolicyRecord;
 }
 
 export interface CodeReviewTemplateOption {
@@ -152,6 +176,7 @@ export interface CodeReviewListItem {
   policy_id: string;
   base_sha: string;
   head_sha: string;
+  from_fork: boolean;
   trigger_source: string;
   status: CodeReviewSessionStatus;
   decision?: CodeReviewDecision;
@@ -206,9 +231,22 @@ export interface CodeReviewFinding {
   created_at: string;
 }
 
+export interface CodeReviewPromptArtifact {
+  id: string;
+  org_id: string;
+  session_id: string;
+  artifact_key: string;
+  role: "reviewer" | "orchestrator" | "description_policy" | string;
+  agent_provider?: string;
+  content: string;
+  metadata?: unknown;
+  created_at: string;
+}
+
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
+  prompt_artifacts?: CodeReviewPromptArtifact[];
 }
 
 export type AgentCapabilityID =
@@ -1272,6 +1310,8 @@ export interface SessionThread {
   cost_cents: number;
   pending_message_count: number;
   cancel_requested_at?: string;
+  execution_mode?: "work" | "review";
+  filesystem_mode?: "read_write" | "read_only";
   inbox_delivery?: ThreadInboxDeliverySummary;
 }
 

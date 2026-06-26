@@ -449,6 +449,7 @@ type SessionMessageStore interface {
 }
 
 type SessionThreadStore interface {
+	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
@@ -3368,6 +3369,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	threadID := latestMsg.ThreadID
 	scopedMessages := messagesInScope(messages, threadID)
+	var readOnlyReviewThread *models.SessionThread
+	if threadID != nil && *threadID != uuid.Nil && o.sessionThreads != nil {
+		thread, threadErr := o.sessionThreads.GetByID(ctx, session.OrgID, *threadID)
+		if errors.Is(threadErr, pgx.ErrNoRows) {
+			// Legacy tests and pre-existing rows may not be readable through
+			// the injected thread store; only read-only review mode needs this
+			// guard.
+		} else if threadErr != nil {
+			log.Warn().Err(threadErr).Str("thread_id", threadID.String()).Msg("failed to load thread for read-only execution guard")
+		} else if thread.ExecutionMode == models.ThreadExecutionModeReview && thread.FilesystemMode == models.ThreadFilesystemModeReadOnly {
+			threadCopy := thread
+			readOnlyReviewThread = &threadCopy
+		}
+	}
 	// Bundle every trailing user message in scope into the prompt seed so
 	// rapid mid-turn sends are all delivered to the agent. The latest
 	// message remains the "carrier" for thread_id, references, and
@@ -4481,6 +4496,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 		return nil
 	}
+	if readOnlyReviewThread != nil {
+		handled, guardErr := o.handleReadOnlyReviewThreadResult(ctx, session, sandbox, *readOnlyReviewThread, result, fallbackStatus, log)
+		if guardErr != nil {
+			return guardErr
+		}
+		if handled {
+			return nil
+		}
+	}
 
 	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, messageTurnNumber, result); err != nil {
@@ -4750,6 +4774,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
+	codeReviewPRNumber, codeReviewHeadSHA, codeReviewCheckout, err := codeReviewCheckoutContextFromSession(session)
+	if err != nil {
+		return models.Issue{}, "", TokenBillingModeUnknown, err
+	}
+	if codeReviewCheckout && session.RepositoryID == nil {
+		return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing repository")
+	}
+
 	// Clone repo if the session has one. sessions.repository_id is the
 	// canonical source of truth — session creation copies issue.repository_id
 	// into it up front, so execution never needs to re-derive repo from the
@@ -4775,6 +4807,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		workingBranch := sessionWorkingBranch(session, &issue)
 		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
 			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, err
+			}
+			session.WorkingBranch = &workingBranch
+		} else if codeReviewCheckout {
+			if workingBranch == "" {
+				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
+			}
+			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4809,6 +4849,34 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, authBillingMode, nil
+}
+
+type codeReviewCheckoutContext struct {
+	Kind           string `json:"kind"`
+	GitHubPRNumber int    `json:"github_pr_number"`
+	HeadSHA        string `json:"head_sha"`
+}
+
+func codeReviewCheckoutContextFromSession(session *models.Session) (int, string, bool, error) {
+	if session == nil || session.Origin != models.SessionOriginCodeReview {
+		return 0, "", false, nil
+	}
+	if len(session.RevisionContext) == 0 {
+		return 0, "", false, fmt.Errorf("code review session is missing revision context")
+	}
+
+	var parsed codeReviewCheckoutContext
+	if err := json.Unmarshal(session.RevisionContext, &parsed); err != nil {
+		return 0, "", false, fmt.Errorf("parse code review revision context: %w", err)
+	}
+	if parsed.Kind != "code_review" {
+		return 0, "", false, fmt.Errorf("code review revision context has kind %q", parsed.Kind)
+	}
+	headSHA := strings.TrimSpace(parsed.HeadSHA)
+	if parsed.GitHubPRNumber <= 0 || headSHA == "" {
+		return 0, "", false, fmt.Errorf("code review revision context is missing pull request number or head SHA")
+	}
+	return parsed.GitHubPRNumber, headSHA, true, nil
 }
 
 func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {
@@ -6917,6 +6985,77 @@ func (o *Orchestrator) failHumanInputPause(ctx context.Context, session *models.
 		}
 	}
 	return err
+}
+
+func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, session *models.Session, sandbox *Sandbox, thread models.SessionThread, result *AgentResult, fallbackStatus models.SessionStatus, log zerolog.Logger) (bool, error) {
+	if result == nil {
+		return false, nil
+	}
+	diff := strings.TrimSpace(result.Diff)
+	if diff == "" {
+		diff = strings.TrimSpace(o.resultDiffOrWorkspaceFallback(ctx, session, sandbox, result.Diff))
+	}
+	if diff == "" {
+		return false, nil
+	}
+
+	message := "read-only review thread produced workspace changes"
+	if revertErr := o.revertReadOnlyReviewDiff(ctx, sandbox, diff); revertErr != nil {
+		message += "; automatic revert failed: " + revertErr.Error()
+		log.Warn().Err(revertErr).Str("thread_id", thread.ID.String()).Msg("failed to reverse read-only review thread diff")
+	}
+	category := "read_only_violation"
+	summary := "Read-only review blocked workspace changes"
+	threadResult := &models.SessionResult{
+		ResultSummary:   &summary,
+		Diff:            &diff,
+		Error:           &message,
+		FailureCategory: &category,
+	}
+	if o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(ctx, session.OrgID, thread.ID, models.ThreadStatusFailed, threadResult); err != nil {
+			return true, fmt.Errorf("mark read-only review thread failed: %w", err)
+		}
+	}
+	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
+		fallbackStatus = models.SessionStatusIdle
+	}
+	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); err != nil {
+		return true, fmt.Errorf("restore session after read-only review violation: %w", err)
+	}
+	log.Warn().
+		Str("thread_id", thread.ID.String()).
+		Int("diff_bytes", len(diff)).
+		Msg("blocked read-only review thread workspace changes")
+	return true, nil
+}
+
+func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
+	if o == nil || o.provider == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
+		return nil
+	}
+	workDir := strings.TrimSpace(sandbox.WorkDir)
+	if workDir == "" {
+		workDir = "."
+	}
+	patchPath := path.Join(workDir, ".143-read-only-review-revert.patch")
+	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(diff)); err != nil {
+		return fmt.Errorf("write revert patch: %w", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := fmt.Sprintf("cd '%s' && git apply -R --whitespace=nowarn '%s'; status=$?; rm -f '%s'; exit $status",
+		shellEscapeSingleQuote(workDir),
+		shellEscapeSingleQuote(patchPath),
+		shellEscapeSingleQuote(patchPath),
+	)
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("reverse apply read-only diff: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("reverse apply read-only diff exited %d: %s", exitCode, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the

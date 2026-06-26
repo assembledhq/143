@@ -256,6 +256,48 @@ func TestPullRequestStore_UpdateTitle(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestPullRequestStore_UpdateGitHubSnapshot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	store := NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	body := "Fresh description"
+	headSHA := "new-head"
+	headRef := "feature/code-review"
+	baseSHA := "new-base"
+
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*head_sha = @head_sha[\\s\\S]*health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0").
+		WithArgs(pgx.NamedArgs{
+			"id":            prID,
+			"org_id":        orgID,
+			"github_pr_url": "https://github.com/org/repo/pull/42",
+			"title":         "Fresh title",
+			"body":          &body,
+			"head_sha":      &headSHA,
+			"head_ref":      &headRef,
+			"base_sha":      &baseSHA,
+			"merge_state":   models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateGitHubSnapshot(context.Background(), orgID, prID, PullRequestGitHubSnapshot{
+		GitHubPRURL: "https://github.com/org/repo/pull/42",
+		Title:       "Fresh title",
+		Body:        &body,
+		HeadSHA:     &headSHA,
+		HeadRef:     &headRef,
+		BaseSHA:     &baseSHA,
+	})
+	require.NoError(t, err, "UpdateGitHubSnapshot should persist the latest GitHub PR mirror fields")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPullRequestStore_UpdateHeadSHA(t *testing.T) {
 	t.Parallel()
 

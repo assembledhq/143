@@ -2345,6 +2345,7 @@ var workerSessionThreadColumns = []string{
 	"created_by_source", "created_by_thread_id",
 	"archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
+	"execution_mode", "filesystem_mode",
 }
 
 var workerProjectTaskColumns = []string{
@@ -2365,6 +2366,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		models.ThreadCreatedBySourceUser, nil,
 		nil, nil, float64(0), 0, nil,
 		"", nil, "", "", []byte("[]"),
+		models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite,
 	}
 }
 

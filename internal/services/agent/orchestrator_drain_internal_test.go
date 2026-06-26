@@ -208,6 +208,9 @@ func (t *drainStubThreads) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, i
 func (t *drainStubThreads) UpdateResult(context.Context, uuid.UUID, uuid.UUID, models.ThreadStatus, *models.SessionResult) error {
 	return nil
 }
+func (t *drainStubThreads) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
+	return models.SessionThread{}, pgx.ErrNoRows
+}
 func (t *drainStubThreads) ClearPendingMessages(_ context.Context, _, threadID uuid.UUID) error {
 	if t.clearErr != nil {
 		return t.clearErr
