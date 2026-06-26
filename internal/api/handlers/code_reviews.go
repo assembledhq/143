@@ -102,7 +102,12 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_FINDINGS_LOAD_FAILED", "failed to load code review findings", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings}})
+	artifacts, err := h.store.ListPromptArtifacts(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_PROMPTS_LOAD_FAILED", "failed to load code review prompt artifacts", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptArtifacts: artifacts}})
 }
 
 func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
@@ -164,6 +169,14 @@ func (h *CodeReviewHandler) CreateAgentResult(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
 	}
+	if _, err := h.store.GetBySessionID(r.Context(), orgID, sessionID); err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_LOAD_FAILED", "failed to load code review session", err)
+		return
+	}
 	result.OrgID = orgID
 	result.SessionID = sessionID
 	if err := h.store.CreateAgentResult(r.Context(), &result); err != nil {
@@ -183,6 +196,14 @@ func (h *CodeReviewHandler) CreateFinding(w http.ResponseWriter, r *http.Request
 	var finding models.CodeReviewFinding
 	if err := json.NewDecoder(r.Body).Decode(&finding); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if _, err := h.store.GetBySessionID(r.Context(), orgID, sessionID); err != nil {
+		if err == pgx.ErrNoRows {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_LOAD_FAILED", "failed to load code review session", err)
 		return
 	}
 	finding.OrgID = orgID

@@ -2,6 +2,7 @@ package codereview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -33,8 +34,10 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
-			name:  "creates session and enqueues durable review job",
-			input: newReviewRequestedInput(nil),
+			name: "creates session and enqueues durable review job",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.FromFork = true
+			}),
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
 				require.True(t, result.Processed, "matching reviewer request should be processed")
 				require.False(t, result.Reused, "new PR head should create a fresh review")
@@ -43,11 +46,19 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, 1, sessions.createCalls, "service should create a normal 143 session")
 				require.Equal(t, models.SessionOriginCodeReview, sessions.created.Origin, "session should use code_review origin")
 				require.Equal(t, models.SessionInteractionModeSingleRun, sessions.created.InteractionMode, "review sessions should be single-run")
+				require.Equal(t, models.SessionStatusIdle, sessions.created.Status, "review sessions should start idle so reviewer tabs can claim the first turn")
 				require.Equal(t, 1, metadata.createCalls, "service should create code review metadata")
+				require.True(t, metadata.created.FromFork, "service should persist fork source evidence on review metadata")
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
+				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")
+				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "service should carry GitHub author login into worker payload")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "service should carry requested reviewer login for stale-request cleanup")
+
+				var revisionContext map[string]any
+				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "session revision context should be valid JSON")
+				require.Equal(t, true, revisionContext["from_fork"], "session revision context should include fork source evidence")
 			},
 		},
 		{
@@ -62,6 +73,36 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, metadata.running.SessionID, result.SessionID, "result should point to running session")
 				require.Equal(t, 0, sessions.createCalls, "duplicate request should not create another session")
 				require.Equal(t, 0, jobs.enqueueCalls, "duplicate request should not enqueue another job")
+			},
+		},
+		{
+			name:  "reuses terminal review for same output key",
+			input: newReviewRequestedInput(nil),
+			setup: func(p *policyStub, m *metadataStub) {
+				m.byOutputKey = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "matching duplicate terminal request should be processed")
+				require.True(t, result.Reused, "duplicate terminal request should reuse the existing review")
+				require.Equal(t, metadata.byOutputKey.SessionID, result.SessionID, "result should point to existing terminal session")
+				require.Equal(t, 0, sessions.createCalls, "duplicate terminal request should not create a detached session")
+				require.Equal(t, 0, metadata.createCalls, "duplicate terminal request should not create duplicate metadata")
+				require.Equal(t, 0, jobs.enqueueCalls, "duplicate terminal request should not enqueue a broken job")
+			},
+		},
+		{
+			name:  "does not enqueue when metadata creation races with same output key",
+			input: newReviewRequestedInput(nil),
+			setup: func(p *policyStub, m *metadataStub) {
+				m.createResult = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusQueued}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "raced duplicate request should be processed")
+				require.True(t, result.Reused, "raced duplicate request should reuse the winning metadata row")
+				require.Equal(t, metadata.createResult.SessionID, result.SessionID, "result should point to winning session metadata")
+				require.Equal(t, 1, sessions.createCalls, "raced duplicate request may have created a loser session before conflict detection")
+				require.Equal(t, 1, metadata.createCalls, "raced duplicate request should attempt metadata creation once")
+				require.Equal(t, 0, jobs.enqueueCalls, "raced duplicate request should not enqueue a job for the loser session")
 			},
 		},
 		{
@@ -142,16 +183,33 @@ func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID
 }
 
 type metadataStub struct {
-	createCalls int
-	staleCalls  int
-	running     models.CodeReviewSessionMetadata
-	runningErr  error
+	createCalls  int
+	staleCalls   int
+	supersededBy *uuid.UUID
+	created      models.CodeReviewSessionMetadata
+	createResult models.CodeReviewSessionMetadata
+	running      models.CodeReviewSessionMetadata
+	byOutputKey  models.CodeReviewSessionMetadata
+	runningErr   error
 }
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	s.createCalls++
+	if s.createResult.ID != uuid.Nil {
+		*metadata = s.createResult
+		s.created = *metadata
+		return nil
+	}
 	metadata.ID = uuid.New()
+	s.created = *metadata
 	return nil
+}
+
+func (s *metadataStub) GetByOutputKey(_ context.Context, _ uuid.UUID, _ string) (models.CodeReviewSessionMetadata, error) {
+	if s.byOutputKey.ID != uuid.Nil {
+		return s.byOutputKey, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
 func (s *metadataStub) GetRunningByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
@@ -164,8 +222,9 @@ func (s *metadataStub) GetRunningByPullRequestHead(_ context.Context, _, _ uuid.
 	return models.CodeReviewSessionMetadata{}, errors.New("unexpected running lookup")
 }
 
-func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string) (int64, error) {
+func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string, supersededBySessionID *uuid.UUID) (int64, error) {
 	s.staleCalls++
+	s.supersededBy = supersededBySessionID
 	return 1, nil
 }
 

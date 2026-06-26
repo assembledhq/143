@@ -56,6 +56,7 @@ CREATE TABLE code_review_session_metadata (
     policy_id uuid NOT NULL REFERENCES code_review_policies(id) ON DELETE RESTRICT,
     base_sha text NOT NULL,
     head_sha text NOT NULL,
+    from_fork boolean NOT NULL DEFAULT false,
     trigger_source text NOT NULL CONSTRAINT chk_code_review_session_metadata_trigger_source CHECK (trigger_source IN ('app_reviewer', 'alias_reviewer', 'team_reviewer', 'slash_command', 'auto_policy')),
     status text NOT NULL CONSTRAINT chk_code_review_session_metadata_status CHECK (status IN ('queued', 'running', 'completed', 'failed', 'stale', 'cancelled')),
     decision text CONSTRAINT chk_code_review_session_metadata_decision CHECK (decision IS NULL OR decision IN ('approved', 'comment_only', 'needs_human_review', 'blocked')),

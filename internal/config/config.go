@@ -164,12 +164,15 @@ type Config struct {
 	PagerDutyIntegrationEnabled bool   `env:"PAGERDUTY_INTEGRATION_ENABLED" envDefault:"true"`
 
 	// GitHub App
-	GitHubAppID           int64  `env:"GITHUB_APP_ID"`
-	GitHubAppClientID     string `env:"GITHUB_APP_CLIENT_ID"`
-	GitHubAppClientSecret string `env:"GITHUB_APP_CLIENT_SECRET"`
-	GitHubAppPrivateKey   string `env:"GITHUB_APP_PRIVATE_KEY"`
-	GitHubWebhookSecret   string `env:"GITHUB_WEBHOOK_SECRET"`
-	GitHubAppSlug         string `env:"GITHUB_APP_SLUG"`
+	GitHubAppID                 int64    `env:"GITHUB_APP_ID"`
+	GitHubAppClientID           string   `env:"GITHUB_APP_CLIENT_ID"`
+	GitHubAppClientSecret       string   `env:"GITHUB_APP_CLIENT_SECRET"`
+	GitHubAppPrivateKey         string   `env:"GITHUB_APP_PRIVATE_KEY"`
+	GitHubWebhookSecret         string   `env:"GITHUB_WEBHOOK_SECRET"`
+	GitHubAppSlug               string   `env:"GITHUB_APP_SLUG"`
+	CodeReviewAppReviewerLogins []string `env:"CODE_REVIEW_APP_REVIEWER_LOGINS" envSeparator:","`
+	CodeReviewAliasLogins       []string `env:"CODE_REVIEW_ALIAS_LOGINS"        envSeparator:","`
+	CodeReviewTeamSlugs         []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
 
 	// CSRF
 	CSRFSigningKey string `env:"CSRF_SIGNING_KEY"`

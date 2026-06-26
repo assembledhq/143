@@ -853,6 +853,38 @@ func (s ThreadCreatedBySource) Validate() error {
 	}
 }
 
+type ThreadExecutionMode string
+
+const (
+	ThreadExecutionModeWork   ThreadExecutionMode = "work"
+	ThreadExecutionModeReview ThreadExecutionMode = "review"
+)
+
+func (m ThreadExecutionMode) Validate() error {
+	switch m {
+	case "", ThreadExecutionModeWork, ThreadExecutionModeReview:
+		return nil
+	default:
+		return fmt.Errorf("invalid ThreadExecutionMode: %q", m)
+	}
+}
+
+type ThreadFilesystemMode string
+
+const (
+	ThreadFilesystemModeReadWrite ThreadFilesystemMode = "read_write"
+	ThreadFilesystemModeReadOnly  ThreadFilesystemMode = "read_only"
+)
+
+func (m ThreadFilesystemMode) Validate() error {
+	switch m {
+	case "", ThreadFilesystemModeReadWrite, ThreadFilesystemModeReadOnly:
+		return nil
+	default:
+		return fmt.Errorf("invalid ThreadFilesystemMode: %q", m)
+	}
+}
+
 // SessionThread is one agent doing one piece of work. All threads in a session
 // share the same container and filesystem.
 type SessionThread struct {
@@ -887,6 +919,8 @@ type SessionThread struct {
 	RecoveryState         RecoveryState               `db:"recovery_state" json:"recovery_state,omitempty"`
 	RecoveryReason        string                      `db:"recovery_reason" json:"recovery_reason,omitempty"`
 	RecoveryEventHistory  json.RawMessage             `db:"recovery_event_history" json:"recovery_event_history,omitempty"`
+	ExecutionMode         ThreadExecutionMode         `db:"execution_mode" json:"execution_mode,omitempty"`
+	FilesystemMode        ThreadFilesystemMode        `db:"filesystem_mode" json:"filesystem_mode,omitempty"`
 	InboxDelivery         *ThreadInboxDeliverySummary `db:"-" json:"inbox_delivery,omitempty"`
 }
 
