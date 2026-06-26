@@ -374,6 +374,7 @@ type codeReviewRequestedWebhook struct {
 	PullRequest struct {
 		HTMLURL string `json:"html_url"`
 		Title   string `json:"title"`
+		Body    string `json:"body"`
 		User    struct {
 			Login string `json:"login"`
 		} `json:"user"`
@@ -404,6 +405,7 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 			GitHubPRURL:    event.PullRequest.HTMLURL,
 			GitHubRepo:     event.Repository.FullName,
 			Title:          event.PullRequest.Title,
+			Body:           nilIfEmpty(event.PullRequest.Body),
 			Status:         models.PullRequestStatusOpen,
 			ReviewStatus:   models.PullRequestReviewStatusPending,
 			AuthoredBy:     models.GitIdentitySourceUser,

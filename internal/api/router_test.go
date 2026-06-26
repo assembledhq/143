@@ -120,6 +120,30 @@ func TestNewRouter_WiresLinearWebhookSigningSecret(t *testing.T) {
 	require.Greater(t, setGlobalSecret, setRequireSecret, "global Linear webhook secret wiring should live with the webhook verification setup")
 }
 
+func TestNewRouter_WiresCodeReviewTriggerConfig(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for code review trigger wiring regression test")
+
+	serviceConstruction := strings.Index(string(source), `codereviewsvc.NewService`)
+	require.NotEqual(t, -1, serviceConstruction, "router should construct the code review trigger service")
+
+	appReviewerConfig := strings.Index(string(source), `AppReviewerLogins: cfg.CodeReviewAppReviewerLogins`)
+	aliasConfig := strings.Index(string(source), `AliasLogins:       cfg.CodeReviewAliasLogins`)
+	teamConfig := strings.Index(string(source), `TeamSlugs:         cfg.CodeReviewTeamSlugs`)
+	setService := strings.Index(string(source), `webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)`)
+
+	require.NotEqual(t, -1, appReviewerConfig, "router should pass configured app reviewer logins into the code review service")
+	require.NotEqual(t, -1, aliasConfig, "router should pass configured alias reviewer logins into the code review service")
+	require.NotEqual(t, -1, teamConfig, "router should pass configured team slugs into the code review service")
+	require.NotEqual(t, -1, setService, "router should wire the code review service into GitHub webhooks")
+	require.Greater(t, appReviewerConfig, serviceConstruction, "code review app reviewer config should be part of service construction")
+	require.Greater(t, aliasConfig, serviceConstruction, "code review alias config should be part of service construction")
+	require.Greater(t, teamConfig, serviceConstruction, "code review team config should be part of service construction")
+	require.Greater(t, setService, teamConfig, "webhook handler should receive the configured service")
+}
+
 func testRouterPrivateKeyPEM(t *testing.T) string {
 	t.Helper()
 

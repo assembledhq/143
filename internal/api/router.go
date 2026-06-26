@@ -348,7 +348,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	prReadinessStore := db.NewPRReadinessStore(pool)
 	codeReviewStore := db.NewCodeReviewStore(pool)
-	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{})
+	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{
+		AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
+		AliasLogins:       cfg.CodeReviewAliasLogins,
+		TeamSlugs:         cfg.CodeReviewTeamSlugs,
+	})
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
