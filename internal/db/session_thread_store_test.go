@@ -22,6 +22,7 @@ var sessionThreadTestColumns = []string{
 	"started_at", "completed_at", "created_at",
 	"created_by_source", "created_by_thread_id", "archived_at", "base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
 	"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
+	"execution_mode", "filesystem_mode",
 }
 
 func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now time.Time) []interface{} {
@@ -33,6 +34,7 @@ func newSessionThreadRow(threadID, sessionID, orgID uuid.UUID, label string, now
 		nil, nil, now,
 		"user", nil, nil, nil, float64(0), 0, nil,
 		"", nil, "", "", []byte("[]"),
+		models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite,
 	}
 }
 
@@ -49,9 +51,9 @@ func TestSessionThreadStore_Create(t *testing.T) {
 	orgID := uuid.New()
 	now := time.Now()
 
-	// Create has 9 named args: session_id, org_id, agent_type, model_override, label, instructions, file_scope, status, max_threads
+	// Create has 11 named args: session_id, org_id, agent_type, model_override, label, instructions, file_scope, status, execution_mode, filesystem_mode, max_threads
 	mock.ExpectQuery("INSERT INTO session_threads").
-		WithArgs(anyArgs(9)...).
+		WithArgs(anyArgs(11)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(threadID, now))
 
 	thread := &models.SessionThread{
@@ -83,7 +85,7 @@ func TestSessionThreadStore_CreateWithProvenance(t *testing.T) {
 	sourceThreadID := uuid.New()
 	now := time.Now()
 
-	args := append(anyArgs(8), models.ThreadCreatedBySourceAgentTool, &sourceThreadID, 4)
+	args := append(anyArgs(8), models.ThreadCreatedBySourceAgentTool, &sourceThreadID, models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite, 4)
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(args...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(threadID, now))
@@ -256,8 +258,22 @@ func TestSessionThreadStore_ListBySession(t *testing.T) {
 			switch tt.name {
 			case "returns threads for session":
 				expected := []models.SessionThread{
-					{ID: threadID1, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Backend", Status: "pending", CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser, RecoveryEventHistory: []byte("[]")},
-					{ID: threadID2, SessionID: sessionID, OrgID: orgID, AgentType: "claude_code", Label: "Frontend", Status: "pending", CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser, RecoveryEventHistory: []byte("[]")},
+					{
+						ID: threadID1, SessionID: sessionID, OrgID: orgID,
+						AgentType: "claude_code", Label: "Backend", Status: "pending",
+						CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser,
+						RecoveryEventHistory: []byte("[]"),
+						ExecutionMode:        models.ThreadExecutionModeWork,
+						FilesystemMode:       models.ThreadFilesystemModeReadWrite,
+					},
+					{
+						ID: threadID2, SessionID: sessionID, OrgID: orgID,
+						AgentType: "claude_code", Label: "Frontend", Status: "pending",
+						CreatedAt: now, CreatedBySource: models.ThreadCreatedBySourceUser,
+						RecoveryEventHistory: []byte("[]"),
+						ExecutionMode:        models.ThreadExecutionModeWork,
+						FilesystemMode:       models.ThreadFilesystemModeReadWrite,
+					},
 				}
 				require.Equal(t, expected, threads, "should return the expected threads for session")
 			case "returns empty for session with no threads":

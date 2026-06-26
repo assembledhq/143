@@ -374,12 +374,16 @@ type codeReviewRequestedWebhook struct {
 	PullRequest struct {
 		HTMLURL string `json:"html_url"`
 		Title   string `json:"title"`
+		Body    string `json:"body"`
 		User    struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Head struct {
-			SHA string `json:"sha"`
-			Ref string `json:"ref"`
+			SHA  string `json:"sha"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				Fork bool `json:"fork"`
+			} `json:"repo"`
 		} `json:"head"`
 		Base struct {
 			SHA string `json:"sha"`
@@ -393,19 +397,29 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse review_requested event")
 		return false
 	}
+	snapshot := db.PullRequestGitHubSnapshot{
+		GitHubPRURL: event.PullRequest.HTMLURL,
+		Title:       event.PullRequest.Title,
+		Body:        nilIfEmpty(event.PullRequest.Body),
+		HeadSHA:     nilIfEmpty(event.PullRequest.Head.SHA),
+		HeadRef:     nilIfEmpty(event.PullRequest.Head.Ref),
+		BaseSHA:     nilIfEmpty(event.PullRequest.Base.SHA),
+	}
 	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.Number)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created := &models.PullRequest{
 			OrgID:          owner.OrgID,
 			GitHubPRNumber: event.Number,
-			GitHubPRURL:    event.PullRequest.HTMLURL,
+			GitHubPRURL:    snapshot.GitHubPRURL,
 			GitHubRepo:     event.Repository.FullName,
-			Title:          event.PullRequest.Title,
+			Title:          snapshot.Title,
+			Body:           snapshot.Body,
 			Status:         models.PullRequestStatusOpen,
 			ReviewStatus:   models.PullRequestReviewStatusPending,
 			AuthoredBy:     models.GitIdentitySourceUser,
-			HeadSHA:        nilIfEmpty(event.PullRequest.Head.SHA),
-			HeadRef:        nilIfEmpty(event.PullRequest.Head.Ref),
+			HeadSHA:        snapshot.HeadSHA,
+			HeadRef:        snapshot.HeadRef,
+			BaseSHA:        snapshot.BaseSHA,
 		}
 		if err := h.pullRequests.Create(r.Context(), created); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_CREATE_FAILED", "failed to create pull request mirror", err)
@@ -415,6 +429,17 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 	} else if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request mirror", err)
 		return false
+	} else {
+		if err := h.pullRequests.UpdateGitHubSnapshot(r.Context(), owner.OrgID, pr.ID, snapshot); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_UPDATE_FAILED", "failed to update pull request mirror", err)
+			return false
+		}
+		pr.GitHubPRURL = snapshot.GitHubPRURL
+		pr.Title = snapshot.Title
+		pr.Body = snapshot.Body
+		pr.HeadSHA = snapshot.HeadSHA
+		pr.HeadRef = snapshot.HeadRef
+		pr.BaseSHA = snapshot.BaseSHA
 	}
 	requestedLogin := ""
 	if event.RequestedReviewer != nil {
@@ -439,6 +464,7 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 		PullRequestAuthor: event.PullRequest.User.Login,
 		BaseSHA:           event.PullRequest.Base.SHA,
 		HeadSHA:           headSHA,
+		FromFork:          event.PullRequest.Head.Repo.Fork,
 		RequestedLogin:    requestedLogin,
 		RequestedTeam:     requestedTeam,
 	})

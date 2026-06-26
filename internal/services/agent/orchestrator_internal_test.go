@@ -1584,6 +1584,57 @@ func TestSessionWorkingBranch_PrefersPersistedBranch(t *testing.T) {
 	require.Equal(t, workingBranch, sessionWorkingBranch(run, &models.Issue{Title: "Ignored"}), "sessionWorkingBranch should reuse the persisted working branch when present")
 }
 
+func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	repoID := uuid.MustParse("66666666-6666-6666-6666-666666666666")
+	repo := models.Repository{
+		ID:             repoID,
+		OrgID:          orgID,
+		FullName:       "assembledhq/143",
+		DefaultBranch:  "main",
+		CloneURL:       "https://github.com/assembledhq/143.git",
+		InstallationID: 42,
+	}
+	title := "Code review for assembledhq/143#42"
+	session := &models.Session{
+		ID:           uuid.MustParse("88888888-8888-8888-8888-888888888888"),
+		OrgID:        orgID,
+		Origin:       models.SessionOriginCodeReview,
+		RepositoryID: &repoID,
+		AgentType:    models.AgentType("test"),
+		Title:        &title,
+		RevisionContext: json.RawMessage(`{
+			"kind": "code_review",
+			"github_pr_number": 42,
+			"head_sha": "expected-head-sha"
+		}`),
+	}
+	provider := &testInternalSandboxProvider{
+		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
+			if cmd == "git rev-parse HEAD" {
+				_, _ = io.WriteString(stdout, "expected-head-sha\n")
+			}
+			return 0, nil
+		},
+	}
+	orch := &Orchestrator{
+		repositories: testInternalRepoStore{repo: repo},
+		github:       testInternalGitHubTokens{token: "ghp_test123"},
+		provider:     provider,
+		logger:       zerolog.Nop(),
+	}
+
+	_, _, _, err := orch.setupFreshSandbox(context.Background(), session, &Sandbox{ID: "sandbox-1", WorkDir: "/home/sandbox/backend", HomeDir: "/home/sandbox"}, nil, nil)
+
+	require.NoError(t, err, "setupFreshSandbox should check out the recorded PR head for code review sessions")
+	require.Contains(t, provider.execCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "code review checkout should fetch the GitHub PR head ref")
+	require.Contains(t, provider.execCalls, "git checkout -B '143/88888888/code-review-for-assembledhq-143-42' FETCH_HEAD", "code review checkout should reset the session branch to the PR head")
+	require.Contains(t, provider.execCalls, "git rev-parse HEAD", "code review checkout should verify the checked-out head SHA")
+	require.NotContains(t, provider.execCalls, "git checkout -b '143/88888888/code-review-for-assembledhq-143-42'", "code review checkout should not branch from the cloned target branch tip")
+}
+
 func TestSetupFreshSandbox_WorkingBranchCheckoutFailures(t *testing.T) {
 	t.Parallel()
 

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,8 +15,10 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -560,6 +563,166 @@ func TestWebhook_HandlePullRequestScopesLookupToActiveOwner(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "webhook should scope pull request lookup to the active owner org")
 }
 
+func TestWebhook_HandleCodeReviewRequestedCreatesMirrorWithBody(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now().UTC()
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}
+	metadata := &codeReviewWebhookMetadataStore{}
+	sessions := &codeReviewWebhookSessionStore{}
+	jobs := &codeReviewWebhookJobStore{jobID: jobID}
+	codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
+		AppReviewerLogins: []string{"143-code-reviewer"},
+	})
+	handler := &WebhookHandler{
+		pullRequests: db.NewPullRequestStore(mock),
+		codeReviews:  codeReviews,
+	}
+
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()))
+	mock.ExpectQuery("INSERT INTO pull_requests").
+		WithArgs(pgx.NamedArgs{
+			"session_id":       (*uuid.UUID)(nil),
+			"org_id":           orgID,
+			"github_pr_number": 42,
+			"github_pr_url":    "https://github.com/assembledhq/143/pull/42",
+			"github_repo":      "assembledhq/143",
+			"title":            "Fix approval guard",
+			"body":             stringPointerArg{value: "## Summary\n\nFixes the approval guard.\n\n## Testing\n\ngo test ./..."},
+			"status":           models.PullRequestStatusOpen,
+			"review_status":    models.PullRequestReviewStatusPending,
+			"authored_by":      models.GitIdentitySourceUser,
+			"head_sha":         stringPointerArg{value: "head-sha"},
+			"head_ref":         stringPointerArg{value: "feature/code-review"},
+			"base_sha":         stringPointerArg{value: "base-sha"},
+		}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(prID, now, now))
+
+	body := []byte(`{
+		"action": "review_requested",
+		"number": 42,
+		"repository": {"full_name": "assembledhq/143"},
+		"requested_reviewer": {"login": "143-code-reviewer"},
+		"pull_request": {
+			"html_url": "https://github.com/assembledhq/143/pull/42",
+			"title": "Fix approval guard",
+			"body": "## Summary\n\nFixes the approval guard.\n\n## Testing\n\ngo test ./...",
+			"user": {"login": "anya"},
+			"head": {"sha": "head-sha", "ref": "feature/code-review", "repo": {"fork": false}},
+			"base": {"sha": "base-sha"}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+
+	ok := handler.handleCodeReviewRequested(rr, req, body, db.GitHubRepoOwner{
+		RepositoryID: repoID,
+		OrgID:        orgID,
+		FullName:     "assembledhq/143",
+		Status:       "active",
+	})
+
+	require.True(t, ok, "review_requested webhook should be processed: %s", rr.Body.String())
+	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the created pull request mirror")
+	require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "code review job should preserve the GitHub PR author")
+	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror should be created with the webhook PR body")
+}
+
+func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now().UTC()
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}
+	metadata := &codeReviewWebhookMetadataStore{}
+	sessions := &codeReviewWebhookSessionStore{}
+	jobs := &codeReviewWebhookJobStore{jobID: jobID}
+	codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
+		AppReviewerLogins: []string{"143-code-reviewer"},
+	})
+	handler := &WebhookHandler{
+		pullRequests: db.NewPullRequestStore(mock),
+		codeReviews:  codeReviews,
+	}
+
+	staleBody := "stale description"
+	staleHead := "stale-head"
+	staleRef := "stale-ref"
+	staleBase := "stale-base"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+			prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Stale title", &staleBody, "open", "pending", "app", "", &staleHead, &staleRef, &staleBase,
+			"unknown", false, 0, false, nil, int64(0),
+			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+			nil, now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha[\\s\\S]*base_sha = @base_sha").
+		WithArgs(pgx.NamedArgs{
+			"id":            prID,
+			"org_id":        orgID,
+			"github_pr_url": "https://github.com/assembledhq/143/pull/42",
+			"title":         "Fresh title",
+			"body":          stringPointerArg{value: "Fresh body with testing evidence"},
+			"head_sha":      stringPointerArg{value: "fresh-head"},
+			"head_ref":      stringPointerArg{value: "feature/code-review"},
+			"base_sha":      stringPointerArg{value: "fresh-base"},
+			"merge_state":   models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body := []byte(`{
+		"action": "review_requested",
+		"number": 42,
+		"repository": {"full_name": "assembledhq/143"},
+		"requested_reviewer": {"login": "143-code-reviewer"},
+		"pull_request": {
+			"html_url": "https://github.com/assembledhq/143/pull/42",
+			"title": "Fresh title",
+			"body": "Fresh body with testing evidence",
+			"user": {"login": "anya"},
+			"head": {"sha": "fresh-head", "ref": "feature/code-review", "repo": {"fork": false}},
+			"base": {"sha": "fresh-base"}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+
+	ok := handler.handleCodeReviewRequested(rr, req, body, db.GitHubRepoOwner{
+		RepositoryID: repoID,
+		OrgID:        orgID,
+		FullName:     "assembledhq/143",
+		Status:       "active",
+	})
+
+	require.True(t, ok, "review_requested webhook should be processed: %s", rr.Body.String())
+	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the existing pull request mirror")
+	require.Equal(t, "fresh-head", jobs.payload.HeadSHA, "code review job should target the fresh webhook head SHA")
+	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request mirror should be refreshed from the webhook payload")
+}
+
 func TestWebhook_HandleIssueComment_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -596,4 +759,87 @@ func TestWebhook_HandleIssueComment_SkipsNonPRIssues(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "issue_comment on non-PR issue should be processed silently")
 	require.Contains(t, rr.Body.String(), "processed", "issue_comment handler should report processed for non-PR issues")
 	require.NoError(t, mock.ExpectationsWereMet(), "no DB calls should be made for non-PR issue comments")
+}
+
+func codeReviewWebhookPullRequestColumns() []string {
+	return []string{
+		"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+	}
+}
+
+type stringPointerArg struct {
+	value string
+}
+
+func (m stringPointerArg) Match(value any) bool {
+	ptr, ok := value.(*string)
+	return ok && ptr != nil && *ptr == m.value
+}
+
+type codeReviewWebhookPolicyStore struct {
+	policyID uuid.UUID
+	config   models.CodeReviewPolicyConfig
+}
+
+func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+	record := models.CodeReviewPolicyRecord{
+		ID:                  s.policyID,
+		Version:             1,
+		Enabled:             s.config.Enabled,
+		ApprovalMode:        s.config.ApprovalMode,
+		DescriptionPolicy:   s.config.DescriptionPolicy,
+		RiskPolicy:          s.config.RiskPolicy,
+		AgentRoster:         s.config.AgentRoster,
+		InlineCommentLimit:  s.config.InlineCommentLimit,
+		FinalReviewTemplate: s.config.FinalReviewTemplate,
+	}
+	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "repository", Policy: &record}, nil
+}
+
+func (s *codeReviewWebhookPolicyStore) SavePolicy(context.Context, uuid.UUID, *uuid.UUID, models.CodeReviewPolicyConfig, *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	return models.CodeReviewPolicyRecord{}, nil
+}
+
+type codeReviewWebhookMetadataStore struct{}
+
+func (s *codeReviewWebhookMetadataStore) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
+	metadata.ID = uuid.New()
+	return nil
+}
+
+func (s *codeReviewWebhookMetadataStore) GetByOutputKey(context.Context, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewWebhookMetadataStore) GetRunningByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) (int64, error) {
+	return 0, nil
+}
+
+type codeReviewWebhookSessionStore struct{}
+
+func (s *codeReviewWebhookSessionStore) Create(_ context.Context, session *models.Session) error {
+	session.ID = uuid.New()
+	return nil
+}
+
+type codeReviewWebhookJobStore struct {
+	jobID   uuid.UUID
+	payload codereviewsvc.RunCodeReviewJobPayload
+}
+
+func (s *codeReviewWebhookJobStore) Enqueue(_ context.Context, _ uuid.UUID, _, _ string, payload any, _ int, _ *string) (uuid.UUID, error) {
+	typed, ok := payload.(codereviewsvc.RunCodeReviewJobPayload)
+	if ok {
+		s.payload = typed
+	}
+	return s.jobID, nil
 }

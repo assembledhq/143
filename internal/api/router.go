@@ -349,7 +349,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	prReadinessStore := db.NewPRReadinessStore(pool)
 	codeReviewStore := db.NewCodeReviewStore(pool)
-	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{})
+	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{
+		AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
+		AliasLogins:       cfg.CodeReviewAliasLogins,
+		TeamSlugs:         cfg.CodeReviewTeamSlugs,
+	})
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
@@ -1529,6 +1533,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
+				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
+				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
 				r.Put("/api/v1/pr-readiness-policies", sessionHandler.PutReadinessPolicy)
 				r.Post("/api/v1/pr-readiness-custom-checks", sessionHandler.CreateReadinessCustomCheck)
 				r.Put("/api/v1/pr-readiness-custom-checks/{check_id}", sessionHandler.UpdateReadinessCustomCheck)
