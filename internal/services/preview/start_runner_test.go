@@ -3,6 +3,7 @@ package preview
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -10,11 +11,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -29,6 +32,50 @@ func TestClassifyLaunchFailure_InstallFailed(t *testing.T) {
 	require.Equal(t, "PREVIEW_INSTALL_FAILED", failure.Code, "install failures should get a dedicated preview start error code")
 	require.Contains(t, failure.Message, "preview.install", "install failure message should point users at the install config")
 	require.Contains(t, failure.Message, "npm ci exited with code 1", "install failure message should include provider details")
+}
+
+func TestIsPreviewStartupInterrupted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{
+			name:     "sentinel",
+			err:      fmt.Errorf("launch preview: %w", ErrPreviewStartupInterrupted),
+			expected: true,
+		},
+		{
+			name:     "docker missing container",
+			err:      fmt.Errorf("create exec: Error response from daemon: No such container: abc123"),
+			expected: true,
+		},
+		{
+			name:     "sandbox exec broken pipe",
+			err:      fmt.Errorf("write exec stdin: broken pipe"),
+			expected: true,
+		},
+		{
+			name:     "normal install failure",
+			err:      fmt.Errorf("%w: npm ci exited with code 1", ErrInstallFailed),
+			expected: false,
+		},
+		{
+			name:     "invalid config",
+			err:      fmt.Errorf("%w: missing primary service", ErrInvalidConfig),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, IsPreviewStartupInterrupted(tt.err), "startup interruption classification should match expected retryability")
+		})
+	}
 }
 
 func TestClassifyLaunchFailure_OutOfMemory(t *testing.T) {
@@ -114,6 +161,108 @@ func TestShouldReassignPreviewWorker(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "shouldReassignPreviewWorker should match the expected fallback ownership behavior")
 		})
 	}
+}
+
+func TestStartRunnerRetryBranchPreviewStartupInterruptionResetsAndDestroysSandbox(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now()
+	provider := &destroyRecordingSandboxProvider{}
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(uuid.New(), previewID, orgID, "warn", "start", "interrupted", json.RawMessage(`{}`), now))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("DELETE FROM preview_services").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 2))
+	mock.ExpectExec("DELETE FROM preview_infrastructure").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	mock.ExpectCommit()
+	expectUpdatePreviewStatusFailed(mock)
+
+	store := db.NewPreviewStore(mock)
+	runner := &StartRunner{
+		manager:         &Manager{store: store, logger: zerolog.Nop()},
+		previews:        store,
+		sandboxProvider: provider,
+		logger:          zerolog.Nop(),
+	}
+	reservation := &models.PreviewInstance{ID: previewID, OrgID: orgID, PreviewTargetID: &targetID, Status: models.PreviewStatusStarting}
+	payload := StartBranchPreviewJobPayload{OrgID: orgID, PreviewID: previewID, PreviewTargetID: targetID}
+	sb := &agent.Sandbox{ID: "sandbox-1", Provider: ProviderDocker}
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	err = runner.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
+
+	require.ErrorIs(t, err, ErrPreviewStartupInterrupted, "interrupted branch preview startup should return the retryable sentinel")
+	require.Equal(t, []string{"sandbox-1"}, provider.destroyed, "interrupted branch preview startup should destroy the transient sandbox")
+	jobctx.RunDeadLetterHooks(ctx, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartRunnerEnsureReservationRuntimeForClaimingWorkerCreatesRuntimeForSameWorkerRetry(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	runtimeID := uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT[\\s\\S]+FROM preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"next_epoch"}).AddRow(2))
+	mock.ExpectQuery("INSERT INTO preview_runtimes").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "preview_instance_id", "runtime_epoch", "worker_node_id",
+			"endpoint_url", "preview_handle", "primary_port", "status", "lease_expires_at",
+			"last_heartbeat_at", "drain_requested_at", "stopped_at", "error", "unavailable_reason", "created_at", "updated_at",
+		}).AddRow(
+			runtimeID, orgID, previewID, 2, "worker-1",
+			"http://worker:8080", "", 0, string(models.PreviewRuntimeStatusStarting), now.Add(90*time.Second),
+			now, nil, nil, "", "", now, now,
+		))
+	mock.ExpectCommit()
+
+	runner := &StartRunner{
+		manager:  &Manager{previewInternalBaseURL: "http://worker:8080"},
+		previews: db.NewPreviewStore(mock),
+		nodeID:   "worker-1",
+		logger:   zerolog.Nop(),
+	}
+	reservation := &models.PreviewInstance{ID: previewID, OrgID: orgID, WorkerNodeID: "worker-1", Status: models.PreviewStatusStarting}
+
+	err = runner.ensureReservationRuntimeForClaimingWorker(context.Background(), orgID, previewID, reservation)
+
+	require.NoError(t, err, "same-worker retry should create a fresh runtime epoch when none is active")
+	require.Equal(t, "worker-1", reservation.WorkerNodeID, "reservation should remain owned by the claiming worker")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 type startRunnerFileReader struct {
@@ -569,6 +718,16 @@ func (f fakeStartRunnerSandboxProvider) Restore(context.Context, *agent.Sandbox,
 }
 func (f fakeStartRunnerSandboxProvider) ExecStream(context.Context, *agent.Sandbox, string, func([]byte), io.Writer) (int, error) {
 	panic("not used")
+}
+
+type destroyRecordingSandboxProvider struct {
+	fakeStartRunnerSandboxProvider
+	destroyed []string
+}
+
+func (p *destroyRecordingSandboxProvider) Destroy(_ context.Context, sb *agent.Sandbox) error {
+	p.destroyed = append(p.destroyed, sb.ID)
+	return nil
 }
 
 func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_RestoresMatchingSnapshot(t *testing.T) {
