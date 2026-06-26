@@ -101,8 +101,23 @@ DOCKER_DNS_RESOLVERS=(1.1.1.1 8.8.8.8 9.9.9.9)
 ALLOW_DEPLOY_DOCKER_DAEMON_RESTART="${ALLOW_DEPLOY_DOCKER_DAEMON_RESTART:-0}"
 
 run_worker_host_reconcile() {
+  local DEPLOY_MODE_FILE="/opt/143/.deploy-mode"
+
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
-    "sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox"
+    "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
+    "$(remote_env_assignment DEPLOY_MODE_FILE "$DEPLOY_MODE_FILE")" \
+    'bash -s' <<'REMOTE'
+set -euo pipefail
+
+case "${DEPLOY_MODE:-routine}" in
+  routine|maintenance) ;;
+  *) echo "ERROR: invalid DEPLOY_MODE for worker reconciliation: ${DEPLOY_MODE}" >&2; exit 1 ;;
+esac
+
+printf '%s %s\n' "$DEPLOY_MODE" "$(date +%s)" > "$DEPLOY_MODE_FILE"
+trap 'rm -f "$DEPLOY_MODE_FILE"' EXIT
+sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox
+REMOTE
 }
 
 remote_shell_quote() {
