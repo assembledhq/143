@@ -135,7 +135,7 @@ describe("PullRequestPreviewPage", () => {
               reason: "stale",
               auto_open: true,
               represents_latest: false,
-              primary_label: "Restart",
+              primary_label: "Start latest preview",
               secondary_label: "Open stale preview",
               stale_preview_url: "https://prev-old.preview.143.dev",
             },
@@ -404,7 +404,7 @@ describe("PullRequestPreviewPage", () => {
     }
   });
 
-  it("does not auto-open stale previews and makes Restart primary", async () => {
+  it("does not auto-open stale previews and makes Start latest preview primary", async () => {
     let startLatestCalled = false;
     server.use(
       http.get("*/api/v1/previews/github/acme/web/pull/42", () =>
@@ -429,7 +429,7 @@ describe("PullRequestPreviewPage", () => {
               reason: "stale",
               auto_open: false,
               represents_latest: false,
-              primary_label: "Restart",
+              primary_label: "Start latest preview",
               secondary_label: "Open stale preview",
               stale_preview_url: "https://prev-old.preview.143.dev",
               message: "This preview is for abc123; the pull request is now at def456.",
@@ -462,7 +462,7 @@ describe("PullRequestPreviewPage", () => {
     expect(screen.getByText("This preview is for abc123; the pull request is now at def456.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Open stale preview/ })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /Restart/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Start latest preview/ }));
 
     await waitFor(() => {
       expect(startLatestCalled).toBe(true);
@@ -573,7 +573,7 @@ describe("PullRequestPreviewPage", () => {
 
     expect(await screen.findByText("Preview blocked")).toBeInTheDocument();
     expect(screen.getByText("You can open existing previews, but you do not have permission to start a new preview for this pull request.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Restart|Start preview|Resume preview/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Start latest preview|Start preview|Resume preview/ })).not.toBeInTheDocument();
   });
 
   it("prefers failed preview diagnostics over blocked launch copy", async () => {
