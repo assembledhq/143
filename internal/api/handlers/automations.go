@@ -816,7 +816,7 @@ func validateAutomationEventTriggerInputs(inputs []automationEventTriggerInput) 
 		if err := provider.Validate(); err != nil {
 			return nil, fmt.Errorf("trigger %d: %w", idx+1, err)
 		}
-		if provider != models.AutomationEventProviderPagerDuty {
+		if provider != models.AutomationEventProviderPagerDuty && provider != models.AutomationEventProviderLinear {
 			return nil, fmt.Errorf("trigger %d: provider %q is not supported for generic event triggers", idx+1, provider)
 		}
 		eventTypes, err := normalizeAutomationEventTypes(provider, input.EventTypes)
@@ -894,6 +894,11 @@ func normalizeAutomationEventTypes(provider models.AutomationEventProvider, raw 
 				return nil, err
 			}
 		}
+		if provider == models.AutomationEventProviderLinear {
+			if err := models.LinearAutomationEvent(eventType).Validate(); err != nil {
+				return nil, err
+			}
+		}
 		if _, ok := seen[eventType]; ok {
 			continue
 		}
@@ -909,6 +914,9 @@ func normalizeAutomationEventTypes(provider models.AutomationEventProvider, raw 
 func normalizeAutomationEventFilter(provider models.AutomationEventProvider, raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return json.RawMessage(`{}`), nil
+	}
+	if provider == models.AutomationEventProviderLinear {
+		return normalizeLinearAutomationEventFilter(raw)
 	}
 	if provider != models.AutomationEventProviderPagerDuty {
 		return raw, nil
@@ -1016,6 +1024,61 @@ func validatePagerDutyEventTriggerFilter(raw json.RawMessage) error {
 		return fmt.Errorf("PagerDuty triggers require urgency or priority filter")
 	}
 	return nil
+}
+
+func normalizeLinearAutomationEventFilter(raw json.RawMessage) (json.RawMessage, error) {
+	var in map[string]any
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil, fmt.Errorf("filter must be a JSON object")
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		switch key {
+		case "team_keys", "team_ids", "labels", "tags":
+			values, err := normalizeStringArrayFilter(value, false)
+			if err != nil {
+				return nil, fmt.Errorf("%s must be an array of strings", key)
+			}
+			if len(values) > 0 {
+				out[key] = values
+			}
+		case "issue_types", "state_types", "state_names", "priorities":
+			values, err := normalizeStringArrayFilter(value, true)
+			if err != nil {
+				return nil, fmt.Errorf("%s must be an array of strings", key)
+			}
+			if len(values) > 0 {
+				out[key] = values
+			}
+		case "title_contains":
+			text, ok := value.(string)
+			if !ok {
+				return nil, fmt.Errorf("title_contains must be a string")
+			}
+			text = strings.TrimSpace(text)
+			if text != "" {
+				out[key] = text
+			}
+		case "cooldown_minutes":
+			minutes, err := normalizeCooldownMinutesFilter(value)
+			if err != nil {
+				return nil, err
+			}
+			if minutes > 0 {
+				out[key] = minutes
+			}
+		default:
+			return nil, fmt.Errorf("unsupported Linear filter field %q", key)
+		}
+	}
+	if len(out) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	normalized, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("filter could not be encoded")
+	}
+	return normalized, nil
 }
 
 func normalizeCustomFieldsFilter(value any) (map[string][]string, error) {

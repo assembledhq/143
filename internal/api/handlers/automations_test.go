@@ -2441,6 +2441,65 @@ func TestAutomationHandler_ReplaceEventTriggers_WithPagerDutyTrigger(t *testing.
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestAutomationHandler_ReplaceEventTriggers_WithLinearTrigger(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	automationID := uuid.New()
+	repoID := uuid.New()
+	now := time.Now()
+	automation := models.Automation{
+		ID: automationID, OrgID: orgID, Name: "linear automation", Goal: "fix tagged tickets",
+		ExecutionMode: "sequential", BaseBranch: "main", ScheduleType: "none",
+		Timezone: "UTC", Enabled: true, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .+ FROM automations WHERE id =").
+		WithArgs(testAnyArgs(2)...).
+		WillReturnRows(newAutomationRow(mock, automation))
+
+	store := &stubAutomationEventTriggerStore{list: []models.AutomationEventTrigger{{
+		ID:           uuid.New(),
+		OrgID:        orgID,
+		AutomationID: automationID,
+		Provider:     models.AutomationEventProviderLinear,
+		EventTypes:   []string{string(models.LinearAutomationEventIssueCreated)},
+		Filter:       json.RawMessage(`{"team_keys":["ENG"],"labels":["bug"],"issue_types":["bug"],"state_types":["triage"],"priorities":["urgent"],"title_contains":"checkout"}`),
+		RepositoryID: &repoID,
+		Enabled:      true,
+	}}}
+	repos := &stubRepoLookup{}
+	h := NewAutomationHandler(db.NewAutomationStore(mock), db.NewAutomationRunStore(mock))
+	h.SetEventTriggerStore(store)
+	h.SetRepositoryStore(repos)
+	body := []map[string]any{{
+		"provider":      "linear",
+		"event_types":   []string{"issue.created", "issue.created"},
+		"filter":        map[string]any{"team_keys": []string{" ENG ", ""}, "labels": []string{" bug "}, "issue_types": []string{"BUG"}, "state_types": []string{"TRIAGE"}, "priorities": []string{"URGENT"}, "title_contains": " checkout ", "cooldown_minutes": 20},
+		"repository_id": repoID.String(),
+		"enabled":       true,
+	}}
+	req := newAutomationRequest(t, http.MethodPut, "/api/v1/automations/"+automationID.String()+"/event-triggers", body, orgID, uuid.New(), map[string]string{"id": automationID.String()})
+	rr := httptest.NewRecorder()
+
+	h.ReplaceEventTriggers(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "ReplaceEventTriggers should save a valid Linear trigger")
+	require.Equal(t, orgID, store.replaceOrgID, "ReplaceEventTriggers should scope replacement by org")
+	require.Equal(t, automationID, store.replaceAutomationID, "ReplaceEventTriggers should scope replacement by automation")
+	require.Len(t, store.replaced, 1, "ReplaceEventTriggers should replace one trigger")
+	require.Equal(t, models.AutomationEventProviderLinear, store.replaced[0].Provider, "ReplaceEventTriggers should preserve Linear provider")
+	require.Equal(t, []string{"issue.created"}, store.replaced[0].EventTypes, "ReplaceEventTriggers should deduplicate Linear event types")
+	require.JSONEq(t, `{"team_keys":["ENG"],"labels":["bug"],"issue_types":["bug"],"state_types":["triage"],"priorities":["urgent"],"title_contains":"checkout","cooldown_minutes":20}`, string(store.replaced[0].Filter), "ReplaceEventTriggers should normalize Linear filters")
+	require.Equal(t, &repoID, store.replaced[0].RepositoryID, "ReplaceEventTriggers should preserve repository override")
+	require.Equal(t, orgID, repos.orgID, "ReplaceEventTriggers should validate repository overrides under the request org")
+	require.Equal(t, repoID, repos.repoID, "ReplaceEventTriggers should validate the requested repository override")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestAutomationHandler_ReplaceEventTriggers_RejectsRepositoryOutsideOrg(t *testing.T) {
 	t.Parallel()
 

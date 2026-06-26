@@ -634,6 +634,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetGoalImprovementService(automationGoalImprovementService)
 	automationHandler.SetCanceller(canceller)
 	automationHandler.SetLogger(logger)
+	linearAutomationTriggerer := automations.NewLinearEventTriggerService(automationEventTriggerStore, automationStore, automationRunStore, jobStore, pool, logger)
+	linearAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
+	linearAutomationTriggerer.SetDefaultRepositoryResolver(linearAgentSettingsView)
+	ingestionWebhookHandler.SetLinearAutomationTriggerer(linearAutomationTriggerer)
 
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	githubStatusHandler := handlers.NewGitHubStatusHandler(

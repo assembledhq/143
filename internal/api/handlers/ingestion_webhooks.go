@@ -11,9 +11,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	automationservice "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,12 +28,17 @@ type webhookSecretLookup interface {
 	Get(ctx context.Context, orgID uuid.UUID, provider models.ProviderName) (*models.DecryptedCredential, error)
 }
 
+type linearAutomationTriggerer interface {
+	TriggerLinearIssueEvent(ctx context.Context, req automationservice.LinearIssueEventTriggerRequest) error
+}
+
 type IngestionWebhookHandler struct {
 	webhookStore     *db.WebhookDeliveryStore
 	integrationStore *db.IntegrationStore
 	credStore        webhookSecretLookup
 	ingestionSvc     *ingestion.Service
 	logger           zerolog.Logger
+	linearTriggers   linearAutomationTriggerer
 
 	// linearAgent is the optional inbound-agent dispatcher. When set, the
 	// Linear webhook handler branches on Linear-Event header and routes
@@ -99,6 +106,10 @@ func (h *IngestionWebhookHandler) SetGlobalLinearWebhookSecret(secret string) {
 // through to the existing ingestion code.
 func (h *IngestionWebhookHandler) SetLinearAgentDispatcher(d *LinearAgentDispatcher) {
 	h.linearAgent = d
+}
+
+func (h *IngestionWebhookHandler) SetLinearAutomationTriggerer(triggerer linearAutomationTriggerer) {
+	h.linearTriggers = triggerer
 }
 
 func (h *IngestionWebhookHandler) HandleSentry(w http.ResponseWriter, r *http.Request) {
@@ -282,11 +293,113 @@ func (h *IngestionWebhookHandler) handleProvider(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusInternalServerError, "INGEST_FAILED", "failed to ingest issue", err)
 		return
 	}
+	if provider == "linear" && h.linearTriggers != nil {
+		req, ok, err := linearIssueAutomationTriggerRequest(integration.OrgID, delivery, body)
+		if err != nil {
+			errMsg := err.Error()
+			if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
+				zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
+			}
+			writeError(w, r, http.StatusBadRequest, "PARSE_FAILED", "failed to parse linear automation trigger payload", err)
+			return
+		}
+		if ok {
+			if err := h.linearTriggers.TriggerLinearIssueEvent(r.Context(), req); err != nil {
+				errMsg := err.Error()
+				if markErr := h.webhookStore.MarkProcessed(r.Context(), delivery, &errMsg); markErr != nil {
+					zerolog.Ctx(r.Context()).Warn().Err(markErr).Msg("failed to mark webhook processed")
+				}
+				writeError(w, r, http.StatusInternalServerError, "AUTOMATION_TRIGGER_FAILED", "failed to trigger linear automations", err)
+				return
+			}
+		}
+	}
 
 	if err := h.webhookStore.MarkProcessed(r.Context(), delivery, nil); err != nil {
 		zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to mark webhook processed")
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func linearIssueAutomationTriggerRequest(orgID uuid.UUID, delivery *models.WebhookDelivery, body []byte) (automationservice.LinearIssueEventTriggerRequest, bool, error) {
+	var event ingestion.LinearWebhookPayload
+	if err := json.Unmarshal(body, &event); err != nil {
+		return automationservice.LinearIssueEventTriggerRequest{}, false, fmt.Errorf("unmarshal linear webhook: %w", err)
+	}
+	if event.Type != "Issue" {
+		return automationservice.LinearIssueEventTriggerRequest{}, false, nil
+	}
+	var eventType models.LinearAutomationEvent
+	switch event.Action {
+	case "create":
+		eventType = models.LinearAutomationEventIssueCreated
+	case "update":
+		eventType = models.LinearAutomationEventIssueUpdated
+	default:
+		return automationservice.LinearIssueEventTriggerRequest{}, false, nil
+	}
+	issueType := strings.TrimSpace(event.Data.IssueType.Name)
+	if issueType == "" {
+		issueType = strings.TrimSpace(event.Data.Type.Name)
+	}
+	labels := make([]string, 0, len(event.Data.Labels))
+	for _, label := range event.Data.Labels {
+		if strings.TrimSpace(label.Name) != "" {
+			labels = append(labels, strings.TrimSpace(label.Name))
+		}
+	}
+	occurredAt := ingestion.ParseTimeSafe(event.Data.UpdatedAt)
+	if occurredAt.IsZero() {
+		occurredAt = ingestion.ParseTimeSafe(event.Data.CreatedAt)
+	}
+	var occurredAtPtr *time.Time
+	if !occurredAt.IsZero() {
+		occurredAtPtr = &occurredAt
+	}
+	providerEventID := ""
+	if delivery != nil && delivery.DeliveryID != nil {
+		providerEventID = strings.TrimSpace(*delivery.DeliveryID)
+	}
+	if providerEventID == "" {
+		providerEventID = fmt.Sprintf("linear:%s:%s:%s", event.Action, event.Data.ID, event.Data.UpdatedAt)
+	}
+	return automationservice.LinearIssueEventTriggerRequest{
+		OrgID:           orgID,
+		ProviderEventID: providerEventID,
+		EventType:       eventType,
+		OccurredAt:      occurredAtPtr,
+		Issue: automationservice.LinearIssueEvent{
+			ID:           event.Data.ID,
+			Identifier:   event.Data.Identifier,
+			Title:        event.Data.Title,
+			URL:          event.Data.URL,
+			Description:  event.Data.Description,
+			Priority:     event.Data.Priority,
+			PriorityName: linearPriorityName(event.Data.Priority),
+			StateName:    event.Data.State.Name,
+			StateType:    event.Data.State.Type,
+			TeamID:       event.Data.Team.ID,
+			TeamKey:      event.Data.Team.Key,
+			TeamName:     event.Data.Team.Name,
+			Labels:       labels,
+			IssueType:    issueType,
+		},
+	}, true, nil
+}
+
+func linearPriorityName(priority int) string {
+	switch priority {
+	case 1:
+		return "urgent"
+	case 2:
+		return "high"
+	case 3:
+		return "medium"
+	case 4:
+		return "low"
+	default:
+		return "none"
+	}
 }
 
 // readDeliveryID extracts the per-delivery unique id for replay

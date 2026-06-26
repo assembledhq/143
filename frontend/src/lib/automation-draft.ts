@@ -1,6 +1,6 @@
 import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import type { AutomationProductTrigger } from "@/lib/automation-triggers";
-import type { AgentCapabilityGrant, PagerDutyEventType } from "@/lib/types";
+import type { AgentCapabilityGrant, LinearEventType, PagerDutyEventType } from "@/lib/types";
 
 const STORAGE_KEY = "143:new-automation-draft";
 const SCHEMA_VERSION = 1;
@@ -34,6 +34,15 @@ export type AutomationFormState = {
   pagerDutyTitleContains: string;
   pagerDutyCustomFields: string;
   pagerDutyCooldownMinutes: string;
+  linearEnabled: boolean;
+  linearEventTypes: LinearEventType[];
+  linearTeamKeys: string;
+  linearLabels: string;
+  linearIssueTypes: string;
+  linearStateTypes: string;
+  linearPriorities: string;
+  linearTitleContains: string;
+  linearCooldownMinutes: string;
   baseBranchByRepoId: Record<string, string>;
   model: string | undefined;
   identityScope: "org" | "personal";
@@ -65,6 +74,11 @@ const pagerDutyEventTypeValues = new Set<PagerDutyEventType>([
   "incident.priority_updated",
   "incident.acknowledged",
   "incident.resolved",
+]);
+
+const linearEventTypeValues = new Set<LinearEventType>([
+  "issue.created",
+  "issue.updated",
 ]);
 
 function getStorage(): Storage | null {
@@ -108,6 +122,15 @@ export function defaultAutomationFormState(
     pagerDutyTitleContains: "",
     pagerDutyCustomFields: "",
     pagerDutyCooldownMinutes: "0",
+    linearEnabled: false,
+    linearEventTypes: ["issue.created"],
+    linearTeamKeys: "",
+    linearLabels: "",
+    linearIssueTypes: "",
+    linearStateTypes: "",
+    linearPriorities: "",
+    linearTitleContains: "",
+    linearCooldownMinutes: "0",
     baseBranchByRepoId: {},
     model: undefined,
     identityScope: "org",
@@ -158,6 +181,18 @@ export function automationFormStateFromDraft(
     pagerDutyTitleContains: stringOr(parsed.pagerDutyTitleContains, ""),
     pagerDutyCustomFields: stringOr(parsed.pagerDutyCustomFields, ""),
     pagerDutyCooldownMinutes: stringOr(parsed.pagerDutyCooldownMinutes, "0"),
+    linearEnabled: parsed.linearEnabled === true,
+    linearEventTypes:
+      parsed.linearEventTypes === undefined
+        ? ["issue.created"]
+        : validArray(parsed.linearEventTypes, linearEventTypeValues),
+    linearTeamKeys: stringOr(parsed.linearTeamKeys, ""),
+    linearLabels: stringOr(parsed.linearLabels, ""),
+    linearIssueTypes: stringOr(parsed.linearIssueTypes, ""),
+    linearStateTypes: stringOr(parsed.linearStateTypes, ""),
+    linearPriorities: stringOr(parsed.linearPriorities, ""),
+    linearTitleContains: stringOr(parsed.linearTitleContains, ""),
+    linearCooldownMinutes: stringOr(parsed.linearCooldownMinutes, "0"),
     baseBranchByRepoId: isStringRecord(parsed.baseBranchByRepoId)
       ? parsed.baseBranchByRepoId
       : {},
@@ -269,6 +304,16 @@ function isEmptyDraft(draft: AutomationDraft): boolean {
     && draft.pagerDutyTitleContains.length === 0
     && draft.pagerDutyCustomFields.length === 0
     && draft.pagerDutyCooldownMinutes === "0"
+    && !draft.linearEnabled
+    && draft.linearEventTypes.length === 1
+    && draft.linearEventTypes[0] === "issue.created"
+    && draft.linearTeamKeys.length === 0
+    && draft.linearLabels.length === 0
+    && draft.linearIssueTypes.length === 0
+    && draft.linearStateTypes.length === 0
+    && draft.linearPriorities.length === 0
+    && draft.linearTitleContains.length === 0
+    && draft.linearCooldownMinutes === "0"
     && Object.keys(draft.baseBranchByRepoId).length === 0
     && draft.model === undefined
     && draft.identityScope === "org"
