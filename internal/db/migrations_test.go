@@ -209,7 +209,7 @@ func TestPagerDutyIntegrationAccountUniqueIndexTreatsNullAccountsAsEqual(t *test
 func TestPreviewPolicyUntrustedForkRepairMigrationIsForwardCompatible(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../migrations/000217_preview_policy_untrusted_fork_repair.up.sql")
+	body, err := os.ReadFile("../../migrations/000218_preview_policy_untrusted_fork_repair.up.sql")
 	require.NoError(t, err, "test should read the preview policy repair migration")
 
 	sql := string(body)
