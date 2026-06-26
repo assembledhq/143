@@ -85,6 +85,7 @@ type RunCodeReviewJobPayload struct {
 	PolicyVersion          int       `json:"policy_version"`
 	HeadSHA                string    `json:"head_sha"`
 	FromFork               bool      `json:"from_fork"`
+	PullRequestAuthor      string    `json:"pull_request_author,omitempty"`
 	OutputKey              string    `json:"review_output_key"`
 	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
@@ -211,6 +212,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		PolicyVersion:          policy.Version,
 		HeadSHA:                input.HeadSHA,
 		FromFork:               input.FromFork,
+		PullRequestAuthor:      strings.TrimSpace(input.PullRequestAuthor),
 		OutputKey:              outputKey,
 		RequestedReviewerLogin: input.RequestedLogin,
 		RequestedTeamSlug:      input.RequestedTeam,

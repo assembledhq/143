@@ -52,6 +52,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
 				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")
+				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "service should carry GitHub author login into worker payload")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "service should carry requested reviewer login for stale-request cleanup")
 
 				var revisionContext map[string]any

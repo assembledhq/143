@@ -166,6 +166,43 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			bodyContains: "Review session: https://143.dev/sessions/" + sessionID.String(),
 		},
 		{
+			name: "uses queued GitHub author login for eligible author policy",
+			input: liveCodeReviewOutcomeInput{
+				Policy: func() models.CodeReviewPolicyConfig {
+					config := policy
+					config.RiskPolicy.EligibleAuthors = []string{"anya"}
+					return config
+				}(),
+				Job: runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head", PullRequestAuthor: "anya"},
+				PullRequest: models.PullRequest{
+					OrgID:      orgID,
+					Body:       &prBody,
+					HeadSHA:    stringPtr("head"),
+					Status:     models.PullRequestStatusOpen,
+					AuthoredBy: models.GitIdentitySourceUser,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "tests", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionApproved,
+		},
+		{
 			name: "withholds approval without reviewer quorum",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,

@@ -25,6 +25,7 @@ type runCodeReviewPayload struct {
 	PolicyVersion          int       `json:"policy_version"`
 	HeadSHA                string    `json:"head_sha"`
 	FromFork               bool      `json:"from_fork"`
+	PullRequestAuthor      string    `json:"pull_request_author,omitempty"`
 	OutputKey              string    `json:"review_output_key"`
 	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
@@ -179,7 +180,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		DescriptionPassed:      codeReviewDescriptionPassed(policy, input.PullRequest),
 		Mergeable:              codeReviewMergeable(input.Health),
 		UpToDate:               codeReviewUpToDate(input.Health),
-		Author:                 codeReviewAuthor(input.PullRequest),
+		Author:                 codeReviewAuthor(input.Job, input.PullRequest),
 		FromFork:               input.Job.FromFork,
 		ContextFetchFailed:     input.Health == nil || !input.ChangedFilesAvailable,
 		HeadSHAChanged:         codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
@@ -560,7 +561,10 @@ func codeReviewHeadChanged(reviewedHead string, pr models.PullRequest, health *m
 	return false
 }
 
-func codeReviewAuthor(pr models.PullRequest) string {
+func codeReviewAuthor(job runCodeReviewPayload, pr models.PullRequest) string {
+	if author := strings.TrimSpace(job.PullRequestAuthor); author != "" {
+		return author
+	}
 	return string(pr.AuthoredBy)
 }
 

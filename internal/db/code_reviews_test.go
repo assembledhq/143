@@ -348,6 +348,7 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, err, "ListReviews should return filtered code reviews")
 	require.Len(t, reviews, 1, "ListReviews should scan matching rows")
 	require.Equal(t, "Fix auth bug", reviews[0].PullRequestTitle, "ListReviews should return pull request metadata")
+	require.Equal(t, "devin", reviews[0].PullRequestAuthor, "ListReviews should return the GitHub pull request author")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
