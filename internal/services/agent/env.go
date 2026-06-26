@@ -1255,20 +1255,21 @@ func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
 // docs/design/implemented/95-opencode-agent-adapter.md in sync when changing
 // this map.
 var auditedUSOpenRouterModelProviders = map[string][]string{
-	"~anthropic/claude-fable-5":      {"anthropic"},
-	"~deepseek/deepseek-v4-flash":    {"fireworks"},
-	"~deepseek/deepseek-v4-pro":      {"fireworks"},
-	"~google/gemini-3.1-pro-preview": {"google-ai-studio"},
-	"~google/gemini-3.5-flash":       {"google-ai-studio"},
-	"~minimax/minimax-m2.5":          {"digitalocean"},
-	"~minimax/minimax-m2.7":          {"fireworks"},
-	"~moonshotai/kimi-k2.5":          {"digitalocean"},
-	"~moonshotai/kimi-k2.6":          {"fireworks"},
-	"~openai/gpt-5.2":                {"openai"},
-	"~openai/gpt-5.5":                {"openai"},
-	"~openai/gpt-5.5-pro":            {"openai"},
-	"~z-ai/glm-5.1":                  {"fireworks"},
-	"~z-ai/glm-5.2":                  {"fireworks"},
+	"~anthropic/claude-fable-5":      {"anthropic", "amazon-bedrock/us", "azure"},
+	"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
+	"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
+	"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
+	"~google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
+	"~minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
+	"~minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
+	"~moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
+	"~moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
+	"~openai/gpt-5.2":                {"openai", "azure"},
+	"~openai/gpt-5.5":                {"openai", "azure"},
+	// OpenRouter currently exposes only OpenAI for GPT 5.5 Pro.
+	"~openai/gpt-5.5-pro": {"openai"},
+	"~z-ai/glm-5.1":       {"deepinfra", "baseten", "together"},
+	"~z-ai/glm-5.2":       {"deepinfra", "together", "fireworks"},
 }
 
 func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig {

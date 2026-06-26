@@ -10,7 +10,7 @@ OpenCode credentials are stored under `ProviderOpenCode` with an optional `backi
 
 Open-source model choices distinguish between audited OpenRouter routes and native OpenCode routes:
 
-- OpenRouter open-source model choices must have an audited US inference-provider route in `openCodeOpenRouterModelConfigs`. The generated per-model `options.provider` block sets `only` and `order` to the audited provider slugs, disables fallbacks, denies provider data collection, and requires parameter support.
+- OpenRouter open-source model choices must have audited US inference-provider routes in `openCodeOpenRouterModelConfigs`. The generated per-model `options.provider` block sets `only` and `order` to audited provider slugs, disables fallbacks beyond that allowlist, denies provider data collection, and requires parameter support. Prefer two or three high-quality audited providers per model where OpenRouter exposes them; document any single-provider exception in code.
 - Every curated native `opencode/*` model that remains in the picker has a curated `openrouter/*` counterpart with audited US-provider routing. Qwen Plus/Max options are excluded from the curated OpenCode picker because the matching OpenRouter endpoints only exposed Alibaba routes during the audit.
 - Native OpenCode/Zen/Go routes are provided by OpenCode, but OpenCode does not expose the same per-provider location controls that OpenRouter exposes. Setup copy should state that distinction instead of implying native OpenCode routes have the same provider-location guarantee.
 - The audit source of truth is OpenRouter's endpoint list plus provider-company location checks. Generated config must not add unaudited OpenRouter provider slugs without updating this audit.
