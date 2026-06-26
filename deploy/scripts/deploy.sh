@@ -1465,8 +1465,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   drain_worker_containers_blocking() {
-    local containers="${1:-}"
-    local timeout waited cid running_count
+    local containers="${1:-}" deploy_id="${2:-worker-maintenance-$(date -u +%Y%m%d%H%M%S)}" build_sha="${3:-${IMAGE_TAG:-}}"
+    local timeout waited cid running_count node_id force_arg
     timeout="$(resolve_worker_drain_timeout_seconds)"
     waited=0
 
@@ -1478,7 +1478,24 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     echo "Requesting blocking drain for existing worker containers (timeout ${timeout}s)..."
     for cid in $containers; do
       if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
-        docker kill --signal=TERM "$cid" >/dev/null
+        node_id="$(worker_container_node_id "$cid")"
+        if [ -z "$node_id" ]; then
+          echo "ERROR: worker container ${cid:0:12} has no NODE_ID; refusing maintenance drain without DB ownership." >&2
+          return 1
+        fi
+        force_arg=()
+        if [ "${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}" = "1" ]; then
+          force_arg=(--force)
+        fi
+        run_worker_deployctl mark-draining \
+          --node-id "$node_id" \
+          --intent host_maintenance \
+          --deploy-id "$deploy_id" \
+          --reason "${DEPLOY_REASON:-maintenance worker deploy}" \
+          --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
+          --build-sha "$build_sha" \
+          "${force_arg[@]}" \
+          --json
       fi
     done
 
@@ -1487,6 +1504,22 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       for cid in $containers; do
         if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
           running_count=$((running_count + 1))
+          node_id="$(worker_container_node_id "$cid")"
+          if [ -z "$node_id" ]; then
+            echo "ERROR: worker container ${cid:0:12} lost NODE_ID while draining." >&2
+            return 1
+          fi
+          run_worker_deployctl expire-budget \
+            --node-id "$node_id" \
+            --deploy-id "$deploy_id" \
+            --reason "${DEPLOY_REASON:-maintenance worker deploy}" \
+            --requested-by "${DEPLOY_REQUESTED_BY:-deploy-script}" \
+            --build-sha "$build_sha" \
+            --json || true
+          if run_worker_deployctl retire-ready --node-id "$node_id" --json; then
+            echo "Worker node $node_id is retire-ready; stopping container ${cid:0:12}."
+            docker stop -t 60 "$cid"
+          fi
         fi
       done
       if [ "$running_count" -eq 0 ]; then
@@ -1494,6 +1527,15 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
         return 0
       fi
       if [ "$waited" -ge "$timeout" ]; then
+        if [ "${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}" = "1" ]; then
+          echo "WARNING: worker container drain timed out after ${timeout}s; force-stopping ${running_count} remaining worker container(s)." >&2
+          for cid in $containers; do
+            if docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null | grep -q true; then
+              docker stop -t 60 "$cid"
+            fi
+          done
+          return 0
+        fi
         echo "ERROR: worker container drain timed out after ${timeout}s (${running_count} still running)" >&2
         return 1
       fi
@@ -2044,10 +2086,13 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       return 1
     fi
     ensure_routine_worker_fingerprints_compatible
+    generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
+    node_id="${base_node_id}-g${generation}"
+    deploy_id="worker-${generation}"
 
     if [ "$deploy_mode" = "maintenance" ]; then
       if [ -n "$old_containers" ]; then
-        drain_worker_containers_blocking "$old_containers"
+        drain_worker_containers_blocking "$old_containers" "$deploy_id" "${IMAGE_TAG:-}"
       else
         echo "No existing worker containers found; maintenance deploy will start a fresh generation."
       fi
@@ -2056,9 +2101,6 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       worker_host_capacity_preflight
     fi
 
-    generation="$(date -u +%Y%m%d%H%M%S)-${IMAGE_TAG:0:12}"
-    node_id="${base_node_id}-g${generation}"
-    deploy_id="worker-${generation}"
     if [ "$deploy_mode" = "maintenance" ]; then
       if ! host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"; then
         echo "ERROR: no reusable worker host port after maintenance drain." >&2

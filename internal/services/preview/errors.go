@@ -3,6 +3,7 @@ package preview
 import (
 	"errors"
 	"strconv"
+	"strings"
 )
 
 // Provider-side failure sentinels. The HTTP handler classifies preview-launch
@@ -47,7 +48,31 @@ var (
 	// ErrServiceBuildFailed means a service's build command (preview build
 	// phase) exited non-zero or timed out before any service was started.
 	ErrServiceBuildFailed = errors.New("preview service build failed")
+
+	// ErrPreviewStartupInterrupted means the preview worker lost the sandbox
+	// while startup was still in progress. This is an infrastructure interruption,
+	// not a user install/build/config failure.
+	ErrPreviewStartupInterrupted = errors.New("preview startup interrupted")
 )
+
+// IsPreviewStartupInterrupted classifies sandbox-lifecycle failures that are
+// safe to retry from a fresh branch-preview sandbox. Call this only from code
+// already known to be executing against a preview sandbox; user command output
+// can otherwise contain similar text.
+func IsPreviewStartupInterrupted(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrPreviewStartupInterrupted) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such container") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer") ||
+		strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "client connection lost")
+}
 
 type CapacityScope string
 

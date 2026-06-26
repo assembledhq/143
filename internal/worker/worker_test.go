@@ -257,6 +257,27 @@ func TestWorker_Poll(t *testing.T) {
 			},
 		},
 		{
+			name: "attempt-consuming retryable failure dead-letters at max attempts",
+			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
+				t.Helper()
+
+				jobID := uuid.New()
+				lockToken := uuid.New()
+				orgID := uuid.New()
+				now := time.Now()
+				handlerErr := &RetryableError{Err: errors.New("preview startup interrupted"), ConsumeAttempt: true}
+
+				w.Register("attempt_consuming_exhausted_job", func(ctx context.Context, jobType string, got json.RawMessage) error {
+					return handlerErr
+				})
+
+				expectClaimWithAttempts(mock, jobID, orgID, "attempt_consuming_exhausted_job", json.RawMessage(`{}`), now, lockToken, 3, 3)
+				mock.ExpectExec("UPDATE jobs\\s+SET status = 'dead_letter'").
+					WithArgs(handlerErr.Error(), jobID, lockToken).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			},
+		},
+		{
 			name: "retryable max duration bypass retries old job",
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()

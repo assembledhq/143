@@ -46,6 +46,7 @@ import (
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
+const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
 
 // prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
@@ -875,6 +876,22 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 					Dur("retry_after", retryAfter).
 					Msg("preview capacity reached; retrying start_branch_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID, ClearTargetNodeID: clearTarget}
+			}
+			if errors.Is(err, previewsvc.ErrPreviewStartupInterrupted) {
+				retryAfter := previewStartupInterruptedRetryDelay
+				logger.Info().
+					Err(err).
+					Str("preview_id", input.PreviewID.String()).
+					Str("preview_target_id", input.PreviewTargetID.String()).
+					Dur("retry_after", retryAfter).
+					Msg("preview startup interrupted; retrying start_branch_preview on a fresh worker selection")
+				return &RetryableError{
+					Err:                    err,
+					ConsumeAttempt:         true,
+					BypassMaxRetryDuration: true,
+					RetryAfter:             &retryAfter,
+					ClearTargetNodeID:      true,
+				}
 			}
 			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
 				EventKind: string(models.SlackNotificationPreviewFailed),

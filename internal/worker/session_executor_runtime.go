@@ -396,6 +396,11 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 
 	var retryable *RetryableError
 	if errors.As(err, &retryable) {
+		if retryable.ConsumeAttempt && job.Attempts >= job.MaxAttempts {
+			r.markJobDeadLetter(writeCtx, handlerCtx, executor, job, err)
+			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
+			return nil
+		}
 		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
 			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
 			r.markJobDeadLetter(writeCtx, handlerCtx, executor, job, timeoutErr)
