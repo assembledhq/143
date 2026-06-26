@@ -8,6 +8,7 @@ import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import {
   apiKeyHelp,
+  DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
   OPENCODE_BACKING_PROVIDER_OPTIONS,
   OPENCODE_US_INFERENCE_HELP_TEXT,
@@ -166,9 +167,9 @@ export default function AgentPage() {
   const [renameValue, setRenameValue] = useState("");
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
-  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>(DEFAULT_OPENCODE_BACKING_PROVIDER);
   const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
-  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
   const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
   const openCodeKeyDetection = useMemo(
@@ -352,9 +353,9 @@ export default function AgentPage() {
     setInsertionMode("next_fallback");
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
     setPiModel(PI_MODEL_CLAUDE_OPUS_48);
-    setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER);
     setOpenCodeBackingProviderTouched(false);
-    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
     setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }
