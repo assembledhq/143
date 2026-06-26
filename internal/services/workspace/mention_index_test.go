@@ -105,11 +105,13 @@ type recursiveMentionReader struct {
 	entries        []sandbox.FileEntry
 	recursiveCalls int
 	maxEntries     int
+	ignoredDirs    []string
 }
 
-func (r *recursiveMentionReader) ListDirRecursive(_ context.Context, maxEntries int, _ []string) ([]sandbox.FileEntry, error) {
+func (r *recursiveMentionReader) ListDirRecursive(_ context.Context, maxEntries int, ignoredDirNames []string) ([]sandbox.FileEntry, error) {
 	r.recursiveCalls++
 	r.maxEntries = maxEntries
+	r.ignoredDirs = ignoredDirNames
 	return r.entries, nil
 }
 
@@ -129,11 +131,58 @@ func TestBuildMentionIndex_UsesRecursiveReaderFastPath(t *testing.T) {
 	require.NoError(t, err, "BuildMentionIndex should succeed through the recursive reader fast path")
 	require.Equal(t, 1, reader.recursiveCalls, "BuildMentionIndex should use one recursive list call when the reader supports it")
 	require.Equal(t, defaultMentionIndexMaxPaths, reader.maxEntries, "BuildMentionIndex should pass its traversal cap into the recursive reader")
+	require.Contains(t, reader.ignoredDirs, ".cache", "BuildMentionIndex should ask recursive readers to skip common cache directories")
+	require.Contains(t, reader.ignoredDirs, ".pytest_cache", "BuildMentionIndex should ask recursive readers to skip Python cache directories")
+	require.Contains(t, reader.ignoredDirs, ".svelte-kit", "BuildMentionIndex should ask recursive readers to skip JavaScript framework caches")
 	require.Equal(t, 0, reader.listDirCalls, "BuildMentionIndex should avoid per-directory ListDir calls when the recursive fast path is available")
 	require.Equal(t, []MentionIndexEntry{
 		{Kind: string(models.SessionInputReferenceKindDirectory), Path: "docs"},
 		{Kind: string(models.SessionInputReferenceKindFile), Path: "docs/guide.md"},
 	}, index.Entries, "BuildMentionIndex should still filter ignored paths returned by the recursive reader")
+}
+
+func TestBuildMentionIndex_FiltersLanguageCachesAndArtifacts(t *testing.T) {
+	t.Parallel()
+
+	reader := &recursiveMentionReader{
+		entries: []sandbox.FileEntry{
+			{Type: "dir", Path: ".cache"},
+			{Type: "file", Path: ".cache/go/11/113a087bb6df4fbe-d"},
+			{Type: "dir", Path: ".pytest_cache"},
+			{Type: "file", Path: ".pytest_cache/v/cache/nodeids"},
+			{Type: "dir", Path: ".mypy_cache"},
+			{Type: "file", Path: ".mypy_cache/3.12/module.meta.json"},
+			{Type: "dir", Path: ".ruff_cache"},
+			{Type: "file", Path: ".ruff_cache/content"},
+			{Type: "dir", Path: ".parcel-cache"},
+			{Type: "file", Path: ".parcel-cache/data.mdb"},
+			{Type: "dir", Path: ".svelte-kit"},
+			{Type: "file", Path: ".svelte-kit/generated/client/app.js"},
+			{Type: "dir", Path: ".gradle"},
+			{Type: "file", Path: ".gradle/8.8/checksums/checksums.lock"},
+			{Type: "dir", Path: "target"},
+			{Type: "file", Path: "target/debug/app"},
+			{Type: "dir", Path: "src"},
+			{Type: "file", Path: "src/main.rs"},
+			{Type: "file", Path: "src/app.pyc"},
+			{Type: "file", Path: "src/App.class"},
+			{Type: "file", Path: "src/module.o"},
+			{Type: "file", Path: "src/lib.so"},
+			{Type: "file", Path: "src/app.tsbuildinfo"},
+			{Type: "file", Path: ".DS_Store"},
+			{Type: "file", Path: "README.md"},
+			{Type: "file", Path: "migrations/000113_session_threads_backfill_primary.up.sql"},
+		},
+	}
+
+	index, err := BuildMentionIndex(context.Background(), reader)
+	require.NoError(t, err, "BuildMentionIndex should succeed while filtering cache and artifact paths")
+	require.Equal(t, []MentionIndexEntry{
+		{Kind: string(models.SessionInputReferenceKindFile), Path: "README.md"},
+		{Kind: string(models.SessionInputReferenceKindFile), Path: "migrations/000113_session_threads_backfill_primary.up.sql"},
+		{Kind: string(models.SessionInputReferenceKindDirectory), Path: "src"},
+		{Kind: string(models.SessionInputReferenceKindFile), Path: "src/main.rs"},
+	}, index.Entries, "BuildMentionIndex should keep searchable source files while excluding common cache and generated artifact paths")
 }
 
 func TestBuildMentionIndexWithConfig_PassesCustomCapToRecursiveReader(t *testing.T) {
