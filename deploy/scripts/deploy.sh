@@ -877,10 +877,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # guards against a failure between the scp and that call leaving it on disk.
   trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new' EXIT
 
-  # recreate_other_services SKIP_SVCS — force-recreate every compose service
-  # except the space-separated list in SKIP_SVCS. Used to update out-of-band
-  # services (vector, etc.) without touching services that are being rolled.
-  recreate_other_services() {
+  # compose_services_except SKIP_SVCS — print every compose service except the
+  # space-separated list in SKIP_SVCS.
+  compose_services_except() {
     local skip_list="$1"
     local all filtered=""
     all="$(docker compose -f "$COMPOSE_FILE" config --services)"
@@ -891,10 +890,102 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       done
       [ "$match" -eq 0 ] && filtered="$filtered $svc"
     done
-    # shellcheck disable=SC2086
-    if [ -n "$(echo $filtered | tr -d ' ')" ]; then
-      echo $filtered | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    echo "$filtered"
+  }
+
+  compose_up_force_recreate_services() {
+    local services="$1"
+    if [ -n "$(echo "$services" | tr -d ' ')" ]; then
+      # shellcheck disable=SC2086
+      docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans $services
     fi
+  }
+
+  # recreate_other_services SKIP_SVCS — force-recreate every compose service
+  # except the space-separated list in SKIP_SVCS. Used to update out-of-band
+  # services (vector, etc.) without touching services that are being rolled.
+  recreate_other_services() {
+    local filtered
+    filtered="$(compose_services_except "$1")"
+    compose_up_force_recreate_services "$filtered"
+  }
+
+  sandbox_dns_endpoint_owner_for_ip() {
+    local network="$1"
+    local ip="$2"
+
+    docker network inspect "$network" \
+      -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' 2>/dev/null \
+      | awk -v want="$ip/" 'index($2, want) == 1 {print $1}' | head -n1
+  }
+
+  disconnect_sandbox_dns_endpoint_for_ip() {
+    local network="$1"
+    local ip="$2"
+    local endpoint
+
+    endpoint="$(sandbox_dns_endpoint_owner_for_ip "$network" "$ip")"
+    if [ -n "$endpoint" ]; then
+      echo "Detaching stale endpoint '$endpoint' holding $ip on $network..." >&2
+      docker network disconnect -f "$network" "$endpoint" >/dev/null 2>&1 || true
+    fi
+  }
+
+  clear_sandbox_dns_network_endpoints() {
+    local stale
+
+    docker stop -t 10 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker rm 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker network disconnect -f 143-sandbox 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker network disconnect -f 143-sandbox-static-egress 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    disconnect_sandbox_dns_endpoint_for_ip 143-sandbox 172.30.0.2
+    disconnect_sandbox_dns_endpoint_for_ip 143-sandbox-static-egress 172.31.0.2
+
+    stale="$(docker ps -a \
+      --filter 'name=143-worker-run-' \
+      --filter 'status=exited' \
+      --filter 'status=created' \
+      --filter 'status=dead' \
+      --format '{{.ID}}' 2>/dev/null || true)"
+    if [ -n "$stale" ]; then
+      echo "Removing stale worker deploy control containers..." >&2
+      printf '%s\n' "$stale" | xargs -r docker rm >/dev/null 2>&1 || true
+    fi
+  }
+
+  recreate_worker_other_services() {
+    local filtered output rc attempt
+    filtered="$(compose_services_except "$HEALTH_SERVICE")"
+    # shellcheck disable=SC2086
+    if [ -z "$(echo $filtered | tr -d ' ')" ]; then
+      return 0
+    fi
+
+    set +e
+    # shellcheck disable=SC2086
+    output="$(docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans $filtered 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "$output"
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+
+    if ! printf '%s\n' "$output" | grep -qi "Address already in use"; then
+      return "$rc"
+    fi
+
+    echo "Worker support-service recreate hit a stale Docker network address; clearing sandbox-dns endpoints and retrying..."
+    for attempt in 1 2 3; do
+      clear_sandbox_dns_network_endpoints
+      if compose_up_force_recreate_services "$filtered"; then
+        return 0
+      fi
+      if [ "$attempt" != "3" ]; then
+        sleep 1
+      fi
+    done
+    return 1
   }
 
   # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
@@ -2239,7 +2330,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       echo "Skipping supporting-service recreation for routine worker deploy; use DEPLOY_MODE=maintenance for host/runtime dependency changes."
     else
       echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
-      recreate_other_services "$HEALTH_SERVICE"
+      recreate_worker_other_services
     fi
   fi
 
