@@ -290,7 +290,7 @@ describe("Account settings page", () => {
 	    const dialog = await screen.findByRole("dialog");
 	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
 	    expect(within(dialog).getByText("Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
-	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("opencode/glm-5.2");
+	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("openrouter/z-ai/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },
 	    });

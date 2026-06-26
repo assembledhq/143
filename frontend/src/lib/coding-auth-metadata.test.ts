@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
   openCodeModelsForBackingProvider,
   openCodeDefaultModelForBackingProvider,
@@ -12,6 +13,11 @@ import {
 } from "./model-constants";
 
 describe("OpenCode backing provider model helpers", () => {
+  it("defaults new OpenCode auths to OpenRouter", () => {
+    expect(DEFAULT_OPENCODE_BACKING_PROVIDER).toBe("openrouter");
+    expect(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER)).toBe(OPENCODE_MODEL_OPENROUTER_GLM_5_2);
+  });
+
   it("defaults native OpenCode auth to GLM 5.2", () => {
     expect(openCodeDefaultModelForBackingProvider("opencode")).toBe(OPENCODE_MODEL_GLM_5_2);
   });
@@ -60,7 +66,7 @@ describe("OpenCode backing provider model helpers", () => {
       confidence: "medium",
     });
     expect(detectOpenCodeKeyPreset("oc_unknown_shape")).toMatchObject({
-      provider: "opencode",
+      provider: "openrouter",
       confidence: "low",
     });
   });

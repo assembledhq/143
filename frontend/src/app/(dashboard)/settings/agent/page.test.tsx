@@ -247,7 +247,7 @@ describe("Agent settings page", () => {
 	    await user.click(screen.getByRole("button", { name: "Add auth" }));
 	    const dialog = await screen.findByRole("dialog");
 	    await user.click(screen.getByLabelText("OpenCode"));
-	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("opencode/glm-5.2");
+	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("openrouter/z-ai/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },
 	    });
