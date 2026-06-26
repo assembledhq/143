@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/reviewartifact"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/workspace"
 )
@@ -22,8 +23,9 @@ import (
 // snapshot tar; the handler dispatches based on the session's state and
 // only returns NO_SANDBOX when neither source is available.
 type SessionFileHandler struct {
-	resolver *sessionWorkspaceResolver
-	logger   zerolog.Logger
+	resolver       *sessionWorkspaceResolver
+	artifactReader *reviewartifact.CachedReader
+	logger         zerolog.Logger
 }
 
 // NewSessionFileHandler creates a SessionFileHandler. snapshotCache may be
@@ -37,11 +39,13 @@ func NewSessionFileHandler(
 	repoStore *db.RepositoryStore,
 	fileReader sandbox.FileReader,
 	snapshotCache *workspace.SnapshotCache,
+	artifactReader *reviewartifact.CachedReader,
 	logger zerolog.Logger,
 ) *SessionFileHandler {
 	return &SessionFileHandler{
-		resolver: newSessionWorkspaceResolver(sessionStore, repoStore, fileReader, snapshotCache, logger),
-		logger:   logger,
+		resolver:       newSessionWorkspaceResolver(sessionStore, repoStore, fileReader, snapshotCache, logger),
+		artifactReader: artifactReader,
+		logger:         logger,
 	}
 }
 
@@ -282,6 +286,10 @@ func (h *SessionFileHandler) GetFileContext(w http.ResponseWriter, r *http.Reque
 		below = 100
 	}
 
+	if h.tryReviewArtifactContext(w, r, cleanPath, line, above, below) {
+		return
+	}
+
 	reader, ok := h.resolveReader(w, r)
 	if !ok {
 		return
@@ -299,4 +307,37 @@ func (h *SessionFileHandler) GetFileContext(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[sandbox.FileContextResult]{Data: contextResult})
+}
+
+func (h *SessionFileHandler) tryReviewArtifactContext(w http.ResponseWriter, r *http.Request, cleanPath string, line, above, below int) bool {
+	if h == nil || h.artifactReader == nil || h.resolver == nil || h.resolver.sessionStore == nil {
+		return false
+	}
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return true
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	ref, err := h.resolver.sessionStore.GetLatestReviewArtifactRef(r.Context(), orgID, sessionID)
+	if err != nil || ref.Key == nil || *ref.Key == "" {
+		return false
+	}
+	contextResult, ok, err := h.artifactReader.ReadFileContext(r.Context(), *ref.Key, cleanPath, line, above, below)
+	if err != nil {
+		h.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Str("review_artifact_key", *ref.Key).
+			Str("path", cleanPath).
+			Msg("failed to read review artifact context; falling back to workspace reader")
+		return false
+	}
+	if !ok {
+		return false
+	}
+	if contextResult.Lines == nil {
+		contextResult.Lines = []sandbox.FileLine{}
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[sandbox.FileContextResult]{Data: contextResult})
+	return true
 }
