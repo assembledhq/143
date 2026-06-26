@@ -451,7 +451,7 @@ type ExecStreamOptions struct {
 // DefaultSandboxTimeout is the default maximum wall-clock duration for an
 // agent execution inside a sandbox. Org admins can override this per-org via
 // OrgSettings.MaxSessionDurationSeconds.
-const DefaultSandboxTimeout = 25 * time.Minute
+const DefaultSandboxTimeout = time.Hour
 
 // HandlerCleanupBuffer is the slack added on top of the resolved session
 // timeout at the worker handler boundary, giving the orchestrator time to

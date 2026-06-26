@@ -462,6 +462,7 @@ func TestParseOrgSettings_MaxSessionDuration_Default(t *testing.T) {
 	s, err := ParseOrgSettings(nil)
 	require.NoError(t, err)
 	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "unset should default")
+	require.Equal(t, 60*60, s.MaxSessionDurationSeconds, "unset max session duration should default to one hour")
 }
 
 func TestParseOrgSettings_MaxSessionDuration_Zero(t *testing.T) {
@@ -470,6 +471,7 @@ func TestParseOrgSettings_MaxSessionDuration_Zero(t *testing.T) {
 	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":0}`))
 	require.NoError(t, err)
 	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "zero should default")
+	require.Equal(t, 60*60, s.MaxSessionDurationSeconds, "zero max session duration should default to one hour")
 }
 
 func TestParseOrgSettings_MaxSessionDuration_ClampsBelowMin(t *testing.T) {
