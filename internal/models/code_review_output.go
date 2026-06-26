@@ -107,6 +107,7 @@ func SelectCodeReviewInlineFindings(findings []CodeReviewFinding, limit int) []C
 	if limit > 10 {
 		limit = 10
 	}
+	findings = SortCodeReviewFindingsForInline(findings)
 	selected := make([]CodeReviewFinding, 0, limit)
 	seen := make(map[string]struct{})
 	for _, finding := range findings {

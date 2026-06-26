@@ -24,6 +24,7 @@ type runCodeReviewPayload struct {
 	PolicyID               uuid.UUID `json:"policy_id"`
 	PolicyVersion          int       `json:"policy_version"`
 	HeadSHA                string    `json:"head_sha"`
+	FromFork               bool      `json:"from_fork"`
 	OutputKey              string    `json:"review_output_key"`
 	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
@@ -72,6 +73,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                policy.Config(),
 			Job:                   job,
+			SessionURL:            codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
 			PullRequest:           pr,
 			Health:                health,
 			AgentResults:          agentResults,
@@ -90,6 +92,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
 			return fmt.Errorf("create code review orchestration result: %w", err)
+		}
+		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, policy.Config().InlineCommentLimit); err != nil {
+			return fmt.Errorf("select code review inline findings: %w", err)
 		}
 		submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, decision.Decision, body)
 		if err != nil {
@@ -151,6 +156,7 @@ type codeReviewRequestedReviewerRemover interface {
 type liveCodeReviewOutcomeInput struct {
 	Policy                models.CodeReviewPolicyConfig
 	Job                   runCodeReviewPayload
+	SessionURL            string
 	PullRequest           models.PullRequest
 	Health                *models.PullRequestHealthResponse
 	AgentResults          []models.CodeReviewAgentResult
@@ -174,11 +180,12 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Mergeable:              codeReviewMergeable(input.Health),
 		UpToDate:               codeReviewUpToDate(input.Health),
 		Author:                 codeReviewAuthor(input.PullRequest),
+		FromFork:               input.Job.FromFork,
 		ContextFetchFailed:     input.Health == nil || !input.ChangedFilesAvailable,
 		HeadSHAChanged:         codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
 		BlockingFindings:       blockingFindings,
 		ReviewerDisagreement:   reviewerFailures > 0,
-		UnresolvedHumanThreads: 0,
+		UnresolvedHumanThreads: codeReviewUnresolvedHumanThreads(input.PullRequest),
 	})
 	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum {
 		risk.Acceptable = false
@@ -189,6 +196,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Decision:      decision.Decision,
 		Acceptable:    decision.Acceptable,
 		RiskReasons:   decision.RiskReasons,
+		SessionURL:    input.SessionURL,
 		PolicyVersion: input.Job.PolicyVersion,
 		HeadSHA:       input.Job.HeadSHA,
 		Summary:       codeReviewOutcomeSummary(decision),
@@ -554,6 +562,37 @@ func codeReviewHeadChanged(reviewedHead string, pr models.PullRequest, health *m
 
 func codeReviewAuthor(pr models.PullRequest) string {
 	return string(pr.AuthoredBy)
+}
+
+func codeReviewUnresolvedHumanThreads(pr models.PullRequest) int {
+	if pr.ReviewStatus == models.PullRequestReviewStatusChangesRequested {
+		return 1
+	}
+	return 0
+}
+
+func ensureCodeReviewInlineSelection(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, findings []models.CodeReviewFinding, limit int) error {
+	if store == nil || len(findings) == 0 {
+		return nil
+	}
+	for _, finding := range findings {
+		if finding.SelectedForInline {
+			return nil
+		}
+	}
+	selected := models.SelectCodeReviewInlineFindings(findings, limit)
+	if len(selected) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(selected))
+	for _, finding := range selected {
+		if finding.ID == uuid.Nil {
+			continue
+		}
+		ids = append(ids, finding.ID)
+	}
+	_, err := store.MarkFindingsSelectedForInline(ctx, job.OrgID, job.SessionID, ids)
+	return err
 }
 
 func codeReviewOutcomeSummary(decision models.CodeReviewDecisionEvaluation) string {

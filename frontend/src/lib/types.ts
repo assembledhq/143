@@ -152,6 +152,7 @@ export interface CodeReviewListItem {
   policy_id: string;
   base_sha: string;
   head_sha: string;
+  from_fork: boolean;
   trigger_source: string;
   status: CodeReviewSessionStatus;
   decision?: CodeReviewDecision;

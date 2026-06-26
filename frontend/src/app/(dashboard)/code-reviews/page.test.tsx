@@ -66,6 +66,7 @@ const review: CodeReviewListItem = {
   policy_id: "policy-1",
   base_sha: "base-sha",
   head_sha: "abcdef123456",
+  from_fork: false,
   trigger_source: "app_reviewer",
   status: "completed",
   decision: "approved",

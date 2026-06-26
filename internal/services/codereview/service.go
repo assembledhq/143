@@ -59,6 +59,7 @@ type ReviewRequestedInput struct {
 	PullRequestAuthor string
 	BaseSHA           string
 	HeadSHA           string
+	FromFork          bool
 	RequestedLogin    string
 	RequestedTeam     string
 }
@@ -82,6 +83,7 @@ type RunCodeReviewJobPayload struct {
 	PolicyID               uuid.UUID `json:"policy_id"`
 	PolicyVersion          int       `json:"policy_version"`
 	HeadSHA                string    `json:"head_sha"`
+	FromFork               bool      `json:"from_fork"`
 	OutputKey              string    `json:"review_output_key"`
 	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
 	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
@@ -146,6 +148,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		"pull_request_author": input.PullRequestAuthor,
 		"base_sha":            input.BaseSHA,
 		"head_sha":            input.HeadSHA,
+		"from_fork":           input.FromFork,
 		"policy_id":           policy.ID,
 		"policy_version":      policy.Version,
 		"trigger_source":      source,
@@ -180,6 +183,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		PolicyID:        policy.ID,
 		BaseSHA:         input.BaseSHA,
 		HeadSHA:         input.HeadSHA,
+		FromFork:        input.FromFork,
 		TriggerSource:   source,
 		Status:          models.CodeReviewSessionStatusQueued,
 		ReviewOutputKey: outputKey,
@@ -197,6 +201,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		PolicyID:               policy.ID,
 		PolicyVersion:          policy.Version,
 		HeadSHA:                input.HeadSHA,
+		FromFork:               input.FromFork,
 		OutputKey:              outputKey,
 		RequestedReviewerLogin: input.RequestedLogin,
 		RequestedTeamSlug:      input.RequestedTeam,

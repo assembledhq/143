@@ -2,6 +2,7 @@ package codereview
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -33,8 +34,10 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
-			name:  "creates session and enqueues durable review job",
-			input: newReviewRequestedInput(nil),
+			name: "creates session and enqueues durable review job",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.FromFork = true
+			}),
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
 				require.True(t, result.Processed, "matching reviewer request should be processed")
 				require.False(t, result.Reused, "new PR head should create a fresh review")
@@ -44,10 +47,16 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.SessionOriginCodeReview, sessions.created.Origin, "session should use code_review origin")
 				require.Equal(t, models.SessionInteractionModeSingleRun, sessions.created.InteractionMode, "review sessions should be single-run")
 				require.Equal(t, 1, metadata.createCalls, "service should create code review metadata")
+				require.True(t, metadata.created.FromFork, "service should persist fork source evidence on review metadata")
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
+				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")
 				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "service should carry requested reviewer login for stale-request cleanup")
+
+				var revisionContext map[string]any
+				require.NoError(t, json.Unmarshal(sessions.created.RevisionContext, &revisionContext), "session revision context should be valid JSON")
+				require.Equal(t, true, revisionContext["from_fork"], "session revision context should include fork source evidence")
 			},
 		},
 		{
@@ -144,6 +153,7 @@ func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID
 type metadataStub struct {
 	createCalls int
 	staleCalls  int
+	created     models.CodeReviewSessionMetadata
 	running     models.CodeReviewSessionMetadata
 	runningErr  error
 }
@@ -151,6 +161,7 @@ type metadataStub struct {
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	s.createCalls++
 	metadata.ID = uuid.New()
+	s.created = *metadata
 	return nil
 }
 

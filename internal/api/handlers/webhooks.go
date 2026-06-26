@@ -378,8 +378,11 @@ type codeReviewRequestedWebhook struct {
 			Login string `json:"login"`
 		} `json:"user"`
 		Head struct {
-			SHA string `json:"sha"`
-			Ref string `json:"ref"`
+			SHA  string `json:"sha"`
+			Ref  string `json:"ref"`
+			Repo struct {
+				Fork bool `json:"fork"`
+			} `json:"repo"`
 		} `json:"head"`
 		Base struct {
 			SHA string `json:"sha"`
@@ -439,6 +442,7 @@ func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *htt
 		PullRequestAuthor: event.PullRequest.User.Login,
 		BaseSHA:           event.PullRequest.Base.SHA,
 		HeadSHA:           headSHA,
+		FromFork:          event.PullRequest.Head.Repo.Fork,
 		RequestedLogin:    requestedLogin,
 		RequestedTeam:     requestedTeam,
 	})

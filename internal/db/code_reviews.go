@@ -23,7 +23,7 @@ const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, ena
 		description_policy, risk_policy, agent_roster, inline_comment_limit, final_review_template, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
-	base_sha, head_sha, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
+	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
 	review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
 	failure_reason, completed_at, created_at`
 
@@ -167,12 +167,12 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO code_review_session_metadata (
 			org_id, session_id, repository_id, pull_request_id, policy_id, base_sha, head_sha,
-			trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
+			from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
 			review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
 			failure_reason, completed_at
 		) VALUES (
 			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
-			@trigger_source, @status, @decision, @acceptable, @stale, @superseded_by_session_id,
+			@from_fork, @trigger_source, @status, @decision, @acceptable, @stale, @superseded_by_session_id,
 			@review_output_key, @prompt_artifact_key, @github_review_id, @github_review_url, @final_review_body,
 			@failure_reason, @completed_at
 		)
@@ -186,6 +186,7 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 		"policy_id":                metadata.PolicyID,
 		"base_sha":                 metadata.BaseSHA,
 		"head_sha":                 metadata.HeadSHA,
+		"from_fork":                metadata.FromFork,
 		"trigger_source":           metadata.TriggerSource,
 		"status":                   metadata.Status,
 		"decision":                 metadata.Decision,
@@ -349,7 +350,7 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 	}
 	query := `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
-			       m.base_sha, m.head_sha, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
+			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
 		       s.title AS session_title, r.name AS repository_name, pr.github_repo, pr.github_pr_number,
@@ -525,6 +526,26 @@ func (s *CodeReviewStore) MarkFindingPosted(ctx context.Context, orgID, findingI
 		return models.CodeReviewFinding{}, fmt.Errorf("mark code review finding posted: %w", err)
 	}
 	return collectOneCodeReviewFinding(rows)
+}
+
+func (s *CodeReviewStore) MarkFindingsSelectedForInline(ctx context.Context, orgID, sessionID uuid.UUID, findingIDs []uuid.UUID) (int64, error) {
+	if len(findingIDs) == 0 {
+		return 0, nil
+	}
+	tag, err := s.db.Exec(ctx, `
+		UPDATE code_review_findings
+		SET selected_for_inline = true
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND id = ANY(@finding_ids)`, pgx.NamedArgs{
+		"org_id":      orgID,
+		"session_id":  sessionID,
+		"finding_ids": findingIDs,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("mark code review findings selected for inline: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 func marshalCodeReviewPolicyParts(config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, error) {

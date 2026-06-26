@@ -124,16 +124,18 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	prBody := "Fixes invoice rounding.\n\nTesting: go test ./..."
 
 	tests := []struct {
-		name     string
-		input    liveCodeReviewOutcomeInput
-		expected models.CodeReviewDecision
-		reason   string
+		name         string
+		input        liveCodeReviewOutcomeInput
+		expected     models.CodeReviewDecision
+		reason       string
+		bodyContains string
 	}{
 		{
 			name: "approves when live reviewer quorum and PR health satisfy policy",
 			input: liveCodeReviewOutcomeInput{
-				Policy: policy,
-				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				Policy:     policy,
+				Job:        runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				SessionURL: "https://143.dev/sessions/" + sessionID.String(),
 				PullRequest: models.PullRequest{
 					OrgID:   orgID,
 					Body:    &prBody,
@@ -160,7 +162,8 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected: models.CodeReviewDecisionApproved,
+			expected:     models.CodeReviewDecisionApproved,
+			bodyContains: "Review session: https://143.dev/sessions/" + sessionID.String(),
 		},
 		{
 			name: "withholds approval without reviewer quorum",
@@ -190,6 +193,73 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "reviewer quorum 1 is below policy requirement 2",
+		},
+		{
+			name: "withholds approval for fork pull requests when policy disallows forks",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head", FromFork: true},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "tests", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "fork PRs are not eligible for approval",
+		},
+		{
+			name: "withholds approval when prior human review requested changes",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:        orgID,
+					Body:         &prBody,
+					HeadSHA:      stringPtr("head"),
+					Status:       models.PullRequestStatusOpen,
+					ReviewStatus: models.PullRequestReviewStatusChangesRequested,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "tests", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "unresolved human review threads are present",
 		},
 		{
 			name: "withholds approval when PR head moved",
@@ -296,6 +366,9 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			if tt.reason != "" {
 				require.Contains(t, decision.RiskReasons, tt.reason, "non-approval should preserve the expected risk reason")
 				require.Contains(t, body, tt.reason, "final review body should explain the non-approval reason")
+			}
+			if tt.bodyContains != "" {
+				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")
 			}
 		})
 	}

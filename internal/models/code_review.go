@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -373,6 +374,7 @@ type CodeReviewSessionMetadata struct {
 	PolicyID              uuid.UUID               `db:"policy_id" json:"policy_id"`
 	BaseSHA               string                  `db:"base_sha" json:"base_sha"`
 	HeadSHA               string                  `db:"head_sha" json:"head_sha"`
+	FromFork              bool                    `db:"from_fork" json:"from_fork"`
 	TriggerSource         CodeReviewTriggerSource `db:"trigger_source" json:"trigger_source"`
 	Status                CodeReviewSessionStatus `db:"status" json:"status"`
 	Decision              *CodeReviewDecision     `db:"decision" json:"decision,omitempty"`
@@ -590,11 +592,59 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 
 func stringInSlice(needle string, haystack []string) bool {
 	for _, item := range haystack {
-		if item == needle {
+		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(needle)) {
 			return true
 		}
 	}
 	return false
+}
+
+func CodeReviewFindingSeverityRank(severity CodeReviewFindingSeverity) int {
+	switch severity {
+	case CodeReviewFindingSeverityCritical:
+		return 5
+	case CodeReviewFindingSeverityHigh:
+		return 4
+	case CodeReviewFindingSeverityMedium:
+		return 3
+	case CodeReviewFindingSeverityLow:
+		return 2
+	case CodeReviewFindingSeverityInfo:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func CodeReviewFindingConfidenceRank(confidence CodeReviewFindingConfidence) int {
+	switch confidence {
+	case CodeReviewFindingConfidenceHigh:
+		return 3
+	case CodeReviewFindingConfidenceMedium:
+		return 2
+	case CodeReviewFindingConfidenceLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func SortCodeReviewFindingsForInline(findings []CodeReviewFinding) []CodeReviewFinding {
+	sorted := append([]CodeReviewFinding(nil), findings...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		leftSeverity := CodeReviewFindingSeverityRank(sorted[i].Severity)
+		rightSeverity := CodeReviewFindingSeverityRank(sorted[j].Severity)
+		if leftSeverity != rightSeverity {
+			return leftSeverity > rightSeverity
+		}
+		leftConfidence := CodeReviewFindingConfidenceRank(sorted[i].Confidence)
+		rightConfidence := CodeReviewFindingConfidenceRank(sorted[j].Confidence)
+		if leftConfidence != rightConfidence {
+			return leftConfidence > rightConfidence
+		}
+		return sorted[i].CreatedAt.Before(sorted[j].CreatedAt)
+	})
+	return sorted
 }
 
 func matchesAnyCodeReviewPath(path string, patterns []string) bool {
