@@ -16,6 +16,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	automationservice "github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -32,6 +33,16 @@ type mockWebhookSecretLookup struct {
 
 func (m *mockWebhookSecretLookup) Get(_ context.Context, _ uuid.UUID, _ models.ProviderName) (*models.DecryptedCredential, error) {
 	return m.cred, m.err
+}
+
+type recordingLinearAutomationTriggerer struct {
+	requests []automationservice.LinearIssueEventTriggerRequest
+	err      error
+}
+
+func (r *recordingLinearAutomationTriggerer) TriggerLinearIssueEvent(_ context.Context, req automationservice.LinearIssueEventTriggerRequest) error {
+	r.requests = append(r.requests, req)
+	return r.err
 }
 
 func setupIngestionHandler(t *testing.T, mock pgxmock.PgxPoolIface, credStore webhookSecretLookup) *IngestionWebhookHandler {
@@ -270,6 +281,8 @@ func TestIngestionWebhook_HandleLinear_Success(t *testing.T) {
 	defer mock.Close()
 
 	handler := setupIngestionHandler(t, mock, nil)
+	triggerer := &recordingLinearAutomationTriggerer{}
+	handler.SetLinearAutomationTriggerer(triggerer)
 
 	integrationID := uuid.New()
 	orgID := uuid.New()
@@ -331,6 +344,14 @@ func TestIngestionWebhook_HandleLinear_Success(t *testing.T) {
 	handler.HandleLinear(w, req)
 	require.Equal(t, http.StatusOK, w.Code, "should return 200 OK for processed linear webhook")
 	require.Contains(t, w.Body.String(), "processed", "response should contain processed status")
+	require.Len(t, triggerer.requests, 1, "linear issue create should dispatch one automation trigger request")
+	triggerRequest := triggerer.requests[0]
+	require.Equal(t, orgID, triggerRequest.OrgID, "linear automation trigger should preserve org scope")
+	require.Equal(t, models.LinearAutomationEventIssueCreated, triggerRequest.EventType, "linear create action should dispatch issue.created")
+	require.Equal(t, "linear:create:LIN-1:2024-01-02T00:00:00Z", triggerRequest.ProviderEventID, "linear automation trigger should use a deterministic provider event id")
+	require.Equal(t, "LIN-1", triggerRequest.Issue.ID, "linear automation trigger should preserve issue id")
+	require.Equal(t, "Bug", triggerRequest.Issue.Title, "linear automation trigger should preserve issue title")
+	require.Equal(t, 1, triggerRequest.Issue.Priority, "linear automation trigger should preserve issue priority")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1166,4 +1187,43 @@ func TestIngestionWebhook_GlobalLinearSecretFallback(t *testing.T) {
 		require.Equal(t, http.StatusUnauthorized, w.Code, "global Linear secret must not be applied to Sentry verification")
 		require.NoError(t, mock.ExpectationsWereMet())
 	})
+}
+
+func TestLinearIssueAutomationTriggerRequestFromCreatePayload(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	deliveryID := "linear-delivery-123"
+	body := []byte(`{
+		"action":"create",
+		"type":"Issue",
+		"data":{
+			"id":"lin-1",
+			"identifier":"ENG-123",
+			"title":"Checkout button fails",
+			"description":"The primary checkout button fails.",
+			"url":"https://linear.app/acme/issue/ENG-123",
+			"priority":1,
+			"state":{"name":"Triage","type":"triage"},
+			"labels":[{"name":"bug"},{"name":"checkout"}],
+			"issueType":{"name":"Bug"},
+			"createdAt":"2026-06-25T12:00:00Z",
+			"updatedAt":"2026-06-25T12:01:00Z",
+			"team":{"id":"team-1","key":"ENG","name":"Engineering"}
+		}
+	}`)
+
+	req, ok, err := linearIssueAutomationTriggerRequest(orgID, &models.WebhookDelivery{DeliveryID: &deliveryID}, body)
+
+	require.NoError(t, err, "Linear issue create payload should convert into an automation trigger request")
+	require.True(t, ok, "Linear issue create payload should be automation-triggerable")
+	require.Equal(t, orgID, req.OrgID, "trigger request should preserve org scope")
+	require.Equal(t, models.LinearAutomationEventIssueCreated, req.EventType, "create action should map to issue.created")
+	require.Equal(t, deliveryID, req.ProviderEventID, "trigger request should use Linear delivery id for idempotency")
+	require.NotNil(t, req.OccurredAt, "trigger request should keep the event timestamp")
+	require.Equal(t, "ENG-123", req.Issue.Identifier, "trigger request should preserve the Linear issue identifier")
+	require.Equal(t, "Bug", req.Issue.IssueType, "trigger request should preserve issue type")
+	require.Equal(t, []string{"bug", "checkout"}, req.Issue.Labels, "trigger request should preserve labels for filtering")
+	require.Equal(t, "urgent", req.Issue.PriorityName, "trigger request should map Linear priority numbers to names")
+	require.Equal(t, "ENG", req.Issue.TeamKey, "trigger request should preserve team key for filtering")
 }
