@@ -189,14 +189,14 @@ export default function CodeReviewsPage() {
   });
   const setupGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.setupGitHubTrigger(targetRepositoryId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null) });
+    onSuccess: (_data, targetRepositoryId) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
     },
   });
   const deleteGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.deleteGitHubTrigger(targetRepositoryId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null) });
+    onSuccess: (_data, targetRepositoryId) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
     },
   });
 
