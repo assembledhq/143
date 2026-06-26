@@ -829,22 +829,8 @@ func newStartPreviewHandler(stores *Stores, services *Services, logger zerolog.L
 				logEvent.Msg("preview sandbox is busy; retrying start_preview")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: targetNodeID}
 			}
-			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: string(models.SlackNotificationPreviewFailed),
-				Title:     "Preview failed",
-				Body:      err.Error(),
-				SessionID: &input.SessionID,
-				PreviewID: &input.PreviewID,
-			})
 			return &FatalError{Err: err}
 		}
-		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: string(models.SlackNotificationPreviewReady),
-			Title:     "Preview ready",
-			Body:      "The preview is ready.",
-			SessionID: &input.SessionID,
-			PreviewID: &input.PreviewID,
-		})
 		return nil
 	}
 }
@@ -893,20 +879,8 @@ func newStartBranchPreviewHandler(stores *Stores, services *Services, logger zer
 					ClearTargetNodeID:      true,
 				}
 			}
-			enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-				EventKind: string(models.SlackNotificationPreviewFailed),
-				Title:     "Preview failed",
-				Body:      err.Error(),
-				PreviewID: &input.PreviewID,
-			})
 			return &FatalError{Err: err}
 		}
-		enqueueSlackNotificationSubscribers(ctx, stores, logger, input.OrgID, slackNotificationFanoutInput{
-			EventKind: string(models.SlackNotificationPreviewReady),
-			Title:     "Preview ready",
-			Body:      "The preview is ready.",
-			PreviewID: &input.PreviewID,
-		})
 		return nil
 	}
 }
@@ -3718,6 +3692,10 @@ type slackNotificationSubscriptionConfig struct {
 }
 
 func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
+	switch eventKind {
+	case string(models.SlackNotificationPreviewReady), string(models.SlackNotificationPreviewFailed):
+		return false
+	}
 	if len(raw) == 0 || string(raw) == "null" {
 		raw = json.RawMessage(`{}`)
 	}
@@ -3747,7 +3725,6 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationSessionFailed),
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
-			string(models.SlackNotificationPreviewFailed),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetBalanced:
@@ -3757,8 +3734,6 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationPROpened),
-			string(models.SlackNotificationPreviewReady),
-			string(models.SlackNotificationPreviewFailed),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetVerbose:

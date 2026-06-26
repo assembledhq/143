@@ -317,8 +317,44 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 		{
 			name:      "wildcard matches event",
 			raw:       json.RawMessage(`{"events":["*"]}`),
-			eventKind: "preview.ready",
+			eventKind: "session.failed",
 			expected:  true,
+		},
+		{
+			name:      "explicit preview ready does not match",
+			raw:       json.RawMessage(`{"events":["preview.ready"]}`),
+			eventKind: "preview.ready",
+			expected:  false,
+		},
+		{
+			name:      "wildcard does not match preview ready",
+			raw:       json.RawMessage(`{"events":["*"]}`),
+			eventKind: "preview.ready",
+			expected:  false,
+		},
+		{
+			name:      "event family wildcard does not match preview ready",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "preview.ready",
+			expected:  false,
+		},
+		{
+			name:      "explicit preview failed does not match",
+			raw:       json.RawMessage(`{"events":["preview.failed"]}`),
+			eventKind: "preview.failed",
+			expected:  false,
+		},
+		{
+			name:      "wildcard does not match preview failed",
+			raw:       json.RawMessage(`{"events":["*"]}`),
+			eventKind: "preview.failed",
+			expected:  false,
+		},
+		{
+			name:      "event family wildcard does not match preview failed",
+			raw:       json.RawMessage(`{"events":["preview.*"]}`),
+			eventKind: "preview.failed",
+			expected:  false,
 		},
 		{
 			name:      "event family wildcard matches event",
@@ -378,12 +414,15 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		expected  bool
 	}{
 		{name: "balanced includes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: true},
-		{name: "balanced includes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
+		{name: "balanced excludes preview ready", preset: &balanced, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
+		{name: "balanced excludes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
 		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
-		{name: "quiet includes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
+		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
-		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: true},
+		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: true},
+		{name: "verbose excludes preview ready", preset: &verbose, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
+		{name: "verbose excludes preview failed", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 	}
 
 	for _, tt := range tests {
