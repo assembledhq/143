@@ -2058,13 +2058,22 @@ func (s *SessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, sessi
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at)
 		WHERE id = @id AND org_id = @org_id`
 
+	var diff any
+	var baseCommitSHA any
+	var diffCollectedAt any
+	if result != nil {
+		diff = result.Diff
+		baseCommitSHA = result.DiffBaseCommitSHA
+		diffCollectedAt = result.DiffCollectedAt
+	}
+
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                sessionID,
 		"org_id":            orgID,
 		"snapshot_key":      snapshotKey,
-		"diff":              result.Diff,
-		"base_commit_sha":   result.DiffBaseCommitSHA,
-		"diff_collected_at": result.DiffCollectedAt,
+		"diff":              diff,
+		"base_commit_sha":   baseCommitSHA,
+		"diff_collected_at": diffCollectedAt,
 	})
 	return err
 }

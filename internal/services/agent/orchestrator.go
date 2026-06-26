@@ -1398,6 +1398,11 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		Str("org_id", session.OrgID.String()).
 		Logger()
 	checkpoint, ok := latestDurableCheckpoint(session)
+	if !ok {
+		if err := o.blockNoCheckpointRecoveryWhenThreadRuntimeActive(ctx, session, log); err != nil {
+			return err
+		}
+	}
 	if !ok && session.RecoveryAttemptCount >= maxNoCheckpointRecoveryAttempts {
 		errMsg := "Session recovery stopped after repeated worker interruptions before any durable checkpoint was available."
 		explanation := "The platform tried to recover this session multiple times, but each recovery would have restarted the first turn from scratch because no checkpoint had been saved yet. The session was stopped to avoid repeating the same work indefinitely."
@@ -1462,6 +1467,28 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 	event.Msg("recovering session from latest durable checkpoint")
 
 	return o.ContinueSession(ctx, session, nil)
+}
+
+func (o *Orchestrator) blockNoCheckpointRecoveryWhenThreadRuntimeActive(ctx context.Context, session *models.Session, log zerolog.Logger) error {
+	if o.threadRuntimes == nil || session == nil || session.PrimaryThreadID == nil || *session.PrimaryThreadID == uuid.Nil {
+		return nil
+	}
+	runtime, err := o.threadRuntimes.GetActiveByThread(ctx, session.OrgID, *session.PrimaryThreadID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("check active thread runtime before no-checkpoint recovery: %w", err)
+	}
+	if runtime.SessionID != session.ID {
+		return fmt.Errorf("active thread runtime session mismatch before no-checkpoint recovery: runtime session %s != session %s", runtime.SessionID, session.ID)
+	}
+	log.Info().
+		Str("thread_id", session.PrimaryThreadID.String()).
+		Str("runtime_id", runtime.ID.String()).
+		Str("owner_node_id", runtime.OwnerNodeID).
+		Msg("no-checkpoint recovery deferred because thread runtime is still active")
+	return fmt.Errorf("%w: active thread runtime %s still owns thread %s", ErrThreadRuntimeAlreadyActive, runtime.ID, *session.PrimaryThreadID)
 }
 
 func (o *Orchestrator) beginRuntimeControl(ctx context.Context, controller *runtimeController, orgID, sessionID uuid.UUID, fallbackStatus models.SessionStatus, capability models.CheckpointCapability, startedAt time.Time, log zerolog.Logger) error {
