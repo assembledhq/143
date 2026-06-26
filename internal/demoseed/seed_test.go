@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -248,6 +249,10 @@ func TestScanSeedSafety(t *testing.T) {
 				"INSERT INTO repositories (clone_url) VALUES ('https://github.com/assembledhq/143.git');",
 		},
 		{
+			name: "allows approved demo PR URL",
+			body: "INSERT INTO pull_requests (github_pr_url) VALUES ('https://github.com/assembledhq/143/pull/42');",
+		},
+		{
 			name:      "rejects non-demo email",
 			body:      "INSERT INTO users (email) VALUES ('alice@example.com');",
 			expectErr: "non-demo email",
@@ -277,6 +282,11 @@ func TestScanSeedSafety(t *testing.T) {
 			body:      "INSERT INTO repositories (clone_url) VALUES ('https://github.com/customer/private-repo.git');",
 			expectErr: "unapproved URL path",
 		},
+		{
+			name:      "rejects unapproved GitHub path in approved repository",
+			body:      "INSERT INTO pull_requests (github_pr_url) VALUES ('https://github.com/assembledhq/143/issues/1');",
+			expectErr: "unapproved URL path",
+		},
 	}
 
 	for _, tt := range tests {
@@ -301,6 +311,84 @@ func TestCurrentSeedPassesSafetyScan(t *testing.T) {
 	require.NoError(t, err, "test should read the canonical demo seed")
 
 	require.NoError(t, ScanSeedSafety(body), "canonical demo seed should pass safety scanning")
+}
+
+func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile(filepath.Join("..", "..", ".143", "seed.sql"))
+	require.NoError(t, err, "test should read the canonical demo seed")
+	seed := string(body)
+
+	requiredStatements := []string{
+		"INSERT INTO issues",
+		"INSERT INTO priority_scores",
+		"INSERT INTO complexity_estimates",
+		"INSERT INTO session_issue_links",
+		"INSERT INTO session_turn_issue_snapshots",
+		"INSERT INTO session_threads",
+		"INSERT INTO session_thread_file_events",
+		"INSERT INTO session_review_comments",
+		"INSERT INTO validations",
+		"INSERT INTO preview_groups",
+		"INSERT INTO preview_targets",
+		"INSERT INTO preview_runtimes",
+		"INSERT INTO preview_logs",
+		"INSERT INTO pull_request_health_current",
+		"INSERT INTO pull_request_health_snapshots",
+		"INSERT INTO repository_pr_templates",
+	}
+	for _, statement := range requiredStatements {
+		require.Contains(t, seed, statement, "canonical demo seed should include representative product data")
+	}
+}
+
+func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile(filepath.Join("..", "..", ".143", "seed.sql"))
+	require.NoError(t, err, "test should read the canonical demo seed")
+	seed := string(body)
+
+	prTemplateBlock := seedBlock(t, seed, "INSERT INTO repository_pr_templates", "INSERT INTO projects")
+	require.Contains(t, prTemplateBlock, "ON CONFLICT (repository_id) DO UPDATE", "repository PR template seed should converge on the table's natural unique key")
+
+	issueBlock := seedBlock(t, seed, "INSERT INTO issues", "INSERT INTO priority_scores")
+	requiredIssueColumns := []string{
+		"external_id = EXCLUDED.external_id",
+		"source = EXCLUDED.source",
+		"source_integration_id = EXCLUDED.source_integration_id",
+		"repository_id = EXCLUDED.repository_id",
+		"first_seen_at = EXCLUDED.first_seen_at",
+		"fingerprint = EXCLUDED.fingerprint",
+	}
+	for _, columnAssignment := range requiredIssueColumns {
+		require.Contains(t, issueBlock, columnAssignment, "issue seed conflict handler should converge canonical issue fields")
+	}
+
+	previewBlock := seedBlock(t, seed, "DELETE FROM preview_links", "-- A seeded \"ready\" preview instance")
+	requiredPreviewCleanup := []string{
+		"DELETE FROM preview_links",
+		"id <> '00000000-0000-4000-a000-000000000432'::uuid",
+		"DELETE FROM preview_targets",
+		"id <> '00000000-0000-4000-a000-000000000431'::uuid",
+		"DELETE FROM preview_groups",
+		"id <> '00000000-0000-4000-a000-000000000430'::uuid",
+	}
+	for _, statement := range requiredPreviewCleanup {
+		require.Contains(t, previewBlock, statement, "preview seed should remove matching natural-key rows before fixed-id inserts")
+	}
+}
+
+func seedBlock(t *testing.T, seed, startMarker, endMarker string) string {
+	t.Helper()
+
+	start := strings.Index(seed, startMarker)
+	require.NotEqual(t, -1, start, "seed should contain the requested block start")
+	remainder := seed[start:]
+	end := strings.Index(remainder, endMarker)
+	require.NotEqual(t, -1, end, "seed should contain the requested block end")
+	return remainder[:end]
 }
 
 type fakeSeedDB struct{}
