@@ -16,6 +16,43 @@ STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
 STATIC_EGRESS_SECRETS_FILE="${STATIC_EGRESS_SECRETS_FILE:-/opt/143/static-egress-worker.env}"
 WORKER_COMPOSE_FILE="${WORKER_COMPOSE_FILE:-/opt/143/docker-compose.worker.yml}"
 DEFAULT_NETWORK="${2:-143_default}"
+DEPLOY_MODE_FILE="${DEPLOY_MODE_FILE:-/opt/143/.deploy-mode}"
+DEPLOY_MODE_FILE_MAX_AGE_SECONDS="${DEPLOY_MODE_FILE_MAX_AGE_SECONDS:-600}"
+
+resolve_deploy_mode() {
+  local mode="${DEPLOY_MODE:-}"
+  local file_mode file_ts now max_age age
+
+  if [ -z "$mode" ] && [ -r "$DEPLOY_MODE_FILE" ]; then
+    read -r file_mode file_ts < "$DEPLOY_MODE_FILE" || true
+    if [ -n "${file_mode:-}" ]; then
+      case "${file_ts:-}" in
+        ""|*[!0-9]*)
+          ;;
+        *)
+          now="$(date +%s)"
+          max_age="$DEPLOY_MODE_FILE_MAX_AGE_SECONDS"
+          case "$max_age" in
+            ""|*[!0-9]*) max_age=600 ;;
+          esac
+          age=$((now - file_ts))
+          if [ "$age" -ge 0 ] && [ "$age" -le "$max_age" ]; then
+            mode="$file_mode"
+          fi
+          ;;
+      esac
+    fi
+  fi
+
+  case "$mode" in
+    ""|routine) printf '%s\n' routine ;;
+    maintenance) printf '%s\n' maintenance ;;
+    *)
+      echo "ERROR: invalid DEPLOY_MODE for worker reconciliation: $mode" >&2
+      return 1
+      ;;
+  esac
+}
 
 load_static_egress_env_key() {
   local key="$1"
@@ -57,6 +94,9 @@ if ! command -v docker >/dev/null 2>&1; then
   echo "ERROR: docker is required before reconciling worker host invariants." >&2
   exit 1
 fi
+
+DEPLOY_MODE="$(resolve_deploy_mode)"
+export DEPLOY_MODE
 
 ensure_bridge() {
   local network="$1"
