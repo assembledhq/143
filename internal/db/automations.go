@@ -900,18 +900,22 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 // ListByAutomation. Pulled out as a const so the cursor variants can share
 // the same join shape and the query plan stays predictable.
 //
-// Multiplicity note: sessions.automation_run_id has no UNIQUE constraint
-// today (the design doc explicitly leaves room for multi-session fan-out
-// per run), so we collapse to the most recent session per run via the
-// LATERAL + LIMIT 1. The next PR per session likewise picks the most
-// recently created — sufficient for the row-level "Review PR →" CTA.
+// Multiplicity note: session_automation_links has no UNIQUE constraint on
+// automation_run_id (the design doc explicitly leaves room for multi-session
+// fan-out per run), so we collapse to the most recent session per run via the
+// LATERAL + LIMIT 1. The next PR per session likewise picks the most recently
+// created — sufficient for the row-level "Review PR →" CTA.
 const listByAutomationFromClause = `FROM automation_runs ar
 	LEFT JOIN LATERAL (
-		SELECT id, title, status, diff_stats,
-			failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
-			pr_creation_state
-		FROM sessions
-		WHERE sessions.automation_run_id = ar.id AND sessions.org_id = ar.org_id
+		SELECT sessions.id, sessions.title, sessions.status, sessions.diff_stats,
+			sessions.failure_explanation, sessions.failure_category, sessions.failure_next_steps,
+			sessions.failure_retry_advised, sessions.pr_creation_state
+		FROM session_automation_links sal
+		JOIN sessions
+		  ON sessions.org_id = sal.org_id
+		 AND sessions.id = sal.session_id
+		 AND sessions.deleted_at IS NULL
+		WHERE sal.automation_run_id = ar.id AND sal.org_id = ar.org_id
 		ORDER BY sessions.created_at DESC
 		LIMIT 1
 	) s ON true

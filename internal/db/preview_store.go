@@ -4463,7 +4463,13 @@ func (s *PreviewStore) CountSessionsWithPanelOpenedBySource(ctx context.Context,
 			  AND (
 			    @source = ''
 			    OR CASE
-			      WHEN sess.project_task_id IS NOT NULL THEN 'automation'
+			      WHEN EXISTS (
+			        SELECT 1
+			        FROM session_pm_context spm
+			        WHERE spm.org_id = sess.org_id
+			          AND spm.session_id = sess.id
+			          AND spm.project_task_id IS NOT NULL
+			      ) THEN 'automation'
 			      WHEN sess.origin = 'api' THEN 'api'
 			      ELSE 'manual'
 			    END = @source

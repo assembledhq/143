@@ -1785,14 +1785,14 @@ func TestSessionStore_UpdatePMPlanID(t *testing.T) {
 
 	store := NewSessionStore(mock)
 
-	// Pinned (intentional tripwire — exact-match regex): UpdatePMPlanID must
-	// bump last_activity_at so the method is self-contained. Today's sole
-	// caller also calls UpdateResult immediately before this, so the bump is
+	// Pinned (intentional tripwire): UpdatePMPlanID must bump last_activity_at
+	// and upsert the PM context outside the sessions row. Today's sole caller
+	// also calls UpdateResult immediately before this, so the bump is
 	// technically redundant on the hot path, but removing it couples
 	// correctness to an unwritten caller contract.
-	mock.ExpectExec(`^UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id$`).
+	mock.ExpectExec(`(?s)WITH bumped AS \(\s*UPDATE sessions\s+SET last_activity_at = now\(\).+INSERT INTO session_pm_context`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	err = store.UpdatePMPlanID(context.Background(), uuid.New(), uuid.New(), uuid.New())
 	require.NoError(t, err)

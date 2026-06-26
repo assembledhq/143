@@ -1079,8 +1079,12 @@ func (s *SlackSessionLinkStore) ListRecentAutomationRunsForSlackUser(ctx context
 			  ON ar.org_id = a.org_id AND ar.automation_id = a.id
 			LEFT JOIN LATERAL (
 				SELECT s.id AS session_id
-				FROM sessions s
-				WHERE s.org_id = ar.org_id AND s.automation_run_id = ar.id
+				FROM session_automation_links sal
+				JOIN sessions s
+				  ON s.org_id = sal.org_id
+				 AND s.id = sal.session_id
+				 AND s.deleted_at IS NULL
+				WHERE sal.org_id = ar.org_id AND sal.automation_run_id = ar.id
 				ORDER BY s.updated_at DESC
 				LIMIT 1
 			) session_match ON true
