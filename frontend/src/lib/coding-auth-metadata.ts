@@ -150,7 +150,7 @@ export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingPr
   { value: "openrouter", label: "OpenCode via OpenRouter" },
 ];
 
-export const OPENCODE_US_INFERENCE_HELP_TEXT = "OpenRouter routes are US-pinned; native OpenCode routes are not provider-pinned.";
+export const OPENCODE_US_INFERENCE_HELP_TEXT = "Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.";
 
 export function openCodeBackingProviderLabel(provider: OpenCodeBackingProvider): string {
   return OPENCODE_BACKING_PROVIDER_OPTIONS.find((option) => option.value === provider)?.label ?? "OpenCode native";

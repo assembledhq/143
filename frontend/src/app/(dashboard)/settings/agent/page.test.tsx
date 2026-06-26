@@ -212,7 +212,7 @@ describe("Agent settings page", () => {
 	    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
-	    expect(within(dialog).getByText("OpenRouter routes are US-pinned; native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
+	    expect(within(dialog).getByText("Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });
