@@ -30,7 +30,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "apply":
 		return runApply(ctx, args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown subcommand %q\n\n", args[0])
+		fmt.Fprintln(stderr, "unknown subcommand")
+		fmt.Fprintln(stderr)
 		usage(stderr)
 		return 2
 	}

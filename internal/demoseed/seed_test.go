@@ -1,10 +1,16 @@
 package demoseed
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,6 +142,98 @@ func TestValidateApplyEnvironment(t *testing.T) {
 	}
 }
 
+func TestApplyPreflightsTargetBeforeMigrations(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	errUnsafeTarget := fmt.Errorf("unsafe target")
+	err := apply(context.Background(), ApplyOptions{
+		DatabaseURL: "postgres://user:pass@localhost/demo",
+		Env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
+	}, applyDeps{
+		readAndScanSeed: func(seedPath string) ([]byte, error) {
+			calls = append(calls, "read")
+			return []byte("seed sql"), nil
+		},
+		validateApplyEnvironment: func(env map[string]string, databaseURL string) error {
+			calls = append(calls, "validate")
+			return nil
+		},
+		connectPool: func(ctx context.Context, databaseURL string) (seedDB, error) {
+			calls = append(calls, "connect")
+			return fakeSeedDB{}, nil
+		},
+		ensureApplyTargetSafe: func(ctx context.Context, pool seedDB, allowNonDemoOrgs bool) error {
+			calls = append(calls, "preflight")
+			return errUnsafeTarget
+		},
+		runMigrations: func(databaseURL string) error {
+			calls = append(calls, "migrate")
+			return nil
+		},
+		applySeedSQL: func(ctx context.Context, pool seedDB, seedSQL []byte) error {
+			calls = append(calls, "apply")
+			return nil
+		},
+		assertDemoSeedState: func(ctx context.Context, pool seedDB) error {
+			calls = append(calls, "assert")
+			return nil
+		},
+	})
+
+	require.ErrorIs(t, err, errUnsafeTarget, "Apply should return the target-safety preflight error")
+	require.Equal(t, []string{"read", "validate", "connect", "preflight"}, calls, "Apply should preflight the target before migrations or seed writes")
+}
+
+func TestEnsureApplyTargetSafe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupMock func(mock pgxmock.PgxPoolIface)
+		expectErr string
+	}{
+		{
+			name: "allows unmigrated database",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass('public.organizations') IS NOT NULL")).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+			},
+		},
+		{
+			name: "rejects non-demo organizations",
+			setupMock: func(mock pgxmock.PgxPoolIface) {
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass('public.organizations') IS NOT NULL")).
+					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM organizations WHERE id <> $1")).
+					WithArgs(DemoOrgID).
+					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+			},
+			expectErr: "non-demo organization",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create pgx mock pool")
+			defer mock.Close()
+			tt.setupMock(mock)
+
+			err = EnsureApplyTargetSafe(context.Background(), mock, false)
+			if tt.expectErr != "" {
+				require.Error(t, err, "EnsureApplyTargetSafe should reject unsafe targets")
+				require.Contains(t, err.Error(), tt.expectErr, "EnsureApplyTargetSafe should explain target rejection")
+			} else {
+				require.NoError(t, err, "EnsureApplyTargetSafe should allow safe targets")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestScanSeedSafety(t *testing.T) {
 	t.Parallel()
 
@@ -198,4 +296,22 @@ func TestCurrentSeedPassesSafetyScan(t *testing.T) {
 	require.NoError(t, err, "test should read the canonical demo seed")
 
 	require.NoError(t, ScanSeedSafety(body), "canonical demo seed should pass safety scanning")
+}
+
+type fakeSeedDB struct{}
+
+func (fakeSeedDB) Close() {}
+
+func (fakeSeedDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, nil
+}
+
+func (fakeSeedDB) QueryRow(context.Context, string, ...any) pgx.Row {
+	return fakeRow{}
+}
+
+type fakeRow struct{}
+
+func (fakeRow) Scan(...any) error {
+	return nil
 }

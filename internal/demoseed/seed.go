@@ -17,6 +17,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -58,6 +59,22 @@ type ApplyOptions struct {
 	SkipMigrations   bool
 	AllowNonDemoOrgs bool
 	Env              map[string]string
+}
+
+type seedDB interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Close()
+}
+
+type applyDeps struct {
+	readAndScanSeed          func(seedPath string) ([]byte, error)
+	validateApplyEnvironment func(env map[string]string, databaseURL string) error
+	runMigrations            func(databaseURL string) error
+	connectPool              func(ctx context.Context, databaseURL string) (seedDB, error)
+	ensureApplyTargetSafe    func(ctx context.Context, pool seedDB, allowNonDemoOrgs bool) error
+	applySeedSQL             func(ctx context.Context, pool seedDB, seedSQL []byte) error
+	assertDemoSeedState      func(ctx context.Context, pool seedDB) error
 }
 
 func ReplaceDatabaseName(databaseURL, dbName string) (string, error) {
@@ -192,48 +209,74 @@ func Check(ctx context.Context, opts CheckOptions) error {
 }
 
 func Apply(ctx context.Context, opts ApplyOptions) error {
+	return apply(ctx, opts, defaultApplyDeps())
+}
+
+func apply(ctx context.Context, opts ApplyOptions, deps applyDeps) error {
 	if opts.DatabaseURL == "" {
 		return fmt.Errorf("DEMO_SEED_DATABASE_URL or --database-url is required for demo-seed apply")
 	}
-	seedSQL, err := readAndScanSeed(defaultString(opts.SeedPath, DefaultSeedPath))
+	seedSQL, err := deps.readAndScanSeed(defaultString(opts.SeedPath, DefaultSeedPath))
 	if err != nil {
 		return err
 	}
-	if err := ValidateApplyEnvironment(opts.Env, opts.DatabaseURL); err != nil {
+	if err := deps.validateApplyEnvironment(opts.Env, opts.DatabaseURL); err != nil {
 		return err
 	}
-	if !opts.SkipMigrations {
-		if err := RunMigrations(opts.DatabaseURL); err != nil {
-			return fmt.Errorf("run migrations before applying demo seed: %w", err)
-		}
-	}
 
-	pool, err := connectPool(ctx, opts.DatabaseURL)
+	pool, err := deps.connectPool(ctx, opts.DatabaseURL)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
 
-	if err := EnsureApplyTargetSafe(ctx, pool, opts.AllowNonDemoOrgs); err != nil {
+	if err := deps.ensureApplyTargetSafe(ctx, pool, opts.AllowNonDemoOrgs); err != nil {
 		return err
 	}
-	if err := ApplySeedSQL(ctx, pool, seedSQL); err != nil {
+	if !opts.SkipMigrations {
+		if err := deps.runMigrations(opts.DatabaseURL); err != nil {
+			return fmt.Errorf("run migrations before applying demo seed: %w", err)
+		}
+	}
+	if err := deps.applySeedSQL(ctx, pool, seedSQL); err != nil {
 		return err
 	}
-	if err := AssertDemoSeedState(ctx, pool); err != nil {
+	if err := deps.assertDemoSeedState(ctx, pool); err != nil {
 		return err
 	}
 	return nil
 }
 
-func ApplySeedSQL(ctx context.Context, pool *pgxpool.Pool, seedSQL []byte) error {
+func defaultApplyDeps() applyDeps {
+	return applyDeps{
+		readAndScanSeed:          readAndScanSeed,
+		validateApplyEnvironment: ValidateApplyEnvironment,
+		runMigrations:            RunMigrations,
+		connectPool: func(ctx context.Context, databaseURL string) (seedDB, error) {
+			return connectPool(ctx, databaseURL)
+		},
+		ensureApplyTargetSafe: EnsureApplyTargetSafe,
+		applySeedSQL:          ApplySeedSQL,
+		assertDemoSeedState:   AssertDemoSeedState,
+	}
+}
+
+func ApplySeedSQL(ctx context.Context, pool seedDB, seedSQL []byte) error {
 	if _, err := pool.Exec(ctx, string(seedSQL)); err != nil {
 		return fmt.Errorf("execute demo seed SQL: %w", err)
 	}
 	return nil
 }
 
-func EnsureApplyTargetSafe(ctx context.Context, pool *pgxpool.Pool, allowNonDemoOrgs bool) error {
+func EnsureApplyTargetSafe(ctx context.Context, pool seedDB, allowNonDemoOrgs bool) error {
+	var organizationsExists bool
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('public.organizations') IS NOT NULL`).Scan(&organizationsExists); err != nil {
+		return fmt.Errorf("inspect organizations table before demo seed apply: %w", err)
+	}
+	if !organizationsExists {
+		return nil
+	}
+
 	var nonDemoOrgs int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM organizations WHERE id <> $1`, DemoOrgID).Scan(&nonDemoOrgs); err != nil {
 		return fmt.Errorf("inspect existing organizations before demo seed apply: %w", err)
@@ -244,7 +287,7 @@ func EnsureApplyTargetSafe(ctx context.Context, pool *pgxpool.Pool, allowNonDemo
 	return nil
 }
 
-func AssertDemoSeedState(ctx context.Context, pool *pgxpool.Pool) error {
+func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 	assertions := []struct {
 		name     string
 		query    string
@@ -408,7 +451,7 @@ func Environment(keys ...string) map[string]string {
 }
 
 func readAndScanSeed(seedPath string) ([]byte, error) {
-	body, err := os.ReadFile(seedPath)
+	body, err := os.ReadFile(seedPath) // #nosec G304 -- seedPath is an operator-supplied local seed file for developer/demo tooling; contents are scanned before execution.
 	if err != nil {
 		return nil, fmt.Errorf("read demo seed %s: %w", seedPath, err)
 	}
