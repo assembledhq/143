@@ -1,5 +1,7 @@
 .git
 .github
+.cache
+.tmp
 .env
 .env.*
 !.env.example

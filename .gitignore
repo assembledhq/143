@@ -73,6 +73,7 @@ coverage.html
 # Go module/build caches (if created locally)
 .gomodcache/
 .gopath/
+.cache/
 
 # Node modules
 node_modules/
