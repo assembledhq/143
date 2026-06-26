@@ -49,13 +49,11 @@ export default function AboutPage() {
             <p className={metaClass}>143.dev</p>
             <h1 className={pageTitleClass}>Why we built 143</h1>
             <p className={ledeClass}>
-              Coding agents are very impressive in fresh repos, but we needed
-              more in order to actually get them working well in our production
-              systems across teams of engineers and non-engineers. That&apos;s why
-              we built 143 and open sourced it.
-            </p>
-            <p className={isDark ? "text-xs text-white/35" : "text-xs text-slate-500"}>
-              By John, from Assembled
+              Coding agents feel magical in a fresh repo and fall apart in a
+              complex codebase. The hard part was never the prompt, it&apos;s
+              everything around the agent from setup to context, CI/CD, credentials,
+              review, and handoff. 143.dev is an open-source project that
+              helps teams actually ship production code with agents.
             </p>
           </header>
 
@@ -63,7 +61,22 @@ export default function AboutPage() {
 
           <div className={bodyClass}>
             <p>
-              At{" "}
+              I hate when people say &ldquo;X% of our code is written by AI.&rdquo; 
+              Code volume, especially these days, is a bad
+              metric. What I care about when I'm on a team is whether we&apos;re building a better
+              product that is genuinely useful to our customers. That is a much
+              harder thing to measure, but I think it is the right one.
+            </p>
+
+            <p>
+              I don&apos;t want to write AI slop. But I do want and need our team to move faster
+              and compete in the market. So we set out to build a system that
+              speeds up how quickly we can ship code meant for
+              production.
+            </p>
+
+            <p>
+              143 started at{" "}
               <a
                 href="https://www.assembled.com"
                 target="_blank"
@@ -72,16 +85,16 @@ export default function AboutPage() {
               >
                 Assembled
               </a>
-              , we wanted coding agents to help with real product work, not
-              just demos and internal tools. Even heading into 2026, we were not
-              seeing the velocity increase we expected. Other people seemed to
-              be getting huge leverage from new repos. We were still losing time
-              to setup, context, CI, review, and handoff.
+              . We wanted coding agents to help with real product work, not just
+              demos and internal tools. But even heading into 2026, we weren&apos;t
+              seeing the velocity gains we expected. Other teams seemed to be
+              getting huge leverage from fresh repos, while we were still losing
+              time to setup, context, CI, review, and handoff.
             </p>
 
             <p>
               We kept asking what we were doing wrong. After talking to a lot of
-              other teams, the answer felt much clearer: this was a shared
+              other teams, the answer got much clearer: this was a shared
               infrastructure problem, not just an individual prompting problem.
             </p>
 
@@ -92,62 +105,47 @@ export default function AboutPage() {
             </InlineCallout>
 
             <p>
-              We started with a small tiger team. We cleaned up our
+              So we started with a small tiger team. We cleaned up our
               instructions, invested more in CI/CD, built agent hooks, and made
-              the agent environment less fragile. All of that helped, but it
-              also made the bigger issue obvious: we needed a system that made
-              this work shared by the team, not trapped inside one
-              engineer&apos;s terminal.
+              the agent environment less fragile. All of that helped, but
+              it also made the bigger issue obvious: we needed a system that made
+              this work shared across the team as opposed to being trapped inside one
+              engineer's terminal.
             </p>
 
             <p>
               That is why we built 143.dev. We were inspired by internal systems
-              like Stripe Minions and Ramp Inspect, but those were not available
-              to the public. We wanted to build something open source that other
+              like Stripe Minions and Ramp Inspect, but those were never
+              available to the public. We wanted something open source that other
               teams could use, adapt, and improve.
             </p>
 
-            <p>
-              Vibe coding is not the right word for what we want. I care much
-              more about productionalized coding. The point is not one-off apps.
-              It is helping professional engineers move faster on important
-              work, and giving domain experts and non-engineers a real path to
-              write real code in production systems.
-            </p>
+            <p>We built around a few convictions:</p>
 
-            <p>
-              That last part matters a lot to me. 143 should not pretend a PM,
-              designer, support leader, or operator suddenly becomes a senior
-              engineer. But they should be able to turn product knowledge into a
-              scoped code change, with shared context, previews, pull requests,
-              CI, and review gates before anything ships.
-            </p>
-
-            <InlineCallout isDark={isDark} label="For non-engineers">
-              The goal is not to route around engineers. It is to make product
-              knowledge useful in code, with previews, tests, pull requests, and
-              review gates before anything gets merged.
-            </InlineCallout>
-
-            <p>
-              A lot of today&apos;s tools make individual engineers faster, but
-              they can make the team part harder. That makes sense; many were
-              built by engineers for their own workflows. Running engineering
-              teams made us notice that a lot of primitives were sitting at the
-              wrong level.
-            </p>
-
-            <p>
-              Automations should be visible to the team, not hidden on one
-              person&apos;s laptop. Teams should be able to swap out intelligence
-              as coding agents and models improve. Usage should be legible by
-              person, PR, issue, automation, and outcome, not just token count.
-              Hooks should make it natural to start work from Sentry issues,
-              Linear assignments, PR comments, or scheduled checks. And you
-              should be able to set up a great environment once for everyone,
-              with the same repos, credentials, tools, logs, docs, and product
-              context available to the whole team.
-            </p>
+            <ul className="list-disc space-y-2 pl-5">
+              <li>
+                Automations should be visible to the team, not hidden on one
+                person&apos;s laptop.
+              </li>
+              <li>
+                Teams should be able to swap out intelligence and harnesses as coding agents
+                and models improve.
+              </li>
+              <li>
+                Hooks should make it natural to start work automatically from Sentry issues,
+                Linear assignments, PR comments, or scheduled checks.
+              </li>
+              <li>
+                Code review should be handled by agents on some or all PRs, and
+                they should be able to auto-approve low-risk changes against
+                thresholds you define.
+              </li>
+              <li>
+                You should be able to set up a great environment once for
+                everyone, with the same repos, credentials, tools, logs, docs,
+                and product context available to the whole team.
+              </li>
+            </ul>
 
             <section className="space-y-3 pt-2">
               <h2 className={headingClass}>Open source from day one</h2>
@@ -160,8 +158,8 @@ export default function AboutPage() {
                 how I think about software.
               </p>
               <p>
-                I was just a college student, but the Rails core team did not
-                care who I was. If a PR was good and well-intentioned, it was
+                I was just a college student, but the Rails core team
+                didn&apos;t care who I was. If a PR was good and well-intentioned, it was
                 welcome. I started with tests and tiny refactors, learned more
                 of the codebase, and eventually fixed Active Record bugs. That
                 work helped me get my job at Stripe and became the launching pad
@@ -173,32 +171,30 @@ export default function AboutPage() {
               </p>
             </section>
 
-            <InlineCallout isDark={isDark} label="Why open source">
-              A lot of us learned by reading public code and sending small
-              patches. 143 should be useful out of the box, but also easy for
-              teams to inspect, adapt, and improve in the open.
-            </InlineCallout>
-
-            <p>
-              I also wanted the hosted version to feel like the old days of
-              developer tools, when pricing was simpler. For hosted 143, we are
-              charging just for the containers you run. Bring whatever LLM
-              provider or coding agent you prefer. We want you to help pay for
-              the servers, not make your team pay our model markup.
-            </p>
-
             <p>
               <Link href="/why-143" className={linkClass}>
-                The name comes from
+                The name for 143 comes from
               </Link>{" "}
               1943, when the Lockheed Skunk Works team built the XP-80 Shooting
-              Star in 143 days. It is a nod to small teams with enough ownership
-              and infrastructure to move quickly.
+              Star in 143 days. It is a nod to what it takes to move that fast: a small
+              team with high ownership and the infrastructure to support it.
             </p>
 
             <p>I really hope you like it.</p>
 
-            <p className={isDark ? "text-white/78" : "text-slate-800"}>John</p>
+            <div className="space-y-1">
+              <p className={isDark ? "text-white/78" : "text-slate-800"}>John</p>
+              <p className={metaClass}>
+                <a
+                  href="https://www.linkedin.com/in/johnjianwang/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={linkClass}
+                >
+                  Co-founder/CTO, Assembled
+                </a>
+              </p>
+            </div>
           </div>
         </article>
       </main>
