@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Future | **Last reviewed:** 2026-06-26
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-26
 >
 > **Depends on:** [../overall.md](../overall.md), [../implemented/78-review-agent-loops.md](../implemented/78-review-agent-loops.md), [../implemented/107-pr-readiness-checks.md](../implemented/107-pr-readiness-checks.md), [../implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -12,6 +12,32 @@ Create a GitHub-native **Code Reviewer** bot that teams can request as a PR revi
 - approves the PR with review evidence when the PR meets the organization's acceptable-risk policy.
 
 The goal is not to replace meaningful human review. It is to move basic acceptable-risk PRs out of the human queue so reviewers can focus on changes where judgment, architecture, ownership, or risk actually matter.
+
+Implemented foundation:
+
+- versioned insert-only code review policies with org defaults and repository overrides
+- lossless policy persistence for final review templates
+- code review session metadata, agent result, and finding tables tied to normal `sessions`
+- typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
+- deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
+- GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
+- service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
+- conservative `run_code_review` worker handler that loads the captured policy version, records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
+- evidence-gated `run_code_review` approval path that evaluates stored reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
+- GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
+- GitHub pending/final commit-status publication for code review runs when the worker has GitHub credentials
+- stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
+- final-review template rendering from persisted policy data with safe fallback to the built-in body
+- `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
+- top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
+
+Still pending:
+
+- live multi-agent worker orchestration that fans out reviewer tabs and runs native `/review`
+- reviewer-result ingestion backed by live reviewer/orchestrator evidence rather than pre-existing stored result rows
+- inline-comment retry/update and posted-comment id persistence
+- prompt artifact storage and recovery for rendered approval prompts
+- unresolved human review-thread checks and richer PR description prompt evaluation
 
 ## Problem
 

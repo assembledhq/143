@@ -28,6 +28,7 @@ import (
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agent"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/externalidentity"
 	"github.com/assembledhq/143/internal/services/feedback"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -352,6 +353,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if stores.CodeReviews != nil {
+		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
+	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
 	}
@@ -477,6 +481,7 @@ type Stores struct {
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	PRReadiness         *db.PRReadinessStore
+	CodeReviews         *db.CodeReviewStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
@@ -575,6 +580,10 @@ type prCreator interface {
 	WaitForPostPRSnapshotUploads()
 }
 
+type codeReviewSubmitter interface {
+	SubmitReview(ctx context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error)
+}
+
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    orchestratorService
@@ -597,6 +606,7 @@ type Services struct {
 	PagerDuty       pagerDutyEventProcessor       // nil-safe: PagerDuty incident ingestion disabled if nil
 	PagerDutySync   pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
 	PagerDutyWrites pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews     codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
