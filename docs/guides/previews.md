@@ -455,6 +455,8 @@ Every service receives:
 | `ONEFORTYTHREE_ENV` | `preview` — always injected for preview runtimes. Apps should use this to skip work that is not needed to serve the preview, such as background consumers, schedulers, profilers, analytics/telemetry exporters, and expensive startup warmers. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `PREVIEW_ORIGIN` | The public URL the gateway serves this preview on, e.g. `http://<id>.preview.localhost:9090`. Set this as your app's external base URL (e.g. `BASE_URL`, `FRONTEND_URL`) so redirects and absolute links point at the preview instead of `localhost`. Overrides any user-declared value. |
 
+The platform context vars (`ONEFORTYTHREE`, `ONEFORTYTHREE_ENV`, `PREVIEW_ORIGIN`) are injected into **service build commands as well as the runtime env**, so a build step can detect that it is building for a preview — for example, a statically built frontend can bake a preview-only flag into its bundle. They carry only non-secret platform context; injected infrastructure credentials and secret bundles stay runtime-only, so build steps still cannot read app secrets.
+
 ## Trust Split
 
 Preview config is untrusted repo content. Not every field is read from the same git revision.
