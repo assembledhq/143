@@ -1245,7 +1245,7 @@ const previewInstallRuntimeVersion = "docker-preview-install-v1"
 type previewInstallCacheKey struct {
 	RuntimeVersion  string                      `json:"runtime_version"`
 	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
-	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	SandboxCacheABI string                      `json:"sandbox_cache_abi,omitempty"`
 	Command         []string                    `json:"command"`
 	Cwd             string                      `json:"cwd"`
 	Lockfiles       []previewInstallLockfileKey `json:"lockfiles"`
@@ -1943,7 +1943,7 @@ func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Contex
 	if sb != nil {
 		key.SandboxProvider = sb.Provider
 		if sb.Metadata != nil {
-			key.SandboxImage = sb.Metadata["image"]
+			key.SandboxCacheABI = preview.SandboxCacheABIFromMetadata(sb.Metadata)
 		}
 	}
 	payload, err := json.Marshal(key)
@@ -2323,8 +2323,12 @@ func previewServiceBuildOrder(cfg *models.PreviewConfig) []string {
 // in dependency order, before any service starts. It is the place to compile
 // artifacts (e.g. `go build`) so the start command can exec a prebuilt binary
 // off the readiness-probe hot path. Build commands run with the service's own
-// Env (no injected platform credentials or runtime secrets) so build steps
-// cannot read app secrets. A non-zero exit or timeout fails the launch.
+// Env plus the platform context env (ONEFORTYTHREE, ONEFORTYTHREE_ENV,
+// PREVIEW_ORIGIN) so build steps can detect the preview runtime and gate
+// build-time behavior — e.g. a static frontend baking a preview flag into its
+// bundle. Injected infrastructure credentials and runtime secret bundles stay
+// runtime-only, so build steps still cannot read app secrets. A non-zero exit
+// or timeout fails the launch.
 func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *previewState, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
 	hasBuild := false
 	for _, svcCfg := range cfg.Services {
@@ -2389,6 +2393,19 @@ func (d *DockerPreviewProvider) runServiceBuilds(ctx context.Context, state *pre
 		sort.Strings(envKeys)
 		for _, k := range envKeys {
 			cmdParts = append(cmdParts, fmt.Sprintf("%s=%s", k, shellEscape(svcCfg.Env[k])))
+		}
+		// Inject the platform context env (ONEFORTYTHREE, ONEFORTYTHREE_ENV,
+		// PREVIEW_ORIGIN) after the service's own Env so the platform value wins,
+		// matching buildServiceEnvs. This is the same non-secret context exposed at
+		// runtime; infra credentials and secret bundles are deliberately not added
+		// here, so build steps still cannot read app secrets.
+		platformKeys := make([]string, 0, len(opts.ExtraEnv))
+		for k := range opts.ExtraEnv {
+			platformKeys = append(platformKeys, k)
+		}
+		sort.Strings(platformKeys)
+		for _, k := range platformKeys {
+			cmdParts = append(cmdParts, fmt.Sprintf("%s=%s", k, shellEscape(opts.ExtraEnv[k])))
 		}
 		escapedCmd := make([]string, len(svcCfg.Build))
 		for i, c := range svcCfg.Build {

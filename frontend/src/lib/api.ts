@@ -661,11 +661,14 @@ export const api = {
     },
     getFileContent: (sessionId: string, path: string) =>
       get<import('./types').SingleResponse<import('./types').FileContent>>(`/api/v1/sessions/${sessionId}/files/content?path=${encodeURIComponent(path)}`),
-    getFileContext: (sessionId: string, path: string, line: number, above?: number, below?: number) => {
+    getFileContext: (sessionId: string, path: string, line: number, above?: number, below?: number, opts?: { signal?: AbortSignal; timeoutMs?: number }) => {
       const params = new URLSearchParams({ path, line: String(line) });
       if (above != null) params.set('above', String(above));
       if (below != null) params.set('below', String(below));
-      return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(`/api/v1/sessions/${sessionId}/files/context?${params.toString()}`);
+      return get<import('./types').SingleResponse<import('./types').FileContextResponse>>(
+        `/api/v1/sessions/${sessionId}/files/context?${params.toString()}`,
+        { signal: timeoutSignal(opts?.timeoutMs ?? 2000, opts?.signal) },
+      );
     },
     preview: {
       get: (sessionId: string) =>

@@ -656,38 +656,34 @@ func (l *LinearTaskManager) resolveIssueReference(ctx context.Context, taskID st
 		return linearIssueReference{ID: taskID}, nil
 	}
 
-	query := `query($identifier: String!) {
-		issues(filter: { identifier: { eq: $identifier } }, first: 1) {
-			nodes {
-				id
-				team { id }
-			}
+	query := `query($id: String!) {
+		issue(id: $id) {
+			id
+			team { id }
 		}
 	}`
 
 	var result struct {
 		Data struct {
-			Issues struct {
-				Nodes []struct {
-					ID   string `json:"id"`
-					Team struct {
-						ID string `json:"id"`
-					} `json:"team"`
-				} `json:"nodes"`
-			} `json:"issues"`
+			Issue *struct {
+				ID   string `json:"id"`
+				Team struct {
+					ID string `json:"id"`
+				} `json:"team"`
+			} `json:"issue"`
 		} `json:"data"`
 	}
 
-	if err := l.doGraphQL(ctx, query, map[string]interface{}{"identifier": taskID}, &result); err != nil {
+	if err := l.doGraphQL(ctx, query, map[string]interface{}{"id": taskID}, &result); err != nil {
 		return linearIssueReference{}, err
 	}
-	if len(result.Data.Issues.Nodes) == 0 {
+	if result.Data.Issue == nil || result.Data.Issue.ID == "" {
 		return linearIssueReference{}, fmt.Errorf("linear issue identifier %q not found", taskID)
 	}
 
 	return linearIssueReference{
-		ID:     result.Data.Issues.Nodes[0].ID,
-		TeamID: result.Data.Issues.Nodes[0].Team.ID,
+		ID:     result.Data.Issue.ID,
+		TeamID: result.Data.Issue.Team.ID,
 	}, nil
 }
 

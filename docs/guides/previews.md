@@ -200,7 +200,7 @@ Use `preview.install` when a preview needs dependencies before services can boot
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
 
-Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
+Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and platform sandbox cache ABI, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
 
 Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
 
@@ -454,6 +454,8 @@ Every service receives:
 | `ONEFORTYTHREE` | `true` — always injected by the platform. Apps can use this to detect that they are running on 143. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `ONEFORTYTHREE_ENV` | `preview` — always injected for preview runtimes. Apps should use this to skip work that is not needed to serve the preview, such as background consumers, schedulers, profilers, analytics/telemetry exporters, and expensive startup warmers. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `PREVIEW_ORIGIN` | The public URL the gateway serves this preview on, e.g. `http://<id>.preview.localhost:9090`. Set this as your app's external base URL (e.g. `BASE_URL`, `FRONTEND_URL`) so redirects and absolute links point at the preview instead of `localhost`. Overrides any user-declared value. |
+
+The platform context vars (`ONEFORTYTHREE`, `ONEFORTYTHREE_ENV`, `PREVIEW_ORIGIN`) are injected into **service build commands as well as the runtime env**, so a build step can detect that it is building for a preview — for example, a statically built frontend can bake a preview-only flag into its bundle. They carry only non-secret platform context; injected infrastructure credentials and secret bundles stay runtime-only, so build steps still cannot read app secrets.
 
 ## Trust Split
 

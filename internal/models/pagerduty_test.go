@@ -73,6 +73,7 @@ func TestAutomationEventProviderValidate(t *testing.T) {
 	}{
 		{name: "PagerDuty is valid", provider: AutomationEventProviderPagerDuty},
 		{name: "GitHub is valid", provider: AutomationEventProviderGitHub},
+		{name: "Linear is valid", provider: AutomationEventProviderLinear},
 		{name: "empty is invalid", provider: "", expectErr: true},
 		{name: "unknown is invalid", provider: AutomationEventProvider("jira"), expectErr: true},
 	}

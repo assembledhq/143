@@ -44,6 +44,15 @@ interface ContextExpanderProps {
   onContextUnavailable?: () => void;
 }
 
+const UNAVAILABLE_CONTEXT_ERROR_CODES = new Set(["NO_SANDBOX", "SNAPSHOT_UNREADABLE"]);
+
+function isContextUnavailableError(err: unknown): boolean {
+  if (err instanceof ApiError && UNAVAILABLE_CONTEXT_ERROR_CODES.has(err.code)) {
+    return true;
+  }
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 /**
  * Clickable expander shown between diff hunks to indicate hidden context lines.
  * Fetches additional context from the file content API when clicked.
@@ -144,10 +153,11 @@ export function ContextExpander({
         });
       }
     } catch (err) {
-      // The session container is gone (completed sessions tear down their
-      // sandbox). Lift this signal so all expanders flip to the disabled
-      // state instead of silently swallowing repeated clicks.
-      if (err instanceof ApiError && err.code === "NO_SANDBOX") {
+      // Additional context is an optional affordance. If the backing
+      // workspace is unavailable, unreadable, or too slow to answer, flip
+      // every expander into the disabled state instead of letting repeated
+      // clicks wait on the same failing path.
+      if (isContextUnavailableError(err)) {
         onContextUnavailable?.();
       }
     } finally {

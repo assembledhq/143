@@ -115,6 +115,60 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
+  it("explains preview warming modes and GitHub PR publishing", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/settings", () => HttpResponse.json({
+        data: {
+          id: "org-1",
+          name: "Assembled",
+          settings: { preview_auto_pool_max_active: 4, preview_session_prewarm_max_active: 2 },
+          created_at: "2026-01-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        },
+      })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "smart",
+            session_prewarm_untrusted_fork: false,
+            open_pr_count: 5,
+            updated_at: "2026-06-08T12:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(
+      await screen.findByText(/Warm builds each PR preview, saves a resumable snapshot, then stops it/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/On builds each PR preview and keeps it running until normal idle limits reclaim it/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Cache only installs dependencies ahead of time without starting the app/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Smart starts with cache warming and may prepare a full preview/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Forks")).not.toBeInTheDocument();
+    expect(screen.queryByText("Untrusted forks")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Not publishing preview links to GitHub PRs"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/When enabled, 143 publishes preview URLs to GitHub PR comments or commit statuses/i),
+    ).toBeInTheDocument();
+  });
+
   it("falls back to connected repositories when preview policies are empty", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -211,8 +265,7 @@ describe("PreviewSettingsPage", () => {
     });
   });
 
-  it("autosaves untrusted fork session prewarm policy when speculative slots are configured", async () => {
-    let savedPolicy: unknown;
+  it("does not expose untrusted fork session prewarm policy", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
       http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
@@ -239,19 +292,14 @@ describe("PreviewSettingsPage", () => {
         ],
         meta: {},
       })),
-      http.put("*/api/v1/repositories/repo-1/preview-policy", async ({ request }) => {
-        savedPolicy = await request.json();
-        return HttpResponse.json({ data: { id: "policy-1", session_prewarm_untrusted_fork: true } });
-      }),
     );
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    await userEvent.click(await screen.findByRole("switch", { name: /allow session prewarm for untrusted forks in assembledhq\/143/i }));
-
-    await waitFor(() => {
-      expect(savedPolicy).toEqual({ session_prewarm_untrusted_fork: true });
-    });
+    expect(await screen.findByText("assembledhq/143")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: /allow session prewarm for untrusted forks/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("groups each repository's build and publish controls in one stacked card", async () => {

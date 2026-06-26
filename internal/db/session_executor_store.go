@@ -37,7 +37,7 @@ func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, o
 		WHERE se.org_id = $1
 		  AND se.session_id = $2
 		  AND se.job_id = $3
-		  AND se.status IN ('starting', 'running', 'draining')
+		  AND se.status = 'starting'
 		  AND j.org_id = se.org_id
 		  AND j.id = se.job_id
 		  AND j.status = 'running'
@@ -272,9 +272,6 @@ func (s *SessionExecutorStore) MarkHumanInputCheckpointByJob(ctx context.Context
 			drain_requested_at = COALESCE(drain_requested_at, now()),
 			updated_at = now()
 		FROM sessions sess
-		LEFT JOIN session_threads th
-		  ON th.org_id = se.org_id
-		 AND th.id = se.thread_id
 		WHERE se.org_id = $1
 		  AND se.job_id = $2
 		  AND se.lock_token = $3
@@ -284,7 +281,13 @@ func (s *SessionExecutorStore) MarkHumanInputCheckpointByJob(ctx context.Context
 		  AND se.drain_intent IN ('none', 'planned_rollout')
 		  AND (
 			sess.status = 'awaiting_input'
-			OR th.status = 'awaiting_input'
+			OR EXISTS (
+				SELECT 1
+				FROM session_threads th
+				WHERE th.org_id = se.org_id
+				  AND th.id = se.thread_id
+				  AND th.status = 'awaiting_input'
+			)
 		  )`, orgID, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("mark human input checkpoint executor: %w", err)

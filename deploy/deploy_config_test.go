@@ -677,6 +677,27 @@ func TestRoutineWorkerDeployDoesNotRecreateHealthySandboxDNS(t *testing.T) {
 	require.Less(t, noRecreateIndex, recreateRetryIndex, "routine reconciliation should fail before the maintenance-only recreate cleanup path")
 }
 
+func TestWorkerReconcileModeSurvivesSudoEnvironmentFiltering(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	runReconcile := extractTopLevelShellFunction(t, deployText, "run_worker_host_reconcile", "remote_shell_quote")
+	require.Contains(t, runReconcile, `DEPLOY_MODE_FILE="/opt/143/.deploy-mode"`, "worker deploy should use a host-side handoff file for reconcile mode")
+	require.Contains(t, runReconcile, `printf '%s %s\n' "$DEPLOY_MODE" "$(date +%s)" > "$DEPLOY_MODE_FILE"`, "worker deploy should write the requested deploy mode before sudo strips the environment")
+	require.Contains(t, runReconcile, `trap 'rm -f "$DEPLOY_MODE_FILE"' EXIT`, "worker deploy should remove the reconcile mode handoff file after the sudo call returns")
+	require.Contains(t, runReconcile, `sudo -n /opt/143/deploy/scripts/reconcile-worker-host.sh 143-sandbox`, "worker deploy should keep using the narrow sudoers command for host reconciliation")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read reconcile-worker-host.sh")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, `DEPLOY_MODE_FILE="${DEPLOY_MODE_FILE:-/opt/143/.deploy-mode}"`, "worker reconcile should know where deploy.sh writes the mode handoff")
+	require.Contains(t, reconcileText, "resolve_deploy_mode()", "worker reconcile should centralize deploy mode resolution")
+	require.Contains(t, reconcileText, `DEPLOY_MODE="$(resolve_deploy_mode)"`, "worker reconcile should populate DEPLOY_MODE before routine-vs-maintenance branches run")
+	require.Contains(t, reconcileText, "DEPLOY_MODE_FILE_MAX_AGE_SECONDS", "worker reconcile should ignore stale deploy mode handoff files")
+}
+
 func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
 	t.Parallel()
 
@@ -1621,6 +1642,7 @@ func TestGrafanaProvisionedDashboardsUseValidDatasourcesAndRangeQueries(t *testi
 	require.True(t, dashboardNames["platform-health.json"], "platform health dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["primary-operations.json"], "primary operations dashboard should be provisioned from the repo")
 	require.True(t, dashboardNames["preview-health.json"], "preview health dashboard should be provisioned from the repo")
+	require.True(t, dashboardNames["worker-runtime.json"], "worker runtime dashboard should be provisioned from the repo")
 
 	for _, dashboardFile := range dashboardFiles {
 		if dashboardFile.IsDir() || !strings.HasSuffix(dashboardFile.Name(), ".json") {
@@ -1800,6 +1822,44 @@ func TestPrimaryOperationsDashboardTracksWorkerLoad(t *testing.T) {
 			require.Contains(t, panel.Targets[0].Expr, exprFragment, "panel %q should query the expected field or log message", title)
 		}
 		require.True(t, found, "primary operations dashboard should include panel %q", title)
+	}
+}
+
+func TestWorkerRuntimeDashboardUsesWorkerRuntimeLogs(t *testing.T) {
+	t.Parallel()
+
+	rawDashboard, err := os.ReadFile("../deploy/grafana/provisioning/dashboards/worker-runtime.json")
+	require.NoError(t, err, "test should read the worker runtime dashboard")
+
+	var dashboard struct {
+		Title  string `json:"title"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	require.NoError(t, json.Unmarshal(rawDashboard, &dashboard), "worker runtime dashboard should be valid JSON")
+	require.Equal(t, "143 - Worker Runtime", dashboard.Title, "worker runtime dashboard should have the expected title")
+
+	required := map[string]string{
+		"Running jobs":                    `platform health: running job total sample`,
+		"Running jobs by worker and type": `platform health: running job sample`,
+		"Container allocation by worker":  `active_memory_allocated_mb`,
+		"Allocated RAM by worker":         `active_memory_allocated_mb`,
+	}
+	for title, exprFragment := range required {
+		found := false
+		for _, panel := range dashboard.Panels {
+			if panel.Title != title {
+				continue
+			}
+			found = true
+			require.NotEmpty(t, panel.Targets, "panel %q should have a LogsQL target", title)
+			require.Contains(t, panel.Targets[0].Expr, exprFragment, "panel %q should query the expected log message or field", title)
+		}
+		require.True(t, found, "worker runtime dashboard should include panel %q", title)
 	}
 }
 

@@ -180,6 +180,8 @@ Per-repository setting, admin-only, three modes:
 | `warm` | Build the preview, save the startup snapshot, then stop it ("hibernate") | Already stopped; resumes in ~30s from the PR link or index | Most repos: every PR link works fast, near-zero idle cost |
 | `on` | Build and leave running | Normal idle TTL applies; when reclaimed it degrades to warm (resumable), never to cold | Repos with active nontechnical reviewers who click PR links all day |
 
+Settings helper copy should make the distinction explicit: `Warm builds each PR preview, saves a resumable snapshot, then stops it. On builds each PR preview and keeps it running until normal idle limits reclaim it.`
+
 Key behaviors:
 
 - Triggered by GitHub PR `opened`, `reopened`, and `synchronize` (new head SHA) webhooks for PRs targeting the repository's default branch. Draft PRs are skipped in v1. Fork PRs are always skipped (secrets).
@@ -187,6 +189,7 @@ Key behaviors:
 - Auto-created previews draw from a **separate org-level pool** (`preview_auto_pool_max_active`), not the per-user quota, so a busy repo cannot exhaust a human's interactive previews — and vice versa. Warm builds queue at lower priority than user-initiated starts.
 - When the PR closes or merges, any active auto-preview is stopped and its target is excluded from the "Ready to resume" section (it still appears in Recent).
 - `on` mode is not staging: idle TTL and the 2h lifetime cap from [82-preview-lifetime-controls](../implemented/82-preview-lifetime-controls.md) still apply. The promise is "the PR link is always one fast click from a running app," not "a container is always burning."
+- When GitHub PR publishing is off, 143 may still create previews internally, but it will not publish preview URLs to GitHub PR comments or commit statuses.
 
 ### Settings Wireframe
 

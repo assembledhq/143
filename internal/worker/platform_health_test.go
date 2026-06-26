@@ -32,6 +32,32 @@ func (s *stubWorkerLoadStore) WorkerLoadSamples(ctx context.Context) ([]db.Worke
 	return s.samples, s.err
 }
 
+type stubRunningJobStore struct {
+	samples []db.RunningJobSample
+	err     error
+}
+
+func (s *stubRunningJobStore) RunningJobSamples(ctx context.Context) ([]db.RunningJobSample, error) {
+	return s.samples, s.err
+}
+
+type sequenceRunningJobStore struct {
+	mu      sync.Mutex
+	calls   int
+	samples [][]db.RunningJobSample
+}
+
+func (s *sequenceRunningJobStore) RunningJobSamples(ctx context.Context) ([]db.RunningJobSample, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := s.calls
+	if index >= len(s.samples) {
+		index = len(s.samples) - 1
+	}
+	s.calls++
+	return append([]db.RunningJobSample(nil), s.samples[index]...), nil
+}
+
 type stubWorkerHeartbeatStore struct {
 	health db.WorkerHeartbeatHealth
 	err    error
@@ -214,6 +240,10 @@ func TestRunWorkerLoadSamplerEmitsStructuredSamples(t *testing.T) {
 			PreviewHeldContainers: 2,
 			RunningJobs:           5,
 			RunningSessionJobs:    2,
+			ActiveUsageContainers: 2,
+			ActiveMemoryAllocated: 6144,
+			ActiveCPUAllocated:    4,
+			ActiveDiskAllocated:   20480,
 		},
 	}}
 	logs := &syncBuffer{}
@@ -253,10 +283,100 @@ func TestRunWorkerLoadSamplerEmitsStructuredSamples(t *testing.T) {
 	require.Equal(t, float64(2), event["preview_held_containers"], "worker load sampler should include preview-held container count")
 	require.Equal(t, float64(5), event["running_jobs"], "worker load sampler should include running job count")
 	require.Equal(t, float64(2), event["running_session_jobs"], "worker load sampler should include running session job count")
+	require.Equal(t, float64(2), event["active_usage_containers"], "worker load sampler should include active usage-event container count")
+	require.Equal(t, float64(6144), event["active_memory_allocated_mb"], "worker load sampler should include allocated memory across active containers")
+	require.Equal(t, float64(4), event["active_cpu_allocated"], "worker load sampler should include allocated CPU across active containers")
+	require.Equal(t, float64(20480), event["active_disk_allocated_mb"], "worker load sampler should include allocated disk across active containers")
 	require.NotNil(t, totalEvent, "worker load sampler should emit a fleet total sample")
 	require.Equal(t, float64(2), totalEvent["running_sessions"], "worker load total should include running session count")
 	require.Equal(t, float64(4), totalEvent["active_previews"], "worker load total should include active preview count")
 	require.Equal(t, float64(3), totalEvent["sandbox_containers"], "worker load total should include sandbox container count")
+	require.Equal(t, float64(6144), totalEvent["active_memory_allocated_mb"], "worker load total should include allocated memory across active containers")
+	require.Equal(t, float64(4), totalEvent["active_cpu_allocated"], "worker load total should include allocated CPU across active containers")
+	require.Equal(t, float64(20480), totalEvent["active_disk_allocated_mb"], "worker load total should include allocated disk across active containers")
+}
+
+func TestRunRunningJobSamplerEmitsStructuredSamples(t *testing.T) {
+	t.Parallel()
+
+	store := &stubRunningJobStore{samples: []db.RunningJobSample{
+		{WorkerNodeID: "worker-1", JobType: "run_agent", Running: 2},
+		{WorkerNodeID: "worker-2", JobType: "start_preview", Running: 1},
+	}}
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunRunningJobSampler(ctx, store, zerolog.New(logs), time.Hour)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		return bytes.Contains(logs.Bytes(), []byte("platform health: running job sample"))
+	}, time.Second, 10*time.Millisecond, "running job sampler should emit an initial health sample")
+	cancel()
+	<-done
+
+	events := parseJSONLogEvents(t, logs.Bytes())
+	require.Len(t, events, 3, "running job sampler should emit one log row per worker/job type plus one fleet total")
+	require.Equal(t, "platform health: running job sample", events[0]["message"], "running job sampler should use the canonical log message")
+	require.Equal(t, "worker-1", events[0]["worker_node_id"], "running job sampler should include worker node id")
+	require.Equal(t, "run_agent", events[0]["job_type"], "running job sampler should include job type")
+	require.Equal(t, float64(2), events[0]["running"], "running job sampler should include running job count")
+	var totalEvent map[string]any
+	for _, event := range events {
+		if event["message"] == "platform health: running job total sample" {
+			totalEvent = event
+		}
+	}
+	require.NotNil(t, totalEvent, "running job sampler should emit a fleet total sample")
+	require.Equal(t, float64(3), totalEvent["running_jobs"], "running job total sample should include current running job count")
+}
+
+func TestRunRunningJobSamplerEmitsZeroForClearedGroups(t *testing.T) {
+	t.Parallel()
+
+	store := &sequenceRunningJobStore{samples: [][]db.RunningJobSample{
+		{{WorkerNodeID: "worker-1", JobType: "run_agent", Running: 2}},
+		{},
+	}}
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		RunRunningJobSampler(ctx, store, zerolog.New(logs), 10*time.Millisecond)
+		close(done)
+	}()
+	require.Eventually(t, func() bool {
+		events := parseJSONLogEvents(t, logs.Bytes())
+		var sawInitialGroup bool
+		var sawClearedGroup bool
+		var sawZeroTotal bool
+		for _, event := range events {
+			if event["message"] == "platform health: running job sample" &&
+				event["worker_node_id"] == "worker-1" &&
+				event["job_type"] == "run_agent" &&
+				event["running"] == float64(2) {
+				sawInitialGroup = true
+			}
+			if event["message"] == "platform health: running job sample" &&
+				event["worker_node_id"] == "worker-1" &&
+				event["job_type"] == "run_agent" &&
+				event["running"] == float64(0) {
+				sawClearedGroup = true
+			}
+			if event["message"] == "platform health: running job total sample" &&
+				event["running_jobs"] == float64(0) {
+				sawZeroTotal = true
+			}
+		}
+		return sawInitialGroup && sawClearedGroup && sawZeroTotal
+	}, time.Second, 10*time.Millisecond, "running job sampler should emit zero samples when running groups clear")
+	cancel()
+	<-done
 }
 
 func TestRunHostResourceSamplerEmitsStructuredSamples(t *testing.T) {
