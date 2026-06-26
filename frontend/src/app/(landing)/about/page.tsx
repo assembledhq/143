@@ -3,7 +3,6 @@
 import { usePrefersDark } from "@/hooks/use-prefers-dark";
 import Link from "next/link";
 import Footer from "@/components/landing/footer";
-import type { ReactNode } from "react";
 
 export default function AboutPage() {
   const isDark = usePrefersDark();
@@ -12,9 +11,6 @@ export default function AboutPage() {
   } transition-colors`;
   const pageTitleClass = `text-2xl sm:text-3xl font-light tracking-tight ${
     isDark ? "text-white" : "text-slate-900"
-  }`;
-  const ledeClass = `max-w-2xl text-base leading-7 ${
-    isDark ? "text-white/58" : "text-slate-600"
   }`;
   const bodyClass = `space-y-6 text-sm leading-7 ${
     isDark ? "text-white/58" : "text-slate-600"
@@ -47,13 +43,6 @@ export default function AboutPage() {
         <article aria-label="Why we built 143" className="mx-auto max-w-[720px]">
           <header className="space-y-5">
             <h1 className={pageTitleClass}>Why we built 143.dev</h1>
-            <p className={ledeClass}>
-              Coding agents feel magical in a fresh repo and fall apart in a
-              complex codebase. The hard part was never the prompt, it&apos;s
-              everything around the agent from setup to context, CI/CD, credentials,
-              review, and handoff. 143.dev is an open-source project that
-              helps teams actually ship production code with agents.
-            </p>
             <div className="space-y-1">
               <p className={metaClass}>
                 <a
@@ -73,9 +62,9 @@ export default function AboutPage() {
 
           <div className={bodyClass}>
             <p>
-              I hate when people say &ldquo;X% of our code is written by AI.&rdquo; 
-              Code volume, especially these days, is a bad
-              metric. What I care about when I&apos;m on a team is whether we&apos;re building a better
+              I hate when people say &ldquo;X% of our code is written by
+              AI.&rdquo; Code volume, especially these days, is a bad metric.
+              What I care about when I&apos;m on a team is whether we&apos;re building a better
               product that is genuinely useful to our customers. That is a much
               harder thing to measure, but I think it is the right one.
             </p>
@@ -84,7 +73,7 @@ export default function AboutPage() {
               I don&apos;t want to write AI slop. But I do want and need our team to move faster
               and compete in the market. So we set out to build a system that
               speeds up how quickly we can ship code meant for
-              production.
+              production while keeping the codebase healthy.
             </p>
 
             <section className="space-y-3 pt-2">
@@ -114,13 +103,6 @@ export default function AboutPage() {
                   infrastructure problem, not just an individual prompting
                   problem.
                 </p>
-
-                <InlineCallout isDark={isDark} label="What was missing">
-                  The useful unit was not one better prompt. It was everything
-                  around the agent: setup, context, CI, credentials, logs,
-                  review, handoff, and the product knowledge needed to make good
-                  changes.
-                </InlineCallout>
               </div>
             </section>
 
@@ -187,7 +169,7 @@ export default function AboutPage() {
                 I was just a college student, but the Rails core team
                 didn&apos;t care who I was. If a PR was good and well-intentioned, it was
                 welcome. I started with tests and tiny refactors, learned more
-                of the codebase, and eventually fixed Active Record bugs. That
+                of the codebase, and eventually got really deep into the internals of Active Record. That
                 work helped me get my job at Stripe and became the launching pad
                 for the rest of my career.
               </p>
@@ -204,29 +186,5 @@ export default function AboutPage() {
 
       <Footer isDark={isDark} />
     </div>
-  );
-}
-
-function InlineCallout({
-  isDark,
-  label,
-  children,
-}: {
-  isDark: boolean;
-  label: string;
-  children: ReactNode;
-}) {
-  const calloutClass = `my-7 border-l py-1 pl-5 ${
-    isDark ? "border-white/16 text-white/64" : "border-slate-900/18 text-slate-600"
-  }`;
-  const labelClass = `mb-2 text-xs font-medium uppercase tracking-wider ${
-    isDark ? "text-white/42" : "text-slate-500"
-  }`;
-
-  return (
-    <aside role="note" aria-label={label} className={calloutClass}>
-      <p className={labelClass}>{label}</p>
-      <p className="text-sm leading-7">{children}</p>
-    </aside>
   );
 }

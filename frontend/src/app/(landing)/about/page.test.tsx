@@ -16,8 +16,8 @@ describe("AboutPage", () => {
   it("explains why 143 was built for production teams", () => {
     renderWithProviders(<AboutPage />);
 
-    expect(screen.getByText(/feel magical in a fresh repo/i)).toBeInTheDocument();
-    expect(screen.getByText(/everything around the agent from setup to context/i)).toBeInTheDocument();
+    expect(screen.getByText(/Code volume, especially these days, is a bad metric/i)).toBeInTheDocument();
+    expect(screen.getByText(/keeping the codebase healthy/i)).toBeInTheDocument();
     expect(screen.getByText(/real product work, not just demos and internal tools/i)).toBeInTheDocument();
     expect(screen.getByText(/shared infrastructure problem/i)).toBeInTheDocument();
     expect(screen.queryByText(/We had real FOMO/i)).not.toBeInTheDocument();
@@ -40,10 +40,10 @@ describe("AboutPage", () => {
     expect(screen.getByText(/set up a great environment once/i)).toBeInTheDocument();
   });
 
-  it("uses inline callouts to annotate the note", () => {
+  it("does not render legacy inline callouts", () => {
     renderWithProviders(<AboutPage />);
 
-    expect(screen.getByRole("note", { name: "What was missing" })).toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
   it("states the open-source principle", () => {
