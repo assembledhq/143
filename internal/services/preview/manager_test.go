@@ -193,7 +193,7 @@ var sessionTestCols = []string{
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
 	"archived_at", "archived_by_user_id", "automation_run_id",
-	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
+	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	// Migration 102 — Linear session-linking columns. Migration 100 — git
 	// identity audit columns. Mocks must include both so SessionStore.GetByID's
 	// row decode finds every selected field.
@@ -269,6 +269,7 @@ func newSessionRow(sessionID, orgID uuid.UUID, containerID *string, now time.Tim
 		"pr_creation_error":              (*string)(nil),
 		"pr_push_state":                  "idle",
 		"pr_push_error":                  (*string)(nil),
+		"pr_push_error_code":             (*string)(nil),
 		"branch_creation_state":          "idle",
 		"branch_creation_error":          (*string)(nil),
 		"branch_url":                     (*string)(nil),
