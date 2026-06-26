@@ -23,6 +23,7 @@ type LinearIssue struct {
 	Identifier  string `json:"identifier"` // e.g. "ENG-123"
 	Title       string `json:"title"`
 	Description string `json:"description"`
+	URL         string `json:"url"`
 	Priority    int    `json:"priority"` // 0=No, 1=Urgent, 2=High, 3=Medium, 4=Low
 	State       struct {
 		Name string `json:"name"`
@@ -31,9 +32,16 @@ type LinearIssue struct {
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
+	IssueType struct {
+		Name string `json:"name"`
+	} `json:"issueType"`
+	Type struct {
+		Name string `json:"name"`
+	} `json:"type"`
 	CreatedAt string `json:"createdAt"`
 	UpdatedAt string `json:"updatedAt"`
 	Team      struct {
+		ID   string `json:"id"`
 		Key  string `json:"key"`
 		Name string `json:"name"`
 	} `json:"team"`
