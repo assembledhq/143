@@ -41,6 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -1726,6 +1727,7 @@ func buildServices(
 		SlackSummarizer:   slackSummarizer,
 		LLM:               llmClient,
 		GitHub:            ghSvc,
+		CodeReviews:       codereviewsvc.NewGitHubSubmitter(ghSvc),
 		GitHubOrgRoster:   ghSvc,
 		Snapshots:         snapshotStore,
 		TitleService:      titleService,

@@ -21,14 +21,14 @@ Implemented foundation:
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
-- conservative `run_code_review` worker handler that records an orchestrator result and final comment-only review evidence when live agent/GitHub submitters are not configured
+- conservative `run_code_review` worker handler that records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
 - `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
 - top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, enablement, approval mode, threshold, prerequisite, timeout, and cost controls
 
 Still pending:
 
 - live multi-agent worker orchestration that fans out reviewer tabs and runs native `/review`
-- GitHub App review submission, inline-comment retry/update, and stale requested-reviewer cleanup
+- inline-comment retry/update and stale requested-reviewer cleanup
 - full prompt artifact storage and recovery for rendered approval prompts
 
 ## Problem
