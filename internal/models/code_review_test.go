@@ -219,7 +219,10 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			expected: CodeReviewRiskEvaluation{Acceptable: true},
 		},
 		{
-			name: "blocks policy changes by default",
+			name: "blocks policy changes independently from sensitive path exclusions",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.ExcludeSensitivePaths = false
+			},
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
 				LinesChanged:      20,

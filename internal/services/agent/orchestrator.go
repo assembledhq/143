@@ -4750,6 +4750,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		}
 	}
 
+	codeReviewPRNumber, codeReviewHeadSHA, codeReviewCheckout, err := codeReviewCheckoutContextFromSession(session)
+	if err != nil {
+		return models.Issue{}, "", TokenBillingModeUnknown, err
+	}
+	if codeReviewCheckout && session.RepositoryID == nil {
+		return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing repository")
+	}
+
 	// Clone repo if the session has one. sessions.repository_id is the
 	// canonical source of truth — session creation copies issue.repository_id
 	// into it up front, so execution never needs to re-derive repo from the
@@ -4775,6 +4783,14 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		workingBranch := sessionWorkingBranch(session, &issue)
 		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
 			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+				return models.Issue{}, "", TokenBillingModeUnknown, err
+			}
+			session.WorkingBranch = &workingBranch
+		} else if codeReviewCheckout {
+			if workingBranch == "" {
+				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
+			}
+			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4809,6 +4825,34 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	}
 
 	return issue, repoFullName, authBillingMode, nil
+}
+
+type codeReviewCheckoutContext struct {
+	Kind           string `json:"kind"`
+	GitHubPRNumber int    `json:"github_pr_number"`
+	HeadSHA        string `json:"head_sha"`
+}
+
+func codeReviewCheckoutContextFromSession(session *models.Session) (int, string, bool, error) {
+	if session == nil || session.Origin != models.SessionOriginCodeReview {
+		return 0, "", false, nil
+	}
+	if len(session.RevisionContext) == 0 {
+		return 0, "", false, fmt.Errorf("code review session is missing revision context")
+	}
+
+	var parsed codeReviewCheckoutContext
+	if err := json.Unmarshal(session.RevisionContext, &parsed); err != nil {
+		return 0, "", false, fmt.Errorf("parse code review revision context: %w", err)
+	}
+	if parsed.Kind != "code_review" {
+		return 0, "", false, fmt.Errorf("code review revision context has kind %q", parsed.Kind)
+	}
+	headSHA := strings.TrimSpace(parsed.HeadSHA)
+	if parsed.GitHubPRNumber <= 0 || headSHA == "" {
+		return 0, "", false, fmt.Errorf("code review revision context is missing pull request number or head SHA")
+	}
+	return parsed.GitHubPRNumber, headSHA, true, nil
 }
 
 func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {

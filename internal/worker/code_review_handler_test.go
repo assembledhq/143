@@ -155,6 +155,12 @@ func TestCodeReviewDescriptionPassed(t *testing.T) {
 			passed: false,
 		},
 		{
+			name:   "rejects explicit missing testing evidence",
+			body:   stringPtr("Fix invoice rounding with backend changes.\n\nTesting: not run"),
+			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 40}},
+			passed: false,
+		},
+		{
 			name:   "requires UI evidence for frontend change",
 			body:   stringPtr("Fix chart tooltip.\n\nTesting: npm test"),
 			files:  []codereview.PullRequestFile{{Filename: "frontend/src/Chart.tsx", Additions: 8}},

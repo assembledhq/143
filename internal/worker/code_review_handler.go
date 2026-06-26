@@ -1813,7 +1813,10 @@ func codeReviewDescriptionRequirementPassed(requirement models.CodeReviewDescrip
 	case "description", "summary", "intent":
 		return len([]rune(body)) >= 20
 	case "testing", "tests", "validation":
-		return containsAnyFold(body, []string{"test", "tested", "testing", "go test", "npm test", "vitest", "verified", "validation", "not run", "not applicable", "n/a"})
+		if containsAnyFold(body, []string{"not run", "not tested", "tests not run", "did not run", "not applicable", "n/a"}) {
+			return false
+		}
+		return containsAnyFold(body, []string{"test", "tested", "testing", "go test", "npm test", "vitest", "verified", "validation"})
 	case "ui_evidence", "screenshots", "screenshot", "preview":
 		return containsAnyFold(body, []string{"screenshot", "screen shot", "preview", "image", "video", "loom", "recording", "http://", "https://", "![", ".png", ".jpg", ".gif"})
 	default:
