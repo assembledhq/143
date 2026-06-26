@@ -41,7 +41,7 @@ func runCheck(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	adminURL := fs.String("database-url", firstNonEmpty(os.Getenv("DEMO_SEED_CHECK_DATABASE_URL"), os.Getenv("DATABASE_URL"), demoseed.DefaultDatabaseURL), "writable Postgres URL used to create a temporary sibling database")
-	seedPath := fs.String("seed", demoseed.DefaultSeedPath, "path to demo seed SQL")
+	seedPath := fs.String("seed", demoseed.DefaultSeedPath, "path to demo seed SQL file or fragment directory")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -66,7 +66,7 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	databaseURL := fs.String("database-url", os.Getenv("DEMO_SEED_DATABASE_URL"), "demo database URL to migrate and seed")
-	seedPath := fs.String("seed", demoseed.DefaultSeedPath, "path to demo seed SQL")
+	seedPath := fs.String("seed", demoseed.DefaultSeedPath, "path to demo seed SQL file or fragment directory")
 	skipMigrations := fs.Bool("skip-migrations", false, "apply seed without running migrations first")
 	allowNonDemoOrgs := fs.Bool("allow-nondemo-orgs", envTruthy(os.Getenv("DEMO_SEED_ALLOW_NONDEMO_ORGS")), "allow seeding into a database that already contains non-demo organizations")
 	if err := fs.Parse(args); err != nil {
@@ -99,8 +99,8 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: demo-seed [check|apply]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "  check  creates a temporary database, runs migrations, applies .143/seed.sql twice, and verifies safety/idempotency")
-	fmt.Fprintln(w, "  apply  migrates and applies .143/seed.sql to an explicit demo database target")
+	fmt.Fprintln(w, "  check  creates a temporary database, runs migrations, applies .143/seed twice, and verifies safety/idempotency")
+	fmt.Fprintln(w, "  apply  migrates and applies .143/seed to an explicit demo database target")
 }
 
 func firstNonEmpty(values ...string) string {

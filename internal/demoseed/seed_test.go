@@ -304,11 +304,23 @@ func TestScanSeedSafety(t *testing.T) {
 	}
 }
 
+func TestReadAndScanSeedReadsDirectoryFragmentsInLexicalOrder(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "20_second.sql"), []byte("SELECT 'second';\n"), 0o600), "test should write second seed fragment")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "10_first.sql"), []byte("SELECT 'first';"), 0o600), "test should write first seed fragment")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("ignored"), 0o600), "test should write non-SQL sibling")
+
+	body, err := readAndScanSeed(dir)
+	require.NoError(t, err, "readAndScanSeed should accept a seed fragment directory")
+	require.Equal(t, "SELECT 'first';\n\nSELECT 'second';\n", string(body), "readAndScanSeed should concatenate SQL fragments in lexical order")
+}
+
 func TestCurrentSeedPassesSafetyScan(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile(filepath.Join("..", "..", ".143", "seed.sql"))
-	require.NoError(t, err, "test should read the canonical demo seed")
+	body := readCurrentSeed(t)
 
 	require.NoError(t, ScanSeedSafety(body), "canonical demo seed should pass safety scanning")
 }
@@ -316,9 +328,7 @@ func TestCurrentSeedPassesSafetyScan(t *testing.T) {
 func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile(filepath.Join("..", "..", ".143", "seed.sql"))
-	require.NoError(t, err, "test should read the canonical demo seed")
-	seed := string(body)
+	seed := string(readCurrentSeed(t))
 
 	requiredStatements := []string{
 		"INSERT INTO issues",
@@ -346,9 +356,7 @@ func TestCurrentSeedCoversRepresentativeProductTables(t *testing.T) {
 func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile(filepath.Join("..", "..", ".143", "seed.sql"))
-	require.NoError(t, err, "test should read the canonical demo seed")
-	seed := string(body)
+	seed := string(readCurrentSeed(t))
 
 	prTemplateBlock := seedBlock(t, seed, "INSERT INTO repository_pr_templates", "INSERT INTO projects")
 	require.Contains(t, prTemplateBlock, "ON CONFLICT (repository_id) DO UPDATE", "repository PR template seed should converge on the table's natural unique key")
@@ -378,6 +386,14 @@ func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 	for _, statement := range requiredPreviewCleanup {
 		require.Contains(t, previewBlock, statement, "preview seed should remove matching natural-key rows before fixed-id inserts")
 	}
+}
+
+func readCurrentSeed(t *testing.T) []byte {
+	t.Helper()
+
+	body, err := readAndScanSeed(filepath.Join("..", "..", DefaultSeedPath))
+	require.NoError(t, err, "test should read the canonical demo seed")
+	return body
 }
 
 func seedBlock(t *testing.T, seed, startMarker, endMarker string) string {

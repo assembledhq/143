@@ -1,6 +1,7 @@
 package demoseed
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 
 const (
 	DefaultDatabaseURL = "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable" // #nosec G101 -- dev-only default.
-	DefaultSeedPath    = ".143/seed.sql"
+	DefaultSeedPath    = ".143/seed"
 	DemoOrgID          = "00000000-0000-4000-a000-000000000001"
 )
 
@@ -559,15 +561,68 @@ func Environment(keys ...string) map[string]string {
 	return env
 }
 
+// ReadAndScanSeed reads a seed SQL file or ordered fragment directory and
+// rejects content that is unsafe for public/demo data.
+func ReadAndScanSeed(seedPath string) ([]byte, error) {
+	return readAndScanSeed(seedPath)
+}
+
 func readAndScanSeed(seedPath string) ([]byte, error) {
-	body, err := os.ReadFile(seedPath) // #nosec G304 -- seedPath is an operator-supplied local seed file for developer/demo tooling; contents are scanned before execution.
+	body, err := readSeedBody(seedPath)
 	if err != nil {
-		return nil, fmt.Errorf("read demo seed %s: %w", seedPath, err)
+		return nil, err
 	}
 	if err := ScanSeedSafety(body); err != nil {
 		return nil, err
 	}
 	return body, nil
+}
+
+func readSeedBody(seedPath string) ([]byte, error) {
+	info, err := os.Stat(seedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read demo seed %s: %w", seedPath, err)
+	}
+	if !info.IsDir() {
+		body, err := os.ReadFile(seedPath) // #nosec G304 -- seedPath is an operator-supplied local seed file for developer/demo tooling; contents are scanned before execution.
+		if err != nil {
+			return nil, fmt.Errorf("read demo seed %s: %w", seedPath, err)
+		}
+		return body, nil
+	}
+
+	entries, err := os.ReadDir(seedPath)
+	if err != nil {
+		return nil, fmt.Errorf("read demo seed directory %s: %w", seedPath, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("read demo seed directory %s: no .sql seed fragments found", seedPath)
+	}
+
+	var seed strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			seed.WriteString("\n")
+		}
+		fragmentPath := filepath.Join(seedPath, name)
+		fragment, err := os.ReadFile(fragmentPath) // #nosec G304 -- fragment names come from os.ReadDir(seedPath); contents are scanned before execution.
+		if err != nil {
+			return nil, fmt.Errorf("read demo seed fragment %s: %w", fragmentPath, err)
+		}
+		seed.Write(fragment)
+		if !bytes.HasSuffix(fragment, []byte("\n")) {
+			seed.WriteString("\n")
+		}
+	}
+	return []byte(seed.String()), nil
 }
 
 func connectPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
