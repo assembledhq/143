@@ -1,7 +1,0 @@
-./dsn.go
-./envelope.go
-./interfaces.go
-./log_batch.go
-./metric_batch.go
-./types.go
-./uuid.go
