@@ -10,12 +10,14 @@ describe("AboutPage", () => {
     expect(screen.getByRole("article", { name: "Why we built 143" })).toBeInTheDocument();
     expect(screen.queryByText("Founder note")).not.toBeInTheDocument();
     expect(screen.getByText(/I really hope you like it/i)).toBeInTheDocument();
-    expect(screen.getByText("John Wang")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "John Wang" })).toBeInTheDocument();
   });
 
   it("explains why 143 was built for production teams", () => {
     renderWithProviders(<AboutPage />);
 
+    expect(screen.getByText(/Code volume, especially these days, is a bad metric/i)).toBeInTheDocument();
+    expect(screen.getByText(/keeping the codebase healthy/i)).toBeInTheDocument();
     expect(screen.getByText(/real product work, not just demos and internal tools/i)).toBeInTheDocument();
     expect(screen.getByText(/velocity gains we expected/i)).toBeInTheDocument();
     expect(screen.getByText(/shared infrastructure problem/i)).toBeInTheDocument();
@@ -24,11 +26,19 @@ describe("AboutPage", () => {
     expect(screen.queryByText(/Also, vibe coding/i)).not.toBeInTheDocument();
   });
 
+  it("organizes the editorial note into readable sections", () => {
+    renderWithProviders(<AboutPage />);
+
+    expect(screen.getByRole("heading", { name: "Where it started" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "What we built" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Open source from day one" })).toBeInTheDocument();
+  });
+
   it("describes team-visible agent infrastructure", () => {
     renderWithProviders(<AboutPage />);
 
     expect(screen.getByText(/auto-approve low-risk changes against thresholds you define/i)).toBeInTheDocument();
-    expect(screen.getByText(/same repos, credentials, tools, logs, docs/i)).toBeInTheDocument();
+    expect(screen.getByText(/same repos, credentials, tools, logs,\s*docs/i)).toBeInTheDocument();
     expect(screen.getByText(/product context available to the whole team/i)).toBeInTheDocument();
   });
 
@@ -40,17 +50,13 @@ describe("AboutPage", () => {
     expect(screen.getByText(/set up a great environment once/i)).toBeInTheDocument();
   });
 
-  it("keeps the note in simple editorial sections", () => {
+  it("does not render legacy inline callouts", () => {
     renderWithProviders(<AboutPage />);
 
-    expect(screen.getByRole("heading", { name: "Where it started" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "What we built" })).toBeInTheDocument();
-    expect(screen.queryByRole("note", { name: "What was missing" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("note", { name: "For non-engineers" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("note", { name: "Why open source" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
   });
 
-  it("states the open-source principles", () => {
+  it("states the open-source principle", () => {
     renderWithProviders(<AboutPage />);
 
     expect(screen.getByRole("heading", { name: /open source/i })).toBeInTheDocument();
