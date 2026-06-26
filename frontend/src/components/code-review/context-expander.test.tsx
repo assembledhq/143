@@ -382,7 +382,54 @@ describe("ContextExpander", () => {
     expect(onContextUnavailable).toHaveBeenCalledTimes(1);
   });
 
-  it("does not call onContextUnavailable on non-NO_SANDBOX errors", async () => {
+  it("calls onContextUnavailable on SNAPSHOT_UNREADABLE response", async () => {
+    const onContextUnavailable = vi.fn();
+    vi.mocked(api.sessions.getFileContext).mockRejectedValue(
+      new ApiError("SNAPSHOT_UNREADABLE", "session snapshot exists but cannot be read")
+    );
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={4}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={1}
+        hiddenEnd={4}
+        onExpand={vi.fn()}
+        onContextUnavailable={onContextUnavailable}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
+    expect(onContextUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls onContextUnavailable when context loading times out", async () => {
+    const onContextUnavailable = vi.fn();
+    const abortError = new DOMException("The operation was aborted.", "AbortError");
+    vi.mocked(api.sessions.getFileContext).mockRejectedValue(abortError);
+
+    const user = userEvent.setup();
+    render(
+      <ContextExpander
+        kind="middle"
+        hiddenLineCount={4}
+        sessionId="s1"
+        filePath="f.ts"
+        hiddenStart={1}
+        hiddenEnd={4}
+        onExpand={vi.fn()}
+        onContextUnavailable={onContextUnavailable}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Reveal context above" }));
+    expect(onContextUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call onContextUnavailable on unrelated API errors", async () => {
     const onContextUnavailable = vi.fn();
     vi.mocked(api.sessions.getFileContext).mockRejectedValue(
       new ApiError("INTERNAL", "boom")
