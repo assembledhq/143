@@ -2861,6 +2861,12 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if session.PRPushState == models.PRPushStateFailed &&
+		session.PRPushErrorCode == models.PRPushErrorCodeBranchDiverged {
+		writeError(w, r, http.StatusConflict, "PR_BRANCH_DIVERGED", ghservice.PushBranchDivergedPRMessage)
+		return
+	}
+
 	if session.SandboxState == models.SandboxStateDestroyed {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
 		return

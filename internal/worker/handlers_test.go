@@ -2331,7 +2331,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
@@ -2524,7 +2524,7 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // current sessionColumns; we pad after dispatch so the shape matches.
 const (
 	preLinearWorkerSessionColumnsLen              = 76
-	workerSessionColumnsWithLegacyConfidenceCount = 93
+	workerSessionColumnsWithLegacyConfidenceCount = 94
 )
 
 func workerLinearSessionDefaults() []any {
@@ -2593,14 +2593,16 @@ func padWorkerIdentityNils(row []any) []any {
 		return row
 	}
 	if len(row) == workerSessionColumnsWithLegacyConfidenceCount-3 {
-		const branchCreationStateIndex = 76
+		const branchCreationStateIndex = 77
 		padded := make([]any, 0, workerSessionColumnsWithLegacyConfidenceCount)
 		padded = append(padded, row[:branchCreationStateIndex]...)
 		padded = append(padded, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != workerSessionColumnsWithLegacyConfidenceCount-10 {
+	legacyPreWorkspaceLen := workerSessionColumnsWithLegacyConfidenceCount - 11
+	legacyPostWorkspaceLen := workerSessionColumnsWithLegacyConfidenceCount - 10
+	if len(row) != legacyPreWorkspaceLen && len(row) != legacyPostWorkspaceLen {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -2617,12 +2619,12 @@ func padWorkerIdentityNils(row []any) []any {
 	// a NULL would fail pgx scanning. The migration mirrors this with NOT
 	// NULL DEFAULT 'idle'.
 	const prPushStateIndex = 74
-	withPRPush := make([]any, 0, len(withPending)+2)
+	withPRPush := make([]any, 0, len(withPending)+3)
 	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
-	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, "idle", (*string)(nil), (*string)(nil)) // pr_push_state, pr_push_error, pr_push_error_code
 	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
 
-	const branchCreationStateIndex = prPushStateIndex + 2
+	const branchCreationStateIndex = prPushStateIndex + 3
 	withBranch := make([]any, 0, len(withPRPush)+3)
 	withBranch = append(withBranch, withPRPush[:branchCreationStateIndex]...)
 	withBranch = append(withBranch, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
@@ -2876,6 +2878,24 @@ type prCreationStateArg struct {
 func (a prCreationStateArg) Match(v interface{}) bool {
 	s, ok := v.(string)
 	return ok && s == string(a.state)
+}
+
+type prPushStateArg struct {
+	state models.PRPushState
+}
+
+func (a prPushStateArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.state)
+}
+
+type prPushErrorCodeArg struct {
+	code models.PRPushErrorCode
+}
+
+func (a prPushErrorCodeArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.code)
 }
 
 func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
@@ -4444,10 +4464,10 @@ func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// Two state-machine writes: pushing → succeeded.
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	called := false
@@ -4534,10 +4554,10 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// pushing → succeeded (NOT failed, despite the error from the service).
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
@@ -4554,6 +4574,51 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 
 	require.NoError(t, err, "push_pr_changes handler should swallow ErrNoChanges as a benign no-op")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (succeeded write must fire, not failed)")
+}
+
+func TestPushPRChangesHandler_BranchDivergedPersistsErrorCode(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-branch-diverged"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(prPushStateArg{state: models.PRPushStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(
+			prPushStateArg{state: models.PRPushStateFailed},
+			ghservice.PushBranchDivergedPRMessage,
+			prPushErrorCodeArg{code: models.PRPushErrorCodeBranchDiverged},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrPushBranchDiverged
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var fatalErr *FatalError
+	require.ErrorAs(t, err, &fatalErr, "branch-diverged push failures should dead-letter after persisting state")
+	require.ErrorIs(t, fatalErr, ghservice.ErrPushBranchDiverged, "branch-diverged push failure should preserve the terminal cause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
@@ -4592,10 +4657,10 @@ func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
 			// stub returning rows so the publish path stays no-op (streams
 			// are nil).
 			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 
 			services := &Services{
@@ -5432,6 +5497,29 @@ func TestUserFacingPRError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.want, userFacingPRError(tt.err), "userFacingPRError should map internal PR errors to the expected UI-safe message")
+		})
+	}
+}
+
+func TestPRPushErrorCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want models.PRPushErrorCode
+	}{
+		{name: "branch diverged", err: ghservice.ErrPushBranchDiverged, want: models.PRPushErrorCodeBranchDiverged},
+		{name: "wrapped push rejected", err: fmt.Errorf("push: %w", ghservice.ErrPushRejected), want: models.PRPushErrorCodePushRejected},
+		{name: "sandbox auth unavailable", err: fmt.Errorf("socket: %w", ghservice.ErrSandboxAuthUnavailable), want: models.PRPushErrorCodeSandboxAuthUnavailable},
+		{name: "generic", err: errors.New("boom"), want: models.PRPushErrorCodeGeneric},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, prPushErrorCode(tt.err), "prPushErrorCode should classify push failures for UI state")
 		})
 	}
 }
