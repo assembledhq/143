@@ -150,7 +150,7 @@ migrate-down:
 
 # Validates the public/demo seed without mutating the source database.
 # Creates a temporary sibling database on the configured Postgres server,
-# runs migrations, applies .143/seed.sql twice, asserts required demo rows, and
+# runs migrations, applies .143/seed twice, asserts required demo rows, and
 # drops the temporary database. Override the admin connection with
 # DEMO_SEED_CHECK_DATABASE_URL or `make demo-seed-check DATABASE_URL=...`.
 demo-seed-check:
