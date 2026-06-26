@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { server } from '@/test/mocks/server';
 import { http, HttpResponse } from 'msw';
 import { api } from './api';
@@ -374,6 +374,49 @@ describe('api client', () => {
       const result = await api.sessions.get('session-abc');
       expect(result.data.id).toBe('session-abc');
       expect(result.data.status).toBe('running');
+    });
+
+    it('bounds session file context requests with a short abort timeout', async () => {
+      vi.useFakeTimers();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((_input, init) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        if (!signal) {
+          return Promise.resolve(new Response(JSON.stringify({
+            data: {
+              lines: [],
+              start_line: 0,
+              end_line: 0,
+              has_more_above: false,
+              has_more_below: false,
+              total_lines: 0,
+            },
+          }), { status: 200 }));
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'));
+          });
+        });
+      });
+
+      try {
+        const request = api.sessions.getFileContext('session-abc', 'src/app.ts', 10, 0, 19);
+        const caughtRequest = request.catch((err: unknown) => err);
+        const signal = fetchSpy.mock.calls[0]?.[1]?.signal as AbortSignal | undefined;
+
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1_999);
+        expect(signal?.aborted).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        expect(signal?.aborted).toBe(true);
+        await expect(caughtRequest).resolves.toMatchObject({ name: 'AbortError' });
+      } finally {
+        fetchSpy.mockRestore();
+        vi.useRealTimers();
+      }
     });
 
     it('fetches session log detail by log id', async () => {
