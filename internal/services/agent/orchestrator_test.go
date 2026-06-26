@@ -19,6 +19,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -1322,6 +1323,7 @@ type testDeps struct {
 	identityResolver *identity.Resolver
 	sandboxAuth      agent.SandboxAuthServer
 	sandboxCapacity  *agent.SandboxCapacityGate
+	threadRuntimes   agent.ThreadRuntimeStore
 	staticEgress     agent.StaticEgressRuntimeConfig
 	users            agent.UserLookup
 	logger           *zerolog.Logger
@@ -1403,6 +1405,40 @@ func (m *mockSessionThreadStore) completedTurns() []struct {
 	}, len(m.completeTurnCalls))
 	copy(out, m.completeTurnCalls)
 	return out
+}
+
+type activeRuntimeConflictStore struct {
+	active      models.ThreadRuntime
+	createCalls []db.CreateThreadRuntimeParams
+}
+
+func (s *activeRuntimeConflictStore) CreateStarting(_ context.Context, _ uuid.UUID, params db.CreateThreadRuntimeParams) (models.ThreadRuntime, error) {
+	s.createCalls = append(s.createCalls, params)
+	return models.ThreadRuntime{}, db.ErrActiveThreadRuntimeExists
+}
+
+func (s *activeRuntimeConflictStore) GetActiveByThread(context.Context, uuid.UUID, uuid.UUID) (models.ThreadRuntime, error) {
+	return s.active, nil
+}
+
+func (s *activeRuntimeConflictStore) MarkLiveWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (s *activeRuntimeConflictStore) HeartbeatWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (s *activeRuntimeConflictStore) AdvanceDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64) (bool, error) {
+	return true, nil
+}
+
+func (s *activeRuntimeConflictStore) CommitInboxDeliveryWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, string, int64, int64) (bool, error) {
+	return true, nil
+}
+
+func (s *activeRuntimeConflictStore) MarkTerminalWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.ThreadRuntimeStatus, string, string) (bool, error) {
+	return true, nil
 }
 
 func defaultDeps() testDeps {
@@ -1530,6 +1566,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		IdentityResolver:   d.identityResolver,
 		SandboxAuth:        d.sandboxAuth,
 		SandboxCapacity:    d.sandboxCapacity,
+		ThreadRuntimes:     d.threadRuntimes,
 		StaticEgress:       d.staticEgress,
 		Users:              d.users,
 		NodeID:             d.nodeID,
@@ -2159,6 +2196,48 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 	require.Empty(t, d.sessions.getTurnUpdates(), "exhausted recovery should not advance the turn")
 	require.Empty(t, d.sessions.getCheckpointUpdates(), "exhausted recovery should not publish checkpoint metadata")
 	require.Equal(t, []models.ThreadStatus{models.ThreadStatusFailed}, d.sessionThreads.statuses(), "exhausted recovery should fail the active thread so the UI does not stay stuck")
+}
+
+func TestRecoverSession_DoesNotConsumeNoCheckpointAttemptWhenThreadRuntimeIsStillActive(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	threadID := uuid.New()
+	run.Status = models.SessionStatusRunning
+	run.PrimaryThreadID = &threadID
+	run.RecoveryAttemptCount = 2
+
+	runtimes := &activeRuntimeConflictStore{
+		active: models.ThreadRuntime{
+			ID:          uuid.New(),
+			OrgID:       orgID,
+			SessionID:   run.ID,
+			ThreadID:    threadID,
+			Status:      models.ThreadRuntimeStatusLive,
+			OwnerNodeID: "worker-live",
+			LeaseToken:  uuid.New(),
+		},
+	}
+	d := defaultDeps()
+	d.threadRuntimes = runtimes
+	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		t.Fatal("RecoverSession should not restart from scratch while the thread runtime is still active")
+		return nil, nil
+	}
+
+	err := buildOrchestrator(d).RecoverSession(context.Background(), run)
+	require.Error(t, err, "RecoverSession should surface active runtime conflicts as retryable errors")
+	require.ErrorIs(t, err, agent.ErrThreadRuntimeAlreadyActive, "active runtime conflicts should not be classified as recovery exhaustion")
+	require.Empty(t, runtimes.createCalls, "RecoverSession should not create another runtime when a live one already exists")
+
+	d.sessions.mu.Lock()
+	recoveryStates := append([]recoveryStateUpdate(nil), d.sessions.recoveryStates...)
+	d.sessions.mu.Unlock()
+	for _, update := range recoveryStates {
+		require.False(t, update.incrementAttempt, "active runtime conflict should not consume no-checkpoint recovery attempts")
+	}
 }
 
 func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {

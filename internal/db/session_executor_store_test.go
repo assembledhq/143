@@ -71,6 +71,28 @@ func TestSessionExecutorStore_ClearPreHandoffReservation(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionExecutorStore_ClearPreHandoffReservationOnlyTargetsStartingRows(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	jobID := uuid.New()
+
+	mock.ExpectExec("UPDATE session_executors se[\\s\\S]+AND se.status = 'starting'[\\s\\S]+AND j.owner_kind = 'worker'").
+		WithArgs(orgID, sessionID, jobID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	cleared, err := store.ClearPreHandoffReservation(context.Background(), orgID, sessionID, jobID)
+	require.NoError(t, err, "ClearPreHandoffReservation should clear only pre-handoff starting rows")
+	require.Equal(t, int64(1), cleared, "ClearPreHandoffReservation should report cleared starting rows")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_HandoffToSessionExecutorWithLease(t *testing.T) {
 	t.Parallel()
 
@@ -343,6 +365,28 @@ func TestSessionExecutorStore_MarkDeployBudgetExpiredByNodeSkipsAlreadyMarkedExe
 	updated, err := store.MarkDeployBudgetExpiredByNode(context.Background(), "worker-1", now, 45*time.Second)
 	require.NoError(t, err, "MarkDeployBudgetExpiredByNode should not error when every expired executor was already marked")
 	require.Equal(t, int64(0), updated, "MarkDeployBudgetExpiredByNode should return zero once budget expiry has already been recorded")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionExecutorStore_MarkHumanInputCheckpointByJobUsesValidThreadLookup(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+
+	mock.ExpectExec("UPDATE session_executors se[\\s\\S]+EXISTS \\([\\s\\S]+FROM session_threads th[\\s\\S]+th.org_id = se.org_id[\\s\\S]+th.id = se.thread_id[\\s\\S]+th.status = 'awaiting_input'[\\s\\S]+\\)").
+		WithArgs(orgID, jobID, lockToken).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	marked, err := store.MarkHumanInputCheckpointByJob(context.Background(), orgID, jobID, lockToken)
+	require.NoError(t, err, "MarkHumanInputCheckpointByJob should use SQL that PostgreSQL can parse")
+	require.True(t, marked, "MarkHumanInputCheckpointByJob should report marked executors")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
