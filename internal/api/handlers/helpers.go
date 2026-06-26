@@ -111,6 +111,20 @@ func parseUUIDList(raw string) ([]uuid.UUID, error) {
 	return ids, nil
 }
 
+func parseRequiredUUIDQuery(w http.ResponseWriter, r *http.Request, key string) (uuid.UUID, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(key))
+	if value == "" {
+		writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", key+" is required")
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(value)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_QUERY", "invalid "+key)
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
 func strPtr(s string) *string { return &s }
 
 func firstNonEmptyString(values ...string) string {

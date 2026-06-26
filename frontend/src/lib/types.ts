@@ -160,6 +160,41 @@ export interface CodeReviewResolvedPolicy {
   inherited_policy?: CodeReviewPolicyRecord;
 }
 
+export type CodeReviewGitHubTriggerStatus =
+  | "unconfigured"
+  | "ready"
+  | "auth_required"
+  | "permission_required"
+  | "error";
+
+export interface CodeReviewGitHubTriggerSetting {
+  id: string;
+  org_id: string;
+  repository_id: string;
+  installation_id: number;
+  active: boolean;
+  version: number;
+  team_slug: string;
+  team_name: string;
+  team_id: number;
+  repo_permission: "pull";
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CodeReviewGitHubTriggerResponse {
+  status: CodeReviewGitHubTriggerStatus;
+  repository_id: string;
+  repository_full_name?: string;
+  github_org?: string;
+  team_slug: string;
+  team_name: string;
+  team_reviewer?: string;
+  repo_permission: "pull";
+  trigger?: CodeReviewGitHubTriggerSetting;
+  message?: string;
+}
+
 export interface CodeReviewTemplateOption {
   key: string;
   title: string;
