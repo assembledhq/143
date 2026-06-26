@@ -213,6 +213,18 @@ export function derivePushChangesActionState(input: PushChangesActionInput): Lab
     };
   }
 
+  const hasRetryablePushError = Boolean(input.localError) || input.pushState === "failed";
+  if (input.isRunning) {
+    return {
+      visible: true,
+      disabled: true,
+      disabledReason: "Wait for the session to finish before pushing changes",
+      label: hasRetryablePushError ? "Retry" : "Push changes",
+      spinning: false,
+      showError: hasRetryablePushError,
+    };
+  }
+
   if (input.localError) {
     return {
       visible: true,
@@ -232,16 +244,6 @@ export function derivePushChangesActionState(input: PushChangesActionInput): Lab
       label: "Retry",
       spinning: false,
       showError: true,
-    };
-  }
-
-  if (input.isRunning) {
-    return {
-      visible: true,
-      disabled: true,
-      disabledReason: "Wait for the session to finish before pushing changes",
-      label: "Push changes",
-      spinning: false,
     };
   }
 
