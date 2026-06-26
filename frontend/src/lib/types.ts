@@ -129,7 +129,6 @@ export interface CodeReviewPolicyConfig {
   agent_roster: {
     reviewers: string[];
     orchestrator: string;
-    review_depth: string;
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;

@@ -7,6 +7,8 @@ import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
+  CodeReviewPolicyConfig,
+  CodeReviewPolicyRecord,
   CodeReviewResolvedPolicy,
   CodeReviewTemplateOption,
   ListResponse,
@@ -65,7 +67,6 @@ const policy: CodeReviewResolvedPolicy = {
     agent_roster: {
       reviewers: ["codex", "claude_code"],
       orchestrator: "claude_code",
-      review_depth: "standard",
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
@@ -188,12 +189,32 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
 };
 
 function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady) {
+  // Autosave issues whole-config PUTs and refetches on settle, so the GET must
+  // reflect the last saved config for optimistic values to stick across the
+  // invalidation round-trip.
+  let currentConfig: CodeReviewPolicyConfig = policy.config;
   server.use(
     http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repo], meta: {} } satisfies ListResponse<Repository>)),
     http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
     http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
     http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
-    http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
+    http.get("/api/v1/code-review-policies", () =>
+      HttpResponse.json({ data: { ...policy, config: currentConfig } } satisfies SingleResponse<CodeReviewResolvedPolicy>),
+    ),
+    http.put("/api/v1/code-review-policies", async ({ request }) => {
+      const body = (await request.json()) as { config: CodeReviewPolicyConfig };
+      currentConfig = body.config;
+      return HttpResponse.json({
+        data: {
+          ...currentConfig,
+          id: "policy-1",
+          org_id: "org-1",
+          active: true,
+          version: 2,
+          created_at: "2026-06-26T12:00:00Z",
+        },
+      } satisfies SingleResponse<CodeReviewPolicyRecord>);
+    }),
     http.get("/api/v1/code-review-github-trigger", () => HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>)),
   );
 }
@@ -219,28 +240,38 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
-    await waitFor(() => {
-      expect(screen.getByDisplayValue("Understandable description")).toBeInTheDocument();
-    });
+    // Essentials and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
+
+    // Fine-tuning groups are collapsed by default; expand the ones we assert on.
+    await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
+    expect(await screen.findByDisplayValue("*auth*")).toBeInTheDocument();
     expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
     expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
     expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
-    expect(screen.getByText("Enforce sensitive paths")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Quality gates/i }));
+    expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Allow policy changes")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /Review depth/i })).toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: /Description requirements/i }));
+    expect(await screen.findByDisplayValue("Understandable description")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
+
+    // Review depth was removed entirely.
+    expect(screen.queryByRole("combobox", { name: /Review depth/i })).not.toBeInTheDocument();
+
+    // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
     await user.click(screen.getByRole("button", { name: /Apply template/i }));
-    expect(screen.getAllByDisplayValue("4").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
+    expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
-    expect(screen.getByDisplayValue("Custom requirement")).toBeInTheDocument();
+    expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   });
 
   it("renders GitHub trigger account-required state", async () => {
