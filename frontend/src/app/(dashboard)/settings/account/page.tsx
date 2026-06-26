@@ -26,6 +26,7 @@ import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
+import { OpenCodeCustomModelField } from "@/components/opencode-custom-model-field";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
@@ -727,15 +728,11 @@ export default function AccountPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="personal-opencode-model-custom">Custom model override</Label>
-                  <Input
-                    id="personal-opencode-model-custom"
-                    value={openCodeCustomModel}
-                    onChange={(event) => setOpenCodeCustomModel(event.target.value)}
-                    placeholder="provider/model (e.g. xai/grok-code-fast)"
-                  />
-                </div>
+                <OpenCodeCustomModelField
+                  id="personal-opencode-model-custom"
+                  value={openCodeCustomModel}
+                  onChange={setOpenCodeCustomModel}
+                />
               </>
             ) : null}
             <div className="space-y-2">

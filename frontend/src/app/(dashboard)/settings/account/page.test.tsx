@@ -193,7 +193,8 @@ describe("Account settings page", () => {
 	    const dialog = screen.getByRole("dialog");
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
-	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    expect(within(dialog).getByRole("button", { name: "Advanced OpenCode model" })).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });
 
@@ -295,6 +296,9 @@ describe("Account settings page", () => {
 	      target: { value: "sk-or-opencode" },
 	    });
 	    await within(dialog).findByText("Detected OpenRouter key from the sk-or prefix.");
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    await user.click(within(dialog).getByRole("button", { name: "Advanced OpenCode model" }));
+	    expect(within(dialog).getByRole("button", { name: "What custom OpenCode model override does" })).toBeInTheDocument();
 	    fireEvent.change(within(dialog).getByLabelText("Custom model override"), {
 	      target: { value: "xai/grok-code-fast" },
 	    });
