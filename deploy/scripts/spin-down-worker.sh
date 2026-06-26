@@ -77,7 +77,10 @@ set -euo pipefail
 cd /opt/143
 
 list_worker_containers() {
-  docker ps --filter "label=com.docker.compose.service=worker" --format '{{.ID}}'
+  docker ps \
+    --filter "label=com.docker.compose.service=worker" \
+    --format '{{.ID}} {{.Label "com.docker.compose.project"}}' \
+    | awk '$2 ~ /^143-worker-/ {print $1}'
 }
 
 list_session_executor_containers() {
