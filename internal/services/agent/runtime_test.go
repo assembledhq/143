@@ -311,6 +311,7 @@ func TestResolveRuntimeConfig_UsesDefaultsAndOrgOverrides(t *testing.T) {
 
 		cfg := (&Orchestrator{}).resolveRuntimeConfig(context.Background(), orgID)
 		require.Equal(t, defaultCfg, cfg, "resolveRuntimeConfig should return defaults when no org store is configured")
+		require.Equal(t, time.Hour, cfg.SoftBudget, "default runtime soft budget should be one hour")
 	})
 
 	t.Run("defaults on org lookup error", func(t *testing.T) {

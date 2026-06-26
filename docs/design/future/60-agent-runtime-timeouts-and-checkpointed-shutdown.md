@@ -6,13 +6,13 @@
 
 ## Summary
 
-143 should keep the current `25 minute` default as a **shared-infrastructure soft
+143 should keep the current `60 minute` default as a **shared-infrastructure soft
 budget**, but it should stop treating that number as the only kill switch for a
 coding session.
 
 The product contract should become:
 
-1. A coding session gets a default runtime budget of 25 minutes.
+1. A coding session gets a default runtime budget of 60 minutes.
 2. If the agent is still making meaningful progress near that budget, the
    system may extend the run within policy rather than killing it immediately.
 3. When the platform does need to stop a run, it first attempts a **graceful,
@@ -36,7 +36,7 @@ The current system has a useful but incomplete timeout model.
 
 What exists today:
 
-- org settings default `max_session_duration_seconds` to 25 minutes
+- org settings default `max_session_duration_seconds` to 60 minutes
 - worker handlers wrap `run_agent` and `continue_session` in
   `session timeout + cleanup buffer`
 - completed turns are snapshotted and persisted
@@ -54,7 +54,7 @@ What is still wrong:
 - resume fidelity is uneven across agents
 - the user-facing contract is not explicit about what survives interruption
 
-That means `25 minutes` is currently serving two jobs badly:
+That means `60 minutes` is currently serving two jobs badly:
 
 1. protecting shared capacity
 2. deciding when a run should die
@@ -65,7 +65,7 @@ These should be separate concerns.
 
 ### Current defaults
 
-- Default per-session timeout: `25 minutes`
+- Default per-session timeout: `60 minutes`
 - Current org-level minimum: `2 minutes`
 - Current org-level maximum: `2 hours`
 - Worker handler cleanup buffer: `2 minutes`
@@ -97,7 +97,7 @@ That is operationally safe, but it is not a good coding-agent experience.
 
 This design should satisfy seven guarantees:
 
-1. **Soft default, not arbitrary kill.** `25 minutes` remains the default
+1. **Soft default, not arbitrary kill.** `60 minutes` remains the default
    budget, not the only control.
 2. **Progress-aware execution.** A healthy long-running session should be
    extendable within policy.
@@ -173,7 +173,7 @@ The correct escalation order is:
 
 Recommended defaults:
 
-- **Soft runtime budget:** 25 minutes
+- **Soft runtime budget:** 60 minutes
 - **No-progress timeout:** 15 minutes without meaningful progress
 - **Graceful shutdown window:** 30 seconds
 - **Checkpoint finalization window:** 30 seconds
@@ -181,7 +181,7 @@ Recommended defaults:
 
 Rationale:
 
-- 25 minutes is still a good default threshold for "this run is getting long"
+- 60 minutes is the default threshold for "this run is getting long"
 - 15 minutes of no output/tool activity is a better stuckness signal than raw
   wall clock
 - 90 minutes is long enough for legitimately heavy repo work, but still bounded
@@ -772,7 +772,7 @@ Recommended derived metrics:
 
 The recommended product decision is:
 
-- keep `25 minutes` as the default soft runtime budget
+- keep `60 minutes` as the default soft runtime budget
 - do not use that number as the only kill condition
 - stop long-running sessions with a graceful, checkpoint-first path
 - extend healthy runs within policy

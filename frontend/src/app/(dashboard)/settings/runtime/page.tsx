@@ -77,7 +77,7 @@ import type {
 
 const DEFAULT_EXECUTION_SETTINGS = {
   max_concurrent_runs: 5,
-  max_session_duration_seconds: 25 * 60,
+  max_session_duration_seconds: 60 * 60,
 };
 
 const CPU_MILLIS_PER_CORE = 1000;
