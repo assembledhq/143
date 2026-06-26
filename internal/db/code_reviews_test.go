@@ -152,6 +152,118 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	triggerID := uuid.New()
+	userID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("FROM code_review_github_trigger_settings").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(codeReviewGitHubTriggerColumns()).AddRow(
+			triggerID, orgID, repoID, int64(123), true, 2, "143-code-reviewer", "143 Code Reviewer", int64(143), "pull", &userID, now,
+		))
+
+	setting, err := NewCodeReviewStore(mock).GetActiveGitHubTrigger(context.Background(), orgID, repoID)
+
+	require.NoError(t, err, "GetActiveGitHubTrigger should load active trigger settings")
+	require.Equal(t, triggerID, setting.ID, "GetActiveGitHubTrigger should return the matching trigger")
+	require.Equal(t, repoID, setting.RepositoryID, "GetActiveGitHubTrigger should scope by repository")
+	require.Equal(t, "143-code-reviewer", setting.TeamSlug, "GetActiveGitHubTrigger should scan team slug")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_SaveGitHubTriggerVersionsInsertOnly(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	triggerID := uuid.New()
+	userID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(3))
+	mock.ExpectExec("UPDATE code_review_github_trigger_settings").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO code_review_github_trigger_settings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(codeReviewGitHubTriggerColumns()).AddRow(
+			triggerID, orgID, repoID, int64(123), true, 3, "143-code-reviewer", "143 Code Reviewer", int64(143), "pull", &userID, now,
+		))
+	mock.ExpectCommit()
+
+	setting, err := NewCodeReviewStore(mock).SaveGitHubTrigger(context.Background(), orgID, SaveCodeReviewGitHubTriggerParams{
+		RepositoryID:    repoID,
+		InstallationID:  123,
+		TeamSlug:        "143-code-reviewer",
+		TeamName:        "143 Code Reviewer",
+		TeamID:          143,
+		RepoPermission:  "pull",
+		CreatedByUserID: &userID,
+	})
+
+	require.NoError(t, err, "SaveGitHubTrigger should insert a new active version")
+	require.Equal(t, 3, setting.Version, "SaveGitHubTrigger should increment from the current scope max version")
+	require.Equal(t, models.CodeReviewGitHubTriggerRepoPermissionPull, setting.RepoPermission, "SaveGitHubTrigger should persist pull access")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_DeactivateGitHubTriggerWritesInactiveVersion(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	triggerID := uuid.New()
+	userID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT COALESCE").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(4))
+	mock.ExpectQuery("UPDATE code_review_github_trigger_settings").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(codeReviewGitHubTriggerColumns()).AddRow(
+			triggerID, orgID, repoID, int64(123), false, 3, "143-code-reviewer", "143 Code Reviewer", int64(143), "pull", &userID, now,
+		))
+	mock.ExpectExec("INSERT INTO code_review_github_trigger_settings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	mock.ExpectCommit()
+
+	err = NewCodeReviewStore(mock).DeactivateGitHubTrigger(context.Background(), orgID, repoID, &userID)
+
+	require.NoError(t, err, "DeactivateGitHubTrigger should write an inactive tombstone version")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	t.Parallel()
 
@@ -392,4 +504,11 @@ func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig
 	inheritance, err := json.Marshal(config.Inheritance)
 	require.NoError(t, err, "inheritance should marshal")
 	return descriptionPolicy, riskPolicy, agentRoster, inheritance
+}
+
+func codeReviewGitHubTriggerColumns() []string {
+	return []string{
+		"id", "org_id", "repository_id", "installation_id", "active", "version",
+		"team_slug", "team_name", "team_id", "repo_permission", "created_by_user_id", "created_at",
+	}
 }
