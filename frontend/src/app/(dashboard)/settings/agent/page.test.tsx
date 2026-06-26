@@ -212,7 +212,7 @@ describe("Agent settings page", () => {
 	    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
-	    expect(within(dialog).getByText("Open-source models use only audited US-based OpenCode or OpenRouter inference provider routes.")).toBeInTheDocument();
+	    expect(within(dialog).getByText("Open-source models use audited US inference providers on OpenRouter; native OpenCode routes do not expose per-provider location controls.")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });

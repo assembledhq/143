@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -660,11 +661,34 @@ func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders
 	options := glmConfig["options"].(map[string]any)
 	providerRouting := options["provider"].(map[string]any)
 
-	require.Equal(t, []any{"deepinfra", "fireworks", "cloudflare", "together"}, providerRouting["only"], "OpenRouter GLM should only route to audited US-based inference providers")
-	require.Equal(t, []any{"deepinfra", "fireworks", "cloudflare", "together"}, providerRouting["order"], "OpenRouter GLM should prefer the audited US-based inference providers in deterministic order")
+	require.Equal(t, []any{"fireworks"}, providerRouting["only"], "OpenRouter GLM should only route to the audited US-based Fireworks inference provider")
+	require.Equal(t, []any{"fireworks"}, providerRouting["order"], "OpenRouter GLM should prefer the audited US-based Fireworks inference provider in deterministic order")
 	require.Equal(t, false, providerRouting["allow_fallbacks"], "OpenRouter GLM should not fall back to unaudited providers")
 	require.Equal(t, "deny", providerRouting["data_collection"], "OpenRouter GLM should deny providers that may collect data")
 	require.Equal(t, true, providerRouting["require_parameters"], "OpenRouter GLM should require full parameter support")
+}
+
+func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProviderRouting(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range models.AvailableOpenCodeModels {
+		if !strings.HasPrefix(model, "openrouter/") {
+			continue
+		}
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+
+			configs := openCodeOpenRouterModelConfigs(model)
+			require.NotEmpty(t, configs, "curated OpenRouter model should define audited provider routing")
+			for modelKey, config := range configs {
+				require.NotEmpty(t, modelKey, "curated OpenRouter model should define a model config key")
+				providerRouting, ok := config.Options["provider"].(map[string]any)
+				require.True(t, ok, "curated OpenRouter model should define provider routing options")
+				require.NotEmpty(t, providerRouting["only"], "curated OpenRouter model should restrict provider routing")
+				require.Equal(t, false, providerRouting["allow_fallbacks"], "curated OpenRouter model should disable fallback to unaudited providers")
+			}
+		})
+	}
 }
 
 func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {

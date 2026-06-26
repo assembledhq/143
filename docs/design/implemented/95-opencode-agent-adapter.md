@@ -8,11 +8,12 @@ Implemented as a first-class `opencode` coding agent with explicit OpenCode-scop
 
 OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`). OpenRouter-backed curated model choices use OpenCode's `openrouter/<upstream-model>` model IDs; the custom model field remains the escape hatch for uncurated OpenRouter slugs.
 
-Open-source model choices are limited to audited US-based inference-provider routes:
+Open-source model choices distinguish between audited OpenRouter routes and native OpenCode routes:
 
-- Native OpenCode GLM 5.2 uses `opencode/glm-5.2`, backed by OpenCode/Anomaly's US-governed hosted service.
-- OpenRouter GLM 5.2 uses `openrouter/z-ai/glm-5.2` with a generated per-model `options.provider` block that sets `only` and `order` to `deepinfra`, `fireworks`, `cloudflare`, and `together`, disables fallbacks, denies provider data collection, and requires parameter support.
-- The audit source of truth is OpenRouter's GLM 5.2 endpoint list plus provider-company location checks. OpenCode's generated config must not add unaudited OpenRouter provider slugs without updating this audit.
+- OpenRouter open-source model choices must have an audited US inference-provider route in `openCodeOpenRouterModelConfigs`. The generated per-model `options.provider` block sets `only` and `order` to the audited provider slugs, disables fallbacks, denies provider data collection, and requires parameter support.
+- `openrouter/z-ai/glm-5.2` uses OpenRouter's model-author slug, but inference is pinned to Fireworks through that provider routing block.
+- Native OpenCode/Zen/Go routes are provided by OpenCode, but OpenCode does not expose the same per-provider location controls that OpenRouter exposes. Setup copy should state that distinction instead of implying native OpenCode routes have the same provider-location guarantee.
+- The audit source of truth is OpenRouter's endpoint list plus provider-company location checks. Generated config must not add unaudited OpenRouter provider slugs without updating this audit.
 
 ## Context
 

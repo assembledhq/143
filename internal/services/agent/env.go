@@ -1249,21 +1249,30 @@ func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
 	return string(data)
 }
 
-// Audited against OpenRouter's GLM 5.2 endpoint list and provider-company
-// locations on 2026-06-26. Keep docs/design/implemented/95-opencode-agent-adapter.md
-// in sync when changing this list.
-var auditedUSOpenRouterGLMProviders = []string{"deepinfra", "fireworks", "cloudflare", "together"}
+// Audited against OpenRouter endpoint lists and provider-company locations on
+// 2026-06-26. Keys use OpenCode's "~upstream/provider-model" custom model key
+// format for model IDs that contain slashes. Keep
+// docs/design/implemented/95-opencode-agent-adapter.md in sync when changing
+// this map.
+var auditedUSOpenRouterModelProviders = map[string][]string{
+	"~z-ai/glm-5.2": {"fireworks"},
+}
 
 func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig {
-	if model != models.OpenCodeModelOpenRouterGLM52 {
+	modelKey, ok := openCodeOpenRouterModelKey(model)
+	if !ok {
+		return nil
+	}
+	providers := auditedUSOpenRouterModelProviders[modelKey]
+	if len(providers) == 0 {
 		return nil
 	}
 	return map[string]openCodeModelConfig{
-		"~z-ai/glm-5.2": {
+		modelKey: {
 			Options: map[string]any{
 				"provider": map[string]any{
-					"only":               auditedUSOpenRouterGLMProviders,
-					"order":              auditedUSOpenRouterGLMProviders,
+					"only":               providers,
+					"order":              providers,
 					"allow_fallbacks":    false,
 					"data_collection":    "deny",
 					"require_parameters": true,
@@ -1271,6 +1280,15 @@ func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig
 			},
 		},
 	}
+}
+
+func openCodeOpenRouterModelKey(model string) (string, bool) {
+	const prefix = "openrouter/"
+	upstreamModel, ok := strings.CutPrefix(model, prefix)
+	if !ok || !strings.Contains(upstreamModel, "/") {
+		return "", false
+	}
+	return "~" + upstreamModel, true
 }
 
 func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {
