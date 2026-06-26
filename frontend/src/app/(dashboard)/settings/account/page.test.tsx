@@ -289,7 +289,7 @@ describe("Account settings page", () => {
 	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
 	    const dialog = await screen.findByRole("dialog");
 	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
-	    expect(within(dialog).getByText("Open-source models use audited US inference providers on OpenRouter; native OpenCode routes do not expose per-provider location controls.")).toBeInTheDocument();
+	    expect(within(dialog).getByText("OpenRouter routes are US-pinned; native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
 	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("opencode/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },

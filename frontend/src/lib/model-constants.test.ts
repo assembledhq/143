@@ -57,27 +57,61 @@ describe("model constants", () => {
       "openai/gpt-5.3-codex-spark",
       "anthropic/claude-haiku-4-5",
       "opencode/gemini-3.5-flash",
+      "openrouter/google/gemini-3.5-flash",
       "google/gemini-3-flash",
       "opencode/minimax-m2.7",
+      "openrouter/minimax/minimax-m2.7",
       "opencode/minimax-m2.5",
-      "opencode/qwen3.7-plus",
-      "opencode/qwen3.6-plus",
+      "openrouter/minimax/minimax-m2.5",
       "opencode/deepseek-v4-flash",
+      "openrouter/deepseek/deepseek-v4-flash",
       "opencode/deepseek-v4-pro",
+      "openrouter/deepseek/deepseek-v4-pro",
       "opencode/glm-5.1",
+      "openrouter/z-ai/glm-5.1",
       "opencode/kimi-k2.5",
+      "openrouter/moonshotai/kimi-k2.5",
       "openai/gpt-5.4",
       "anthropic/claude-sonnet-4-6",
       "opencode/gemini-3.1-pro",
-      "opencode/qwen3.7-max",
+      "openrouter/google/gemini-3.1-pro-preview",
       "opencode/kimi-k2.6",
+      "openrouter/moonshotai/kimi-k2.6",
       "opencode/gpt-5.2",
+      "openrouter/openai/gpt-5.2",
       "opencode/gpt-5.5",
+      "openrouter/openai/gpt-5.5",
       "opencode/gpt-5.5-pro",
+      "openrouter/openai/gpt-5.5-pro",
       "anthropic/claude-opus-4-8",
       "anthropic/claude-opus-4-7",
       "opencode/claude-fable-5",
+      "openrouter/anthropic/claude-fable-5",
     ]);
+  });
+
+  it("includes an audited OpenRouter counterpart for each native OpenCode model", () => {
+    const counterparts = [
+      ["opencode/gemini-3.5-flash", "openrouter/google/gemini-3.5-flash"],
+      ["opencode/minimax-m2.7", "openrouter/minimax/minimax-m2.7"],
+      ["opencode/minimax-m2.5", "openrouter/minimax/minimax-m2.5"],
+      ["opencode/deepseek-v4-flash", "openrouter/deepseek/deepseek-v4-flash"],
+      ["opencode/deepseek-v4-pro", "openrouter/deepseek/deepseek-v4-pro"],
+      ["opencode/glm-5.2", "openrouter/z-ai/glm-5.2"],
+      ["opencode/glm-5.1", "openrouter/z-ai/glm-5.1"],
+      ["opencode/kimi-k2.5", "openrouter/moonshotai/kimi-k2.5"],
+      ["opencode/gemini-3.1-pro", "openrouter/google/gemini-3.1-pro-preview"],
+      ["opencode/kimi-k2.6", "openrouter/moonshotai/kimi-k2.6"],
+      ["opencode/gpt-5.2", "openrouter/openai/gpt-5.2"],
+      ["opencode/gpt-5.5", "openrouter/openai/gpt-5.5"],
+      ["opencode/gpt-5.5-pro", "openrouter/openai/gpt-5.5-pro"],
+      ["opencode/claude-fable-5", "openrouter/anthropic/claude-fable-5"],
+    ];
+
+    for (const [nativeModel, openRouterModel] of counterparts) {
+      expect(AVAILABLE_OPENCODE_MODELS).toContain(nativeModel);
+      expect(AVAILABLE_OPENCODE_MODELS).toContain(openRouterModel);
+    }
   });
 
   it("includes latest Codex models", () => {

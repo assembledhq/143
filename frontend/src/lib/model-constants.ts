@@ -79,28 +79,38 @@ export const OPENCODE_MODEL_GPT_5_4_MINI = "openai/gpt-5.4-mini";
 export const OPENCODE_MODEL_GPT_5_3_CODEX_SPARK = "openai/gpt-5.3-codex-spark";
 export const OPENCODE_MODEL_CLAUDE_HAIKU_45 = "anthropic/claude-haiku-4-5";
 export const OPENCODE_MODEL_GEMINI_3_5_FLASH = "opencode/gemini-3.5-flash";
+export const OPENCODE_MODEL_OPENROUTER_GEMINI_3_5_FLASH = "openrouter/google/gemini-3.5-flash";
 export const OPENCODE_MODEL_GEMINI_3_FLASH = "google/gemini-3-flash";
 export const OPENCODE_MODEL_MINIMAX_M2_7 = "opencode/minimax-m2.7";
+export const OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_7 = "openrouter/minimax/minimax-m2.7";
 export const OPENCODE_MODEL_MINIMAX_M2_5 = "opencode/minimax-m2.5";
-export const OPENCODE_MODEL_QWEN_3_7_PLUS = "opencode/qwen3.7-plus";
-export const OPENCODE_MODEL_QWEN_3_6_PLUS = "opencode/qwen3.6-plus";
+export const OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_5 = "openrouter/minimax/minimax-m2.5";
 export const OPENCODE_MODEL_DEEPSEEK_V4_FLASH = "opencode/deepseek-v4-flash";
+export const OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_FLASH = "openrouter/deepseek/deepseek-v4-flash";
 export const OPENCODE_MODEL_DEEPSEEK_V4_PRO = "opencode/deepseek-v4-pro";
+export const OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_PRO = "openrouter/deepseek/deepseek-v4-pro";
 export const OPENCODE_MODEL_GLM_5_2 = "opencode/glm-5.2";
 export const OPENCODE_MODEL_OPENROUTER_GLM_5_2 = "openrouter/z-ai/glm-5.2";
 export const OPENCODE_MODEL_GLM_5_1 = "opencode/glm-5.1";
+export const OPENCODE_MODEL_OPENROUTER_GLM_5_1 = "openrouter/z-ai/glm-5.1";
 export const OPENCODE_MODEL_KIMI_K2_5 = "opencode/kimi-k2.5";
+export const OPENCODE_MODEL_OPENROUTER_KIMI_K2_5 = "openrouter/moonshotai/kimi-k2.5";
 export const OPENCODE_MODEL_GPT_5_4 = "openai/gpt-5.4";
 export const OPENCODE_MODEL_CLAUDE_SONNET_46 = "anthropic/claude-sonnet-4-6";
 export const OPENCODE_MODEL_GEMINI_3_1_PRO = "opencode/gemini-3.1-pro";
-export const OPENCODE_MODEL_QWEN_3_7_MAX = "opencode/qwen3.7-max";
+export const OPENCODE_MODEL_OPENROUTER_GEMINI_3_1_PRO = "openrouter/google/gemini-3.1-pro-preview";
 export const OPENCODE_MODEL_KIMI_K2_6 = "opencode/kimi-k2.6";
+export const OPENCODE_MODEL_OPENROUTER_KIMI_K2_6 = "openrouter/moonshotai/kimi-k2.6";
 export const OPENCODE_MODEL_GPT_5_2 = "opencode/gpt-5.2";
+export const OPENCODE_MODEL_OPENROUTER_GPT_5_2 = "openrouter/openai/gpt-5.2";
 export const OPENCODE_MODEL_GPT_5_5 = "opencode/gpt-5.5";
+export const OPENCODE_MODEL_OPENROUTER_GPT_5_5 = "openrouter/openai/gpt-5.5";
 export const OPENCODE_MODEL_GPT_5_5_PRO = "opencode/gpt-5.5-pro";
+export const OPENCODE_MODEL_OPENROUTER_GPT_5_5_PRO = "openrouter/openai/gpt-5.5-pro";
 export const OPENCODE_MODEL_CLAUDE_OPUS_48 = "anthropic/claude-opus-4-8";
 export const OPENCODE_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
 export const OPENCODE_MODEL_CLAUDE_FABLE_5 = "opencode/claude-fable-5";
+export const OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5 = "openrouter/anthropic/claude-fable-5";
 
 export const AVAILABLE_OPENCODE_MODELS = [
   OPENCODE_MODEL_GLM_5_2,
@@ -109,26 +119,36 @@ export const AVAILABLE_OPENCODE_MODELS = [
   OPENCODE_MODEL_GPT_5_3_CODEX_SPARK,
   OPENCODE_MODEL_CLAUDE_HAIKU_45,
   OPENCODE_MODEL_GEMINI_3_5_FLASH,
+  OPENCODE_MODEL_OPENROUTER_GEMINI_3_5_FLASH,
   OPENCODE_MODEL_GEMINI_3_FLASH,
   OPENCODE_MODEL_MINIMAX_M2_7,
+  OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_7,
   OPENCODE_MODEL_MINIMAX_M2_5,
-  OPENCODE_MODEL_QWEN_3_7_PLUS,
-  OPENCODE_MODEL_QWEN_3_6_PLUS,
+  OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_5,
   OPENCODE_MODEL_DEEPSEEK_V4_FLASH,
+  OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_FLASH,
   OPENCODE_MODEL_DEEPSEEK_V4_PRO,
+  OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_PRO,
   OPENCODE_MODEL_GLM_5_1,
+  OPENCODE_MODEL_OPENROUTER_GLM_5_1,
   OPENCODE_MODEL_KIMI_K2_5,
+  OPENCODE_MODEL_OPENROUTER_KIMI_K2_5,
   OPENCODE_MODEL_GPT_5_4,
   OPENCODE_MODEL_CLAUDE_SONNET_46,
   OPENCODE_MODEL_GEMINI_3_1_PRO,
-  OPENCODE_MODEL_QWEN_3_7_MAX,
+  OPENCODE_MODEL_OPENROUTER_GEMINI_3_1_PRO,
   OPENCODE_MODEL_KIMI_K2_6,
+  OPENCODE_MODEL_OPENROUTER_KIMI_K2_6,
   OPENCODE_MODEL_GPT_5_2,
+  OPENCODE_MODEL_OPENROUTER_GPT_5_2,
   OPENCODE_MODEL_GPT_5_5,
+  OPENCODE_MODEL_OPENROUTER_GPT_5_5,
   OPENCODE_MODEL_GPT_5_5_PRO,
+  OPENCODE_MODEL_OPENROUTER_GPT_5_5_PRO,
   OPENCODE_MODEL_CLAUDE_OPUS_48,
   OPENCODE_MODEL_CLAUDE_OPUS_47,
   OPENCODE_MODEL_CLAUDE_FABLE_5,
+  OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5,
 ] as const;
 
 export const DEFAULT_PM_MODEL = DEFAULT_CODEX_MODEL;

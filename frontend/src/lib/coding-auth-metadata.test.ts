@@ -5,7 +5,11 @@ import {
   openCodeModelsForBackingProvider,
   openCodeDefaultModelForBackingProvider,
 } from "./coding-auth-metadata";
-import { OPENCODE_MODEL_GLM_5_2, OPENCODE_MODEL_OPENROUTER_GLM_5_2 } from "./model-constants";
+import {
+  AVAILABLE_OPENCODE_MODELS,
+  OPENCODE_MODEL_GLM_5_2,
+  OPENCODE_MODEL_OPENROUTER_GLM_5_2,
+} from "./model-constants";
 
 describe("OpenCode backing provider model helpers", () => {
   it("defaults native OpenCode auth to GLM 5.2", () => {
@@ -24,15 +28,17 @@ describe("OpenCode backing provider model helpers", () => {
 
   it("keeps the curated OpenRouter list on audited OpenRouter routes", () => {
     const models = openCodeModelsForBackingProvider("openrouter");
-    expect(models).toEqual([OPENCODE_MODEL_OPENROUTER_GLM_5_2]);
+    expect(models).toEqual(AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("openrouter/")));
+    expect(models.length).toBeGreaterThan(1);
   });
 
-  it("keeps open-source OpenCode models on US-based OpenCode or OpenRouter inference routes", () => {
+  it("keeps open-source OpenCode models separated from US-pinned OpenRouter routes", () => {
     const nativeModels = openCodeModelsForBackingProvider("opencode");
     expect(nativeModels).toContain(OPENCODE_MODEL_GLM_5_2);
     expect(nativeModels.every((model) => model.startsWith("opencode/"))).toBe(true);
     const openRouterModels = openCodeModelsForBackingProvider("openrouter");
     expect(openRouterModels).toContain(OPENCODE_MODEL_OPENROUTER_GLM_5_2);
+    expect(openRouterModels.every((model) => model.startsWith("openrouter/"))).toBe(true);
     expect(openRouterModels).not.toEqual(expect.arrayContaining(nativeModels));
   });
 

@@ -150,7 +150,7 @@ export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingPr
   { value: "openrouter", label: "OpenCode via OpenRouter" },
 ];
 
-export const OPENCODE_US_INFERENCE_HELP_TEXT = "Open-source models use audited US inference providers on OpenRouter; native OpenCode routes do not expose per-provider location controls.";
+export const OPENCODE_US_INFERENCE_HELP_TEXT = "OpenRouter routes are US-pinned; native OpenCode routes are not provider-pinned.";
 
 export function openCodeBackingProviderLabel(provider: OpenCodeBackingProvider): string {
   return OPENCODE_BACKING_PROVIDER_OPTIONS.find((option) => option.value === provider)?.label ?? "OpenCode native";
@@ -210,7 +210,7 @@ export function openCodeModelsForBackingProvider(provider: OpenCodeBackingProvid
     case "gemini":
       return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("google/"));
     case "openrouter":
-      return [OPENCODE_MODEL_OPENROUTER_GLM_5_2];
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("openrouter/"));
   }
 }
 
