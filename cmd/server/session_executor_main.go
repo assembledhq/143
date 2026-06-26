@@ -43,22 +43,29 @@ func isSessionExecutorInvocation(args []string) bool {
 func runSessionExecutorMain() {
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
-	if err := cfg.ValidateSecrets(); err != nil {
-		logger.Fatal().Err(err).Msg("security configuration check failed")
-	}
-
 	executorID, err := parseSessionExecutorID(os.Args)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("invalid session executor arguments")
 	}
+	logger = logger.With().Str("executor_id", executorID.String()).Logger()
+	logger.Info().Msg("session executor process entered")
+	if err := cfg.ValidateSecrets(); err != nil {
+		logger.Fatal().Err(err).Msg("security configuration check failed")
+	}
+	logger.Info().Msg("session executor configuration validated")
 	if cfg.NodeID == "" {
 		hostname, _ := os.Hostname()
 		cfg.NodeID = hostname
 	}
+	logger = logger.With().Str("node_id", cfg.NodeID).Logger()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	logger.Info().
+		Int32("database_max_conns", cfg.DatabaseMaxConns).
+		Dur("database_max_conn_idle_time", cfg.DatabaseMaxConnIdleTime).
+		Msg("session executor connecting to database")
 	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
 		MaxConns:        cfg.DatabaseMaxConns,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
@@ -67,21 +74,24 @@ func runSessionExecutorMain() {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
 	}
 	defer pool.Close()
+	logger.Info().Msg("session executor connected to database")
 	if err := db.EnsureAnthropicSplitSentinel(ctx, pool); err != nil {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; session executor refusing to start")
 	}
+	logger.Info().Msg("session executor migration gates passed")
 
+	logger.Info().Msg("session executor building runtime")
 	runtime, shutdown, err := buildSessionExecutorRuntime(ctx, cfg, pool, logger)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to build session executor runtime")
 	}
 	defer shutdown()
 
-	logger.Info().Str("executor_id", executorID.String()).Str("node_id", cfg.NodeID).Msg("session executor starting")
+	logger.Info().Msg("session executor starting")
 	if err := runtime.Run(ctx, executorID); err != nil {
-		logger.Fatal().Err(err).Str("executor_id", executorID.String()).Msg("session executor failed")
+		logger.Fatal().Err(err).Msg("session executor failed")
 	}
-	logger.Info().Str("executor_id", executorID.String()).Msg("session executor completed")
+	logger.Info().Msg("session executor completed")
 }
 
 func parseSessionExecutorID(args []string) (uuid.UUID, error) {
