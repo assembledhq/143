@@ -330,9 +330,9 @@ State transitions (`warming → warm`, `warming → failed`) should emit through
 
 - Add a `Session prewarm` row under Preview settings for each repository.
 - Mode labels: `Off`, `Cache only`, `Smart`. (`Cache only` is clearer than `Cache` for admins scanning without helper copy.)
-- Fork policy: `Untrusted forks`, disabled unless speculative slots are configured. Default is off; enabling it is an explicit repo-level opt-in.
+- Fork prewarm remains off and is not exposed in the normal settings UI. Sessions derived from untrusted fork content should not be speculatively warmed unless a reviewed operator-only path explicitly allows it.
 - Pool setting: `Speculative preview slots`.
-- Helper copy: `Cache only warms dependencies before the user clicks Preview. Smart mode may also prepare a full preview when a session looks likely to need one. Speculative work yields to active sessions and user-started previews.`
+- Helper copy: `Cache only installs dependencies ahead of time without starting the app. Smart starts with cache warming and may prepare a full preview when a session looks likely to need one. Speculative work yields to active sessions and user-started previews.`
 - When `Speculative preview slots = 0`, disable the mode selector with inline text: `Set speculative preview slots above 0 to enable session prewarm.`
 - Repos already using `auto_mode = 'warm'` for PR auto-preview are natural candidates for `cache` mode. Consider surfacing an indicator in the settings list for these repos.
 
