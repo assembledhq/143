@@ -14,6 +14,7 @@ import {
   ExternalLink,
   HelpCircle,
   KeyRound,
+  Loader2,
   MonitorPlay,
   Pencil,
   Plus,
@@ -531,10 +532,8 @@ function RepoPreviewCard({
   testPreviewPending: boolean;
 }) {
   const missingPermissions =
-    (policy.github_pr_comment_enabled &&
-      !policy.github_pr_comment_permission_ok) ||
-    (policy.github_commit_status_enabled &&
-      !policy.github_commit_status_permission_ok);
+    !policy.github_pr_comment_permission_ok ||
+    !policy.github_commit_status_permission_ok;
   const showTestPreview =
     policy.preview_configured &&
     (!policy.preview_success_recorded ||
@@ -552,24 +551,11 @@ function RepoPreviewCard({
     ? policy.preview_readiness_missing_reason ||
       "Run a successful test preview before enabling GitHub PR links"
     : missingPermissions
-      ? "GitHub App permissions are missing for one or more selected surfaces"
+      ? "GitHub App permissions are missing for PR comments or commit statuses"
       : "";
   const canEnable = policy.preview_ready && !missingPermissions;
   const publishDisabled = !canEnable && !policy.pr_preview_surfaces_enabled;
   const publishDisabledReason = publishDisabled ? disabledReason : "";
-  const commentSurfaceDisabledReason = getSurfaceDisabledReason({
-    publishingEnabled: policy.pr_preview_surfaces_enabled,
-    publishDisabledReason,
-    permissionOK: policy.github_pr_comment_permission_ok,
-    missingPermissionReason:
-      "GitHub App needs Issues or Pull requests write permission.",
-  });
-  const statusSurfaceDisabledReason = getSurfaceDisabledReason({
-    publishingEnabled: policy.pr_preview_surfaces_enabled,
-    publishDisabledReason,
-    permissionOK: policy.github_commit_status_permission_ok,
-    missingPermissionReason: "GitHub App needs Statuses write permission.",
-  });
   const configNames = policy.preview_config_names ?? [];
   const defaultConfigName = policy.preview_config_default_name ?? "";
 
@@ -732,7 +718,11 @@ function RepoPreviewCard({
                   : undefined
               }
               onCheckedChange={(checked) =>
-                onUpdatePolicy({ pr_preview_surfaces_enabled: checked })
+                onUpdatePolicy({
+                  pr_preview_surfaces_enabled: checked,
+                  github_pr_comment_enabled: true,
+                  github_commit_status_enabled: true,
+                })
               }
               className="mt-0.5"
             />
@@ -743,8 +733,8 @@ function RepoPreviewCard({
                   : "Not publishing preview links to GitHub PRs"}
               </span>
               <p className="text-xs leading-4 text-muted-foreground">
-                When enabled, 143 publishes preview URLs to GitHub PR comments
-                or commit statuses. Auto-build can still create previews
+                When enabled, 143 publishes preview URLs to both GitHub PR
+                comments and commit statuses. Auto-build can still create previews
                 internally when publishing is off.
               </p>
               {publishDisabledReason ? (
@@ -756,35 +746,6 @@ function RepoPreviewCard({
                   <span>{publishDisabledReason}</span>
                 </p>
               ) : null}
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <span className="block text-xs font-medium text-foreground">
-              Surfaces
-            </span>
-            <div className="grid gap-2 sm:grid-cols-2">
-              <PreviewSurfaceSwitch
-                id={`preview-comment-${policy.repository_id}`}
-                label="Comment"
-                ariaLabel={`Enable PR comment preview link for ${policy.repository_full_name}`}
-                checked={policy.github_pr_comment_enabled}
-                disabled={Boolean(commentSurfaceDisabledReason)}
-                disabledReason={commentSurfaceDisabledReason}
-                onCheckedChange={(checked) =>
-                  onUpdatePolicy({ github_pr_comment_enabled: checked })
-                }
-              />
-              <PreviewSurfaceSwitch
-                id={`preview-status-${policy.repository_id}`}
-                label="Status"
-                ariaLabel={`Enable commit status preview link for ${policy.repository_full_name}`}
-                checked={policy.github_commit_status_enabled}
-                disabled={Boolean(statusSurfaceDisabledReason)}
-                disabledReason={statusSurfaceDisabledReason}
-                onCheckedChange={(checked) =>
-                  onUpdatePolicy({ github_commit_status_enabled: checked })
-                }
-              />
             </div>
           </div>
           {showTestPreview ? (
@@ -801,8 +762,12 @@ function RepoPreviewCard({
                 }
                 onClick={() => onTestPreview(selectedPreviewConfig || undefined)}
               >
-                <MonitorPlay className="mr-2 h-4 w-4" />
-                Test preview
+                {testPreviewPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <MonitorPlay className="mr-2 h-4 w-4" />
+                )}
+                {testPreviewPending ? "Testing preview" : "Test preview"}
               </Button>
               {testPreviewDisabledReason ? (
                 <p
@@ -898,69 +863,6 @@ function PreviewModeOption({
       </span>
     </Label>
   );
-}
-
-function PreviewSurfaceSwitch({
-  id,
-  label,
-  ariaLabel,
-  checked,
-  disabled,
-  disabledReason,
-  onCheckedChange,
-}: {
-  id: string;
-  label: string;
-  ariaLabel: string;
-  checked: boolean;
-  disabled: boolean;
-  disabledReason: string;
-  onCheckedChange: (checked: boolean) => void;
-}) {
-  return (
-    <div className="rounded-md border border-border p-2.5">
-      <div className="flex items-center gap-2 text-xs">
-        <Switch
-          aria-label={ariaLabel}
-          checked={checked}
-          disabled={disabled}
-          aria-describedby={disabledReason ? `${id}-reason` : undefined}
-          onCheckedChange={onCheckedChange}
-        />
-        <span className="font-medium text-foreground">{label}</span>
-      </div>
-      {disabledReason ? (
-        <p
-          id={`${id}-reason`}
-          className="mt-1 pl-11 text-xs leading-4 text-muted-foreground"
-        >
-          {disabledReason}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
-function getSurfaceDisabledReason({
-  publishingEnabled,
-  publishDisabledReason,
-  permissionOK,
-  missingPermissionReason,
-}: {
-  publishingEnabled: boolean;
-  publishDisabledReason: string;
-  permissionOK: boolean;
-  missingPermissionReason: string;
-}) {
-  if (!publishingEnabled) {
-    return publishDisabledReason
-      ? `Publishing is disabled: ${publishDisabledReason}`
-      : "Turn on publishing to choose this surface.";
-  }
-  if (!permissionOK) {
-    return missingPermissionReason;
-  }
-  return "";
 }
 
 function PreviewSecretsSection() {
