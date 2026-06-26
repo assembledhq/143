@@ -893,14 +893,12 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 			},
 		},
 		slackbotsvc.SlackRoutingModeAnswerOnly,
-		true,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should let users correct channel repository defaults")
-	require.True(t, slackBlocksContainAction(blocks, "slack_start_work"), "answer-only ack should let users escalate into durable work")
+	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "ack should not show start-work escalation while the session is already running")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_preview_target"), "ack should offer a preview target selector when preview context is missing")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_pull_request"), "ack should offer a PR selector when PR context is missing")
-	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
 }
 
 func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
@@ -925,7 +923,6 @@ func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
 			Branch:         "main",
 		},
 		slackbotsvc.SlackRoutingModeStartWork,
-		false,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should still let users correct channel repository defaults")
@@ -955,7 +952,6 @@ func TestSlackSessionAckBlocksSuppressStartWorkForAutoRouting(t *testing.T) {
 			Branch:         "main",
 		},
 		slackbotsvc.SlackRoutingModeAuto,
-		false,
 	)
 
 	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "auto-routed Slack acks should not show a Start work escalation while the session is already running")
