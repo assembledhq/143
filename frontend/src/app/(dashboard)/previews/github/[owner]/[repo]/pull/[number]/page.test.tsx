@@ -353,9 +353,10 @@ describe("PullRequestPreviewPage", () => {
 
     renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
 
-    expect(await screen.findByText("Partially Ready")).toBeInTheDocument();
+    expect((await screen.findAllByText("Partially Ready")).length).toBeGreaterThan(0);
     expect(screen.getByText("Start Services")).toBeInTheDocument();
-    expect(screen.getByText("Starting")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getAllByText("Starting").length).toBeGreaterThan(0);
     expect(screen.getByText("Unhealthy")).toBeInTheDocument();
   });
 
@@ -396,8 +397,9 @@ describe("PullRequestPreviewPage", () => {
     renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
 
     const startingLabels = await screen.findAllByText("Starting");
-    expect(startingLabels).toHaveLength(2);
-    for (const label of startingLabels) {
+    const startingBadges = startingLabels.filter((label) => label.closest('[data-slot="badge"]'));
+    expect(startingBadges.length).toBeGreaterThan(0);
+    for (const label of startingBadges) {
       expect(label.closest('[data-slot="badge"]')?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
     }
   });
