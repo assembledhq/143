@@ -1,0 +1,739 @@
+"use client";
+
+import Link from "next/link";
+import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw } from "lucide-react";
+import { PageHeader } from "@/components/page-header";
+import { EmptyState } from "@/components/empty-state";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
+import type {
+  CodeReviewApprovalMode,
+  CodeReviewDecision,
+  CodeReviewListItem,
+  CodeReviewPolicyConfig,
+  CodeReviewSessionStatus,
+} from "@/lib/types";
+
+const ALL_REPOSITORIES = "all";
+const ALL_DECISIONS = "all";
+const ALL_RISKS = "all";
+const ALL_STATUSES = "all";
+
+function formatDate(value?: string): string {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function decisionLabel(review: CodeReviewListItem): string {
+  if (review.decision === "approved") return "Approved";
+  if (review.decision === "needs_human_review") return "Needs human";
+  if (review.decision === "blocked") return "Blocked";
+  if (review.decision === "comment_only") return "Comment only";
+  return "Pending";
+}
+
+function decisionVariant(review: CodeReviewListItem): "success" | "secondary" | "destructive" | "outline" {
+  if (review.decision === "approved") return "success";
+  if (review.decision === "blocked") return "destructive";
+  if (review.decision === "needs_human_review") return "secondary";
+  return "outline";
+}
+
+function statusVariant(status: string): "success" | "secondary" | "destructive" | "outline" {
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "stale") return "destructive";
+  if (status === "running" || status === "queued") return "secondary";
+  return "outline";
+}
+
+function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
+  return JSON.parse(JSON.stringify(config)) as CodeReviewPolicyConfig;
+}
+
+export default function CodeReviewsPage() {
+  const queryClient = useQueryClient();
+  const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
+  const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
+  const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
+  const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
+  const [search, setSearch] = useState("");
+  const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
+  const reviewFilters = useMemo(
+    () => ({
+      repository_id: repositoryId,
+      decision: decisionFilter === ALL_DECISIONS ? undefined : (decisionFilter as CodeReviewDecision),
+      risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
+      search: search.trim() || undefined,
+      limit: 100,
+    }),
+    [decisionFilter, repositoryId, riskFilter, search, statusFilter],
+  );
+
+  const repositoriesQuery = useQuery({
+    queryKey: queryKeys.repositories.all,
+    queryFn: () => api.repositories.list(),
+  });
+  const reviewsQuery = useQuery({
+    queryKey: queryKeys.codeReviews.list(reviewFilters),
+    queryFn: () => api.codeReviews.list(reviewFilters),
+  });
+  const policyQuery = useQuery({
+    queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
+    queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
+  });
+
+  const policyKey = `${repositoryId ?? "org"}:${policyQuery.data?.data.policy?.id ?? policyQuery.data?.data.source ?? "loading"}`;
+  const serverPolicy = policyQuery.data?.data.config;
+  const baseDraftPolicy = useMemo(
+    () => (serverPolicy ? clonePolicy(serverPolicy) : null),
+    [serverPolicy],
+  );
+  const [draftOverride, setDraftOverride] = useState<{ key: string; config: CodeReviewPolicyConfig } | null>(null);
+  const draftPolicy = draftOverride?.key === policyKey ? draftOverride.config : baseDraftPolicy;
+
+  const savePolicy = useMutation({
+    mutationFn: (config: CodeReviewPolicyConfig) =>
+      api.codeReviews.updatePolicy({ repository_id: repositoryId ?? null, config }),
+    onSuccess: () => {
+      setDraftOverride(null);
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
+    },
+  });
+
+  const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
+  const repositories = repositoriesQuery.data?.data ?? [];
+  const insightCounts = useMemo(() => {
+    return reviews.reduce(
+      (acc, review) => {
+        acc.total += 1;
+        if (review.decision === "approved") acc.approved += 1;
+        if (review.decision === "needs_human_review" || review.decision === "comment_only") acc.escalated += 1;
+        if (review.stale || review.status === "stale") acc.stale += 1;
+        return acc;
+      },
+      { total: 0, approved: 0, escalated: 0, stale: 0 },
+    );
+  }, [reviews]);
+
+  return (
+    <main className="min-h-full bg-background">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
+        <PageHeader
+          title="Code reviews"
+          description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
+          action={
+            <Button variant="outline" size="sm" onClick={() => reviewsQuery.refetch()}>
+              <RefreshCw className="h-4 w-4" />
+              Refresh
+            </Button>
+          }
+        />
+
+        <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">
+          <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+            <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+            {repositories.map((repo) => (
+              <SelectItem key={repo.id} value={repo.id}>
+                {repo.full_name}
+              </SelectItem>
+            ))}
+          </FilterSelect>
+          <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
+            <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
+            <SelectItem value="approved">Approved</SelectItem>
+            <SelectItem value="comment_only">Comment only</SelectItem>
+            <SelectItem value="needs_human_review">Needs human</SelectItem>
+            <SelectItem value="blocked">Blocked</SelectItem>
+          </FilterSelect>
+          <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+            <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+            <SelectItem value="acceptable">Acceptable</SelectItem>
+            <SelectItem value="needs_review">Needs review</SelectItem>
+          </FilterSelect>
+          <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
+            <SelectItem value="queued">Queued</SelectItem>
+            <SelectItem value="running">Running</SelectItem>
+            <SelectItem value="completed">Completed</SelectItem>
+            <SelectItem value="failed">Failed</SelectItem>
+            <SelectItem value="stale">Stale</SelectItem>
+            <SelectItem value="cancelled">Cancelled</SelectItem>
+          </FilterSelect>
+          <div className="flex flex-col gap-2">
+            <Label className="text-xs text-muted-foreground">Search</Label>
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="PR, repo, or title"
+              aria-label="Search code reviews"
+            />
+          </div>
+        </div>
+
+        <Tabs defaultValue="reviews" className="space-y-4">
+          <TabsList>
+            <TabsTrigger value="reviews">
+              <ClipboardCheck className="h-4 w-4" />
+              Reviews
+            </TabsTrigger>
+            <TabsTrigger value="config">
+              <Settings2 className="h-4 w-4" />
+              Configurations
+            </TabsTrigger>
+            <TabsTrigger value="insights">
+              <BarChart3 className="h-4 w-4" />
+              Insights
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="reviews" className="space-y-3">
+            {reviews.length === 0 ? (
+              <EmptyState
+                icon={ClipboardCheck}
+                title="No code review sessions"
+                description="Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
+              />
+            ) : (
+              <Card>
+                <CardContent className="p-0">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>PR</TableHead>
+                        <TableHead>Repo</TableHead>
+                        <TableHead>Risk</TableHead>
+                        <TableHead>Decision</TableHead>
+                        <TableHead>Status</TableHead>
+                        <TableHead>Completed</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {reviews.map((review) => (
+                        <TableRow key={review.id}>
+                          <TableCell className="min-w-[18rem]">
+                            <div className="font-medium text-foreground">
+                              #{review.github_pr_number} {review.pull_request_title}
+                            </div>
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                            </div>
+                          </TableCell>
+                          <TableCell>{review.repository_name || review.github_repo}</TableCell>
+                          <TableCell>
+                            <Badge variant={review.acceptable ? "success" : "secondary"}>
+                              {review.acceptable ? "Acceptable" : "Needs review"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={statusVariant(review.status)}>{review.stale ? "stale" : review.status}</Badge>
+                          </TableCell>
+                          <TableCell>{formatDate(review.completed_at)}</TableCell>
+                          <TableCell>
+                            <div className="flex justify-end gap-2">
+                              <Button variant="ghost" size="sm" asChild>
+                                <Link href={`/sessions/${review.session_id}`}>Session</Link>
+                              </Button>
+                              <Button variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
+                                <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
+                                  <ExternalLink className="h-4 w-4" />
+                                </Link>
+                              </Button>
+                              {review.github_review_url ? (
+                                <Button variant="ghost" size="icon-sm" asChild aria-label="Open final review">
+                                  <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+                                    <ClipboardCheck className="h-4 w-4" />
+                                  </Link>
+                                </Button>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            )}
+          </TabsContent>
+
+          <TabsContent value="config" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Bot behavior</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">Enable 143 Code Reviewer</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      When off, reviewer requests are acknowledged but no review session is started.
+                    </div>
+                  </div>
+                  <Switch
+                    checked={draftPolicy?.enabled ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) => {
+                      if (!draftPolicy) return;
+                      setDraftOverride({ key: policyKey, config: { ...draftPolicy, enabled: checked } });
+                    }}
+                  />
+                </div>
+
+                <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">Approve acceptable PRs</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      When off, the bot always submits comment-only GitHub reviews.
+                    </div>
+                  </div>
+                  <Switch
+                    checked={draftPolicy?.approval_mode === "approve_acceptable"}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) => {
+                      if (!draftPolicy) return;
+                      setDraftOverride({
+                        key: policyKey,
+                        config: {
+                          ...draftPolicy,
+                          approval_mode: (checked ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode,
+                        },
+                      });
+                    }}
+                  />
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <NumberPolicyInput
+                    label="Files changed"
+                    value={draftPolicy?.risk_policy.max_files_changed}
+                    min={1}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, max_files_changed: value } },
+                      })
+                    }
+                  />
+                  <NumberPolicyInput
+                    label="Lines changed"
+                    value={draftPolicy?.risk_policy.max_lines_changed}
+                    min={1}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, max_lines_changed: value } },
+                      })
+                    }
+                  />
+                  <NumberPolicyInput
+                    label="Inline comments"
+                    value={draftPolicy?.inline_comment_limit}
+                    min={1}
+                    max={10}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({ key: policyKey, config: { ...draftPolicy, inline_comment_limit: value } })
+                    }
+                  />
+                  <NumberPolicyInput
+                    label="Timeout seconds"
+                    value={draftPolicy?.agent_roster.timeout_seconds}
+                    min={60}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, timeout_seconds: value } },
+                      })
+                    }
+                  />
+                  <NumberPolicyInput
+                    label="Cost ceiling cents"
+                    value={draftPolicy?.agent_roster.max_cost_cents}
+                    min={0}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, max_cost_cents: value } },
+                      })
+                    }
+                  />
+                  <ConfigMetric label="Reviewer quorum" value={draftPolicy?.agent_roster.require_reviewer_quorum ?? "-"} />
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  <PolicyToggle
+                    label="Require passing checks"
+                    checked={draftPolicy?.risk_policy.require_passing_checks ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_passing_checks: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Require mergeable PR"
+                    checked={draftPolicy?.risk_policy.require_mergeable ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_mergeable: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Require up-to-date branch"
+                    checked={draftPolicy?.risk_policy.require_up_to_date ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_up_to_date: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Allow fork PRs"
+                    checked={draftPolicy?.risk_policy.allow_forks ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, allow_forks: checked } },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-2">
+                  <ListTextArea
+                    label="Sensitive paths"
+                    value={draftPolicy?.risk_policy.sensitive_paths ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, sensitive_paths: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Excluded categories"
+                    value={draftPolicy?.risk_policy.exclude_categories ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, exclude_categories: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Required checks"
+                    value={draftPolicy?.risk_policy.required_checks ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, required_checks: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Eligible authors"
+                    value={draftPolicy?.risk_policy.eligible_authors ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, eligible_authors: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Reviewer agents"
+                    value={draftPolicy?.agent_roster.reviewers ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, reviewers: items } },
+                      })
+                    }
+                  />
+                  <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">Orchestrator</Label>
+                    <Input
+                      value={draftPolicy?.agent_roster.orchestrator ?? ""}
+                      disabled={!draftPolicy}
+                      onChange={(event) =>
+                        draftPolicy &&
+                        setDraftOverride({
+                          key: policyKey,
+                          config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, orchestrator: event.target.value } },
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-xs text-muted-foreground">Final review template</Label>
+                  <Textarea
+                    value={draftPolicy?.final_review_template ?? ""}
+                    disabled={!draftPolicy}
+                    rows={4}
+                    onChange={(event) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, final_review_template: event.target.value },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-foreground">Description requirements</div>
+                  <div className="grid gap-3 lg:grid-cols-3">
+                    {draftPolicy?.description_policy.requirements.map((requirement, index) => (
+                      <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
+                        <Input
+                          value={requirement.title}
+                          disabled={!draftPolicy}
+                          aria-label={`${requirement.key} title`}
+                          onChange={(event) => {
+                            if (!draftPolicy) return;
+                            const requirements = [...draftPolicy.description_policy.requirements];
+                            requirements[index] = { ...requirement, title: event.target.value };
+                            setDraftOverride({
+                              key: policyKey,
+                              config: { ...draftPolicy, description_policy: { requirements } },
+                            });
+                          }}
+                        />
+                        <Textarea
+                          value={requirement.prompt}
+                          disabled={!draftPolicy}
+                          rows={4}
+                          aria-label={`${requirement.key} prompt`}
+                          onChange={(event) => {
+                            if (!draftPolicy) return;
+                            const requirements = [...draftPolicy.description_policy.requirements];
+                            requirements[index] = { ...requirement, prompt: event.target.value };
+                            setDraftOverride({
+                              key: policyKey,
+                              config: { ...draftPolicy, description_policy: { requirements } },
+                            });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <Button
+                    disabled={!draftPolicy || savePolicy.isPending}
+                    onClick={() => draftPolicy && savePolicy.mutate(draftPolicy)}
+                  >
+                    Save policy
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="insights">
+            <div className="grid gap-3 sm:grid-cols-4">
+              <InsightCard label="Reviews" value={insightCounts.total} />
+              <InsightCard label="Approved" value={insightCounts.approved} />
+              <InsightCard label="Escalated" value={insightCounts.escalated} />
+              <InsightCard label="Stale" value={insightCounts.stale} />
+            </div>
+          </TabsContent>
+        </Tabs>
+      </div>
+    </main>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  onValueChange,
+  children,
+}: {
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Select value={value} onValueChange={onValueChange}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>{children}</SelectContent>
+      </Select>
+    </div>
+  );
+}
+
+function ConfigMetric({ label, value }: { label: string; value: string | number }) {
+	return (
+		<div className="rounded-md border border-border p-4">
+			<div className="text-xs text-muted-foreground">{label}</div>
+			<div className="mt-2 text-lg font-semibold text-foreground">{value}</div>
+		</div>
+	);
+}
+
+function NumberPolicyInput({
+	label,
+	value,
+	min,
+	max,
+	disabled,
+	onChange,
+}: {
+	label: string;
+	value?: number;
+	min: number;
+	max?: number;
+	disabled?: boolean;
+	onChange: (value: number) => void;
+}) {
+	return (
+		<div className="rounded-md border border-border p-4">
+			<Label className="text-xs text-muted-foreground">{label}</Label>
+			<Input
+				className="mt-2"
+				type="number"
+				min={min}
+				max={max}
+				value={value ?? ""}
+				disabled={disabled}
+				onChange={(event) => {
+					const parsed = Number.parseInt(event.target.value, 10);
+					if (Number.isNaN(parsed)) return;
+					onChange(Math.max(min, max ? Math.min(max, parsed) : parsed));
+				}}
+			/>
+		</div>
+	);
+}
+
+function PolicyToggle({
+	label,
+	checked,
+	disabled,
+	onCheckedChange,
+}: {
+	label: string;
+	checked: boolean;
+	disabled?: boolean;
+	onCheckedChange: (checked: boolean) => void;
+}) {
+	return (
+		<div className="flex items-center justify-between rounded-md border border-border p-4">
+			<Label className="text-sm text-foreground">{label}</Label>
+			<Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+		</div>
+	);
+}
+
+function ListTextArea({
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string[];
+  disabled?: boolean;
+  onChange: (items: string[]) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Textarea
+        value={value.join("\n")}
+        disabled={disabled}
+        rows={4}
+        onChange={(event) =>
+          onChange(event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))
+        }
+      />
+    </div>
+  );
+}
+
+function InsightCard({ label, value }: { label: string; value: number }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="text-xs text-muted-foreground">{label}</div>
+        <div className="mt-2 text-2xl font-semibold text-foreground">{value}</div>
+      </CardContent>
+    </Card>
+  );
+}

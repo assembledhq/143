@@ -19,7 +19,9 @@ describe("AboutPage", () => {
     expect(screen.getByText(/Code volume, especially these days, is a bad metric/i)).toBeInTheDocument();
     expect(screen.getByText(/keeping the codebase healthy/i)).toBeInTheDocument();
     expect(screen.getByText(/real product work, not just demos and internal tools/i)).toBeInTheDocument();
+    expect(screen.getByText(/velocity gains we expected/i)).toBeInTheDocument();
     expect(screen.getByText(/shared infrastructure problem/i)).toBeInTheDocument();
+    expect(screen.getByText(/That is why we built 143.dev/i)).toBeInTheDocument();
     expect(screen.queryByText(/We had real FOMO/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Also, vibe coding/i)).not.toBeInTheDocument();
   });
@@ -30,6 +32,14 @@ describe("AboutPage", () => {
     expect(screen.getByRole("heading", { name: "Where it started" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "What we built" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Open source from day one" })).toBeInTheDocument();
+  });
+
+  it("describes team-visible agent infrastructure", () => {
+    renderWithProviders(<AboutPage />);
+
+    expect(screen.getByText(/auto-approve low-risk changes against thresholds you define/i)).toBeInTheDocument();
+    expect(screen.getByText(/same repos, credentials, tools, logs,\s*docs/i)).toBeInTheDocument();
+    expect(screen.getByText(/product context available to the whole team/i)).toBeInTheDocument();
   });
 
   it("covers the team-level product choices behind 143", () => {
