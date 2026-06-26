@@ -136,6 +136,8 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
 export type OpenCodeBackingProvider = "opencode" | "anthropic" | "openai" | "gemini" | "openrouter";
 export type OpenCodePresetConfidence = "high" | "medium" | "low";
 
+export const DEFAULT_OPENCODE_BACKING_PROVIDER: OpenCodeBackingProvider = "openrouter";
+
 export interface OpenCodeKeyPresetDetection {
   provider: OpenCodeBackingProvider;
   confidence: OpenCodePresetConfidence;
@@ -191,10 +193,10 @@ export function detectOpenCodeKeyPreset(apiKey: string): OpenCodeKeyPresetDetect
     };
   }
   return {
-    provider: "opencode",
+    provider: DEFAULT_OPENCODE_BACKING_PROVIDER,
     confidence: "low",
     message: trimmed
-      ? "This key shape is ambiguous. Defaulting to OpenCode native; you can change the provider."
+      ? "This key shape is ambiguous. Defaulting to OpenCode via OpenRouter; you can change the provider."
       : "Paste a key to detect the provider preset.",
   };
 }

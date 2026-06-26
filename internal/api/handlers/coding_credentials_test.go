@@ -1241,3 +1241,43 @@ func TestAuthTypeForProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenCodeBackingProviderFromInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  models.ProviderName
+	}{
+		{
+			name:  "omitted defaults to openrouter",
+			input: "",
+			want:  models.ProviderOpenRouter,
+		},
+		{
+			name:  "explicit native opencode is preserved",
+			input: string(models.ProviderOpenCode),
+			want:  models.ProviderOpenCode,
+		},
+		{
+			name:  "explicit openrouter is preserved",
+			input: string(models.ProviderOpenRouter),
+			want:  models.ProviderOpenRouter,
+		},
+		{
+			name:  "unknown defaults to openrouter",
+			input: "unknown",
+			want:  models.ProviderOpenRouter,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, openCodeBackingProviderFromInput(tt.input), "OpenCode backing provider should normalize input")
+		})
+	}
+}
