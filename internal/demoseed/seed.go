@@ -340,7 +340,57 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		},
 		{
 			name:     "demo sessions exist",
-			query:    `SELECT count(*) FROM sessions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid)`,
+			query:    `SELECT count(*) FROM sessions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo issues exist",
+			query:    `SELECT count(*) FROM issues WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo issue priority scores exist",
+			query:    `SELECT count(*) FROM priority_scores WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo issue complexity estimates exist",
+			query:    `SELECT count(*) FROM complexity_estimates WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND issue_id IN ('00000000-0000-4000-a000-000000000600'::uuid, '00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000603'::uuid, '00000000-0000-4000-a000-000000000604'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo session issue links exist",
+			query:    `SELECT count(*) FROM session_issue_links WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND session_id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo session threads exist",
+			query:    `SELECT count(*) FROM session_threads WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000700'::uuid, '00000000-0000-4000-a000-000000000701'::uuid, '00000000-0000-4000-a000-000000000702'::uuid, '00000000-0000-4000-a000-000000000703'::uuid, '00000000-0000-4000-a000-000000000704'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo session thread file events exist",
+			query:    `SELECT count(*) FROM session_thread_file_events WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND session_id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo review comments exist",
+			query:    `SELECT count(*) FROM session_review_comments WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000730'::uuid, '00000000-0000-4000-a000-000000000731'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo validation rows exist",
+			query:    `SELECT count(*) FROM validations WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000750'::uuid, '00000000-0000-4000-a000-000000000751'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo session questions exist",
+			query:    `SELECT count(*) FROM session_questions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000740'::uuid, '00000000-0000-4000-a000-000000000741'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo session issue snapshots exist",
+			query:    `SELECT count(*) FROM session_turn_issue_snapshots WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000640'::uuid, '00000000-0000-4000-a000-000000000641'::uuid, '00000000-0000-4000-a000-000000000642'::uuid)`,
 			expected: 3,
 		},
 		{
@@ -351,6 +401,41 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		{
 			name:     "demo preview uses sentinel runtime",
 			query:    `SELECT count(*) FROM preview_instances WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000400'::uuid AND provider = 'seeded' AND worker_node_id = 'seeded'`,
+			expected: 1,
+		},
+		{
+			name:     "demo preview target exists",
+			query:    `SELECT count(*) FROM preview_targets WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000431'::uuid AND preview_group_id = '00000000-0000-4000-a000-000000000430'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo preview group points at current target",
+			query:    `SELECT count(*) FROM preview_groups WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000430'::uuid AND current_target_id = '00000000-0000-4000-a000-000000000431'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo preview runtime exists",
+			query:    `SELECT count(*) FROM preview_runtimes WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000433'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo preview logs exist",
+			query:    `SELECT count(*) FROM preview_logs WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000435'::uuid, '00000000-0000-4000-a000-000000000436'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo PR health current exists",
+			query:    `SELECT count(*) FROM pull_request_health_current WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND pull_request_id = '00000000-0000-4000-a000-000000000501'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo PR health snapshot exists",
+			query:    `SELECT count(*) FROM pull_request_health_snapshots WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND pull_request_id = '00000000-0000-4000-a000-000000000501'::uuid AND version = 1`,
+			expected: 1,
+		},
+		{
+			name:     "demo repository PR template exists",
+			query:    `SELECT count(*) FROM repository_pr_templates WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000120'::uuid`,
 			expected: 1,
 		},
 	}
@@ -373,7 +458,9 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			  AND session_id IN (
 			    '00000000-0000-4000-a000-000000000300'::uuid,
 			    '00000000-0000-4000-a000-000000000301'::uuid,
-			    '00000000-0000-4000-a000-000000000302'::uuid
+			    '00000000-0000-4000-a000-000000000302'::uuid,
+			    '00000000-0000-4000-a000-000000000303'::uuid,
+			    '00000000-0000-4000-a000-000000000304'::uuid
 			  )
 			GROUP BY session_id, role, turn_number, content
 			HAVING count(*) > 1
@@ -394,7 +481,9 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			  AND session_id IN (
 			    '00000000-0000-4000-a000-000000000300'::uuid,
 			    '00000000-0000-4000-a000-000000000301'::uuid,
-			    '00000000-0000-4000-a000-000000000302'::uuid
+			    '00000000-0000-4000-a000-000000000302'::uuid,
+			    '00000000-0000-4000-a000-000000000303'::uuid,
+			    '00000000-0000-4000-a000-000000000304'::uuid
 			  )
 			GROUP BY session_id, level, message, turn_number
 			HAVING count(*) > 1
