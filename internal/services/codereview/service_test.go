@@ -46,6 +46,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, 1, sessions.createCalls, "service should create a normal 143 session")
 				require.Equal(t, models.SessionOriginCodeReview, sessions.created.Origin, "session should use code_review origin")
 				require.Equal(t, models.SessionInteractionModeSingleRun, sessions.created.InteractionMode, "review sessions should be single-run")
+				require.Equal(t, models.SessionStatusIdle, sessions.created.Status, "review sessions should start idle so reviewer tabs can claim the first turn")
 				require.Equal(t, 1, metadata.createCalls, "service should create code review metadata")
 				require.True(t, metadata.created.FromFork, "service should persist fork source evidence on review metadata")
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")

@@ -404,6 +404,18 @@ type CodeReviewAgentResult struct {
 	CreatedAt        time.Time                   `db:"created_at" json:"created_at"`
 }
 
+type CodeReviewPromptArtifact struct {
+	ID            uuid.UUID       `db:"id" json:"id"`
+	OrgID         uuid.UUID       `db:"org_id" json:"org_id"`
+	SessionID     uuid.UUID       `db:"session_id" json:"session_id"`
+	ArtifactKey   string          `db:"artifact_key" json:"artifact_key"`
+	Role          string          `db:"role" json:"role"`
+	AgentProvider string          `db:"agent_provider" json:"agent_provider,omitempty"`
+	Content       string          `db:"content" json:"content"`
+	Metadata      json.RawMessage `db:"metadata" json:"metadata,omitempty"`
+	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+}
+
 type CodeReviewFinding struct {
 	ID                uuid.UUID                   `db:"id" json:"id"`
 	OrgID             uuid.UUID                   `db:"org_id" json:"org_id"`
@@ -434,8 +446,9 @@ type CodeReviewListItem struct {
 }
 
 type CodeReviewEvidence struct {
-	AgentResults []CodeReviewAgentResult `json:"agent_results"`
-	Findings     []CodeReviewFinding     `json:"findings"`
+	AgentResults    []CodeReviewAgentResult    `json:"agent_results"`
+	Findings        []CodeReviewFinding        `json:"findings"`
+	PromptArtifacts []CodeReviewPromptArtifact `json:"prompt_artifacts,omitempty"`
 }
 
 type CodeReviewTemplate string
@@ -486,6 +499,7 @@ type CodeReviewRiskInput struct {
 	Mergeable              bool
 	UpToDate               bool
 	Author                 string
+	AuthorClass            string
 	FromFork               bool
 	UnresolvedHumanThreads int
 	BlockingFindings       int
@@ -557,7 +571,7 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.FromFork && !policy.RiskPolicy.AllowForks {
 		reasons = append(reasons, "fork PRs are not eligible for approval")
 	}
-	if len(policy.RiskPolicy.EligibleAuthors) > 0 && !stringInSlice(input.Author, policy.RiskPolicy.EligibleAuthors) {
+	if len(policy.RiskPolicy.EligibleAuthors) > 0 && !codeReviewAuthorAllowed(input.Author, input.AuthorClass, policy.RiskPolicy.EligibleAuthors) {
 		reasons = append(reasons, "PR author is not eligible for automated approval")
 	}
 	if input.UnresolvedHumanThreads > 0 {
@@ -594,6 +608,36 @@ func stringInSlice(needle string, haystack []string) bool {
 	for _, item := range haystack {
 		if strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(needle)) {
 			return true
+		}
+	}
+	return false
+}
+
+func codeReviewAuthorAllowed(author, authorClass string, allowed []string) bool {
+	author = strings.TrimSpace(author)
+	authorClass = strings.ToLower(strings.TrimSpace(authorClass))
+	for _, item := range allowed {
+		item = strings.ToLower(strings.TrimSpace(item))
+		switch item {
+		case "", "none":
+			continue
+		case "all", "*":
+			return true
+		case "human", "humans":
+			if authorClass == "human" {
+				return true
+			}
+		case "143", "143-authored", "app", "bot", "agent":
+			if authorClass == "143" || authorClass == "app" || authorClass == "agent" {
+				return true
+			}
+		default:
+			if strings.EqualFold(author, item) {
+				return true
+			}
+			if strings.HasPrefix(item, "login:") && strings.EqualFold(author, strings.TrimPrefix(item, "login:")) {
+				return true
+			}
 		}
 	}
 	return false
@@ -653,7 +697,7 @@ func matchesAnyCodeReviewPath(path string, patterns []string) bool {
 			continue
 		}
 		normalizedPattern := strings.TrimSuffix(pattern, "/**")
-		if ok, _ := filepath.Match(pattern, path); ok {
+		if ok, err := filepath.Match(pattern, path); err == nil && ok {
 			return true
 		}
 		if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") && strings.Contains(path, strings.Trim(pattern, "*")) {

@@ -203,6 +203,22 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			}},
 		},
 		{
+			name: "allows configured author classes",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthors = []string{"human"}
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "sam",
+				AuthorClass:       "human",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: true},
+		},
+		{
 			name: "blocks policy changes by default",
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,

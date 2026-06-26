@@ -207,9 +207,22 @@ export interface CodeReviewFinding {
   created_at: string;
 }
 
+export interface CodeReviewPromptArtifact {
+  id: string;
+  org_id: string;
+  session_id: string;
+  artifact_key: string;
+  role: "reviewer" | "orchestrator" | "description_policy" | string;
+  agent_provider?: string;
+  content: string;
+  metadata?: unknown;
+  created_at: string;
+}
+
 export interface CodeReviewEvidence {
   agent_results: CodeReviewAgentResult[];
   findings: CodeReviewFinding[];
+  prompt_artifacts?: CodeReviewPromptArtifact[];
 }
 
 export type AgentCapabilityID =

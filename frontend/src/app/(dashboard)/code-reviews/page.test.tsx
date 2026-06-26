@@ -3,7 +3,7 @@ import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import CodeReviewsPage from "./page";
-import type { CodeReviewListItem, CodeReviewResolvedPolicy, ListResponse, Repository, SingleResponse } from "@/lib/types";
+import type { CodeReviewListItem, CodeReviewResolvedPolicy, CodeReviewTemplateOption, ListResponse, Repository, SingleResponse } from "@/lib/types";
 
 const repo: Repository = {
   id: "repo-1",
@@ -83,12 +83,27 @@ const review: CodeReviewListItem = {
   pull_request_author: "anya",
 };
 
+const template: CodeReviewTemplateOption = {
+  key: "small_backend_change",
+  title: "Small backend change",
+  description: "Small backend changes outside sensitive packages.",
+  config: {
+    ...policy.config,
+    approval_mode: "approve_acceptable",
+    risk_policy: {
+      ...policy.config.risk_policy,
+      max_files_changed: 4,
+    },
+  },
+};
+
 describe("CodeReviewsPage", () => {
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     server.use(
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repo], meta: {} } satisfies ListResponse<Repository>)),
       http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
+      http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
       http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
     );
 
@@ -106,5 +121,13 @@ describe("CodeReviewsPage", () => {
     });
     expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
     expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
+    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
+    await user.click(screen.getByRole("button", { name: /Apply template/i }));
+    expect(screen.getAllByDisplayValue("4").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: /Add requirement/i }));
+    expect(screen.getByDisplayValue("Custom requirement")).toBeInTheDocument();
   });
 });

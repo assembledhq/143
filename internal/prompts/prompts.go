@@ -289,6 +289,45 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 	return render("review_loop_fix.template", data)
 }
 
+// ─── Code Reviews ───────────────────────────────────────────────────────────
+
+type CodeReviewReviewerPromptData struct {
+	Repository              string
+	PullNumber              int
+	PullRequestURL          string
+	Title                   string
+	Author                  string
+	BaseSHA                 string
+	HeadSHA                 string
+	PolicyVersion           int
+	ReviewDepth             string
+	ApprovalMode            any
+	InlineCommentLimit      int
+	RequiredReviewerQuorum  int
+	DescriptionRequirements []CodeReviewDescriptionRequirementPromptData
+	MaxFilesChanged         int
+	MaxLinesChanged         int
+	RequirePassingChecks    bool
+	RequireMergeable        bool
+	RequireUpToDate         bool
+	AllowForks              bool
+	ExcludeSensitivePaths   bool
+	SensitivePaths          []string
+	ExcludeCategories       []string
+	RequiredChecks          []string
+	ChangedFiles            []string
+}
+
+type CodeReviewDescriptionRequirementPromptData struct {
+	Title         string
+	Prompt        string
+	Applicability string
+}
+
+func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
+	return render("code_review_reviewer.template", data)
+}
+
 // ─── Automations ────────────────────────────────────────────────────────────
 
 type AutomationGoalFastImprovementPromptData struct {

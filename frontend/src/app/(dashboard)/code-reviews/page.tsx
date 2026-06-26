@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw } from "lucide-react";
+import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw, Plus, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,7 @@ const ALL_REPOSITORIES = "all";
 const ALL_DECISIONS = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+const NO_TEMPLATE = "none";
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -88,6 +89,7 @@ export default function CodeReviewsPage() {
   const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
+  const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
@@ -113,6 +115,10 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
   });
+  const templatesQuery = useQuery({
+    queryKey: queryKeys.codeReviews.templates,
+    queryFn: () => api.codeReviews.templates(),
+  });
 
   const policyKey = `${repositoryId ?? "org"}:${policyQuery.data?.data.policy?.id ?? policyQuery.data?.data.source ?? "loading"}`;
   const serverPolicy = policyQuery.data?.data.config;
@@ -134,6 +140,8 @@ export default function CodeReviewsPage() {
 
   const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
   const repositories = repositoriesQuery.data?.data ?? [];
+  const templates = templatesQuery.data?.data ?? [];
+  const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const insightCounts = useMemo(() => {
     return reviews.reduce(
       (acc, review) => {
@@ -298,6 +306,27 @@ export default function CodeReviewsPage() {
                 <CardTitle>Bot behavior</CardTitle>
               </CardHeader>
               <CardContent className="space-y-5">
+                <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
+                  <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
+                    <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
+                    {templates.map((template) => (
+                      <SelectItem key={template.key} value={template.key}>
+                        {template.title}
+                      </SelectItem>
+                    ))}
+                  </FilterSelect>
+                  <Button
+                    variant="outline"
+                    disabled={!selectedTemplate}
+                    onClick={() => {
+                      if (!selectedTemplate) return;
+                      setDraftOverride({ key: policyKey, config: clonePolicy(selectedTemplate.config) });
+                    }}
+                  >
+                    Apply template
+                  </Button>
+                </div>
+
                 <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
                   <div>
                     <div className="text-sm font-medium text-foreground">Enable 143 Code Reviewer</div>
@@ -550,24 +579,106 @@ export default function CodeReviewsPage() {
                 </div>
 
                 <div className="space-y-3">
-                  <div className="text-sm font-medium text-foreground">Description requirements</div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-sm font-medium text-foreground">Description requirements</div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!draftPolicy}
+                      onClick={() => {
+                        if (!draftPolicy) return;
+                        const nextIndex = draftPolicy.description_policy.requirements.length + 1;
+                        setDraftOverride({
+                          key: policyKey,
+                          config: {
+                            ...draftPolicy,
+                            description_policy: {
+                              requirements: [
+                                ...draftPolicy.description_policy.requirements,
+                                {
+                                  key: `custom_${nextIndex}`,
+                                  title: "Custom requirement",
+                                  prompt: "",
+                                  required: true,
+                                },
+                              ],
+                            },
+                          },
+                        });
+                      }}
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add requirement
+                    </Button>
+                  </div>
                   <div className="grid gap-3 lg:grid-cols-3">
                     {draftPolicy?.description_policy.requirements.map((requirement, index) => (
                       <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
-                        <Input
-                          value={requirement.title}
-                          disabled={!draftPolicy}
-                          aria-label={`${requirement.key} title`}
-                          onChange={(event) => {
-                            if (!draftPolicy) return;
-                            const requirements = [...draftPolicy.description_policy.requirements];
-                            requirements[index] = { ...requirement, title: event.target.value };
-                            setDraftOverride({
-                              key: policyKey,
-                              config: { ...draftPolicy, description_policy: { requirements } },
-                            });
-                          }}
-                        />
+                        <div className="flex items-center gap-2">
+                          <Input
+                            value={requirement.title}
+                            disabled={!draftPolicy}
+                            aria-label={`${requirement.key} title`}
+                            onChange={(event) => {
+                              if (!draftPolicy) return;
+                              const requirements = [...draftPolicy.description_policy.requirements];
+                              requirements[index] = { ...requirement, title: event.target.value };
+                              setDraftOverride({
+                                key: policyKey,
+                                config: { ...draftPolicy, description_policy: { requirements } },
+                              });
+                            }}
+                          />
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            disabled={!draftPolicy || draftPolicy.description_policy.requirements.length <= 1}
+                            aria-label={`Remove ${requirement.title}`}
+                            onClick={() => {
+                              if (!draftPolicy) return;
+                              const requirements = draftPolicy.description_policy.requirements.filter((_, itemIndex) => itemIndex !== index);
+                              setDraftOverride({
+                                key: policyKey,
+                                config: { ...draftPolicy, description_policy: { requirements } },
+                              });
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                          <Input
+                            value={requirement.applicability ?? ""}
+                            disabled={!draftPolicy}
+                            placeholder="Applicability"
+                            aria-label={`${requirement.key} applicability`}
+                            onChange={(event) => {
+                              if (!draftPolicy) return;
+                              const requirements = [...draftPolicy.description_policy.requirements];
+                              requirements[index] = { ...requirement, applicability: event.target.value };
+                              setDraftOverride({
+                                key: policyKey,
+                                config: { ...draftPolicy, description_policy: { requirements } },
+                              });
+                            }}
+                          />
+                          <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+                            <Label className="text-xs text-muted-foreground">Required</Label>
+                            <Switch
+                              checked={requirement.required}
+                              disabled={!draftPolicy}
+                              onCheckedChange={(checked) => {
+                                if (!draftPolicy) return;
+                                const requirements = [...draftPolicy.description_policy.requirements];
+                                requirements[index] = { ...requirement, required: checked };
+                                setDraftOverride({
+                                  key: policyKey,
+                                  config: { ...draftPolicy, description_policy: { requirements } },
+                                });
+                              }}
+                            />
+                          </div>
+                        </div>
                         <Textarea
                           value={requirement.prompt}
                           disabled={!draftPolicy}
@@ -629,7 +740,7 @@ function FilterSelect({
     <div className="flex min-w-0 flex-col gap-2">
       <Label className="text-xs text-muted-foreground">{label}</Label>
       <Select value={value} onValueChange={onValueChange}>
-        <SelectTrigger>
+        <SelectTrigger aria-label={label}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>{children}</SelectContent>

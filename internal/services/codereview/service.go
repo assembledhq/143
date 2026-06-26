@@ -170,7 +170,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		InteractionMode:  models.SessionInteractionModeSingleRun,
 		ValidationPolicy: models.SessionValidationPolicySkip,
 		AgentType:        resolved.Config.AgentRoster.Orchestrator,
-		Status:           models.SessionStatusPending,
+		Status:           models.SessionStatusIdle,
 		AutonomyLevel:    models.SessionAutonomySupervised,
 		TokenMode:        models.DefaultSessionTokenMode,
 		RepositoryID:     &repositoryID,

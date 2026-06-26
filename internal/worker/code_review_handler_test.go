@@ -72,6 +72,76 @@ func TestCodeReviewInlineComments(t *testing.T) {
 	}
 }
 
+func TestParseCodeReviewFindings(t *testing.T) {
+	t.Parallel()
+
+	output := `Looks mostly good.
+::code-comment{title="[P1] Missing org filter" body="This subquery can read rows from another org when IDs collide." file="/workspace/internal/db/users.go" start=42 end=43 priority=1}
+::code-comment{title="[P3] Broad note" body="No line means this should be ignored." file="internal/db/users.go"}`
+
+	findings := parseCodeReviewFindings(output, []string{"internal/db/users.go"})
+
+	require.Equal(t, []models.CodeReviewFinding{{
+		DedupeKey:  "internal/db/users.go:42:43:missing org filter",
+		Severity:   models.CodeReviewFindingSeverityHigh,
+		Confidence: models.CodeReviewFindingConfidenceHigh,
+		Path:       stringPtr("internal/db/users.go"),
+		StartLine:  intPtr(42),
+		EndLine:    intPtr(43),
+		Summary:    "Missing org filter",
+		Body:       "This subquery can read rows from another org when IDs collide.",
+	}}, findings, "parser should persist concrete directive-backed findings with repo-relative paths")
+}
+
+func TestCodeReviewDescriptionPassed(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	body := "Fix invoice rounding.\n\nTesting: go test ./...\n\nPreview: https://preview.example.com"
+
+	tests := []struct {
+		name    string
+		body    *string
+		files   []codereview.PullRequestFile
+		passed  bool
+		message string
+	}{
+		{
+			name:   "passes applicable built-ins",
+			body:   &body,
+			files:  []codereview.PullRequestFile{{Filename: "frontend/src/App.tsx", Additions: 40, Deletions: 2}},
+			passed: true,
+		},
+		{
+			name:   "skips nontrivial and UI requirements for tiny backend change",
+			body:   stringPtr("Fix typo in log message."),
+			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 1}},
+			passed: true,
+		},
+		{
+			name:   "requires testing evidence for nontrivial change",
+			body:   stringPtr("Fix invoice rounding with backend changes."),
+			files:  []codereview.PullRequestFile{{Filename: "internal/api/router.go", Additions: 40}},
+			passed: false,
+		},
+		{
+			name:   "requires UI evidence for frontend change",
+			body:   stringPtr("Fix chart tooltip.\n\nTesting: npm test"),
+			files:  []codereview.PullRequestFile{{Filename: "frontend/src/Chart.tsx", Additions: 8}},
+			passed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pr := models.PullRequest{Body: tt.body}
+			require.Equal(t, tt.passed, codeReviewDescriptionPassed(policy, pr, tt.files), "description policy should respect applicability and built-in evidence checks")
+		})
+	}
+}
+
 func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -412,5 +482,9 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 }
 
 func stringPtr(value string) *string {
+	return &value
+}
+
+func intPtr(value int) *int {
 	return &value
 }

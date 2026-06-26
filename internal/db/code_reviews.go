@@ -33,6 +33,9 @@ const codeReviewAgentResultColumns = `id, org_id, session_id, agent_provider, ag
 const codeReviewFindingColumns = `id, org_id, session_id, agent_result_id, dedupe_key, severity,
 	confidence, path, start_line, end_line, summary, body, selected_for_inline, github_comment_id, created_at`
 
+const codeReviewPromptArtifactColumns = `id, org_id, session_id, artifact_key, role, agent_provider,
+	content, metadata, created_at`
+
 func (s *CodeReviewStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewPolicyColumns+`
@@ -227,6 +230,21 @@ func (s *CodeReviewStore) GetByOutputKey(ctx context.Context, orgID uuid.UUID, o
 	return collectOneCodeReviewMetadata(rows)
 }
 
+func (s *CodeReviewStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND session_id = @session_id`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query code review by session id: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
 func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewMetadataColumns+`
@@ -255,13 +273,30 @@ func (s *CodeReviewStore) MarkRunning(ctx context.Context, orgID, sessionID uuid
 		SET status = 'running'
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
-		  AND status = 'queued'
+		  AND status IN ('queued', 'running')
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":     orgID,
 		"session_id": sessionID,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review running: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) SetPromptArtifactKey(ctx context.Context, orgID, sessionID uuid.UUID, artifactKey string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET prompt_artifact_key = @prompt_artifact_key
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id":              orgID,
+		"session_id":          sessionID,
+		"prompt_artifact_key": artifactKey,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review prompt artifact key: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
 }
@@ -282,6 +317,28 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 		return 0, fmt.Errorf("mark stale code reviews: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET status = 'stale',
+		    stale = true,
+		    decision = 'blocked',
+		    acceptable = false,
+		    failure_reason = @failure_reason,
+		    completed_at = COALESCE(completed_at, now())
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id":         orgID,
+		"session_id":     sessionID,
+		"failure_reason": reason,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review stale: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
 }
 
 type CompleteCodeReviewParams struct {
@@ -320,6 +377,27 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("complete code review: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) RecordGitHubReview(ctx context.Context, orgID, sessionID uuid.UUID, githubReviewID int64, githubReviewURL string, finalReviewBody string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET github_review_id = @github_review_id,
+		    github_review_url = @github_review_url,
+		    final_review_body = @final_review_body
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id":            orgID,
+		"session_id":        sessionID,
+		"github_review_id":  githubReviewID,
+		"github_review_url": githubReviewURL,
+		"final_review_body": finalReviewBody,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("record code review GitHub review: %w", err)
 	}
 	return collectOneCodeReviewMetadata(rows)
 }
@@ -463,6 +541,73 @@ func (s *CodeReviewStore) ListAgentResults(ctx context.Context, orgID, sessionID
 		return nil, fmt.Errorf("list code review agent results: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewAgentResult])
+}
+
+func (s *CodeReviewStore) UpdateAgentResultOutcome(ctx context.Context, orgID, resultID uuid.UUID, status models.CodeReviewAgentResultStatus, rawOutput *string, structuredResult json.RawMessage) (models.CodeReviewAgentResult, error) {
+	if err := status.Validate(); err != nil {
+		return models.CodeReviewAgentResult{}, err
+	}
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_agent_results
+		SET status = @status,
+		    raw_output = @raw_output,
+		    structured_result = @structured_result
+		WHERE org_id = @org_id
+		  AND id = @id
+		RETURNING `+codeReviewAgentResultColumns, pgx.NamedArgs{
+		"org_id":            orgID,
+		"id":                resultID,
+		"status":            status,
+		"raw_output":        rawOutput,
+		"structured_result": structuredResult,
+	})
+	if err != nil {
+		return models.CodeReviewAgentResult{}, fmt.Errorf("update code review agent result: %w", err)
+	}
+	return collectOneCodeReviewAgentResult(rows)
+}
+
+func (s *CodeReviewStore) CreatePromptArtifact(ctx context.Context, artifact *models.CodeReviewPromptArtifact) error {
+	rows, err := s.db.Query(ctx, `
+		INSERT INTO code_review_prompt_artifacts (
+			org_id, session_id, artifact_key, role, agent_provider, content, metadata
+		) VALUES (
+			@org_id, @session_id, @artifact_key, @role, @agent_provider, @content, COALESCE(@metadata, '{}'::jsonb)
+		)
+		ON CONFLICT (org_id, artifact_key) DO UPDATE
+		SET content = EXCLUDED.content,
+		    metadata = EXCLUDED.metadata
+		RETURNING `+codeReviewPromptArtifactColumns, pgx.NamedArgs{
+		"org_id":         artifact.OrgID,
+		"session_id":     artifact.SessionID,
+		"artifact_key":   artifact.ArtifactKey,
+		"role":           artifact.Role,
+		"agent_provider": artifact.AgentProvider,
+		"content":        artifact.Content,
+		"metadata":       artifact.Metadata,
+	})
+	if err != nil {
+		return fmt.Errorf("create code review prompt artifact: %w", err)
+	}
+	created, err := collectOneCodeReviewPromptArtifact(rows)
+	if err != nil {
+		return err
+	}
+	*artifact = created
+	return nil
+}
+
+func (s *CodeReviewStore) ListPromptArtifacts(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.CodeReviewPromptArtifact, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewPromptArtifactColumns+`
+		FROM code_review_prompt_artifacts
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		ORDER BY created_at ASC, id ASC`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("list code review prompt artifacts: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewPromptArtifact])
 }
 
 func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
@@ -631,4 +776,13 @@ func collectOneCodeReviewFinding(rows pgx.Rows) (models.CodeReviewFinding, error
 		return models.CodeReviewFinding{}, err
 	}
 	return finding, nil
+}
+
+func collectOneCodeReviewPromptArtifact(rows pgx.Rows) (models.CodeReviewPromptArtifact, error) {
+	defer rows.Close()
+	artifact, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPromptArtifact])
+	if err != nil {
+		return models.CodeReviewPromptArtifact{}, err
+	}
+	return artifact, nil
 }

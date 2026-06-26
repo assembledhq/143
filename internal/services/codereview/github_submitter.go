@@ -74,8 +74,16 @@ type SubmitReviewComment struct {
 }
 
 type SubmitReviewResult struct {
-	ID  int64
-	URL string
+	ID       int64
+	URL      string
+	Comments []SubmitReviewPostedComment
+}
+
+type SubmitReviewPostedComment struct {
+	ID   int64
+	Path string
+	Line int
+	Body string
 }
 
 type PullRequestFilesRequest struct {
@@ -183,8 +191,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -193,7 +200,51 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review response: %w", err)
 	}
-	return SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}, nil
+	result := SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}
+	if decoded.ID != 0 && len(req.Comments) > 0 {
+		if comments, commentsErr := s.listReviewComments(ctx, token, owner, repo, req.PullNumber, decoded.ID); commentsErr == nil {
+			result.Comments = comments
+		}
+	}
+	return result, nil
+}
+
+func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, repo string, pullNumber int, reviewID int64) ([]SubmitReviewPostedComment, error) {
+	commentsURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber, reviewID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, commentsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create review comments request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("list GitHub review comments: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list GitHub review comments returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+	}
+	var decoded []struct {
+		ID   int64  `json:"id"`
+		Path string `json:"path"`
+		Line int    `json:"line"`
+		Body string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return nil, fmt.Errorf("decode GitHub review comments response: %w", err)
+	}
+	comments := make([]SubmitReviewPostedComment, 0, len(decoded))
+	for _, comment := range decoded {
+		comments = append(comments, SubmitReviewPostedComment{
+			ID:   comment.ID,
+			Path: comment.Path,
+			Line: comment.Line,
+			Body: comment.Body,
+		})
+	}
+	return comments, nil
 }
 
 func (s *GitHubSubmitter) PublishCommitStatus(ctx context.Context, req CommitStatusRequest) error {
@@ -244,8 +295,7 @@ func (s *GitHubSubmitter) PublishCommitStatus(ctx context.Context, req CommitSta
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("publish GitHub commit status returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+		return fmt.Errorf("publish GitHub commit status returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
 	}
 	return nil
 }
@@ -299,8 +349,7 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("remove GitHub requested reviewers returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+		return fmt.Errorf("remove GitHub requested reviewers returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
 	}
 	return nil
 }
@@ -350,14 +399,21 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, "", fmt.Errorf("list GitHub pull request files returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+		return nil, "", fmt.Errorf("list GitHub pull request files returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
 	}
 	var files []PullRequestFile
 	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
 		return nil, "", fmt.Errorf("decode GitHub pull request files: %w", err)
 	}
 	return files, parseNextGitHubPath(resp.Header.Get("Link")), nil
+}
+
+func readGitHubErrorBody(resp *http.Response) string {
+	errorBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return fmt.Sprintf("failed to read error body: %v", err)
+	}
+	return strings.TrimSpace(string(errorBody))
 }
 
 func githubReviewEvent(decision SubmitReviewDecision) string {
