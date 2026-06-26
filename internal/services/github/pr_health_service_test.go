@@ -2918,7 +2918,7 @@ func newPRHealthSessionRow(sessionID, orgID uuid.UUID, now time.Time, status mod
 		nil, "", "", int64(0), nil,
 		"", nil, nil, 0,
 		nil, nil, nil, nil, nil, nil, nil,
-		nil, nil, nil, "idle", (*string)(nil), "idle", (*string)(nil), "idle", (*string)(nil), (*string)(nil), nil, nil,
+		nil, nil, nil, "idle", (*string)(nil), "idle", (*string)(nil), (*string)(nil), "idle", (*string)(nil), (*string)(nil), nil, nil,
 		int64(0), now,
 		false, false, false, (*string)(nil), models.LinearPrepareStateNone,
 		nil, nil, nil, nil, now,
