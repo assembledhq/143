@@ -16,15 +16,17 @@ import (
 )
 
 type runCodeReviewPayload struct {
-	OrgID         uuid.UUID `json:"org_id"`
-	SessionID     uuid.UUID `json:"session_id"`
-	MetadataID    uuid.UUID `json:"metadata_id"`
-	RepositoryID  uuid.UUID `json:"repository_id"`
-	PullRequestID uuid.UUID `json:"pull_request_id"`
-	PolicyID      uuid.UUID `json:"policy_id"`
-	PolicyVersion int       `json:"policy_version"`
-	HeadSHA       string    `json:"head_sha"`
-	OutputKey     string    `json:"review_output_key"`
+	OrgID                  uuid.UUID `json:"org_id"`
+	SessionID              uuid.UUID `json:"session_id"`
+	MetadataID             uuid.UUID `json:"metadata_id"`
+	RepositoryID           uuid.UUID `json:"repository_id"`
+	PullRequestID          uuid.UUID `json:"pull_request_id"`
+	PolicyID               uuid.UUID `json:"policy_id"`
+	PolicyVersion          int       `json:"policy_version"`
+	HeadSHA                string    `json:"head_sha"`
+	OutputKey              string    `json:"review_output_key"`
+	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
 }
 
 func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -50,6 +52,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("load code review pull request: %w", err)
 		}
+		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStatePending, "143 Code Reviewer is running")
 		health, err := loadStoredCodeReviewHealth(ctx, stores, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review health: %w", err)
@@ -92,6 +95,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
+		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
 			SessionID:       job.SessionID,
 			Decision:        decision.Decision,
@@ -109,6 +113,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if submission.GitHubReviewID != nil {
 			event = event.Int64("github_review_id", *submission.GitHubReviewID)
 		}
+		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
 		return nil
 	}
@@ -133,6 +138,14 @@ func buildUnavailableCodeReviewOutcome(policy models.CodeReviewPolicyConfig, job
 type codeReviewSubmission struct {
 	GitHubReviewID  *int64
 	GitHubReviewURL *string
+}
+
+type codeReviewStatusPublisher interface {
+	PublishCommitStatus(ctx context.Context, req codereviewsvc.CommitStatusRequest) error
+}
+
+type codeReviewRequestedReviewerRemover interface {
+	RemoveRequestedReviewers(ctx context.Context, req codereviewsvc.RequestedReviewersRequest) error
 }
 
 type liveCodeReviewOutcomeInput struct {
@@ -186,6 +199,105 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 
 type codeReviewFileLister interface {
 	ListPullRequestFiles(ctx context.Context, req codereviewsvc.PullRequestFilesRequest) ([]codereviewsvc.PullRequestFile, error)
+}
+
+func publishCodeReviewStatus(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, state codereviewsvc.CommitStatusState, description string) {
+	if services == nil || services.CodeReviews == nil {
+		return
+	}
+	publisher, ok := services.CodeReviews.(codeReviewStatusPublisher)
+	if !ok {
+		return
+	}
+	if stores == nil || stores.Repositories == nil {
+		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository store unavailable")
+		return
+	}
+	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load repository for code review status")
+		return
+	}
+	if repo.InstallationID == 0 {
+		logger.Warn().Str("repository_id", repo.ID.String()).Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository has no GitHub installation id")
+		return
+	}
+	repository := strings.TrimSpace(pr.GitHubRepo)
+	if repository == "" {
+		repository = strings.TrimSpace(repo.FullName)
+	}
+	if err := publisher.PublishCommitStatus(ctx, codereviewsvc.CommitStatusRequest{
+		InstallationID: repo.InstallationID,
+		Repository:     repository,
+		SHA:            job.HeadSHA,
+		State:          state,
+		Context:        "143 Code Reviewer",
+		Description:    description,
+		TargetURL:      codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
+	}); err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Str("state", string(state)).Msg("failed to publish code review status")
+	}
+}
+
+func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) {
+	reviewer := strings.TrimSpace(job.RequestedReviewerLogin)
+	team := strings.TrimSpace(job.RequestedTeamSlug)
+	if reviewer == "" && team == "" {
+		return
+	}
+	if services == nil || services.CodeReviews == nil {
+		return
+	}
+	remover, ok := services.CodeReviews.(codeReviewRequestedReviewerRemover)
+	if !ok {
+		return
+	}
+	if stores == nil || stores.Repositories == nil {
+		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping requested reviewer cleanup: repository store unavailable")
+		return
+	}
+	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load repository for requested reviewer cleanup")
+		return
+	}
+	if repo.InstallationID == 0 {
+		logger.Warn().Str("repository_id", repo.ID.String()).Str("session_id", job.SessionID.String()).Msg("skipping requested reviewer cleanup: repository has no GitHub installation id")
+		return
+	}
+	repository := strings.TrimSpace(pr.GitHubRepo)
+	if repository == "" {
+		repository = strings.TrimSpace(repo.FullName)
+	}
+	req := codereviewsvc.RequestedReviewersRequest{
+		InstallationID: repo.InstallationID,
+		Repository:     repository,
+		PullNumber:     pr.GitHubPRNumber,
+	}
+	if reviewer != "" {
+		req.Reviewers = []string{reviewer}
+	}
+	if team != "" {
+		req.TeamReviewers = []string{team}
+	}
+	if err := remover.RemoveRequestedReviewers(ctx, req); err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to remove stale code review requested reviewer")
+	}
+}
+
+func codeReviewStatusTargetURL(frontendURL string, sessionID uuid.UUID) string {
+	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
+	if base == "" || sessionID == uuid.Nil {
+		return ""
+	}
+	return base + "/sessions/" + sessionID.String()
+}
+
+func codeReviewFinalStatusDescription(decision models.CodeReviewDecision) string {
+	if decision == models.CodeReviewDecisionApproved {
+		return "143 Code Reviewer approved this PR"
+	}
+	return "143 Code Reviewer completed without approval"
 }
 
 func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) ([]codereviewsvc.PullRequestFile, bool, error) {

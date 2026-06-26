@@ -88,6 +88,32 @@ func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
 	require.Contains(t, body, "Reviewed head: abc123", "final body should include reviewed head")
 }
 
+func TestCodeReviewStatusTargetURL(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+
+	tests := []struct {
+		name        string
+		frontendURL string
+		expected    string
+	}{
+		{name: "empty frontend URL omits target", expected: ""},
+		{name: "trims trailing slash", frontendURL: "https://143.dev/", expected: "https://143.dev/sessions/" + sessionID.String()},
+		{name: "uses base URL", frontendURL: "https://app.143.dev", expected: "https://app.143.dev/sessions/" + sessionID.String()},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := codeReviewStatusTargetURL(tt.frontendURL, sessionID)
+
+			require.Equal(t, tt.expected, actual, "codeReviewStatusTargetURL should build stable session links")
+		})
+	}
+}
+
 func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	t.Parallel()
 

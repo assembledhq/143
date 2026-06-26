@@ -25,6 +25,8 @@ Implemented foundation:
 - conservative `run_code_review` worker handler that loads the captured policy version, records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
 - evidence-gated `run_code_review` approval path that evaluates stored reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
+- GitHub pending/final commit-status publication for code review runs when the worker has GitHub credentials
+- stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
 - `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
 - top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
@@ -33,9 +35,8 @@ Still pending:
 
 - live multi-agent worker orchestration that fans out reviewer tabs and runs native `/review`
 - reviewer-result ingestion backed by live reviewer/orchestrator evidence rather than pre-existing stored result rows
-- inline-comment retry/update and stale requested-reviewer cleanup
+- inline-comment retry/update and posted-comment id persistence
 - prompt artifact storage and recovery for rendered approval prompts
-- GitHub pending/running status publication before the final review
 - unresolved human review-thread checks and richer PR description prompt evaluation
 
 ## Problem

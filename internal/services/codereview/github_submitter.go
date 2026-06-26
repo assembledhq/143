@@ -91,6 +91,33 @@ type PullRequestFile struct {
 	Status    string `json:"status"`
 }
 
+type CommitStatusState string
+
+const (
+	CommitStatusStateError   CommitStatusState = "error"
+	CommitStatusStateFailure CommitStatusState = "failure"
+	CommitStatusStatePending CommitStatusState = "pending"
+	CommitStatusStateSuccess CommitStatusState = "success"
+)
+
+type CommitStatusRequest struct {
+	InstallationID int64
+	Repository     string
+	SHA            string
+	State          CommitStatusState
+	Context        string
+	Description    string
+	TargetURL      string
+}
+
+type RequestedReviewersRequest struct {
+	InstallationID int64
+	Repository     string
+	PullNumber     int
+	Reviewers      []string
+	TeamReviewers  []string
+}
+
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	if s == nil || s.tokens == nil {
 		return SubmitReviewResult{}, fmt.Errorf("github submitter is not configured")
@@ -169,6 +196,115 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	return SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}, nil
 }
 
+func (s *GitHubSubmitter) PublishCommitStatus(ctx context.Context, req CommitStatusRequest) error {
+	if s == nil || s.tokens == nil {
+		return fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return fmt.Errorf("repository must be owner/name")
+	}
+	if req.InstallationID <= 0 {
+		return fmt.Errorf("installation id is required")
+	}
+	if strings.TrimSpace(req.SHA) == "" {
+		return fmt.Errorf("sha is required")
+	}
+	if err := req.State.validate(); err != nil {
+		return err
+	}
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	payload := map[string]any{
+		"state":       req.State,
+		"context":     firstNonEmpty(req.Context, "143 Code Reviewer"),
+		"description": req.Description,
+	}
+	if strings.TrimSpace(req.TargetURL) != "" {
+		payload["target_url"] = req.TargetURL
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal commit status payload: %w", err)
+	}
+	statusURL := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(req.SHA))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, statusURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create commit status request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("publish GitHub commit status: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("publish GitHub commit status returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+	}
+	return nil
+}
+
+func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req RequestedReviewersRequest) error {
+	if s == nil || s.tokens == nil {
+		return fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return fmt.Errorf("repository must be owner/name")
+	}
+	if req.InstallationID <= 0 {
+		return fmt.Errorf("installation id is required")
+	}
+	if req.PullNumber <= 0 {
+		return fmt.Errorf("pull number is required")
+	}
+	reviewers := compactStrings(req.Reviewers)
+	teams := compactStrings(req.TeamReviewers)
+	if len(reviewers) == 0 && len(teams) == 0 {
+		return nil
+	}
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return fmt.Errorf("get installation token: %w", err)
+	}
+	payload := map[string]any{}
+	if len(reviewers) > 0 {
+		payload["reviewers"] = reviewers
+	}
+	if len(teams) > 0 {
+		payload["team_reviewers"] = teams
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal requested reviewers payload: %w", err)
+	}
+	requestedURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/requested_reviewers", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, requestedURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create requested reviewers request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("remove GitHub requested reviewers: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("remove GitHub requested reviewers returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+	}
+	return nil
+}
+
 func (s *GitHubSubmitter) ListPullRequestFiles(ctx context.Context, req PullRequestFilesRequest) ([]PullRequestFile, error) {
 	if s == nil || s.tokens == nil {
 		return nil, fmt.Errorf("github submitter is not configured")
@@ -238,6 +374,42 @@ func (d SubmitReviewDecision) validate() error {
 	default:
 		return fmt.Errorf("invalid submit review decision: %q", d)
 	}
+}
+
+func (s CommitStatusState) validate() error {
+	switch s {
+	case CommitStatusStateError, CommitStatusStateFailure, CommitStatusStatePending, CommitStatusStateSuccess:
+		return nil
+	default:
+		return fmt.Errorf("invalid commit status state: %q", s)
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func compactStrings(values []string) []string {
+	compacted := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		compacted = append(compacted, value)
+	}
+	return compacted
 }
 
 func parseNextGitHubPath(link string) string {

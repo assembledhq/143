@@ -101,9 +101,9 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Understandable description")).toBeInTheDocument();
+      expect(screen.getByDisplayValue("Understandable description")).toBeInTheDocument();
     });
-    expect(screen.getByText("auth")).toBeInTheDocument();
-    expect(screen.getByText("billing")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
   });
 });

@@ -47,6 +47,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
+				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedReviewerLogin, "service should carry requested reviewer login for stale-request cleanup")
 			},
 		},
 		{
@@ -185,11 +186,15 @@ type jobStub struct {
 	jobID        uuid.UUID
 	jobType      string
 	dedupeKey    string
+	payload      RunCodeReviewJobPayload
 }
 
-func (s *jobStub) Enqueue(_ context.Context, _ uuid.UUID, _, jobType string, _ any, _ int, dedupeKey *string) (uuid.UUID, error) {
+func (s *jobStub) Enqueue(_ context.Context, _ uuid.UUID, _ string, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
 	s.enqueueCalls++
 	s.jobType = jobType
+	if typed, ok := payload.(RunCodeReviewJobPayload); ok {
+		s.payload = typed
+	}
 	if dedupeKey != nil {
 		s.dedupeKey = *dedupeKey
 	}

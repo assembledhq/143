@@ -74,15 +74,17 @@ type ReviewRequestedResult struct {
 }
 
 type RunCodeReviewJobPayload struct {
-	OrgID         uuid.UUID `json:"org_id"`
-	SessionID     uuid.UUID `json:"session_id"`
-	MetadataID    uuid.UUID `json:"metadata_id"`
-	RepositoryID  uuid.UUID `json:"repository_id"`
-	PullRequestID uuid.UUID `json:"pull_request_id"`
-	PolicyID      uuid.UUID `json:"policy_id"`
-	PolicyVersion int       `json:"policy_version"`
-	HeadSHA       string    `json:"head_sha"`
-	OutputKey     string    `json:"review_output_key"`
+	OrgID                  uuid.UUID `json:"org_id"`
+	SessionID              uuid.UUID `json:"session_id"`
+	MetadataID             uuid.UUID `json:"metadata_id"`
+	RepositoryID           uuid.UUID `json:"repository_id"`
+	PullRequestID          uuid.UUID `json:"pull_request_id"`
+	PolicyID               uuid.UUID `json:"policy_id"`
+	PolicyVersion          int       `json:"policy_version"`
+	HeadSHA                string    `json:"head_sha"`
+	OutputKey              string    `json:"review_output_key"`
+	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
 }
 
 func NewService(policies PolicyStore, metadata MetadataStore, sessions SessionStore, jobs JobStore, logger zerolog.Logger, cfg Config) *Service {
@@ -187,15 +189,17 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	}
 
 	payload := RunCodeReviewJobPayload{
-		OrgID:         input.OrgID,
-		SessionID:     session.ID,
-		MetadataID:    metadata.ID,
-		RepositoryID:  input.RepositoryID,
-		PullRequestID: input.PullRequestID,
-		PolicyID:      policy.ID,
-		PolicyVersion: policy.Version,
-		HeadSHA:       input.HeadSHA,
-		OutputKey:     outputKey,
+		OrgID:                  input.OrgID,
+		SessionID:              session.ID,
+		MetadataID:             metadata.ID,
+		RepositoryID:           input.RepositoryID,
+		PullRequestID:          input.PullRequestID,
+		PolicyID:               policy.ID,
+		PolicyVersion:          policy.Version,
+		HeadSHA:                input.HeadSHA,
+		OutputKey:              outputKey,
+		RequestedReviewerLogin: input.RequestedLogin,
+		RequestedTeamSlug:      input.RequestedTeam,
 	}
 	dedupeKey := "code_review:" + outputKey
 	jobID, err := s.jobs.Enqueue(ctx, input.OrgID, "agent", models.JobTypeRunCodeReview, payload, 5, &dedupeKey)
