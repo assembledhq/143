@@ -13,7 +13,7 @@ import { safeExternalUrl } from "@/lib/utils";
 import { pollMs } from "@/lib/poll-intervals";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
-const RESTART_LATEST_LABEL = "Restart";
+const RESTART_LATEST_LABEL = "Start latest preview";
 
 export default function PullRequestPreviewPage({
   params,
@@ -261,7 +261,7 @@ function launchStateCopy(preview: BranchPreviewResponse | undefined): {
       return {
         title: preview?.status === "expired" ? "Preview expired" : "Preview not started",
         description: launch.message ?? (preview?.status === "expired"
-          ? "Restart to launch a fresh runtime for this pull request."
+          ? "Start a fresh preview for this pull request."
           : "Start a preview for the latest pull request head."),
       };
     case "retry":
