@@ -2322,33 +2322,16 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					return fmt.Errorf("refresh linked Slack session routing: %w", routeErr)
 				}
 				session = refreshedSession
-				msg := &models.SessionMessage{
-					SessionID:  session.ID,
-					OrgID:      orgID,
-					ThreadID:   session.PrimaryThreadID,
-					UserID:     mappedUserID,
-					TurnNumber: session.CurrentTurn,
-					Role:       models.MessageRoleUser,
-					Content:    renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
-					References: slackContextReferencesForSessionInput(contextRefs),
-				}
-				if err := stores.SessionMessages.Create(ctx, msg); err != nil {
-					return fmt.Errorf("create slack follow-up message: %w", err)
-				}
-				scopeID := session.ID
-				if session.PrimaryThreadID != nil {
-					scopeID = *session.PrimaryThreadID
-				}
-				dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-				continuePayload := map[string]string{
-					"org_id":     orgID.String(),
-					"session_id": session.ID.String(),
-				}
-				if session.PrimaryThreadID != nil {
-					continuePayload["thread_id"] = session.PrimaryThreadID.String()
-				}
-				if _, err := stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", continuePayload, 5, &dedupeKey); err != nil {
-					return fmt.Errorf("enqueue slack session continuation: %w", err)
+				if err := enqueueSlackSessionContinuationMessage(
+					ctx,
+					stores,
+					orgID,
+					session,
+					mappedUserID,
+					renderSlackPromptWithUserResolver(ctx, payload.Text, permalink, threadMessages, contextRefs, contextFiles, userResolver),
+					contextRefs,
+				); err != nil {
+					return err
 				}
 				ackText := slackSessionAckText(services, session.ID, "Continuing")
 				if teamLine := slackTeamSessionLine(existingLink); teamLine != "" {
@@ -5491,12 +5474,24 @@ func enqueueSlackSessionContinuationPromptWithReferences(ctx context.Context, st
 	if err != nil {
 		return fmt.Errorf("get session for Slack continuation: %w", err)
 	}
+	return enqueueSlackSessionContinuationMessage(ctx, stores, orgID, session, session.TriggeredByUserID, prompt, refs)
+}
+
+func enqueueSlackSessionContinuationMessage(ctx context.Context, stores *Stores, orgID uuid.UUID, session models.Session, userID *uuid.UUID, prompt string, refs []slackContextReference) error {
+	if stores == nil || stores.SessionMessages == nil || stores.SessionThreads == nil || stores.Jobs == nil {
+		return fmt.Errorf("slack session continuation dependencies are not configured")
+	}
+	thread, err := primaryThreadForSlackContinuation(ctx, stores, session)
+	if err != nil {
+		return fmt.Errorf("resolve primary thread for Slack continuation: %w", err)
+	}
+	threadIDLocal := thread.ID
 	msg := &models.SessionMessage{
 		SessionID:  session.ID,
 		OrgID:      orgID,
-		ThreadID:   session.PrimaryThreadID,
-		UserID:     session.TriggeredByUserID,
-		TurnNumber: session.CurrentTurn,
+		ThreadID:   &threadIDLocal,
+		UserID:     userID,
+		TurnNumber: thread.CurrentTurn + 1,
 		Role:       models.MessageRoleUser,
 		Content:    prompt,
 		References: slackContextReferencesForSessionInput(refs),
@@ -5504,17 +5499,31 @@ func enqueueSlackSessionContinuationPromptWithReferences(ctx context.Context, st
 	if err := stores.SessionMessages.Create(ctx, msg); err != nil {
 		return fmt.Errorf("create Slack continuation message: %w", err)
 	}
-	scopeID := session.ID
-	if session.PrimaryThreadID != nil {
-		scopeID = *session.PrimaryThreadID
-	}
-	dedupeKey := db.ContinueSessionDedupeKey(scopeID)
-	payload := map[string]string{"org_id": orgID.String(), "session_id": session.ID.String()}
-	if session.PrimaryThreadID != nil {
-		payload["thread_id"] = session.PrimaryThreadID.String()
+	dedupeKey := db.ContinueSessionDedupeKey(thread.ID)
+	payload := map[string]string{
+		"org_id":     orgID.String(),
+		"session_id": session.ID.String(),
+		"thread_id":  thread.ID.String(),
 	}
 	_, err = stores.Jobs.Enqueue(ctx, orgID, "agent", "continue_session", payload, 5, &dedupeKey)
 	return err
+}
+
+func primaryThreadForSlackContinuation(ctx context.Context, stores *Stores, session models.Session) (models.SessionThread, error) {
+	if stores == nil || stores.SessionThreads == nil {
+		return models.SessionThread{}, fmt.Errorf("session thread store not configured")
+	}
+	if session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
+		return stores.SessionThreads.GetByID(ctx, session.OrgID, *session.PrimaryThreadID)
+	}
+	threads, err := stores.SessionThreads.ListBySession(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return models.SessionThread{}, fmt.Errorf("list session threads: %w", err)
+	}
+	if len(threads) == 0 {
+		return models.SessionThread{}, fmt.Errorf("session has no threads")
+	}
+	return threads[0], nil
 }
 
 func postSlackEphemeralIfPossible(ctx context.Context, stores *Stores, slackClient *ingestion.SlackAPIClient, orgID uuid.UUID, input models.SlackInteractionJobPayload, text string) error {
@@ -8519,6 +8528,10 @@ func enqueueSlackRunUpdateIfLinked(ctx context.Context, stores *Stores, logger z
 }
 
 func enqueueSlackFinalIfLinked(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
+	enqueueSlackFinalIfLinkedForThread(ctx, stores, logger, orgID, sessionID, nil, 0)
+}
+
+func enqueueSlackFinalIfLinkedForThread(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, threadID *uuid.UUID, turnNumber int) {
 	if stores == nil || stores.SlackSessionLinks == nil || stores.SessionMessages == nil || stores.Jobs == nil {
 		return
 	}
@@ -8529,14 +8542,19 @@ func enqueueSlackFinalIfLinked(ctx context.Context, stores *Stores, logger zerol
 		}
 		return
 	}
-	messages, err := stores.SessionMessages.ListBySession(ctx, orgID, sessionID)
+	var messages []models.SessionMessage
+	if threadID != nil && *threadID != uuid.Nil {
+		messages, err = stores.SessionMessages.ListByThread(ctx, orgID, *threadID)
+	} else {
+		messages, err = stores.SessionMessages.ListBySession(ctx, orgID, sessionID)
+	}
 	if err != nil {
 		logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load messages for Slack final response")
 		return
 	}
 	var finalMessageID int64
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == models.MessageRoleAssistant {
+		if messages[i].Role == models.MessageRoleAssistant && (turnNumber <= 0 || messages[i].TurnNumber == turnNumber) {
 			finalMessageID = messages[i].ID
 			break
 		}
@@ -9144,6 +9162,15 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("failed to complete pull request repair run after continue_session")
 			}
 		}
+		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, sessionID)
+		var completedThreadID *uuid.UUID
+		completedThreadTurn := 0
+		if hasThread {
+			threadIDLocal := threadID
+			completedThreadID = &threadIDLocal
+			completedThreadTurn = threadTurnBefore + 1
+		}
+		enqueueSlackFinalIfLinkedForThread(ctx, stores, logger, orgID, sessionID, completedThreadID, completedThreadTurn)
 		supersedeStaleSessionPreviewWarmRuns(ctx, stores, logger, orgID, sessionID)
 		enqueueSessionPreviewCachePrewarm(ctx, stores, services, logger, orgID, sessionID, "continue_session_completed")
 		enqueueSessionPreviewPostTurnClassifier(ctx, stores, services, logger, orgID, sessionID)
