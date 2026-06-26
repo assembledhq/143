@@ -398,7 +398,7 @@ func TestSharedDependencyCache_StageBlobUsesLocalCacheStagingDir(t *testing.T) {
 			LastUsedAt: time.Now().UTC(),
 		},
 		BlobKey: blobKey,
-	})
+	}, "")
 	require.NoError(t, err, "stageBlob should download the remote dependency cache blob")
 	defer blob.cleanup()
 
@@ -497,7 +497,7 @@ func TestSharedDependencyCache_RestoreDeletesMetadataWhenObjectMissing(t *testin
 	require.NoError(t, err, "pgx mock should initialize")
 	defer mock.Close()
 	mock.ExpectExec("DELETE FROM preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(entryID, orgID, "deps/missing.tar.gz").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -547,7 +547,7 @@ func TestSharedDependencyCache_RestoreDeletesMetadataOnChecksumMismatch(t *testi
 	require.NoError(t, err, "pgx mock should initialize")
 	defer mock.Close()
 	mock.ExpectExec("DELETE FROM preview_dependency_cache").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(entryID, orgID, "deps/blob.tar.gz").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	cache, err := NewDependencyCache(DependencyCacheConfig{
@@ -573,6 +573,79 @@ func TestSharedDependencyCache_RestoreDeletesMetadataOnChecksumMismatch(t *testi
 	})
 	require.Error(t, err, "Restore should reject corrupted cache blobs")
 	require.Contains(t, err.Error(), "checksum mismatch", "Restore should explain checksum failures")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSharedDependencyCache_RestoreFallsBackToObjectStoreWhenLocalBlobChecksumMismatches(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	localDir := t.TempDir()
+	orgID := uuid.New()
+	repoID := uuid.New()
+	entryID := uuid.New()
+	cacheKey := strings.Repeat("e", 64)
+	remotePayload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.cache/build": "fresh"})
+	remoteSum := sha256.Sum256(remotePayload)
+	remoteChecksum := fmt.Sprintf("%x", remoteSum[:])
+	metadataJSON, err := json.Marshal(DependencyCacheMetadata{
+		EffectivePaths: []string{"node_modules"},
+		ChecksumSHA256: remoteChecksum,
+	})
+	require.NoError(t, err, "dependency cache metadata should marshal")
+	blobStore := newMemorySnapshotStore()
+	require.NoError(t, blobStore.Save(ctx, "deps/blob.tar.gz", bytes.NewReader(remotePayload)), "test blob should save")
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	mock.ExpectExec("DELETE FROM preview_dependency_cache_locations").
+		WithArgs("worker-1", models.PreviewCacheKindBuildArtifact, cacheKey).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	now := time.Now().UTC()
+	mock.ExpectQuery("INSERT INTO preview_dependency_cache_locations").
+		WithArgs(orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "worker-1", int64(len(remotePayload))).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repo_id", "cache_kind", "cache_key", "placement_key",
+			"worker_node_id", "size_bytes", "last_used_at", "created_at",
+		}).AddRow(uuid.New(), orgID, repoID, models.PreviewCacheKindBuildArtifact, cacheKey, "placement", "worker-1", int64(len(remotePayload)), now, now))
+
+	cache, err := NewDependencyCache(DependencyCacheConfig{
+		Store:        db.NewPreviewStore(mock),
+		Executor:     &dependencyCacheExec{},
+		BlobStore:    blobStore,
+		Logger:       zerolog.Nop(),
+		Prefix:       "deps",
+		WorkerNodeID: "worker-1",
+		LocalDir:     localDir,
+	})
+	require.NoError(t, err, "dependency cache should initialize")
+
+	localPath := cache.localBlobPath(models.PreviewCacheKindBuildArtifact, cacheKey)
+	require.NoError(t, os.MkdirAll(filepath.Dir(localPath), 0o750), "local cache directory should be created")
+	localPayload := makeDependencyCacheTarGz(t, map[string]string{"node_modules/.cache/build": "stale"})
+	require.NoError(t, os.WriteFile(localPath, localPayload, 0o600), "stale local blob should be written")
+
+	err = cache.RestorePathCache(ctx, &agent.Sandbox{WorkDir: "/workspace/repo"}, &DependencyCacheHit{
+		Entry: models.PreviewDependencyCache{
+			ID:           entryID,
+			OrgID:        orgID,
+			RepoID:       repoID,
+			CacheKind:    models.PreviewCacheKindBuildArtifact,
+			CacheKey:     cacheKey,
+			PlacementKey: "placement",
+			BlobKey:      "deps/blob.tar.gz",
+			SizeBytes:    int64(len(remotePayload)),
+			Metadata:     metadataJSON,
+			LastUsedAt:   time.Now().UTC(),
+		},
+		BlobKey: "deps/blob.tar.gz",
+	}, models.PreviewCacheRootWorkDir)
+	require.NoError(t, err, "RestorePathCache should fall back to object storage when the local blob is stale")
+
+	replacedPayload, err := os.ReadFile(localPath)
+	require.NoError(t, err, "fallback restore should rewrite the worker-local cache blob")
+	require.Equal(t, remotePayload, replacedPayload, "fallback restore should replace the stale local blob with the shared object blob")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

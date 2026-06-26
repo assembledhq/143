@@ -277,7 +277,7 @@ describe("PreviewsPage", () => {
     await userEvent.click(screen.getAllByRole("button", { name: /stop/i })[0]);
     await userEvent.click(screen.getAllByRole("button", { name: /resume/i })[0]);
     await userEvent.click(
-      screen.getAllByRole("button", { name: /restart/i })[0],
+      screen.getAllByRole("button", { name: /start a new preview from the latest source state/i })[0],
     );
 
     await waitFor(() => {
@@ -305,7 +305,7 @@ describe("PreviewsPage", () => {
     expect(screen.queryByRole("link", { name: /new preview/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /stop/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /resume/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /restart/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start a new preview from the latest source state/i })).not.toBeInTheDocument();
   });
 
   it("opens the create preview dialog from the empty state action", async () => {
@@ -501,7 +501,7 @@ describe("PreviewsPage", () => {
       within(runningSection).getAllByText(/Running aabb1122, branch is ccdd3344/)[0],
     ).toBeInTheDocument();
     expect(
-      within(runningSection).getAllByRole("button", { name: /restart/i })[0],
+      within(runningSection).getAllByRole("button", { name: /start a new preview from the latest source state/i })[0],
     ).toBeInTheDocument();
   });
 
@@ -562,7 +562,7 @@ describe("PreviewsPage", () => {
       name: /recent/i,
     });
     const restartButton = within(recentSection).getAllByRole("button", {
-      name: /restart preview from the latest source state/i,
+      name: /start a new preview from the latest source state/i,
     })[0];
 
     await userEvent.click(restartButton);
@@ -660,7 +660,7 @@ describe("PreviewsPage", () => {
       name: /running/i,
     });
     const restartLatestButton = within(runningSection).getAllByRole("button", {
-      name: /restart preview from the latest source state/i,
+      name: /start a new preview from the latest source state/i,
     })[0];
 
     await userEvent.click(restartLatestButton);

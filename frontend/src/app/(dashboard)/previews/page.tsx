@@ -60,8 +60,8 @@ import { safeExternalUrl } from "@/lib/utils";
 
 type PreviewScope = "running" | "resumable" | "recent";
 
-const RESTART_LATEST_LABEL = "Restart";
-const RESTART_LATEST_TOOLTIP = "Restart preview from the latest source state";
+const RESTART_LATEST_LABEL = "Start latest preview";
+const RESTART_LATEST_TOOLTIP = "Start a new preview from the latest source state";
 
 const SECTIONS: {
   scope: PreviewScope;
