@@ -63,9 +63,31 @@ describe("SplitDiffHunk", () => {
 
   it("renders remove+add pair side by side", () => {
     const hunk = makeHunk([removeLine, addLine]);
-    render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
-    expect(screen.getByText("const z = 3;")).toBeInTheDocument();
-    expect(screen.getByText("const y = 2;")).toBeInTheDocument();
+    const { container } = render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    expect(container).toHaveTextContent("const z = 3;");
+    expect(container).toHaveTextContent("const y = 2;");
+  });
+
+  it("highlights only changed text inside paired split remove and add lines", () => {
+    const hunk = makeHunk([
+      {
+        type: "remove",
+        content: "const value = 1;",
+        oldLineNumber: 2,
+        newLineNumber: null,
+      },
+      {
+        type: "add",
+        content: "const value = 2;",
+        oldLineNumber: null,
+        newLineNumber: 2,
+      },
+    ]);
+    const { container } = render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const removedHighlight = container.querySelector(".bg-red-200\\/80");
+    const addedHighlight = container.querySelector(".bg-green-200\\/80");
+    expect(removedHighlight).toHaveTextContent("1");
+    expect(addedHighlight).toHaveTextContent("2");
   });
 
   it("renders standalone add line with empty left cell", () => {
@@ -225,11 +247,11 @@ describe("SplitDiffHunk", () => {
     const add2: DiffLine = { type: "add", content: "new line 2", oldLineNumber: null, newLineNumber: 2 };
     const add3: DiffLine = { type: "add", content: "new line 3", oldLineNumber: null, newLineNumber: 3 };
     const hunk = makeHunk([remove1, remove2, add1, add2, add3]);
-    render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
-    expect(screen.getByText("old line 1")).toBeInTheDocument();
-    expect(screen.getByText("old line 2")).toBeInTheDocument();
-    expect(screen.getByText("new line 1")).toBeInTheDocument();
-    expect(screen.getByText("new line 2")).toBeInTheDocument();
+    const { container } = render(<SplitDiffHunk hunk={hunk} filePath="src/app.ts" />);
+    expect(container).toHaveTextContent("old line 1");
+    expect(container).toHaveTextContent("old line 2");
+    expect(container).toHaveTextContent("new line 1");
+    expect(container).toHaveTextContent("new line 2");
     expect(screen.getByText("new line 3")).toBeInTheDocument();
   });
 });
