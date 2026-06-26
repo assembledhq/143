@@ -549,7 +549,16 @@ function PublishDisabledHint({
     cancelScheduledClose();
     closeTimer.current = setTimeout(() => setOpen(false), 120);
   };
-  useEffect(() => cancelScheduledClose, []);
+  // Clear any pending close timer on unmount. Inlined (rather than referencing
+  // cancelScheduledClose) so the effect has no changing dependencies.
+  useEffect(
+    () => () => {
+      if (closeTimer.current) {
+        clearTimeout(closeTimer.current);
+      }
+    },
+    [],
+  );
 
   if (!hasDetails) {
     return (
