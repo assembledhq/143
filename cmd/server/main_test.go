@@ -399,7 +399,22 @@ func TestSessionExecutorBindsIncludeStaticEgressCapabilityMount(t *testing.T) {
 		"/etc/143:/etc/143:ro",
 	}
 
-	require.Equal(t, expected, sessionExecutorBinds(), "session executors should mount every host resource needed for sandbox creation")
+	require.Equal(t, expected, sessionExecutorBinds(nil), "session executors should mount every host resource needed for sandbox creation")
+}
+
+func TestSessionExecutorBindsIncludeConfiguredExtraBinds(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		"/var/run/docker.sock:/var/run/docker.sock",
+		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
+		"/etc/143:/etc/143:ro",
+		"/var/lib/143:/var/lib/143",
+	}
+
+	got := sessionExecutorBinds([]string{"", " /var/lib/143:/var/lib/143 "})
+
+	require.Equal(t, expected, got, "session executors should include configured extra host binds")
 }
 
 func TestSessionExecutorIDFromEnv(t *testing.T) {

@@ -618,6 +618,30 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID, WORKER_PRIVATE_IP, or DOCKER_GID")
 }
 
+func TestSingleNodeComposeRunsProductionAllMode(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.single-node.yml")
+	require.NoError(t, err, "test should read the single-node compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "MODE: all", "single-node compose should run API and worker loops in one process")
+	require.Contains(t, composeText, "${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-server:${IMAGE_TAG:-latest}", "single-node compose should allow operators to pull runtime images from a mirror or local registry")
+	require.Contains(t, composeText, "SANDBOX_IMAGE: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-sandbox:${IMAGE_TAG:-latest}", "single-node compose should pass the configured sandbox image to workers")
+	require.Contains(t, composeText, "migrate:", "single-node compose should include a migration job")
+	require.Contains(t, composeText, "- pgdata:/var/lib/postgresql", "postgres:18 should mount the data volume at /var/lib/postgresql so the image can create its versioned data directory")
+	require.NotContains(t, composeText, "- pgdata:/var/lib/postgresql/data", "postgres:18 rejects the legacy /var/lib/postgresql/data volume mount")
+	require.Contains(t, composeText, "condition: service_completed_successfully", "API startup should wait for migrations to complete")
+	require.Contains(t, composeText, "${DOCKER_GID:?", "single-node compose should require the host docker group GID for docker.sock access")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK: ${SESSION_EXECUTOR_DOCKER_NETWORK:-143-single-node}", "session executors should join the single-node app network")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_EXTRA_BINDS: ${SESSION_EXECUTOR_EXTRA_BINDS:-/var/lib/143:/var/lib/143}", "session executors should share local durable data on single-node installs")
+	require.Contains(t, composeText, "${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}", "API/worker container should mount the same host-backed durable data path")
+	require.Contains(t, composeText, "${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}:${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}", "single-node compose should allow sandbox auth socket paths to be overridden for local smoke tests")
+	require.Contains(t, composeText, "name: 143-sandbox", "single-node compose should use the canonical sandbox bridge")
+	require.Contains(t, composeText, "container_name: 143-sandbox-dns-1", "single-node sandbox DNS should use the canonical container name expected by host reconciliation")
+	require.Contains(t, composeText, "condition: service_healthy\n    restart: unless-stopped\n    deploy:", "single-node chrome should wait for sandbox DNS so dynamic sandbox-network allocation cannot take the DNS sidecar's pinned IP")
+}
+
 func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
 	t.Parallel()
 
@@ -1480,7 +1504,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, reconcileText, "/opt/143/.env", "worker reconciliation should load static egress config from the host env file during fresh provisioning")
 	require.Contains(t, reconcileText, "/opt/143/static-egress-worker.env", "worker reconciliation should load host-only static egress secrets outside the compose env file")
 	require.Contains(t, reconcileText, "load_static_egress_env_key", "worker reconciliation should parse env values without eval/source")
-	require.Contains(t, reconcileText, "static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
+	require.Contains(t, reconcileText, "static egress is configured but $DEPLOY_SCRIPT_DIR/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
 	require.Contains(t, reconcileText, "ensure_static_egress_dns", "worker reconciliation should ensure sandbox DNS exists before static egress verification")
 	require.Contains(t, reconcileText, "docker image inspect 143-sandbox-dns:local", "fresh worker provisioning should build sandbox-dns only when the local image is missing")
 	require.Contains(t, reconcileText, "docker compose -f \"$compose_file\" up -d --no-deps sandbox-dns", "worker reconciliation should start sandbox-dns before probing the static egress bridge without forcing a rebuild/recreate")
@@ -2554,7 +2578,8 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
 	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
 	require.Contains(t, string(resolvScript), `NAMESERVER="${2:-`+sandboxDNSIP+`}"`, "sandbox-resolv-conf.sh should default to sandbox-dns's IP for /etc/143/sandbox-resolv.conf")
-	require.Contains(t, reconcileText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
+	require.Contains(t, reconcileText, `DEPLOY_SCRIPT_DIR="${DEPLOY_SCRIPT_DIR:-/opt/143/deploy/scripts}"`, "reconcile-worker-host.sh should default helper scripts to the staged deploy path")
+	require.Contains(t, reconcileText, `"$DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh"`, "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
 	deployText := string(deployScript)
