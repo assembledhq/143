@@ -877,10 +877,9 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   # guards against a failure between the scp and that call leaving it on disk.
   trap 'rm -f /opt/143/deploy/Caddyfile.new /opt/143/Dockerfile.caddy.new /opt/143/.caddy-env.fingerprint.new /opt/143/.caddy-service.fingerprint.new' EXIT
 
-  # recreate_other_services SKIP_SVCS — force-recreate every compose service
-  # except the space-separated list in SKIP_SVCS. Used to update out-of-band
-  # services (vector, etc.) without touching services that are being rolled.
-  recreate_other_services() {
+  # compose_services_except SKIP_SVCS — print every compose service except the
+  # space-separated list in SKIP_SVCS.
+  compose_services_except() {
     local skip_list="$1"
     local all filtered=""
     all="$(docker compose -f "$COMPOSE_FILE" config --services)"
@@ -891,10 +890,100 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
       done
       [ "$match" -eq 0 ] && filtered="$filtered $svc"
     done
-    # shellcheck disable=SC2086
-    if [ -n "$(echo $filtered | tr -d ' ')" ]; then
-      echo $filtered | xargs docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans
+    echo "$filtered"
+  }
+
+  compose_up_force_recreate_services() {
+    local services="$1"
+    if [ -n "$(echo "$services" | tr -d ' ')" ]; then
+      # shellcheck disable=SC2086
+      docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans $services
     fi
+  }
+
+  # recreate_other_services SKIP_SVCS — force-recreate every compose service
+  # except the space-separated list in SKIP_SVCS. Used to update out-of-band
+  # services (vector, etc.) without touching services that are being rolled.
+  recreate_other_services() {
+    local filtered
+    filtered="$(compose_services_except "$1")"
+    compose_up_force_recreate_services "$filtered"
+  }
+
+  sandbox_dns_endpoint_owner_for_ip() {
+    local network="$1"
+    local ip="$2"
+
+    docker network inspect "$network" \
+      -f '{{range .Containers}}{{.Name}} {{.IPv4Address}}{{"\n"}}{{end}}' 2>/dev/null \
+      | awk -v want="$ip/" 'index($2, want) == 1 {print $1}' | head -n1
+  }
+
+  disconnect_sandbox_dns_endpoint_for_ip() {
+    local network="$1"
+    local ip="$2"
+    local endpoint
+
+    endpoint="$(sandbox_dns_endpoint_owner_for_ip "$network" "$ip")"
+    if [ -n "$endpoint" ]; then
+      echo "Detaching stale endpoint '$endpoint' holding $ip on $network..." >&2
+      docker network disconnect -f "$network" "$endpoint" >/dev/null 2>&1 || true
+    fi
+  }
+
+  clear_sandbox_dns_network_endpoints() {
+    local stale
+
+    docker stop -t 10 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker rm 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker network disconnect -f 143-sandbox 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    docker network disconnect -f 143-sandbox-static-egress 143-sandbox-dns-1 >/dev/null 2>&1 || true
+    disconnect_sandbox_dns_endpoint_for_ip 143-sandbox 172.30.0.2
+    disconnect_sandbox_dns_endpoint_for_ip 143-sandbox-static-egress 172.31.0.2
+
+    stale="$(docker ps -a \
+      --filter 'name=143-worker-run-' \
+      --format '{{.ID}} {{.Label "com.docker.compose.project"}} {{.Label "com.docker.compose.service"}}' 2>/dev/null \
+      | awk '$2 == "143" && $3 == "worker" {print $1}' || true)"
+    if [ -n "$stale" ]; then
+      echo "Removing stale worker deploy control containers..." >&2
+      printf '%s\n' "$stale" | xargs -r docker rm -f >/dev/null 2>&1 || true
+    fi
+  }
+
+  recreate_worker_other_services() {
+    local filtered output rc attempt
+    filtered="$(compose_services_except "$HEALTH_SERVICE")"
+    # shellcheck disable=SC2086
+    if [ -z "$(echo $filtered | tr -d ' ')" ]; then
+      return 0
+    fi
+
+    set +e
+    # shellcheck disable=SC2086
+    output="$(docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-deps --remove-orphans $filtered 2>&1)"
+    rc=$?
+    set -e
+    printf '%s\n' "$output"
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+
+    if ! printf '%s\n' "$output" | grep -qi "Address already in use"; then
+      return "$rc"
+    fi
+
+    echo "Worker support-service recreate hit a stale Docker network address; clearing sandbox-dns endpoints and retrying..."
+    for attempt in 1 2 3; do
+      clear_sandbox_dns_network_endpoints
+      if compose_up_force_recreate_services "$filtered"; then
+        return 0
+      fi
+      if [ "$attempt" != "3" ]; then
+        sleep 1
+      fi
+    done
+    return 1
   }
 
   # stage_caddy_config_if_changed — returns 0 if deploy/Caddyfile.new differs
@@ -1440,13 +1529,32 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   list_running_worker_containers() {
-    docker ps --filter "label=com.docker.compose.service=worker" --format '{{.ID}}'
+    docker ps \
+      --filter "label=com.docker.compose.service=worker" \
+      --format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}' \
+      | awk '$3 ~ /^143-worker-/ || ($3 == "143" && $2 !~ /^143-worker-run-/) {print $1}'
   }
 
   worker_container_node_id() {
     local cid="$1"
     docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
       | awk -F= '$1=="NODE_ID"{print $2; exit}'
+  }
+
+  worker_database_url() {
+    local db_host db_password pool_max_conns
+    db_host="$(read_worker_env_value DB_HOST)"
+    db_password="$(read_worker_env_value DB_PASSWORD)"
+    pool_max_conns="$(read_worker_env_value WORKER_DATABASE_POOL_MAX_CONNS)"
+    if [ -z "$pool_max_conns" ]; then
+      pool_max_conns=4
+    fi
+    if [ -z "$db_host" ] || [ -z "$db_password" ]; then
+      echo "ERROR: DB_HOST and DB_PASSWORD must be present in /opt/143/.env for deploy-control helpers." >&2
+      return 1
+    fi
+    printf 'postgres://onefortythree:%s@%s:5432/onefortythree?sslmode=disable&pool_max_conns=%s' \
+      "$db_password" "$db_host" "$pool_max_conns"
   }
 
   first_running_worker_node_id() {
@@ -1465,9 +1573,16 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   }
 
   run_worker_deployctl() {
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+    local database_url
+    database_url="$(worker_database_url)"
+    docker run --rm -i \
+      --network 143_default \
+      --env-file /opt/143/.env \
+      -e "DATABASE_URL=$database_url" \
       -e "IMAGE_TAG=${IMAGE_TAG:-}" \
-      "$HEALTH_SERVICE" /bin/worker-deployctl "$@" < /dev/null
+      -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
+      "ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}" \
+      /bin/worker-deployctl "$@" < /dev/null
   }
 
   wait_worker_db_heartbeat() {
@@ -1872,9 +1987,26 @@ SELECT COUNT(*) FROM endpoint_blockers;"
           exit 0
         fi
         run_ctl() {
-          docker compose -f "$compose_file" run --rm -T --no-deps \
+          local db_host db_password pool_max_conns database_url
+          db_host="$(awk -F= "\$1 == \"DB_HOST\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
+          db_password="$(awk -F= "\$1 == \"DB_PASSWORD\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
+          pool_max_conns="$(awk -F= "\$1 == \"WORKER_DATABASE_POOL_MAX_CONNS\" {sub(/^[^=]*=/, \"\"); print; exit}" /opt/143/.env)"
+          if [ -z "$pool_max_conns" ]; then
+            pool_max_conns=4
+          fi
+          if [ -z "$db_host" ] || [ -z "$db_password" ]; then
+            echo "ERROR: DB_HOST and DB_PASSWORD must be present in /opt/143/.env for deploy-control helpers." >&2
+            return 1
+          fi
+          database_url="postgres://onefortythree:${db_password}@${db_host}:5432/onefortythree?sslmode=disable&pool_max_conns=${pool_max_conns}"
+          docker run --rm -i \
+            --network 143_default \
+            --env-file /opt/143/.env \
+            -e "DATABASE_URL=$database_url" \
             -e "IMAGE_TAG=$build_sha" \
-            "$health_service" /bin/worker-deployctl "$@" < /dev/null
+            -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
+            "ghcr.io/assembledhq/143-server:${build_sha:-latest}" \
+            /bin/worker-deployctl "$@" < /dev/null
         }
         while true; do
           if ! docker inspect --format "{{.State.Running}}" "$cid" 2>/dev/null | grep -q true; then
@@ -2051,10 +2183,17 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     if [ "$ROLE" != "worker" ]; then
       return 0
     fi
+    local database_url
+    database_url="$(worker_database_url)"
     echo "Checking active long-running sessions before worker deploy..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+    docker run --rm -i \
+      --network 143_default \
+      --env-file /opt/143/.env \
+      -e "DATABASE_URL=$database_url" \
       -e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}" \
-      "$HEALTH_SERVICE" /bin/deploy-guardrail worker-sessions < /dev/null
+      -v /opt/143/.env.production.enc:/app/.env.production.enc:ro \
+      "ghcr.io/assembledhq/143-server:${IMAGE_TAG:-latest}" \
+      /bin/deploy-guardrail worker-sessions < /dev/null
   }
 
   # wait_container_healthy CONTAINER_ID TIMEOUT — poll until a specific container
@@ -2239,7 +2378,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       echo "Skipping supporting-service recreation for routine worker deploy; use DEPLOY_MODE=maintenance for host/runtime dependency changes."
     else
       echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
-      recreate_other_services "$HEALTH_SERVICE"
+      recreate_worker_other_services
     fi
   fi
 
@@ -2283,7 +2422,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
       cat > "$rollover_script" <<EOS
 #!/bin/bash
 set -euo pipefail
-$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
+$(declare -f resolve_worker_drain_timeout_seconds drain_worker_service drain_worker_containers_blocking read_worker_env_value load_worker_endpoint_check_env sanitize_compose_project list_running_worker_containers worker_container_node_id worker_database_url first_running_worker_node_id run_worker_deployctl wait_worker_db_heartbeat worker_port_in_use worker_runtime_endpoint_in_use worker_blue_green_extra_ports_configured worker_host_capacity_preflight fingerprint_files compose_service_fingerprint worker_process_config_fingerprint worker_support_service_fingerprint worker_host_runtime_fingerprint worker_docker_daemon_fingerprint ensure_routine_worker_fingerprints_compatible worker_expected_schema_version protect_active_executor_images find_free_worker_port start_worker_generation drain_old_worker_containers deploy_worker_blue_green wait_container_healthy dump_diagnostics prune_docker_deploy_artifacts)
 COMPOSE_FILE='$COMPOSE_FILE'
 HEALTH_SERVICE='$HEALTH_SERVICE'
 STATUS_FILE='$status_file'

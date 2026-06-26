@@ -47,14 +47,31 @@ type AutomationEventProvider string
 const (
 	AutomationEventProviderPagerDuty AutomationEventProvider = "pagerduty"
 	AutomationEventProviderGitHub    AutomationEventProvider = "github"
+	AutomationEventProviderLinear    AutomationEventProvider = "linear"
 )
 
 func (p AutomationEventProvider) Validate() error {
 	switch p {
-	case AutomationEventProviderPagerDuty, AutomationEventProviderGitHub:
+	case AutomationEventProviderPagerDuty, AutomationEventProviderGitHub, AutomationEventProviderLinear:
 		return nil
 	default:
 		return fmt.Errorf("invalid automation event provider: %q", p)
+	}
+}
+
+type LinearAutomationEvent string
+
+const (
+	LinearAutomationEventIssueCreated LinearAutomationEvent = "issue.created"
+	LinearAutomationEventIssueUpdated LinearAutomationEvent = "issue.updated"
+)
+
+func (e LinearAutomationEvent) Validate() error {
+	switch e {
+	case LinearAutomationEventIssueCreated, LinearAutomationEventIssueUpdated:
+		return nil
+	default:
+		return fmt.Errorf("invalid Linear automation event type: %q", e)
 	}
 }
 

@@ -1,6 +1,6 @@
 ---
 title: Self-hosting
-description: Run 143 on your own infrastructure with GitHub, Postgres, Redis, workers, and coding-agent credentials.
+description: Start with a single-node 143 instance, then harden the deployment before routing real coding-agent work.
 section: Self-hosting
 order: 30
 status: stable
@@ -8,19 +8,31 @@ audience: operator
 tags:
   - self-hosting
   - deployment
-llm_summary: Self-host 143 by preparing GitHub App credentials, platform LLM settings, database and worker infrastructure, and deployment checks.
+llm_summary: The self-hosting quickstart is the single-node deployment. It runs 143 on one Linux host with Docker Compose before operators harden GitHub, LLM, backup, worker, and production-readiness settings.
 ---
 
-Self-hosting is an operations commitment as much as an installation path. Plan for the app, database, Redis, worker hosts, secrets, logs, and coding-agent credentials as one production system.
+The fastest supported self-hosting path is the single-node quickstart. It runs the production-shaped stack on one Linux host so you can validate GitHub, migrations, API/frontend health, worker loops, sandbox runtime, previews, and provider credentials before splitting capacity across dedicated hosts.
 
-## Start here
+Use the other pages in this section to fill in required credentials and production checks around that quickstart.
+
+## Quickstart
 
 <Cards>
+  <Card title="Quickstart: single-node" href="/docs/self-hosting/single-node" description="Bring up Caddy, frontend, API, worker loops, Postgres, Redis, Chrome, sandbox DNS, and sandboxes on one host." />
   <Card title="GitHub App setup" href="/docs/self-hosting/github-app-setup" description="Create the GitHub App used for repo access and PR creation." />
   <Card title="Platform LLM" href="/docs/self-hosting/platform-llm" description="Configure the LLM used for platform reasoning and classification." />
   <Card title="Deployment checklist" href="/docs/self-hosting/production-deployment-checklist" description="Verify production readiness before real agent work." />
   <Card title="Worker capacity" href="/docs/self-hosting/worker-capacity-tuning" description="Size worker process and sandbox concurrency." />
 </Cards>
+
+## Quickstart flow
+
+<Steps>
+  <Step>Prepare DNS, GitHub App credentials, LLM/provider keys, and access to the runtime images.</Step>
+  <Step>Copy `.env.single-node.example`, fill in the required values, and choose an `IMAGE_TAG`.</Step>
+  <Step>Run `sudo deploy/scripts/prepare-single-node.sh` on the host, then start the stack with `make single-node-up`.</Step>
+  <Step>Run the production checklist before allowing real repositories or automations to depend on the instance.</Step>
+</Steps>
 
 ## Operating responsibilities
 

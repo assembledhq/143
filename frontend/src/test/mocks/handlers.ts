@@ -1012,6 +1012,14 @@ export const handlers = [
     } satisfies ListResponse<AgentCapabilityDefinition>);
   }),
 
+  http.get('/api/v1/settings/agent/capabilities', () => {
+    return HttpResponse.json({
+      data: {
+        capabilities: [],
+      },
+    } satisfies SingleResponse<AgentCapabilityPolicyResponse>);
+  }),
+
   http.get('/api/v1/automations/:id/capabilities', () => {
     return HttpResponse.json({
       data: {
@@ -1189,6 +1197,25 @@ export const handlers = [
         static_egress_available: true,
         static_egress_enabled: false,
         static_egress_public_ip: '203.0.113.10',
+      },
+    });
+  }),
+
+  http.get('/api/v1/settings/runtime/status', () => {
+    return HttpResponse.json({
+      data: {
+        static_egress: {
+          available: true,
+          enabled: false,
+          public_ip: '203.0.113.10',
+        },
+        capacity: {
+          state: 'normal',
+          active_agent_runs: 0,
+          max_concurrent_agent_runs: 5,
+          active_previews: 0,
+          max_previews_per_user: 5,
+        },
       },
     });
   }),

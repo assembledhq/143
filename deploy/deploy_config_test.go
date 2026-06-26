@@ -618,6 +618,52 @@ func TestWorkerPerHostIdentityIsPreservedAcrossDeploys(t *testing.T) {
 	require.Contains(t, string(deployScript), "/opt/143/.env.local is missing", "deploy.sh worker branch should abort loudly when .env.local is missing instead of coming up with empty NODE_ID, WORKER_PRIVATE_IP, or DOCKER_GID")
 }
 
+func TestSingleNodeComposeRunsProductionAllMode(t *testing.T) {
+	t.Parallel()
+
+	compose, err := os.ReadFile("../docker-compose.single-node.yml")
+	require.NoError(t, err, "test should read the single-node compose file")
+	composeText := string(compose)
+
+	require.Contains(t, composeText, "MODE: all", "single-node compose should run API and worker loops in one process")
+	require.Contains(t, composeText, "${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-server:${IMAGE_TAG:-latest}", "single-node compose should allow operators to pull runtime images from a mirror or local registry")
+	require.Contains(t, composeText, "SANDBOX_IMAGE: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-sandbox:${IMAGE_TAG:-latest}", "single-node compose should pass the configured sandbox image to workers")
+	require.Contains(t, composeText, "migrate:", "single-node compose should include a migration job")
+	require.Contains(t, composeText, "- pgdata:/var/lib/postgresql", "postgres:18 should mount the data volume at /var/lib/postgresql so the image can create its versioned data directory")
+	require.NotContains(t, composeText, "- pgdata:/var/lib/postgresql/data", "postgres:18 rejects the legacy /var/lib/postgresql/data volume mount")
+	require.Contains(t, composeText, "condition: service_completed_successfully", "API startup should wait for migrations to complete")
+	require.Contains(t, composeText, "${DOCKER_GID:?", "single-node compose should require the host docker group GID for docker.sock access")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK: ${SESSION_EXECUTOR_DOCKER_NETWORK:-143-single-node}", "session executors should join the single-node app network")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_EXTRA_BINDS: ${SESSION_EXECUTOR_EXTRA_BINDS:-${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}}", "session executors should share the configured local durable data path on single-node installs")
+	require.Contains(t, composeText, "${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}", "API/worker container should mount the same host-backed durable data path")
+	require.Contains(t, composeText, "${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}:${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}", "single-node compose should allow sandbox auth socket paths to be overridden for local smoke tests")
+	require.Contains(t, composeText, "name: 143-sandbox", "single-node compose should use the canonical sandbox bridge")
+	require.Contains(t, composeText, "container_name: 143-sandbox-dns-1", "single-node sandbox DNS should use the canonical container name expected by host reconciliation")
+	require.Contains(t, composeText, "condition: service_healthy\n    restart: unless-stopped\n    deploy:", "single-node chrome should wait for sandbox DNS so dynamic sandbox-network allocation cannot take the DNS sidecar's pinned IP")
+}
+
+func TestSingleNodeDataDirContractStaysInSync(t *testing.T) {
+	t.Parallel()
+
+	envExample, err := os.ReadFile("../.env.single-node.example")
+	require.NoError(t, err, "test should read the single-node env example")
+	envText := string(envExample)
+
+	require.Contains(t, envText, "SINGLE_NODE_DATA_DIR=/var/lib/143", "env example should expose the data root as the single override point")
+	require.NotContains(t, envText, "\nSESSION_EXECUTOR_EXTRA_BINDS=/var/lib/143:/var/lib/143", "env example should not pin executor binds to the default data root")
+
+	prepareScript, err := os.ReadFile("../deploy/scripts/prepare-single-node.sh")
+	require.NoError(t, err, "test should read the single-node host preparation script")
+	prepareText := string(prepareScript)
+
+	require.Contains(t, prepareText, `ENV_FILE="${SINGLE_NODE_ENV_FILE:-$PROJECT_DIR/.env.single-node}"`, "host prep should read the same env file operators use for compose")
+	require.Contains(t, prepareText, `read_env_value SINGLE_NODE_DATA_DIR "$ENV_FILE"`, "host prep should honor SINGLE_NODE_DATA_DIR from the single-node env file")
+	require.Contains(t, prepareText, `"$data_dir/uploads"`, "host prep should create uploads under the configured data root")
+	require.Contains(t, prepareText, `"$data_dir/snapshots"`, "host prep should create snapshots under the configured data root")
+	require.Contains(t, prepareText, `"$data_dir/session-files-cache"`, "host prep should create session file cache under the configured data root")
+	require.Contains(t, prepareText, `chown -R 1000:1000 "$data_dir"`, "host prep should set ownership on the configured data root")
+}
+
 func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {
 	t.Parallel()
 
@@ -723,6 +769,57 @@ func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
 		"    # effect on a host that already has 143-sandbox-dns:local from a prior deploy.",
 		`    docker compose -f "$COMPOSE_FILE" build sandbox-dns`,
 	}, "\n"), "routine worker deploy must not rebuild sandbox-dns unconditionally because that primes the next reconcile to recreate the sidecar")
+}
+
+func TestMaintenanceWorkerSupportServiceRecreateRetriesSandboxDNSAddressConflict(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	recreateFn := extractShellFunction(t, deployText, "recreate_worker_other_services", "stage_caddy_config_if_changed")
+	clearFn := extractShellFunction(t, deployText, "clear_sandbox_dns_network_endpoints", "recreate_worker_other_services")
+
+	require.Contains(t, recreateFn, `grep -qi "Address already in use"`, "worker maintenance support-service recreate should detect stale Docker address conflicts")
+	require.Contains(t, recreateFn, "clear_sandbox_dns_network_endpoints", "worker maintenance support-service recreate should clear pinned sandbox DNS endpoints before retrying")
+	require.Contains(t, recreateFn, "for attempt in 1 2 3", "worker maintenance support-service recreate should retry endpoint cleanup more than once")
+	require.Contains(t, clearFn, "docker stop -t 10 143-sandbox-dns-1", "worker maintenance cleanup should stop the failed sandbox-dns container before retrying compose")
+	require.Contains(t, clearFn, "docker rm 143-sandbox-dns-1", "worker maintenance cleanup should remove the failed sandbox-dns container before retrying compose")
+	require.Contains(t, clearFn, "143-sandbox 172.30.0.2", "worker maintenance cleanup should clear the default sandbox DNS pinned IP")
+	require.Contains(t, clearFn, "143-sandbox-static-egress 172.31.0.2", "worker maintenance cleanup should clear the static-egress sandbox DNS pinned IP")
+	require.Contains(t, clearFn, "name=143-worker-run-", "worker maintenance cleanup should remove stale deploy-control run containers that can leave endpoints behind")
+	require.Contains(t, clearFn, `Label "com.docker.compose.project"`, "worker maintenance cleanup should distinguish compose deploy-control helpers from user sandbox containers")
+	require.Contains(t, clearFn, `docker rm -f`, "worker maintenance cleanup should force-remove deploy-control helpers that are racing the pinned DNS IP")
+	require.Contains(t, deployText, "recreate_worker_other_services", "maintenance worker deploy should use the retrying support-service recreate path")
+	require.Contains(t, deployText, `recreate_other_services "api frontend caddy"`, "generic recreate helper should remain available for non-worker paths")
+	require.NotContains(t, deployText, `echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
+      recreate_other_services "$HEALTH_SERVICE"`, "maintenance worker deploy should not use the generic no-retry recreate path")
+}
+
+func TestWorkerDeployControlHelpersAvoidSandboxNetworks(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	runDeployctl := extractShellFunction(t, deployText, "run_worker_deployctl", "wait_worker_db_heartbeat")
+	listWorkers := extractShellFunction(t, deployText, "list_running_worker_containers", "worker_container_node_id")
+
+	require.Contains(t, runDeployctl, `docker run --rm -i`, "deploy-control helpers should run as plain containers instead of compose service runs")
+	require.Contains(t, runDeployctl, `--network 143_default`, "deploy-control helpers should attach only to the default network")
+	require.NotContains(t, runDeployctl, `docker compose -f "$COMPOSE_FILE" run`, "deploy-control helpers must not inherit the worker service sandbox networks")
+	require.Contains(t, deployText, `docker run --rm -i \
+            --network 143_default`, "detached drain monitors should also keep deploy-control helpers off sandbox networks")
+	require.Contains(t, listWorkers, `Label "com.docker.compose.project"`, "worker generation discovery should inspect compose project labels")
+	require.Contains(t, listWorkers, `{{.Names}}`, "worker discovery should inspect container names to distinguish compose-run helpers from real default-project workers")
+	require.Contains(t, listWorkers, `$3 ~ /^143-worker-/`, "worker generation discovery should include blue/green worker projects")
+	require.Contains(t, listWorkers, `$3 == "143" && $2 !~ /^143-worker-run-/`, "worker generation discovery should include fresh default-project workers while excluding compose-run deploy-control helpers")
+
+	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
+	require.NoError(t, err, "test should read reconcile-worker-host.sh")
+	reconcileText := string(reconcileScript)
+	require.Contains(t, reconcileText, `Label "com.docker.compose.project"`, "worker reconciliation should identify old compose-run deploy-control helpers")
+	require.Contains(t, reconcileText, `docker rm -f`, "worker reconciliation should remove old deploy-control helpers before starting sandbox-dns")
 }
 
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
@@ -1124,6 +1221,7 @@ func TestWorkerSpinDownScriptDrainsBeforeClearingHost(t *testing.T) {
 	text := string(script)
 
 	require.Contains(t, text, "docker kill --signal=TERM", "worker spin-down should request worker drain before stopping support services")
+	require.Contains(t, text, `$3 == "143" && $2 !~ /^143-worker-run-/`, "worker spin-down should drain fresh default-project workers while excluding compose-run deploy-control helpers")
 	require.Contains(t, text, "wait_for_stopped \"worker\" \"$WORKER_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the worker drain with the drain timeout")
 	require.Contains(t, text, "docker stop -t \"$EXECUTOR_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the executor drain with Docker's stop timeout")
 	require.Contains(t, text, "label=com.143.role=session-executor", "worker spin-down should include durable session executor containers in cleanup")
@@ -1457,7 +1555,7 @@ func TestStaticEgressDeployWiring(t *testing.T) {
 	require.Contains(t, reconcileText, "/opt/143/.env", "worker reconciliation should load static egress config from the host env file during fresh provisioning")
 	require.Contains(t, reconcileText, "/opt/143/static-egress-worker.env", "worker reconciliation should load host-only static egress secrets outside the compose env file")
 	require.Contains(t, reconcileText, "load_static_egress_env_key", "worker reconciliation should parse env values without eval/source")
-	require.Contains(t, reconcileText, "static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
+	require.Contains(t, reconcileText, "static egress is configured but $DEPLOY_SCRIPT_DIR/install-static-egress-worker.sh is missing", "configured static egress must not silently skip a missing install helper")
 	require.Contains(t, reconcileText, "ensure_static_egress_dns", "worker reconciliation should ensure sandbox DNS exists before static egress verification")
 	require.Contains(t, reconcileText, "docker image inspect 143-sandbox-dns:local", "fresh worker provisioning should build sandbox-dns only when the local image is missing")
 	require.Contains(t, reconcileText, "docker compose -f \"$compose_file\" up -d --no-deps sandbox-dns", "worker reconciliation should start sandbox-dns before probing the static egress bridge without forcing a rebuild/recreate")
@@ -2014,12 +2112,13 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read deploy script")
 	deployText := string(deployScript)
+	pruneFn := extractShellFunction(t, deployText, "prune_docker_deploy_artifacts", "run_worker_session_deploy_guardrail")
 
 	require.Contains(t, deployText, "prune_docker_deploy_artifacts()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
-	require.Contains(t, deployText, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
-	require.NotContains(t, deployText, `docker rm -f`, "deploy prune must not force-remove running executor containers")
-	require.Contains(t, deployText, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
-	require.Contains(t, deployText, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
+	require.Contains(t, pruneFn, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
+	require.NotContains(t, pruneFn, `docker rm -f`, "deploy prune must not force-remove running executor containers")
+	require.Contains(t, pruneFn, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
+	require.Contains(t, pruneFn, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
 	require.Contains(t, deployText, `$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
 	require.Contains(t, deployText, `$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")`, "deploy should pass the prune age window through SSH to the remote host")
 	require.Contains(t, deployText, `$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")`, "deploy should pass the executor network override through SSH to the remote host")
@@ -2531,7 +2630,8 @@ func TestSandboxDNSConfigAlignment(t *testing.T) {
 	resolvScript, err := os.ReadFile("../deploy/scripts/sandbox-resolv-conf.sh")
 	require.NoError(t, err, "test should read the sandbox resolv.conf writer")
 	require.Contains(t, string(resolvScript), `NAMESERVER="${2:-`+sandboxDNSIP+`}"`, "sandbox-resolv-conf.sh should default to sandbox-dns's IP for /etc/143/sandbox-resolv.conf")
-	require.Contains(t, reconcileText, "/opt/143/deploy/scripts/sandbox-resolv-conf.sh", "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
+	require.Contains(t, reconcileText, `DEPLOY_SCRIPT_DIR="${DEPLOY_SCRIPT_DIR:-/opt/143/deploy/scripts}"`, "reconcile-worker-host.sh should default helper scripts to the staged deploy path")
+	require.Contains(t, reconcileText, `"$DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh"`, "reconcile-worker-host.sh should delegate to the shared writer instead of inlining the file content")
 	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
 	require.NoError(t, err, "test should read the deploy script")
 	deployText := string(deployScript)

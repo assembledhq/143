@@ -44,6 +44,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -643,6 +644,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	automationHandler.SetGoalImprovementService(automationGoalImprovementService)
 	automationHandler.SetCanceller(canceller)
 	automationHandler.SetLogger(logger)
+	linearAutomationTriggerer := automations.NewLinearEventTriggerService(automationEventTriggerStore, automationStore, automationRunStore, jobStore, pool, logger)
+	linearAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
+	linearAutomationTriggerer.SetDefaultRepositoryResolver(linearAgentSettingsView)
+	ingestionWebhookHandler.SetLinearAutomationTriggerer(linearAutomationTriggerer)
 
 	prTemplateStore := db.NewPRTemplateStore(pool)
 	githubStatusHandler := handlers.NewGitHubStatusHandler(
@@ -740,8 +745,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
+	var reviewArtifactReader *reviewartifact.CachedReader
+	if snapshotStore != nil {
+		reviewArtifactReader = reviewartifact.NewCachedReader(snapshotStore, reviewartifact.DefaultCacheBytes)
+	}
 	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewArtifactReader, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector

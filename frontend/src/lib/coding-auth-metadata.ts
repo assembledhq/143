@@ -1,6 +1,7 @@
 import {
   AVAILABLE_OPENCODE_MODELS,
-  OPENCODE_MODEL_GPT_5_2,
+  OPENCODE_MODEL_GLM_5_2,
+  OPENCODE_MODEL_OPENROUTER_GLM_5_2,
   OPENCODE_MODEL_GPT_5_4_MINI,
 } from "@/lib/model-constants";
 
@@ -135,6 +136,8 @@ export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {
 export type OpenCodeBackingProvider = "opencode" | "anthropic" | "openai" | "gemini" | "openrouter";
 export type OpenCodePresetConfidence = "high" | "medium" | "low";
 
+export const DEFAULT_OPENCODE_BACKING_PROVIDER: OpenCodeBackingProvider = "openrouter";
+
 export interface OpenCodeKeyPresetDetection {
   provider: OpenCodeBackingProvider;
   confidence: OpenCodePresetConfidence;
@@ -148,6 +151,8 @@ export const OPENCODE_BACKING_PROVIDER_OPTIONS: Array<{ value: OpenCodeBackingPr
   { value: "gemini", label: "OpenCode via Gemini" },
   { value: "openrouter", label: "OpenCode via OpenRouter" },
 ];
+
+export const OPENCODE_US_INFERENCE_HELP_TEXT = "Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.";
 
 export function openCodeBackingProviderLabel(provider: OpenCodeBackingProvider): string {
   return OPENCODE_BACKING_PROVIDER_OPTIONS.find((option) => option.value === provider)?.label ?? "OpenCode native";
@@ -188,10 +193,10 @@ export function detectOpenCodeKeyPreset(apiKey: string): OpenCodeKeyPresetDetect
     };
   }
   return {
-    provider: "opencode",
+    provider: DEFAULT_OPENCODE_BACKING_PROVIDER,
     confidence: "low",
     message: trimmed
-      ? "This key shape is ambiguous. Defaulting to OpenCode native; you can change the provider."
+      ? "This key shape is ambiguous. Defaulting to OpenCode via OpenRouter; you can change the provider."
       : "Paste a key to detect the provider preset.",
   };
 }
@@ -207,13 +212,19 @@ export function openCodeModelsForBackingProvider(provider: OpenCodeBackingProvid
     case "gemini":
       return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("google/"));
     case "openrouter":
-      return [...AVAILABLE_OPENCODE_MODELS];
+      return AVAILABLE_OPENCODE_MODELS.filter((model) => model.startsWith("openrouter/"));
   }
 }
 
 export function openCodeDefaultModelForBackingProvider(provider: OpenCodeBackingProvider): string {
+  if (provider === "opencode") {
+    return OPENCODE_MODEL_GLM_5_2;
+  }
+  if (provider === "openrouter") {
+    return OPENCODE_MODEL_OPENROUTER_GLM_5_2;
+  }
   const models = openCodeModelsForBackingProvider(provider);
-  return models[0] ?? (provider === "opencode" ? OPENCODE_MODEL_GPT_5_2 : OPENCODE_MODEL_GPT_5_4_MINI);
+  return models[0] ?? OPENCODE_MODEL_GPT_5_4_MINI;
 }
 
 // openCodeAgentDefaults builds the agent_defaults map for an OpenCode

@@ -179,7 +179,7 @@ Use this section when previews boot correctly but cold starts are too slow.
 
 ### Reuse dependency artifacts
 
-Declaring `verify_paths` lets fresh workspaces skip install entirely. When a cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and skips `install.command` once every verify path exists. Without `verify_paths`, fresh workspaces run `install.command`.
+Declaring `verify_paths` lets fresh workspaces skip install entirely. When a cache hit matches the exact install command, lockfile contents, and platform sandbox cache ABI, 143 restores the cached artifacts and skips `install.command` once every verify path exists. Without `verify_paths`, fresh workspaces run `install.command`.
 
 Because the dependency cache key does not include the commit SHA, `install.command` must produce output that depends only on the install config and lockfiles. Do dependency installation here, not application builds. Source-dependent builds belong in the service `command`, where they run on every preview start.
 

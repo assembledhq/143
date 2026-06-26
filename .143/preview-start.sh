@@ -67,7 +67,13 @@ echo '[143-preview] running migrations...'
 "$MIGRATE_BIN" up
 
 echo '[143-preview] seeding database...'
-psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f .143/seed.sql
+for seed_file in .143/seed/*.sql; do
+    if [ ! -f "$seed_file" ]; then
+        echo '[143-preview] no seed SQL fragments found in .143/seed'
+        exit 1
+    fi
+    psql -v ON_ERROR_STOP=1 "$DATABASE_URL" -f "$seed_file"
+done
 
 if [ ! -s "$SECRET_FILE" ]; then
     # tr strips the trailing newline base64 appends — SESSION_SECRET is

@@ -753,6 +753,36 @@ func TestSessionStore_PublishCheckpoint_BumpsWorkspaceRevisionForSnapshot(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
 }
 
+func TestSessionStore_UpdateWorkspaceSnapshotAllowsNilResult(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	snapshotKey := "snapshots/org/session/interrupted.tar.zst"
+
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+snapshot_key = @snapshot_key[\\s\\S]+diff = COALESCE\\(@diff, diff\\)").
+		WithArgs(pgx.NamedArgs{
+			"id":                sessionID,
+			"org_id":            orgID,
+			"snapshot_key":      snapshotKey,
+			"diff":              nil,
+			"base_commit_sha":   nil,
+			"diff_collected_at": nil,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	require.NotPanics(t, func() {
+		err = store.UpdateWorkspaceSnapshot(context.Background(), orgID, sessionID, snapshotKey, nil)
+	}, "UpdateWorkspaceSnapshot should allow interrupted-session snapshot updates without diff metadata")
+	require.NoError(t, err, "UpdateWorkspaceSnapshot should persist the snapshot when result metadata is nil")
+	require.NoError(t, mock.ExpectationsWereMet(), "expectations should be met")
+}
+
 func TestSessionStore_BumpWorkspaceRevision(t *testing.T) {
 	t.Parallel()
 

@@ -206,6 +206,26 @@ func TestPagerDutyIntegrationAccountUniqueIndexTreatsNullAccountsAsEqual(t *test
 		"PagerDuty account uniqueness should treat NULL account_subdomain values as equal")
 }
 
+func TestPreviewPolicyUntrustedForkRepairMigrationIsForwardCompatible(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000218_preview_policy_untrusted_fork_repair.up.sql")
+	require.NoError(t, err, "test should read the preview policy repair migration")
+
+	sql := string(body)
+	require.Contains(t, sql,
+		"ADD COLUMN IF NOT EXISTS session_prewarm_untrusted_fork BOOLEAN NOT NULL DEFAULT false",
+		"repair migration should add the missing preview policy column without failing on fresh databases")
+	require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS session_preview_prewarm_runs_status_check",
+		"repair migration should replace the older session prewarm status constraint")
+	require.Contains(t, sql, "'skipped_untrusted_fork'",
+		"repair migration should allow untrusted fork prewarm skips on databases that applied the older 000208")
+	require.Contains(t, sql, "'skipped_no_lockfiles'",
+		"repair migration should allow missing-lockfile prewarm skips on databases that applied the older 000208")
+	require.Contains(t, sql, "'skipped_no_paths'",
+		"repair migration should allow missing-path prewarm skips on databases that applied the older 000208")
+}
+
 func TestCodingCredentialsVersioningMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

@@ -7,8 +7,10 @@ import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import {
   apiKeyHelp,
+  DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
   OPENCODE_BACKING_PROVIDER_OPTIONS,
+  OPENCODE_US_INFERENCE_HELP_TEXT,
   openCodeAgentDefaults,
   openCodeCredentialLabel,
   openCodeDefaultModelForBackingProvider,
@@ -25,6 +27,7 @@ import { CLISessionsCard } from "@/components/cli-sessions-card";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { CodingAuthDialog } from "@/components/coding-auth-dialog";
 import { EmptyState } from "@/components/empty-state";
+import { OpenCodeCustomModelField } from "@/components/opencode-custom-model-field";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
@@ -233,9 +236,9 @@ export default function AccountPage() {
   const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
-  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>(DEFAULT_OPENCODE_BACKING_PROVIDER);
   const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
-  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
   const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
   const openCodeKeyDetection = useMemo(
@@ -294,8 +297,7 @@ export default function AccountPage() {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      setApiKey("");
-      setAuthLabel("");
+      resetModalState();
       setAddOpen(false);
       toast.success("Personal auth saved");
     },
@@ -423,9 +425,9 @@ export default function AccountPage() {
     setAuthLabel("");
     setProvider("openai");
     setAuthType("subscription");
-    setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER);
     setOpenCodeBackingProviderTouched(false);
-    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
     setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }
@@ -704,6 +706,7 @@ export default function AccountPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-muted-foreground">{OPENCODE_US_INFERENCE_HELP_TEXT}</p>
                   {openCodeKeyDetection && apiKey.trim() ? (
                     <p className="text-xs text-muted-foreground">
                       {openCodeBackingProviderTouched
@@ -725,15 +728,11 @@ export default function AccountPage() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="personal-opencode-model-custom">Custom model override</Label>
-                  <Input
-                    id="personal-opencode-model-custom"
-                    value={openCodeCustomModel}
-                    onChange={(event) => setOpenCodeCustomModel(event.target.value)}
-                    placeholder="provider/model (e.g. xai/grok-code-fast)"
-                  />
-                </div>
+                <OpenCodeCustomModelField
+                  id="personal-opencode-model-custom"
+                  value={openCodeCustomModel}
+                  onChange={setOpenCodeCustomModel}
+                />
               </>
             ) : null}
             <div className="space-y-2">

@@ -165,8 +165,61 @@ describe("PreviewSettingsPage", () => {
       screen.getByText("Not publishing preview links to GitHub PRs"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/When enabled, 143 publishes preview URLs to GitHub PR comments or commit statuses/i),
+      screen.getByText(/When enabled, 143 publishes preview URLs to both GitHub PR comments and commit statuses/i),
     ).toBeInTheDocument();
+  });
+
+  it("shows contextual reasons when publish and surface controls are disabled", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
+            pr_preview_surfaces_enabled: false,
+            github_pr_comment_enabled: true,
+            github_commit_status_enabled: true,
+            preview_configured: true,
+            preview_success_recorded: false,
+            preview_ready: false,
+            preview_readiness_missing_reason:
+              "Run a successful test preview before enabling GitHub PR links",
+            github_pr_comment_permission_ok: true,
+            github_commit_status_permission_ok: true,
+            open_pr_count: 1,
+            updated_at: null,
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(
+      await screen.findByRole("switch", {
+        name: /publish preview links to GitHub PRs for assembledhq\/143/i,
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Run a successful test preview before enabling GitHub PR links"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Surfaces")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", {
+        name: /enable pr comment preview link for assembledhq\/143/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", {
+        name: /enable commit status preview link for assembledhq\/143/i,
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("falls back to connected repositories when preview policies are empty", async () => {
@@ -992,6 +1045,10 @@ describe("PreviewSettingsPage", () => {
 
   it("starts a policy test preview with the selected preview config", async () => {
     let testPreviewBody: unknown;
+    let resolveTestPreview: () => void;
+    const testPreviewStarted = new Promise<void>((resolve) => {
+      resolveTestPreview = resolve;
+    });
 
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -1025,6 +1082,7 @@ describe("PreviewSettingsPage", () => {
       })),
       http.post("*/api/v1/repositories/repo-1/preview-policy/test-preview", async ({ request }) => {
         testPreviewBody = await request.json();
+        await testPreviewStarted;
         return HttpResponse.json({
           data: {
             target_id: "target-1",
@@ -1045,13 +1103,17 @@ describe("PreviewSettingsPage", () => {
 
     expect(await screen.findAllByText("assembledhq/143")).not.toHaveLength(0);
     await userEvent.click(await screen.findByRole("button", { name: /test preview/i }));
+    expect(
+      await screen.findByRole("button", { name: /testing preview/i }),
+    ).toBeDisabled();
+    resolveTestPreview!();
 
     await waitFor(() => {
       expect(testPreviewBody).toEqual({ preview_config_name: "web" });
     });
   });
 
-  it("toggles a PR preview surface from the publish stage", async () => {
+  it("toggles GitHub PR publishing with both publish surfaces enabled", async () => {
     let savedPolicy: unknown;
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
@@ -1085,11 +1147,17 @@ describe("PreviewSettingsPage", () => {
 
     renderWithProviders(<PreviewSettingsPage />);
 
-    await userEvent.click(
-      await screen.findByRole("switch", { name: /enable pr comment preview link for assembledhq\/143/i }),
-    );
+    const publishSwitch = await screen.findByRole("switch", {
+      name: /publish preview links to github prs for assembledhq\/143/i,
+    });
+    expect(screen.queryByText("Surfaces")).not.toBeInTheDocument();
+    await userEvent.click(publishSwitch);
     await waitFor(() => {
-      expect(savedPolicy).toEqual({ github_pr_comment_enabled: false });
+      expect(savedPolicy).toEqual({
+        pr_preview_surfaces_enabled: false,
+        github_pr_comment_enabled: true,
+        github_commit_status_enabled: true,
+      });
     });
   });
 

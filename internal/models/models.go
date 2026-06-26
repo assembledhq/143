@@ -614,36 +614,55 @@ func (s SessionListItem) MarshalJSON() ([]byte, error) {
 
 // SessionResult holds the result fields to update on an agent run.
 type SessionResult struct {
-	TokenUsage         json.RawMessage   `json:"token_usage,omitempty"`
-	ModelUsed          *string           `json:"model_used,omitempty"`
-	ResultSummary      *string           `json:"result_summary,omitempty"`
-	Diff               *string           `json:"diff,omitempty"`
-	Error              *string           `json:"error,omitempty"`
-	FailureCategory    *string           `json:"failure_category,omitempty"`
-	DiffBaseCommitSHA  *string           `json:"-"`
-	DiffHeadCommitSHA  *string           `json:"-"`
-	DiffWorkspaceDirty bool              `json:"-"`
-	DiffCollectedAt    *time.Time        `json:"-"`
-	DiffSource         SessionDiffSource `json:"-"`
+	TokenUsage                      json.RawMessage   `json:"token_usage,omitempty"`
+	ModelUsed                       *string           `json:"model_used,omitempty"`
+	ResultSummary                   *string           `json:"result_summary,omitempty"`
+	Diff                            *string           `json:"diff,omitempty"`
+	Error                           *string           `json:"error,omitempty"`
+	FailureCategory                 *string           `json:"failure_category,omitempty"`
+	DiffBaseCommitSHA               *string           `json:"-"`
+	DiffHeadCommitSHA               *string           `json:"-"`
+	DiffWorkspaceDirty              bool              `json:"-"`
+	DiffCollectedAt                 *time.Time        `json:"-"`
+	DiffSource                      SessionDiffSource `json:"-"`
+	ReviewArtifactKey               *string           `json:"-"`
+	ReviewArtifactVersion           *int              `json:"-"`
+	ReviewArtifactCompressedBytes   int64             `json:"-"`
+	ReviewArtifactUncompressedBytes int64             `json:"-"`
+	ReviewArtifactFileCount         int               `json:"-"`
+	ReviewArtifactSkippedCount      int               `json:"-"`
+	ReviewArtifactTruncated         bool              `json:"-"`
 }
 
 type SessionDiffSnapshot struct {
-	ID             uuid.UUID         `db:"id" json:"id"`
-	SessionID      uuid.UUID         `db:"session_id" json:"session_id"`
-	OrgID          uuid.UUID         `db:"org_id" json:"org_id"`
-	TurnNumber     int               `db:"turn_number" json:"turn_number"`
-	SequenceNumber int               `db:"sequence_number" json:"sequence_number"`
-	Source         SessionDiffSource `db:"source" json:"source"`
-	BaseCommitSHA  string            `db:"base_commit_sha" json:"base_commit_sha"`
-	HeadCommitSHA  *string           `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
-	WorkspaceDirty bool              `db:"workspace_dirty" json:"workspace_dirty"`
-	WorkingBranch  *string           `db:"working_branch" json:"working_branch,omitempty"`
-	TargetBranch   *string           `db:"target_branch" json:"target_branch,omitempty"`
-	Diff           string            `db:"diff" json:"diff"`
-	FilesChanged   int               `db:"files_changed" json:"files_changed"`
-	LinesAdded     int               `db:"lines_added" json:"lines_added"`
-	LinesRemoved   int               `db:"lines_removed" json:"lines_removed"`
-	CapturedAt     time.Time         `db:"captured_at" json:"captured_at"`
+	ID                              uuid.UUID         `db:"id" json:"id"`
+	SessionID                       uuid.UUID         `db:"session_id" json:"session_id"`
+	OrgID                           uuid.UUID         `db:"org_id" json:"org_id"`
+	TurnNumber                      int               `db:"turn_number" json:"turn_number"`
+	SequenceNumber                  int               `db:"sequence_number" json:"sequence_number"`
+	Source                          SessionDiffSource `db:"source" json:"source"`
+	BaseCommitSHA                   string            `db:"base_commit_sha" json:"base_commit_sha"`
+	HeadCommitSHA                   *string           `db:"head_commit_sha" json:"head_commit_sha,omitempty"`
+	WorkspaceDirty                  bool              `db:"workspace_dirty" json:"workspace_dirty"`
+	WorkingBranch                   *string           `db:"working_branch" json:"working_branch,omitempty"`
+	TargetBranch                    *string           `db:"target_branch" json:"target_branch,omitempty"`
+	Diff                            string            `db:"diff" json:"diff"`
+	FilesChanged                    int               `db:"files_changed" json:"files_changed"`
+	LinesAdded                      int               `db:"lines_added" json:"lines_added"`
+	LinesRemoved                    int               `db:"lines_removed" json:"lines_removed"`
+	CapturedAt                      time.Time         `db:"captured_at" json:"captured_at"`
+	ReviewArtifactKey               *string           `db:"review_artifact_key" json:"review_artifact_key,omitempty"`
+	ReviewArtifactVersion           *int              `db:"review_artifact_version" json:"review_artifact_version,omitempty"`
+	ReviewArtifactCompressedBytes   int64             `db:"review_artifact_compressed_bytes" json:"review_artifact_compressed_bytes"`
+	ReviewArtifactUncompressedBytes int64             `db:"review_artifact_uncompressed_bytes" json:"review_artifact_uncompressed_bytes"`
+	ReviewArtifactFileCount         int               `db:"review_artifact_file_count" json:"review_artifact_file_count"`
+	ReviewArtifactSkippedCount      int               `db:"review_artifact_skipped_count" json:"review_artifact_skipped_count"`
+	ReviewArtifactTruncated         bool              `db:"review_artifact_truncated" json:"review_artifact_truncated"`
+}
+
+type SessionReviewArtifactRef struct {
+	Key     *string `db:"review_artifact_key" json:"review_artifact_key,omitempty"`
+	Version *int    `db:"review_artifact_version" json:"review_artifact_version,omitempty"`
 }
 
 // PullRequestStatus represents the lifecycle state of a pull request.

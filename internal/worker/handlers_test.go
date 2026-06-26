@@ -893,14 +893,12 @@ func TestSlackSessionAckBlocksIncludeCorrectionActions(t *testing.T) {
 			},
 		},
 		slackbotsvc.SlackRoutingModeAnswerOnly,
-		true,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should let users correct channel repository defaults")
-	require.True(t, slackBlocksContainAction(blocks, "slack_start_work"), "answer-only ack should let users escalate into durable work")
+	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "ack should not show start-work escalation while the session is already running")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_preview_target"), "ack should offer a preview target selector when preview context is missing")
 	require.True(t, slackBlocksContainAction(blocks, "slack_choose_pull_request"), "ack should offer a PR selector when PR context is missing")
-	require.Contains(t, slackBlocksActionValue(blocks, "slack_start_work"), orgID.String(), "start-work action should carry org scope")
 }
 
 func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
@@ -925,7 +923,6 @@ func TestSlackSessionAckBlocksHideStartWorkWhenWorkAlreadyQueued(t *testing.T) {
 			Branch:         "main",
 		},
 		slackbotsvc.SlackRoutingModeStartWork,
-		false,
 	)
 
 	require.True(t, slackBlocksContainAction(blocks, "slack_configure_channel"), "ack should still let users correct channel repository defaults")
@@ -955,7 +952,6 @@ func TestSlackSessionAckBlocksSuppressStartWorkForAutoRouting(t *testing.T) {
 			Branch:         "main",
 		},
 		slackbotsvc.SlackRoutingModeAuto,
-		false,
 	)
 
 	require.False(t, slackBlocksContainAction(blocks, "slack_start_work"), "auto-routed Slack acks should not show a Start work escalation while the session is already running")
@@ -1224,6 +1220,111 @@ func TestPostSlackMessageWithFallback_InvalidBlocksRetriesPlainTextAndRecordsFal
 	require.Equal(t, 1, poster.blockCalls, "helper should try the block payload first")
 	require.Equal(t, 1, poster.textCalls, "helper should retry with plain text after invalid_blocks")
 	require.NoError(t, mock.ExpectationsWereMet(), "helper should record failed block and fallback delivery attempts")
+}
+
+func TestUpdateSlackMessageWithPostFallback(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		messageTS           string
+		blocksErr           error
+		updateTextErr       error
+		expectedTS          string
+		expectedBlockCalls  int
+		expectedUpdateCalls int
+		expectedBlockPosts  int
+		expectedTextPosts   int
+	}{
+		{
+			name:                "updates existing status message with final blocks",
+			messageTS:           "1700000000.000100",
+			expectedTS:          "1700000000.000100",
+			expectedBlockCalls:  1,
+			expectedUpdateCalls: 0,
+			expectedBlockPosts:  0,
+			expectedTextPosts:   0,
+		},
+		{
+			name:                "falls back to posting when no status message timestamp exists",
+			messageTS:           "",
+			expectedTS:          "1700000000.000200",
+			expectedBlockCalls:  0,
+			expectedUpdateCalls: 0,
+			expectedBlockPosts:  1,
+			expectedTextPosts:   0,
+		},
+		{
+			name:                "retries update as plain text when Slack rejects blocks",
+			messageTS:           "1700000000.000100",
+			blocksErr:           errors.New("slack chat.update: invalid_blocks"),
+			expectedTS:          "1700000000.000100",
+			expectedBlockCalls:  1,
+			expectedUpdateCalls: 1,
+			expectedBlockPosts:  0,
+			expectedTextPosts:   0,
+		},
+		{
+			name:                "posts a new message when both block and plain text updates fail",
+			messageTS:           "1700000000.000100",
+			blocksErr:           errors.New("slack chat.update: invalid_blocks"),
+			updateTextErr:       errors.New("slack chat.update: message_not_found"),
+			expectedTS:          "1700000000.000200",
+			expectedBlockCalls:  1,
+			expectedUpdateCalls: 1,
+			expectedBlockPosts:  0,
+			expectedTextPosts:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			link := models.SlackSessionLink{
+				ID:             uuid.New(),
+				OrgID:          uuid.New(),
+				SessionID:      uuid.New(),
+				SlackTeamID:    "T123",
+				SlackChannelID: "C123",
+				SlackThreadTS:  "1700000000.000050",
+				SlackRootTS:    "1700000000.000050",
+				SlackUserID:    "U123",
+				CreatedAt:      time.Now(),
+				UpdatedAt:      time.Now(),
+			}
+			client := &fakeSlackMessagePoster{
+				updateBlocksErr: tt.blocksErr,
+				updateTextErr:   tt.updateTextErr,
+				blocksPosted:    ingestion.SlackPostedMessage{Channel: "C123", Timestamp: "1700000000.000200"},
+				textPosted:      ingestion.SlackPostedMessage{Channel: "C123", Timestamp: "1700000000.000200"},
+			}
+
+			posted, err := updateSlackMessageWithPostFallback(
+				context.Background(),
+				client,
+				client,
+				nil,
+				&Services{},
+				zerolog.Nop(),
+				link,
+				"xoxb-token",
+				"C123",
+				"1700000000.000050",
+				tt.messageTS,
+				"Final response",
+				[]ingestion.SlackBlock{{Type: "section", Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Final response*"}}},
+				models.SlackOutboundMessageKindFinal,
+			)
+
+			require.NoError(t, err, "update helper should deliver the final Slack message")
+			require.Equal(t, tt.expectedTS, posted.Timestamp, "update helper should return the delivered Slack timestamp")
+			require.Equal(t, tt.expectedBlockCalls, client.updateBlockCalls, "update helper should call block update the expected number of times")
+			require.Equal(t, tt.expectedUpdateCalls, client.updateTextCalls, "update helper should call plain-text update the expected number of times")
+			require.Equal(t, tt.expectedBlockPosts, client.blockCalls, "update helper should post with blocks only when update cannot be used")
+			require.Equal(t, tt.expectedTextPosts, client.textCalls, "update helper should post plain text only when update fallback cannot be used")
+		})
+	}
 }
 
 func TestEnqueueSlackFinalIfLinkedEnqueuesFinalResponseForAssistantMessage(t *testing.T) {
@@ -2640,12 +2741,16 @@ func workerAnyArgs(n int) []interface{} {
 }
 
 type fakeSlackMessagePoster struct {
-	blocksErr    error
-	textErr      error
-	blocksPosted ingestion.SlackPostedMessage
-	textPosted   ingestion.SlackPostedMessage
-	blockCalls   int
-	textCalls    int
+	blocksErr        error
+	textErr          error
+	updateBlocksErr  error
+	updateTextErr    error
+	blocksPosted     ingestion.SlackPostedMessage
+	textPosted       ingestion.SlackPostedMessage
+	blockCalls       int
+	textCalls        int
+	updateBlockCalls int
+	updateTextCalls  int
 }
 
 type fakeSlackReactionAdder struct {
@@ -2680,6 +2785,16 @@ func (f *fakeSlackMessagePoster) PostMessageWithBlocks(_ context.Context, _, _, 
 		return ingestion.SlackPostedMessage{}, f.blocksErr
 	}
 	return f.blocksPosted, nil
+}
+
+func (f *fakeSlackMessagePoster) UpdateMessage(_ context.Context, _, _, _, _ string) error {
+	f.updateTextCalls++
+	return f.updateTextErr
+}
+
+func (f *fakeSlackMessagePoster) UpdateMessageWithBlocks(_ context.Context, _, _, _, _ string, _ []ingestion.SlackBlock) error {
+	f.updateBlockCalls++
+	return f.updateBlocksErr
 }
 
 func expectSlackOutboundUpsert(t *testing.T, mock pgxmock.PgxPoolIface, orgID, linkID uuid.UUID, teamID, channelID string, kind models.SlackOutboundMessageKind, status string) {

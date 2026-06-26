@@ -61,6 +61,7 @@ type SessionExecutor struct {
 	OwnerID           string                `db:"owner_id" json:"owner_id"`
 	LockToken         uuid.UUID             `db:"lock_token" json:"lock_token"`
 	Status            SessionExecutorStatus `db:"status" json:"status"`
+	ContainerID       *string               `db:"container_id" json:"container_id,omitempty"`
 	Image             string                `db:"image" json:"image"`
 	BuildSHA          string                `db:"build_sha" json:"build_sha"`
 	HeartbeatAt       *time.Time            `db:"heartbeat_at" json:"heartbeat_at,omitempty"`

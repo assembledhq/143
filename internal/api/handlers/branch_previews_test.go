@@ -1667,6 +1667,56 @@ func TestBranchPreviewHandler_UpdatePolicyRejectsMissingSelectedGitHubPermission
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestBranchPreviewHandler_UpdatePolicyRequiresBothGitHubPermissionsForStalePolicy(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	repoID := uuid.New()
+	policyID := uuid.New()
+	now := time.Now()
+	details := ghservice.InstallationDetails{}
+	details.Permissions.Issues = "write"
+	details.Permissions.Statuses = "read"
+
+	handler := NewBranchPreviewHandler(
+		db.NewPreviewStore(mock),
+		db.NewRepositoryStore(mock),
+		fakeBranchPreviewGitHubWithDetails{details: details},
+		nil,
+		"https://app.143.dev",
+		"https://{id}.preview.143.dev",
+	)
+
+	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryTestCols()).
+			AddRow(repoID, orgID, uuid.New(), int64(123), "acme/app", "main", false, (*string)(nil), (*string)(nil), "https://github.com/acme/app.git", int64(456), "active", (*time.Time)(nil), (*float64)(nil), []byte(`{}`), now, now))
+	mock.ExpectQuery("SELECT .+ FROM repository_preview_policies").
+		WithArgs(previewHandlerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(repositoryPreviewPolicyTestCols()).
+			AddRow(policyID, orgID, repoID, string(models.PreviewAutoModeOff), string(models.PreviewSessionPrewarmModeOff), false, false, true, false, "", userID, now, now))
+
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/repositories/"+repoID.String()+"/preview-policy", bytes.NewBufferString(`{"pr_preview_surfaces_enabled":true}`))
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repoID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: "admin"})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.UpdatePolicy(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "UpdatePolicy should require commit status permission even when an old policy row disabled statuses")
+	require.Contains(t, rr.Body.String(), "GITHUB_PERMISSION_MISSING", "response should identify the missing GitHub permission")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestBranchPreviewHandler_UpdatePolicySessionPrewarmOnlyPreservesAutoMode(t *testing.T) {
 	t.Parallel()
 

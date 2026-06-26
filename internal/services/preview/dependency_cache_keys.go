@@ -34,7 +34,7 @@ type PreviewInstallLockfileKey struct {
 type previewDependencyCacheKey struct {
 	RuntimeVersion  string                      `json:"runtime_version"`
 	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
-	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	SandboxCacheABI string                      `json:"sandbox_cache_abi,omitempty"`
 	Kind            models.PreviewCacheKind     `json:"kind,omitempty"`
 	InstallCommand  []string                    `json:"install_command"`
 	InstallCwd      string                      `json:"install_cwd"`
@@ -109,7 +109,7 @@ func computePreviewPathCacheKey(ctx context.Context, executor dependencyCacheKey
 	if sb != nil {
 		payload.SandboxProvider = sb.Provider
 		if sb.Metadata != nil {
-			payload.SandboxImage = sb.Metadata["image"]
+			payload.SandboxCacheABI = SandboxCacheABIFromMetadata(sb.Metadata)
 		}
 	}
 	key, err := stableJSONSHA256(payload)
@@ -117,6 +117,19 @@ func computePreviewPathCacheKey(ctx context.Context, executor dependencyCacheKey
 		return "", nil, fmt.Errorf("marshal dependency cache key: %w", err)
 	}
 	return key, lockfiles, nil
+}
+
+func SandboxCacheABIFromMetadata(metadata map[string]string) string {
+	if metadata == nil {
+		return ""
+	}
+	if abi := strings.TrimSpace(metadata[agent.SandboxMetadataCacheABI]); abi != "" {
+		return abi
+	}
+	if image := strings.TrimSpace(metadata["image"]); image != "" {
+		return "legacy-image:" + image
+	}
+	return ""
 }
 
 func ComputePreviewDependencyCachePlacementKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {

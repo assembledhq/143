@@ -600,9 +600,9 @@ const (
 	DefaultWeightRevenueRisk    = 0.20
 
 	// DefaultMaxSessionDurationSeconds is the default per-session wall-clock
-	// timeout (25 minutes). Long enough for non-trivial agent runs, short
+	// timeout (60 minutes). Long enough for non-trivial agent runs, short
 	// enough that stuck sessions don't silently eat capacity.
-	DefaultMaxSessionDurationSeconds = 25 * 60
+	DefaultMaxSessionDurationSeconds = 60 * 60
 
 	// MinMaxSessionDurationSeconds is the smallest sensible per-org timeout.
 	// Values below this produce very short runs that are unlikely to complete

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
+import { fireEvent, renderWithProviders, screen, waitFor, userEvent } from '@/test/test-utils';
 import SettingsPage from './page';
 
 const {
@@ -566,10 +566,10 @@ describe('SettingsPage', () => {
 
     const user = userEvent.setup();
     await user.click(await screen.findByRole('button', { name: 'Manage readiness policy' }));
-    await user.type(await screen.findByPlaceholderText('check_key'), 'review_docs');
-    await user.type(screen.getByPlaceholderText('Check name'), 'Review docs');
-    await user.type(screen.getByPlaceholderText('Include paths'), 'docs/**');
-    await user.type(screen.getByPlaceholderText('Prompt template'), 'Check docs for reviewer context.');
+    fireEvent.change(await screen.findByPlaceholderText('check_key'), { target: { value: 'review_docs' } });
+    fireEvent.change(screen.getByPlaceholderText('Check name'), { target: { value: 'Review docs' } });
+    fireEvent.change(screen.getByPlaceholderText('Include paths'), { target: { value: 'docs/**' } });
+    fireEvent.change(screen.getByPlaceholderText('Prompt template'), { target: { value: 'Check docs for reviewer context.' } });
     await user.click(screen.getByRole('button', { name: 'Add custom check' }));
 
     await waitFor(() => {

@@ -1,0 +1,8 @@
+-- No-op repair migration.
+--
+-- The current 000208 migration already declares
+-- repository_preview_policies.session_prewarm_untrusted_fork and the expanded
+-- session_preview_prewarm_runs.status vocabulary for databases migrated from
+-- scratch. This migration exists for databases that applied an older 000208
+-- before those edits, so rolling back 000217 should not remove schema that
+-- belongs to the version-216 schema in this codebase.

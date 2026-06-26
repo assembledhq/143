@@ -193,7 +193,8 @@ describe("Account settings page", () => {
 	    const dialog = screen.getByRole("dialog");
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
-	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    expect(within(dialog).getByRole("button", { name: "Advanced OpenCode model" })).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });
 
@@ -289,10 +290,15 @@ describe("Account settings page", () => {
 	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
 	    const dialog = await screen.findByRole("dialog");
 	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
+	    expect(within(dialog).getByText("Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
+	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("openrouter/z-ai/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },
 	    });
 	    await within(dialog).findByText("Detected OpenRouter key from the sk-or prefix.");
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    await user.click(within(dialog).getByRole("button", { name: "Advanced OpenCode model" }));
+	    expect(within(dialog).getByRole("button", { name: "What custom OpenCode model override does" })).toBeInTheDocument();
 	    fireEvent.change(within(dialog).getByLabelText("Custom model override"), {
 	      target: { value: "xai/grok-code-fast" },
 	    });
@@ -307,7 +313,7 @@ describe("Account settings page", () => {
 	        api_key: "sk-or-opencode",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
 	        },
 	      });
@@ -361,7 +367,7 @@ describe("Account settings page", () => {
 	        api_key: "sk-or-v1-personal",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	        },
 	      });
 	    });

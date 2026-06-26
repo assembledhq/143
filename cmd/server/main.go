@@ -1191,30 +1191,41 @@ func configureSessionExecutorDispatch(
 	}
 
 	svc.RequireSessionExecutorDispatcher = true
+	executorLauncher := worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+		Image:       cfg.SessionExecutorImage,
+		NetworkMode: cfg.SessionExecutorDockerNetwork,
+		Binds:       sessionExecutorBinds(cfg.SessionExecutorExtraBinds),
+		GroupAdd:    sessionExecutorGroupAddFromEnv(),
+		Env:         os.Environ(),
+		StopTimeout: cfg.SessionExecutorStopTimeout,
+	})
+	executorLauncher.SetLogger(logger)
 	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
-		Executors: db.NewSessionExecutorStore(pool),
-		Jobs:      jobStore,
-		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
-			Image:       cfg.SessionExecutorImage,
-			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds:       sessionExecutorBinds(),
-			GroupAdd:    sessionExecutorGroupAddFromEnv(),
-			Env:         os.Environ(),
-			StopTimeout: cfg.SessionExecutorStopTimeout,
-		}),
+		Executors:             db.NewSessionExecutorStore(pool),
+		Jobs:                  jobStore,
+		Launcher:              executorLauncher,
 		NodeID:                cfg.NodeID,
 		Image:                 cfg.SessionExecutorImage,
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
+		Logger:                logger,
 	}
 }
 
-func sessionExecutorBinds() []string {
-	return []string{
+func sessionExecutorBinds(extraBinds []string) []string {
+	binds := []string{
 		"/var/run/docker.sock:/var/run/docker.sock",
 		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 		"/etc/143:/etc/143:ro",
 	}
+	for _, bind := range extraBinds {
+		bind = strings.TrimSpace(bind)
+		if bind == "" {
+			continue
+		}
+		binds = append(binds, bind)
+	}
+	return binds
 }
 
 func sessionExecutorIDFromEnv() (uuid.UUID, bool, error) {

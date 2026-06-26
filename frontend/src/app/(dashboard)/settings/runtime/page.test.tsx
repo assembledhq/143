@@ -191,6 +191,29 @@ describe("RuntimeSettingsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("defaults the maximum session length to one hour when unset", async () => {
+    settingsGetMock.mockResolvedValueOnce({
+      data: {
+        id: "org-1",
+        name: "Test Org",
+        settings: {
+          max_concurrent_runs: 5,
+          preview_max_previews_per_user: 7,
+        },
+        created_at: "2026-05-01T12:00:00Z",
+        updated_at: "2026-05-01T12:00:00Z",
+      },
+    });
+
+    renderWithProviders(<RuntimeSettingsPage />);
+
+    expect(await screen.findByText("1 hour")).toBeInTheDocument();
+
+    await openSessionLifecycleControls();
+
+    expect(screen.getByLabelText("Maximum session length")).toHaveValue(60);
+  });
+
   it("uses concise visible helper copy with question mark tooltips for caveats", async () => {
     renderWithProviders(<RuntimeSettingsPage />);
 

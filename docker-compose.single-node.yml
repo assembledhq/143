@@ -1,0 +1,282 @@
+# Production-style single-node deployment.
+#
+# Required first step on the host:
+#   sudo deploy/scripts/prepare-single-node.sh
+#
+# Then:
+#   cp .env.single-node.example .env.single-node
+#   docker compose --env-file .env.single-node -f docker-compose.single-node.yml up -d
+
+services:
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env.single-node}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in .env.single-node for wildcard preview certificates}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  frontend:
+    image: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-frontend:${IMAGE_TAG:-latest}
+    environment:
+      API_PROXY_TARGET: http://api:8080
+      HOSTNAME: "0.0.0.0"
+      NODE_ENV: production
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+
+  api:
+    image: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-server:${IMAGE_TAG:-latest}
+    env_file:
+      - .env.single-node
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD:?set DB_PASSWORD in .env.single-node}@postgres:5432/onefortythree?sslmode=disable
+      DATABASE_MAX_CONNS: ${DATABASE_MAX_CONNS:-10}
+      DATABASE_MAX_CONN_IDLE_TIME: ${DATABASE_MAX_CONN_IDLE_TIME:-5m}
+      REDIS_URL: redis://redis:6379/0
+      PORT: "8080"
+      ENV: production
+      MODE: all
+      BASE_URL: ${BASE_URL:?set BASE_URL in .env.single-node}
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL in .env.single-node}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS in .env.single-node}
+      NODE_ID: ${NODE_ID:-single-node}
+      NODE_REGION: ${NODE_REGION:-single-node}
+      PREVIEW_INTERNAL_BASE_URL: http://api:8080
+      PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:?set PREVIEW_ORIGIN_TEMPLATE in .env.single-node}
+      PREVIEW_GATEWAY_PORT: "9090"
+      CHROME_WS_URL: ws://chrome:9222
+      SESSION_EXECUTOR_IMAGE: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-server:${IMAGE_TAG:-latest}
+      SESSION_EXECUTOR_DOCKER_NETWORK: ${SESSION_EXECUTOR_DOCKER_NETWORK:-143-single-node}
+      SESSION_EXECUTOR_EXTRA_BINDS: ${SESSION_EXECUTOR_EXTRA_BINDS:-${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}}
+      SANDBOX_IMAGE: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-sandbox:${IMAGE_TAG:-latest}
+      SANDBOX_CACHE_ABI: ${SANDBOX_CACHE_ABI:-ubuntu24.04-node24-go1.26-v1}
+      SANDBOX_RUNTIME: ${SANDBOX_RUNTIME:-runsc}
+      SANDBOX_REQUIRE_GVISOR: ${SANDBOX_REQUIRE_GVISOR:-true}
+      SANDBOX_REQUIRE_DISK_QUOTA: ${SANDBOX_REQUIRE_DISK_QUOTA:-false}
+      SANDBOX_HEALTH_CHECK_IMAGE: ${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}
+      SANDBOX_RESOLV_CONF: ${SANDBOX_RESOLV_CONF:-/etc/143/sandbox-resolv.conf}
+      SANDBOX_AUTH_SOCKET_DIR: ${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}
+      UPLOAD_STORAGE_DIR: ${SINGLE_NODE_DATA_DIR:-/var/lib/143}/uploads
+      SNAPSHOT_STORAGE_DIR: ${SINGLE_NODE_DATA_DIR:-/var/lib/143}/snapshots
+      SESSION_FILES_CACHE_DIR: ${SINGLE_NODE_DATA_DIR:-/var/lib/143}/session-files-cache
+      PREVIEW_SNAPSHOT_CACHE_DIR: ${SINGLE_NODE_DATA_DIR:-/var/lib/143}/preview-snapshots
+      PREVIEW_HMR_BLOB_DIR: ${SINGLE_NODE_DATA_DIR:-/var/lib/143}/preview-hmr
+      PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR: ${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}
+      WORKER_PROCESS_COUNT: ${WORKER_PROCESS_COUNT:-1}
+      WORKER_MAX_ACTIVE_SANDBOXES: ${WORKER_MAX_ACTIVE_SANDBOXES:-1}
+      STATIC_EGRESS_PUBLIC_IP: ${STATIC_EGRESS_PUBLIC_IP:-}
+      DOCKER_GID: ${DOCKER_GID:?run sudo deploy/scripts/prepare-single-node.sh and copy DOCKER_GID into .env.single-node}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      chrome:
+        condition: service_started
+      gvisor-check:
+        condition: service_completed_successfully
+      sandbox-dns:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_143_DIR:-/etc/143}:/etc/143:ro
+      - ${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}:${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}
+      - ${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}:${PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR:-/var/cache/143/preview-dependency-cache}
+      - ${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}
+    networks:
+      default:
+        gw_priority: 1
+      sandbox:
+        gw_priority: 0
+      static-egress-sandbox:
+        gw_priority: 0
+    group_add:
+      - ${DOCKER_GID:?run sudo deploy/scripts/prepare-single-node.sh and copy DOCKER_GID into .env.single-node}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 3h
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "4.0"
+
+  migrate:
+    image: ${IMAGE_REGISTRY:-ghcr.io/assembledhq}/143-server:${IMAGE_TAG:-latest}
+    env_file:
+      - .env.single-node
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD:?set DB_PASSWORD in .env.single-node}@postgres:5432/onefortythree?sslmode=disable
+    command: ["/bin/migrate", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  postgres:
+    image: postgres:18
+    shm_size: 1g
+    environment:
+      POSTGRES_DB: onefortythree
+      POSTGRES_USER: onefortythree
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env.single-node}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U onefortythree -d onefortythree"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  redis:
+    image: redis:8.6-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+
+  chrome:
+    image: chromedp/headless-shell:latest
+    shm_size: 256m
+    networks:
+      - default
+      - sandbox
+    depends_on:
+      sandbox-dns:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 256M
+          cpus: "0.5"
+
+  gvisor-check:
+    image: docker:27-cli
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "${SANDBOX_RUNTIME:-runsc}" != "runsc" ]; then
+          echo "SANDBOX_RUNTIME=${SANDBOX_RUNTIME:-runsc}; skipping gVisor check."
+          exit 0
+        fi
+        echo "Checking gVisor (runsc) runtime..."
+        if ! docker info --format '{{.Runtimes}}' | grep -q runsc; then
+          if [ "${SANDBOX_REQUIRE_GVISOR:-true}" = "true" ]; then
+            echo "ERROR: runsc runtime not registered with Docker."
+            echo "Install gVisor, then run: sudo runsc install -- --ignore-cgroups --host-uds=open"
+            exit 1
+          fi
+          echo "WARNING: runsc runtime not registered; application may fall back to runc."
+          exit 0
+        fi
+        HEALTHCHECK_IMAGE="${SANDBOX_HEALTH_CHECK_IMAGE:-busybox:1.36.1}"
+        docker image inspect "$$HEALTHCHECK_IMAGE" >/dev/null 2>&1 || docker pull "$$HEALTHCHECK_IMAGE"
+        docker run --rm --runtime=runsc "$$HEALTHCHECK_IMAGE" echo "gVisor basic: OK"
+        docker run --rm --runtime=runsc --pids-limit 64 "$$HEALTHCHECK_IMAGE" echo "gVisor pids-limit: OK"
+    env_file:
+      - .env.single-node
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: "no"
+
+  sandbox-dns:
+    build:
+      context: .
+      dockerfile: Dockerfile.dnsmasq
+    image: 143-sandbox-dns:local
+    container_name: 143-sandbox-dns-1
+    networks:
+      sandbox:
+        ipv4_address: 172.30.0.2
+      static-egress-sandbox:
+        ipv4_address: 172.31.0.2
+    healthcheck:
+      test: ["CMD-SHELL", "nslookup localhost 127.0.0.1 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.2"
+
+volumes:
+  caddy_data:
+  pgdata:
+  redisdata:
+
+networks:
+  default:
+    external: true
+    name: 143-single-node
+  sandbox:
+    external: true
+    name: 143-sandbox
+  static-egress-sandbox:
+    external: true
+    name: 143-sandbox-static-egress

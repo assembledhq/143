@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -148,6 +148,26 @@ migrate-up:
 migrate-down:
 	go run cmd/migrate/main.go down
 
+# Validates the public/demo seed without mutating the source database.
+# Creates a temporary sibling database on the configured Postgres server,
+# runs migrations, applies .143/seed twice, asserts required demo rows, and
+# drops the temporary database. Override the admin connection with
+# DEMO_SEED_CHECK_DATABASE_URL or `make demo-seed-check DATABASE_URL=...`.
+demo-seed-check:
+	go run ./cmd/demo-seed check
+
+# Applies the canonical public/demo seed to an explicit demo database.
+# Guarded intentionally: set all three env vars below so this cannot
+# accidentally run against production or a personal dev DB.
+# Usage:
+#   DEMO_MODE=true ALLOW_DEMO_SEED_APPLY=true \
+#   DEMO_SEED_DATABASE_URL=postgres://... make demo-seed-apply
+demo-seed-apply:
+	@test -n "$$DEMO_SEED_DATABASE_URL" || { echo "DEMO_SEED_DATABASE_URL is required."; exit 1; }
+	@test "$$DEMO_MODE" = "true" || { echo "DEMO_MODE=true is required."; exit 1; }
+	@test "$$ALLOW_DEMO_SEED_APPLY" = "true" || { echo "ALLOW_DEMO_SEED_APPLY=true is required."; exit 1; }
+	go run ./cmd/demo-seed apply
+
 BUILD_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo dev)
 LDFLAGS := -X github.com/assembledhq/143/internal/version.BuildSHA=$(BUILD_SHA)
 
@@ -243,6 +263,16 @@ hooks-uninstall:
 	else \
 	  echo "core.hooksPath is '$$existing' (not .githooks) — leaving alone."; \
 	fi
+
+single-node-prepare:
+	sudo ./deploy/scripts/prepare-single-node.sh
+
+single-node-up:
+	@test -f .env.single-node || { echo "Create .env.single-node first: cp .env.single-node.example .env.single-node"; exit 1; }
+	docker compose --env-file .env.single-node -f docker-compose.single-node.yml up -d
+
+single-node-down:
+	docker compose --env-file .env.single-node -f docker-compose.single-node.yml down
 
 # ── Secrets management (SOPS + age) ─────────────────────────────────
 # Optional — only needed if you want encrypted secrets kept in a private

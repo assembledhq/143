@@ -8,8 +8,10 @@ import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import {
   apiKeyHelp,
+  DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
   OPENCODE_BACKING_PROVIDER_OPTIONS,
+  OPENCODE_US_INFERENCE_HELP_TEXT,
   openCodeAgentDefaults,
   openCodeCredentialLabel,
   openCodeDefaultModelForBackingProvider,
@@ -29,6 +31,7 @@ import type { AgentCapabilityDefinition, AgentCapabilityGrant, CodingCredentialS
 import { CodingAuthStack } from "@/components/coding-auth-stack";
 import { EmptyState } from "@/components/empty-state";
 import { AGENTS_BY_KEY } from "@/lib/agents";
+import { OpenCodeCustomModelField } from "@/components/opencode-custom-model-field";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
@@ -165,9 +168,9 @@ export default function AgentPage() {
   const [renameValue, setRenameValue] = useState("");
   const [ampMode, setAmpMode] = useState<string>(AVAILABLE_AMP_MODES[0] ?? "smart");
   const [piModel, setPiModel] = useState<string>(PI_MODEL_CLAUDE_OPUS_48);
-  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>(DEFAULT_OPENCODE_BACKING_PROVIDER);
   const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
-  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
   const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
   const openCodeKeyDetection = useMemo(
@@ -351,9 +354,9 @@ export default function AgentPage() {
     setInsertionMode("next_fallback");
     setAmpMode(AVAILABLE_AMP_MODES[0] ?? "smart");
     setPiModel(PI_MODEL_CLAUDE_OPUS_48);
-    setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER);
     setOpenCodeBackingProviderTouched(false);
-    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
     setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }
@@ -747,6 +750,7 @@ export default function AgentPage() {
                           ))}
                         </SelectContent>
                       </Select>
+                      <p className="text-xs text-muted-foreground">{OPENCODE_US_INFERENCE_HELP_TEXT}</p>
                       {openCodeKeyDetection && apiKey.trim() ? (
                         <p className="text-xs text-muted-foreground">
                           {openCodeBackingProviderTouched
@@ -768,15 +772,11 @@ export default function AgentPage() {
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="opencode-model-custom">Custom model override</Label>
-                      <Input
-                        id="opencode-model-custom"
-                        value={openCodeCustomModel}
-                        onChange={(event) => setOpenCodeCustomModel(event.target.value)}
-                        placeholder="provider/model (e.g. xai/grok-code-fast)"
-                      />
-                    </div>
+                    <OpenCodeCustomModelField
+                      id="opencode-model-custom"
+                      value={openCodeCustomModel}
+                      onChange={setOpenCodeCustomModel}
+                    />
                   </>
                 ) : null}
                 <div className="space-y-2">

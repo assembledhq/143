@@ -16,7 +16,7 @@ import (
 
 // Default demo credentials. Must stay in sync with the envDefault tags on
 // Config.DemoEmail / Config.DemoPassword and with the seeded admin row in
-// .143/seed.sql (where the password is stored as a bcrypt hash). Overriding
+// .143/seed/10_identity.sql (where the password is stored as a bcrypt hash). Overriding
 // DemoPassword via env without regenerating the seed hash results in a
 // login-page banner that advertises credentials that won't actually sign in
 // — LogStatus warns about this at boot.
@@ -49,7 +49,7 @@ type Config struct {
 	DemoMode bool `env:"DEMO_MODE" envDefault:"false"`
 	// DemoEmail / DemoPassword are the public credentials rendered in the
 	// login-page banner when DemoMode is on. Defaults must match the seeded
-	// admin in .143/seed.sql and the constants below — override via env
+	// admin in .143/seed/10_identity.sql and the constants below — override via env
 	// only if you also regenerate the bcrypt hash in the seed.
 	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
 	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
@@ -81,6 +81,11 @@ type Config struct {
 	// SessionExecutorDockerNetwork optionally attaches executor containers to
 	// the same Docker network as worker-side dependencies such as chrome.
 	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
+	// SessionExecutorExtraBinds adds host bind mounts to durable session
+	// executor containers. Single-node deployments use this to share local
+	// snapshot/upload storage with executor containers; multi-node production
+	// deployments should prefer S3-compatible storage.
+	SessionExecutorExtraBinds []string `env:"SESSION_EXECUTOR_EXTRA_BINDS" envSeparator:","`
 	// SessionExecutorStopTimeout is the Docker stop timeout for executor
 	// containers. Routine deploys should not stop active executors, but this
 	// keeps maintenance/emergency stops aligned with runtime policy.
@@ -609,13 +614,13 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 
 	if c.DemoMode {
 		logger.Warn().Msg("DEMO_MODE is enabled — GitHub integrations are stubbed, seeded credentials are public. Do not use this configuration for production data.")
-		// The seeded admin in .143/seed.sql stores a bcrypt hash of
+		// The seeded admin in .143/seed/10_identity.sql stores a bcrypt hash of
 		// defaultDemoPassword. Overriding DEMO_PASSWORD without regenerating
 		// the hash leaves the login-page banner pointing at credentials that
 		// do not log in — a subtle footgun, so warn loudly.
 		if c.DemoPassword != defaultDemoPassword || c.DemoEmail != defaultDemoEmail {
 			logger.Warn().
-				Msg("DEMO_EMAIL or DEMO_PASSWORD overridden but the seeded admin in .143/seed.sql still uses the defaults — the login banner will advertise credentials that don't sign in. Regenerate the bcrypt hash in the seed, or unset the override.")
+				Msg("DEMO_EMAIL or DEMO_PASSWORD overridden but the seeded admin in .143/seed/10_identity.sql still uses the defaults — the login banner will advertise credentials that don't sign in. Regenerate the bcrypt hash in the seed, or unset the override.")
 		}
 		// Operators enabling DemoMode on top of real GitHub App credentials
 		// will see integrations silently no-op. Call that out so the cause

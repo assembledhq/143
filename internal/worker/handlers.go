@@ -2355,7 +2355,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode, routingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
+				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode)
 				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 				if postErr != nil {
 					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
@@ -2485,7 +2485,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
-		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode, resolvedContext.RoutingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
+		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
 		posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, *link, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 		if postErr != nil {
@@ -3096,6 +3096,11 @@ type slackMessagePoster interface {
 	PostMessageWithBlocks(ctx context.Context, accessToken, channelID, threadTS, text string, blocks []ingestion.SlackBlock) (ingestion.SlackPostedMessage, error)
 }
 
+type slackMessageUpdater interface {
+	UpdateMessage(ctx context.Context, accessToken, channelID, messageTS, text string) error
+	UpdateMessageWithBlocks(ctx context.Context, accessToken, channelID, messageTS, text string, blocks []ingestion.SlackBlock) error
+}
+
 type slackReactionAdder interface {
 	AddReaction(ctx context.Context, accessToken, channelID, messageTS, name string) error
 }
@@ -3161,6 +3166,37 @@ func postSlackMessageWithFallback(ctx context.Context, poster slackMessagePoster
 	}
 	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, fallbackPosted.Timestamp, kind, "sent_fallback", text)
 	return fallbackPosted, nil
+}
+
+func updateSlackMessageWithPostFallback(ctx context.Context, poster slackMessagePoster, updater slackMessageUpdater, stores *Stores, services *Services, logger zerolog.Logger, link models.SlackSessionLink, accessToken, channelID, threadTS, messageTS, text string, blocks []ingestion.SlackBlock, kind models.SlackOutboundMessageKind) (ingestion.SlackPostedMessage, error) {
+	if updater == nil || strings.TrimSpace(messageTS) == "" {
+		return postSlackMessageWithFallback(ctx, poster, stores, services, logger, link, accessToken, channelID, threadTS, text, blocks, kind)
+	}
+	if len(blocks) == 0 {
+		if err := updater.UpdateMessage(ctx, accessToken, channelID, messageTS, text); err != nil {
+			recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_update"), kind, "failed_update", text)
+			logger.Warn().Err(err).Str("session_id", link.SessionID.String()).Msg("failed to update Slack message; posting a new message")
+			return postSlackMessageWithFallback(ctx, poster, stores, services, logger, link, accessToken, channelID, threadTS, text, blocks, kind)
+		}
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, messageTS, kind, "sent", text)
+		return ingestion.SlackPostedMessage{Channel: channelID, Timestamp: messageTS}, nil
+	}
+	if err := updater.UpdateMessageWithBlocks(ctx, accessToken, channelID, messageTS, text, blocks); err == nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, messageTS, kind, "sent", text)
+		return ingestion.SlackPostedMessage{Channel: channelID, Timestamp: messageTS}, nil
+	} else if !slackIsInvalidBlocksError(err) {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_update"), kind, "failed_update", text)
+		logger.Warn().Err(err).Str("session_id", link.SessionID.String()).Msg("failed to update Slack message; posting a new message")
+		return postSlackMessageWithFallback(ctx, poster, stores, services, logger, link, accessToken, channelID, threadTS, text, blocks, kind)
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_update_invalid_blocks"), kind, "failed_update_invalid_blocks", text)
+	if err := updater.UpdateMessage(ctx, accessToken, channelID, messageTS, text); err != nil {
+		recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, slackSyntheticMessageTS(kind, "failed_update_fallback"), kind, "failed_update_fallback", text)
+		logger.Warn().Err(err).Str("session_id", link.SessionID.String()).Msg("failed to update Slack message without blocks; posting a new message")
+		return postSlackMessageWithFallback(ctx, poster, stores, services, logger, link, accessToken, channelID, threadTS, text, nil, kind)
+	}
+	recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, messageTS, kind, "sent_update_fallback", text)
+	return ingestion.SlackPostedMessage{Channel: channelID, Timestamp: messageTS}, nil
 }
 
 func slackIsInvalidBlocksError(err error) bool {
@@ -3322,26 +3358,18 @@ func newSlackPostFinalResponseHandler(stores *Stores, services *Services, logger
 		}
 		text, blocks := renderSlackFinalBlocks(services, msg.Content, orgID, sessionID, link, details)
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
+		messageTS := ""
 		if link.LatestStatusMessageTS != nil && *link.LatestStatusMessageTS != "" {
-			terminal := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
-				Session:    models.Session{ID: sessionID},
-				Link:       link,
-				State:      slackbotsvc.SessionLifecycleComplete,
-				SessionURL: slackSessionURL(services, sessionID),
-			})
-			updateStarted := time.Now()
-			if err := slackClient.UpdateMessageWithBlocks(ctx, slackCfg.AccessToken, channelID, *link.LatestStatusMessageTS, terminal.Text, terminal.Blocks); err != nil {
-				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "failed", time.Since(updateStarted))
-				logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to update Slack progress message to terminal state")
-			} else {
-				recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
-				recordSlackOutboundInChannel(ctx, stores, services, logger, link, channelID, *link.LatestStatusMessageTS, models.SlackOutboundMessageKindProgress, "sent", terminal.Text)
-			}
+			messageTS = *link.LatestStatusMessageTS
 		}
-		posted, err := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, text, blocks, models.SlackOutboundMessageKindFinal)
+		updateStarted := time.Now()
+		posted, err := updateSlackMessageWithPostFallback(ctx, slackClient, slackClient, stores, services, logger, link, slackCfg.AccessToken, channelID, threadTS, messageTS, text, blocks, models.SlackOutboundMessageKindFinal)
 		if err != nil {
 			recordSlackAPIFailure(ctx, services, "chat.postMessage")
 			return err
+		}
+		if messageTS != "" && posted.Timestamp == messageTS {
+			recordSlackMessageUpdateLatency(ctx, services, "chat.update", "sent", time.Since(updateStarted))
 		}
 		if stores.SlackSessionLinks != nil {
 			if updateErr := stores.SlackSessionLinks.SetFinalMessageTS(ctx, orgID, sessionID, posted.Timestamp); updateErr != nil {
@@ -6906,7 +6934,7 @@ func slackSessionAckText(services *Services, sessionID uuid.UUID, verb string) s
 	}).Text
 }
 
-func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode, showStartWorkAction bool) []ingestion.SlackBlock {
+func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode) []ingestion.SlackBlock {
 	var sessionID uuid.UUID
 	if session != nil {
 		sessionID = session.ID
@@ -6938,16 +6966,6 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 				"channel_id": channelID,
 			}),
 		})
-		if showStartWorkAction {
-			actions = append(actions, slackbotsvc.SlackAction{
-				Text:     "Start work",
-				ActionID: "slack_start_work",
-				Value: slackActionValue(map[string]string{
-					"session_id": session.ID.String(),
-					"org_id":     orgID.String(),
-				}),
-			})
-		}
 		for _, missing := range contextSummary.Missing {
 			switch missing.Kind {
 			case "preview_target":

@@ -74,6 +74,8 @@ The frontend proxies `/api/*` to the Go server automatically.
 |---------|-------------|
 | `make migrate-up` | Apply pending migrations |
 | `make migrate-down` | Roll back last migration |
+| `make demo-seed-check` | Validate `.143/seed/` against a temporary migrated database |
+| `make demo-seed-apply` | Apply `.143/seed/` to an explicit guarded demo database target |
 
 ### Secrets Management
 
