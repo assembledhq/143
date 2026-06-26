@@ -704,7 +704,7 @@ function RepoPreviewCard({
             {!sessionPrewarmEnabled ? (
               <p
                 id={`preview-prewarm-disabled-${policy.repository_id}`}
-                className="text-[11px] leading-4 text-muted-foreground"
+                className="text-xs leading-4 text-muted-foreground"
               >
                 Set speculative preview slots above 0 to enable session prewarm.
               </p>
@@ -742,7 +742,7 @@ function RepoPreviewCard({
                   ? "Publishing preview links to GitHub PRs"
                   : "Not publishing preview links to GitHub PRs"}
               </span>
-              <p className="text-[11px] leading-4 text-muted-foreground">
+              <p className="text-xs leading-4 text-muted-foreground">
                 When enabled, 143 publishes preview URLs to GitHub PR comments
                 or commit statuses. Auto-build can still create previews
                 internally when publishing is off.
@@ -750,7 +750,7 @@ function RepoPreviewCard({
               {publishDisabledReason ? (
                 <p
                   id={`preview-publish-disabled-${policy.repository_id}`}
-                  className="flex items-start gap-1.5 text-[11px] leading-4 text-muted-foreground"
+                  className="flex items-start gap-1.5 text-xs leading-4 text-muted-foreground"
                 >
                   <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
                   <span>{publishDisabledReason}</span>
@@ -807,7 +807,7 @@ function RepoPreviewCard({
               {testPreviewDisabledReason ? (
                 <p
                   id={`preview-test-disabled-${policy.repository_id}`}
-                  className="text-[11px] leading-4 text-muted-foreground"
+                  className="text-xs leading-4 text-muted-foreground"
                 >
                   {testPreviewDisabledReason}
                 </p>
@@ -892,7 +892,7 @@ function PreviewModeOption({
         <span className="block text-xs font-medium text-foreground">
           {label}
         </span>
-        <span className="block text-[11px] leading-4 text-muted-foreground">
+        <span className="block text-xs leading-4 text-muted-foreground">
           {description}
         </span>
       </span>
@@ -932,7 +932,7 @@ function PreviewSurfaceSwitch({
       {disabledReason ? (
         <p
           id={`${id}-reason`}
-          className="mt-1 pl-11 text-[11px] leading-4 text-muted-foreground"
+          className="mt-1 pl-11 text-xs leading-4 text-muted-foreground"
         >
           {disabledReason}
         </p>

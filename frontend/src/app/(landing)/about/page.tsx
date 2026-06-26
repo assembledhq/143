@@ -63,7 +63,7 @@ export default function AboutPage() {
             <p>
               I hate when people say &ldquo;X% of our code is written by AI.&rdquo; 
               Code volume, especially these days, is a bad
-              metric. What I care about when I'm on a team is whether we&apos;re building a better
+              metric. What I care about when I&apos;m on a team is whether we&apos;re building a better
               product that is genuinely useful to our customers. That is a much
               harder thing to measure, but I think it is the right one.
             </p>
@@ -110,7 +110,7 @@ export default function AboutPage() {
               the agent environment less fragile. All of that helped, but
               it also made the bigger issue obvious: we needed a system that made
               this work shared across the team as opposed to being trapped inside one
-              engineer's terminal.
+              engineer&apos;s terminal.
             </p>
 
             <p>
