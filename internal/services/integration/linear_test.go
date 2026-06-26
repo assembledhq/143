@@ -167,14 +167,14 @@ func TestLinearTaskManager_GetTaskResolvesIdentifier(t *testing.T) {
 
 		switch len(requests) {
 		case 1:
-			require.Contains(t, req.Query, "issues(filter:", "GetTask should resolve a task identifier before loading the issue")
-			require.Equal(t, "ENG-123", req.Variables["identifier"], "GetTask should look up the issue by the provided identifier")
+			require.Contains(t, req.Query, "issue(id: $id)", "GetTask should resolve a task identifier through Linear's direct issue lookup")
+			require.NotContains(t, req.Query, "identifier:", "GetTask should not use IssueFilter.identifier because Linear does not expose that filter")
+			require.Equal(t, "ENG-123", req.Variables["id"], "GetTask should look up the issue by the provided identifier")
 			_, err = w.Write([]byte(`{
 				"data": {
-					"issues": {
-						"nodes": [
-							{"id": "linear-issue-id"}
-						]
+					"issue": {
+						"id": "linear-issue-id",
+						"team": {"id": "team-1"}
 					}
 				}
 			}`))
@@ -241,14 +241,14 @@ func TestLinearTaskManager_UpdateTaskResolvesIdentifierAndState(t *testing.T) {
 
 		switch len(requests) {
 		case 1:
-			require.Contains(t, req.Query, "issues(filter:", "UpdateTask should resolve a human-readable task identifier before mutating the issue")
-			require.Equal(t, "ENG-123", req.Variables["identifier"], "UpdateTask should look up the task by identifier")
+			require.Contains(t, req.Query, "issue(id: $id)", "UpdateTask should resolve a human-readable task identifier through Linear's direct issue lookup")
+			require.NotContains(t, req.Query, "identifier:", "UpdateTask should not use IssueFilter.identifier because Linear does not expose that filter")
+			require.Equal(t, "ENG-123", req.Variables["id"], "UpdateTask should look up the task by identifier")
 			_, err = w.Write([]byte(`{
 				"data": {
-					"issues": {
-						"nodes": [
-							{"id": "linear-issue-id", "team": {"id": "team-1"}}
-						]
+					"issue": {
+						"id": "linear-issue-id",
+						"team": {"id": "team-1"}
 					}
 				}
 			}`))
@@ -427,18 +427,21 @@ func TestLinearTaskManager_UpdateTask_LabelResolution(t *testing.T) {
 
 		var req graphqlRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
-		require.NoError(t, err)
+		require.NoError(t, err, "Linear test server should decode GraphQL requests")
 
 		w.Header().Set("Content-Type", "application/json")
 
 		switch callCount {
 		case 1:
 			// Resolve identifier.
-			require.Contains(t, req.Query, "issues(filter:")
+			require.Contains(t, req.Query, "issue(id: $id)", "UpdateTask should resolve label changes through Linear's direct issue lookup")
+			require.NotContains(t, req.Query, "identifier:", "UpdateTask should not use IssueFilter.identifier because Linear does not expose that filter")
+			require.Equal(t, "ENG-100", req.Variables["id"], "UpdateTask should resolve the label update target by issue identifier")
 			w.Write([]byte(`{
 				"data": {
-					"issues": {
-						"nodes": [{"id": "issue-1", "team": {"id": "team-1"}}]
+					"issue": {
+						"id": "issue-1",
+						"team": {"id": "team-1"}
 					}
 				}
 			}`))
@@ -533,16 +536,22 @@ func TestLinearTaskManager_UpdateTask_LabelNotFound(t *testing.T) {
 		defer r.Body.Close()
 
 		var req graphqlRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		err := json.NewDecoder(r.Body).Decode(&req)
+		require.NoError(t, err, "Linear test server should decode GraphQL requests")
 		w.Header().Set("Content-Type", "application/json")
 
 		switch callCount {
 		case 1:
-			// Resolve identifier (use raw UUID, skip identifier resolution).
+			// Resolve identifier.
+			require.Contains(t, req.Query, "issue(id: $id)",
+				"UpdateTask should resolve the label update target by direct issue lookup")
+			require.NotContains(t, req.Query, "identifier:",
+				"UpdateTask should not use IssueFilter.identifier because Linear does not expose that filter")
 			w.Write([]byte(`{
 				"data": {
-					"issues": {
-						"nodes": [{"id": "issue-1", "team": {"id": "team-1"}}]
+					"issue": {
+						"id": "issue-1",
+						"team": {"id": "team-1"}
 					}
 				}
 			}`))
