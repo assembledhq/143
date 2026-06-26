@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, Pause, Play, MoreHorizontal, Search, Trash2 } from "lucide-react";
+import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { formatTimeAgo } from "@/lib/utils";
@@ -18,7 +18,6 @@ import {
 import { formatAutomationSchedule } from "./schedule-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -76,27 +75,29 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
   const categories = [popularCategory, ...automationTemplateCategories];
 
   return (
-    <section className="space-y-4">
-      <div className="space-y-1.5">
-        <h2 className="text-sm font-medium text-foreground">Automation templates</h2>
-        <p className="text-sm text-muted-foreground">
-          Start with a recurring agent template, then customize the goal, repository, schedule, and model before it runs.
-        </p>
+    <section className="border-t border-border/70 pt-8">
+      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-1.5">
+          <h2 className="text-sm font-medium text-foreground">Template library</h2>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            Optional starting points for new recurring agents. Templates stay separate from the automations already running.
+          </p>
+        </div>
       </div>
 
-      <div className="space-y-4">
+      <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-3 sm:p-4">
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search templates..."
-            className="pl-9"
+            className="h-8 bg-background pl-9"
           />
         </div>
 
         <Tabs defaultValue={popularCategory.id}>
-          <TabsList className="max-w-full overflow-x-auto overflow-y-hidden">
+          <TabsList size="sm" className="max-w-full overflow-x-auto overflow-y-hidden">
             {categories.map((category) => (
               <TabsTrigger key={category.id} value={category.id}>
                 {category.name}
@@ -109,76 +110,68 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
               .filter((template) => templateMatchesSearch(template, query));
 
             return (
-              <TabsContent key={category.id} value={category.id} className="mt-4 space-y-4">
-                <div className="space-y-1">
-                  <h3 className="text-sm font-medium text-foreground">{category.name}</h3>
-                  <p className="text-sm text-muted-foreground">{category.description}</p>
+              <TabsContent key={category.id} value={category.id} className="mt-3 space-y-3">
+                <div className="space-y-0.5">
+                  <h3 className="text-xs font-medium text-foreground">{category.name}</h3>
+                  <p className="text-xs text-muted-foreground">{category.description}</p>
                 </div>
 
                 {templates.length > 0 ? (
-                  <div className="grid gap-3 lg:grid-cols-2">
+                  <div className="grid gap-2 lg:grid-cols-2">
                     {templates.map((template) => {
                       const Icon = template.icon;
 
                       return (
-                        <Card key={template.id} className="h-full">
-                          <CardHeader className="space-y-3">
-                            <div className="flex items-start gap-3">
-                              <div className="rounded-md border border-border bg-muted/50 p-2">
-                                <Icon className="h-4 w-4 text-foreground" />
-                              </div>
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                                  <CardTitle className="text-base leading-5">
-                                    <h4>{template.name}</h4>
-                                  </CardTitle>
-                                  <Badge variant="secondary" className="w-fit shrink-0">
-                                    {formatTemplateCadence(template)}
-                                  </Badge>
-                                </div>
-                                <CardDescription className="leading-5">
+                        <div
+                          key={template.id}
+                          className="flex min-h-24 items-start gap-3 rounded-md border border-border/60 bg-background p-3"
+                        >
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/40">
+                            <Icon className="h-4 w-4 text-muted-foreground" />
+                          </div>
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0 space-y-1">
+                                <h4 className="text-sm font-medium leading-5 text-foreground">
+                                  {template.name}
+                                </h4>
+                                <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
                                   {template.summary}
-                                </CardDescription>
+                                </p>
                               </div>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                              {template.tags.slice(0, 3).map((tag) => (
-                                <Badge key={tag} variant="outline">
-                                  {tag}
-                                </Badge>
-                              ))}
-                            </div>
-                          </CardHeader>
-                          <CardContent className="space-y-4">
-                            <div className="space-y-2">
-                              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                                Expected output
-                              </p>
-                              <ul className="space-y-1 text-sm text-muted-foreground">
-                                {template.outcomes.slice(0, 2).map((outcome) => (
-                                  <li key={outcome}>• {outcome}</li>
-                                ))}
-                              </ul>
+                              <Badge variant="outline" className="w-fit shrink-0 bg-background text-muted-foreground">
+                                {formatTemplateCadence(template)}
+                              </Badge>
                             </div>
 
-                            {canManage ? (
-                              <Button asChild variant="outline" size="sm">
-                                <Link
-                                  href={`/automations/new?template=${template.id}`}
-                                  aria-label={`Use ${template.name}`}
-                                >
-                                  Use template
-                                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
-                                </Link>
-                              </Button>
-                            ) : null}
-                          </CardContent>
-                        </Card>
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="hidden min-w-0 flex-wrap gap-1.5 sm:flex">
+                                {template.tags.slice(0, 2).map((tag) => (
+                                  <Badge key={tag} variant="ghost" className="px-0 text-muted-foreground">
+                                    {tag}
+                                  </Badge>
+                                ))}
+                              </div>
+
+                              {canManage ? (
+                                <Button asChild variant="ghost" size="sm" className="ml-auto">
+                                  <Link
+                                    href={`/automations/new?template=${template.id}`}
+                                    aria-label={`Use ${template.name}`}
+                                  >
+                                    Use
+                                    <ArrowRight className="h-3.5 w-3.5" />
+                                  </Link>
+                                </Button>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
                       );
                     })}
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-border bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+                  <div className="rounded-md border border-border/60 bg-background px-4 py-8 text-center text-sm text-muted-foreground">
                     No templates match your search.
                   </div>
                 )}
@@ -187,6 +180,81 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
           })}
         </Tabs>
       </div>
+    </section>
+  );
+}
+
+function AutomationSection({
+  title,
+  automations,
+  canManage,
+}: {
+  title: string;
+  automations: Automation[];
+  canManage: boolean;
+}) {
+  if (automations.length === 0) return null;
+
+  return (
+    <section className="space-y-2">
+      <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        {title} ({automations.length})
+      </h3>
+      <div className="overflow-hidden rounded-lg border border-border/70 bg-background">
+        {automations.map((automation) => (
+          <AutomationCard key={automation.id} automation={automation} canManage={canManage} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AutomationsWorkspace({
+  enabled,
+  paused,
+  canManage,
+}: {
+  enabled: Automation[];
+  paused: Automation[];
+  canManage: boolean;
+}) {
+  const total = enabled.length + paused.length;
+
+  return (
+    <section className="space-y-4" aria-labelledby="your-automations-heading">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-1">
+          <h2 id="your-automations-heading" className="text-sm font-medium text-foreground">
+            Your automations
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {total > 0
+              ? "Recurring agents currently configured for this team."
+              : "No recurring agents are configured yet."}
+          </p>
+        </div>
+        {total > 0 ? (
+          <div className="flex gap-2 text-xs text-muted-foreground">
+            <span>{enabled.length} enabled</span>
+            <span aria-hidden="true">/</span>
+            <span>{paused.length} paused</span>
+          </div>
+        ) : null}
+      </div>
+
+      {total > 0 ? (
+        <div className="space-y-5">
+          <AutomationSection title="Enabled" automations={enabled} canManage={canManage} />
+          <AutomationSection title="Paused" automations={paused} canManage={canManage} />
+        </div>
+      ) : (
+        <div className="rounded-lg border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center">
+          <p className="text-sm font-medium text-foreground">Create an automation when you are ready.</p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Start from a blank setup or use a template below.
+          </p>
+        </div>
+      )}
     </section>
   );
 }
@@ -231,7 +299,7 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
     null;
 
   return (
-    <div className="rounded-lg border border-border bg-background transition-colors hover:bg-muted/30">
+    <div className="border-b border-border/60 bg-background transition-colors last:border-b-0 hover:bg-muted/30">
       <div className="flex items-start gap-3 p-4 sm:gap-4">
         <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
           <div className="flex items-start gap-2.5">
@@ -331,10 +399,18 @@ export default function AutomationsPage() {
 
   return (
     <PageContainer size="default">
-      <div className="space-y-6">
+      <div className="space-y-8">
         <PageHeader
           title="Automations"
           description="Recurring agents that run on a schedule for your team."
+          action={canManage ? (
+            <Button asChild>
+              <Link href="/automations/new">
+                <Plus className="h-4 w-4" />
+                New
+              </Link>
+            </Button>
+          ) : undefined}
         />
 
         {isLoading && (
@@ -343,30 +419,8 @@ export default function AutomationsPage() {
           </div>
         )}
 
-        {enabled.length > 0 && (
-          <section className="space-y-3">
-            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Enabled ({enabled.length})
-            </h2>
-            <div className="space-y-2">
-              {enabled.map((a) => (
-                <AutomationCard key={a.id} automation={a} canManage={canManage} />
-              ))}
-            </div>
-          </section>
-        )}
-
-        {paused.length > 0 && (
-          <section className="space-y-3">
-            <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Paused ({paused.length})
-            </h2>
-            <div className="space-y-2">
-              {paused.map((a) => (
-                <AutomationCard key={a.id} automation={a} canManage={canManage} />
-              ))}
-            </div>
-          </section>
+        {!isLoading && (
+          <AutomationsWorkspace enabled={enabled} paused={paused} canManage={canManage} />
         )}
 
         {!isLoading && (
