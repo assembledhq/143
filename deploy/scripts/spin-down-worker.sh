@@ -79,8 +79,8 @@ cd /opt/143
 list_worker_containers() {
   docker ps \
     --filter "label=com.docker.compose.service=worker" \
-    --format '{{.ID}} {{.Label "com.docker.compose.project"}}' \
-    | awk '$2 ~ /^143-worker-/ {print $1}'
+    --format '{{.ID}} {{.Names}} {{.Label "com.docker.compose.project"}}' \
+    | awk '$3 ~ /^143-worker-/ || ($3 == "143" && $2 !~ /^143-worker-run-/) {print $1}'
 }
 
 list_session_executor_containers() {

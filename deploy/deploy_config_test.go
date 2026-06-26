@@ -765,7 +765,9 @@ func TestWorkerDeployControlHelpersAvoidSandboxNetworks(t *testing.T) {
 	require.Contains(t, deployText, `docker run --rm -i \
             --network 143_default`, "detached drain monitors should also keep deploy-control helpers off sandbox networks")
 	require.Contains(t, listWorkers, `Label "com.docker.compose.project"`, "worker generation discovery should inspect compose project labels")
-	require.Contains(t, listWorkers, `/^143-worker-/`, "worker generation discovery should exclude compose-run deploy-control helpers")
+	require.Contains(t, listWorkers, `{{.Names}}`, "worker discovery should inspect container names to distinguish compose-run helpers from real default-project workers")
+	require.Contains(t, listWorkers, `$3 ~ /^143-worker-/`, "worker generation discovery should include blue/green worker projects")
+	require.Contains(t, listWorkers, `$3 == "143" && $2 !~ /^143-worker-run-/`, "worker generation discovery should include fresh default-project workers while excluding compose-run deploy-control helpers")
 
 	reconcileScript, err := os.ReadFile("../deploy/scripts/reconcile-worker-host.sh")
 	require.NoError(t, err, "test should read reconcile-worker-host.sh")
@@ -1173,6 +1175,7 @@ func TestWorkerSpinDownScriptDrainsBeforeClearingHost(t *testing.T) {
 	text := string(script)
 
 	require.Contains(t, text, "docker kill --signal=TERM", "worker spin-down should request worker drain before stopping support services")
+	require.Contains(t, text, `$3 == "143" && $2 !~ /^143-worker-run-/`, "worker spin-down should drain fresh default-project workers while excluding compose-run deploy-control helpers")
 	require.Contains(t, text, "wait_for_stopped \"worker\" \"$WORKER_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the worker drain with the drain timeout")
 	require.Contains(t, text, "docker stop -t \"$EXECUTOR_DRAIN_TIMEOUT_SECONDS\"", "worker spin-down should bound the executor drain with Docker's stop timeout")
 	require.Contains(t, text, "label=com.143.role=session-executor", "worker spin-down should include durable session executor containers in cleanup")
