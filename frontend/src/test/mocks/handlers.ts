@@ -1012,6 +1012,14 @@ export const handlers = [
     } satisfies ListResponse<AgentCapabilityDefinition>);
   }),
 
+  http.get('/api/v1/settings/agent/capabilities', () => {
+    return HttpResponse.json({
+      data: {
+        capabilities: [],
+      },
+    } satisfies SingleResponse<AgentCapabilityPolicyResponse>);
+  }),
+
   http.get('/api/v1/automations/:id/capabilities', () => {
     return HttpResponse.json({
       data: {
