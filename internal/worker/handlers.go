@@ -2345,7 +2345,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 					ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 				}
 				ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, existingLink, threadTS)
-				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode, routingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
+				ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, &session, ackText, slackbotsvc.SlackSessionContextSummary{}, routingMode)
 				posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, existingLink, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 				if postErr != nil {
 					logger.Warn().Err(postErr).Str("session_id", session.ID.String()).Msg("failed to post Slack continuation acknowledgement")
@@ -2475,7 +2475,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 		if teamLine := slackTeamSessionLine(*link); teamLine != "" {
 			ackText = strings.TrimSpace(ackText) + "\n\n" + teamLine
 		}
-		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode, resolvedContext.RoutingMode == slackbotsvc.SlackRoutingModeAnswerOnly)
+		ackBlocks := slackSessionAckBlocks(ctx, stores, services, logger, orgID, installationID, payload.TeamID, payload.ChannelID, session, ackText, resolvedContext.ContextSummary, resolvedContext.RoutingMode)
 		ackChannelID, ackThreadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, *link, threadTS)
 		posted, postErr := postSlackMessageWithFallback(ctx, slackClient, stores, services, logger, *link, slackCfg.AccessToken, ackChannelID, ackThreadTS, ackText, ackBlocks, models.SlackOutboundMessageKindAck)
 		if postErr != nil {
@@ -6896,7 +6896,7 @@ func slackSessionAckText(services *Services, sessionID uuid.UUID, verb string) s
 	}).Text
 }
 
-func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode, showStartWorkAction bool) []ingestion.SlackBlock {
+func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, orgID, installationID uuid.UUID, teamID, channelID string, session *models.Session, text string, contextSummary slackbotsvc.SlackSessionContextSummary, routingMode slackbotsvc.SlackRoutingMode) []ingestion.SlackBlock {
 	var sessionID uuid.UUID
 	if session != nil {
 		sessionID = session.ID
@@ -6928,16 +6928,6 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 				"channel_id": channelID,
 			}),
 		})
-		if showStartWorkAction {
-			actions = append(actions, slackbotsvc.SlackAction{
-				Text:     "Start work",
-				ActionID: "slack_start_work",
-				Value: slackActionValue(map[string]string{
-					"session_id": session.ID.String(),
-					"org_id":     orgID.String(),
-				}),
-			})
-		}
 		for _, missing := range contextSummary.Missing {
 			switch missing.Kind {
 			case "preview_target":
