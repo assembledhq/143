@@ -17,6 +17,8 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+const defaultSandboxCacheABI = "ubuntu24.04-node24-go1.26-v1"
+
 // SessionResumeMode declares how an adapter handles continuation turns. The
 // orchestrator reads this to decide whether to ship a bare follow-up message
 // (and let the agent CLI load its own conversation history) or to embed
@@ -462,6 +464,7 @@ const HandlerCleanupBuffer = 2 * time.Minute
 // SandboxConfig holds the resource limits and settings for creating a sandbox.
 type SandboxConfig struct {
 	Image          string            // base image with agent CLI tools pre-installed
+	CacheABI       string            // stable compatibility key for preview dependency caches
 	CPULimit       float64           // CPU cores (default: 2)
 	MemoryLimitMB  int               // memory in MB (default: 3072)
 	Timeout        time.Duration     // max execution time (default: DefaultSandboxTimeout)
@@ -501,6 +504,10 @@ func DefaultSandboxConfig() SandboxConfig {
 	if v := os.Getenv("SANDBOX_IMAGE"); v != "" {
 		image = v
 	}
+	cacheABI := defaultSandboxCacheABI
+	if v := strings.TrimSpace(os.Getenv("SANDBOX_CACHE_ABI")); v != "" {
+		cacheABI = v
+	}
 	cpuLimit := 2.0
 	if v := os.Getenv("SANDBOX_CPU_LIMIT"); v != "" {
 		if parsed, err := strconv.ParseFloat(v, 64); err == nil && parsed > 0 {
@@ -521,6 +528,7 @@ func DefaultSandboxConfig() SandboxConfig {
 	}
 	return SandboxConfig{
 		Image:         image,
+		CacheABI:      cacheABI,
 		CPULimit:      cpuLimit,
 		MemoryLimitMB: memoryLimitMB,
 		DiskLimitGB:   diskLimitGB,
@@ -592,6 +600,11 @@ const SandboxMetadataTargetBranch = "target_branch"
 // SandboxMetadataEgressMode records whether a sandbox used direct worker
 // egress or the opt-in static egress gateway path.
 const SandboxMetadataEgressMode = "egress_mode"
+
+// SandboxMetadataCacheABI records the stable sandbox compatibility identifier
+// used by preview dependency cache keys. It changes when baked toolchains or
+// OS/runtime libraries change, not for ordinary deploy image tag changes.
+const SandboxMetadataCacheABI = "cache_abi"
 
 const (
 	SandboxEgressModeDirect = "direct"
