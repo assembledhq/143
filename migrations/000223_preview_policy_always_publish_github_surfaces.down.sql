@@ -1,0 +1,2 @@
+-- This data repair is intentionally irreversible. The product no longer
+-- supports configuring PR preview comments and commit statuses separately.

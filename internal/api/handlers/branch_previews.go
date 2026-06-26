@@ -2303,6 +2303,10 @@ func (h *BranchPreviewHandler) UpdatePolicy(w http.ResponseWriter, r *http.Reque
 	if req.GitHubCommitStatusEnabled != nil {
 		nextStatus = *req.GitHubCommitStatusEnabled
 	}
+	if nextSurfaces {
+		nextComment = true
+		nextStatus = true
+	}
 	if nextSurfaces && repoLoaded {
 		if detailsGetter, ok := h.github.(branchPreviewGitHubInstallationDetails); ok {
 			details, detailsErr := detailsGetter.GetInstallationDetails(r.Context(), repo.InstallationID)
