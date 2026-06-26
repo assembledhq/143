@@ -95,8 +95,6 @@ const SLACK_NOTIFICATION_EVENTS = [
   { value: "automation.run.failed", label: "Automation failed" },
   { value: "automation.run.failure_streak", label: "Automation failure streak" },
   { value: "pr.opened", label: "PR opened" },
-  { value: "preview.ready", label: "Preview ready" },
-  { value: "preview.failed", label: "Preview failed" },
   { value: "preview.stale", label: "Preview stale" },
   { value: "preview.*", label: "All preview events" },
 ] as const;
