@@ -81,6 +81,11 @@ type Config struct {
 	// SessionExecutorDockerNetwork optionally attaches executor containers to
 	// the same Docker network as worker-side dependencies such as chrome.
 	SessionExecutorDockerNetwork string `env:"SESSION_EXECUTOR_DOCKER_NETWORK"`
+	// SessionExecutorExtraBinds adds host bind mounts to durable session
+	// executor containers. Single-node deployments use this to share local
+	// snapshot/upload storage with executor containers; multi-node production
+	// deployments should prefer S3-compatible storage.
+	SessionExecutorExtraBinds []string `env:"SESSION_EXECUTOR_EXTRA_BINDS" envSeparator:","`
 	// SessionExecutorStopTimeout is the Docker stop timeout for executor
 	// containers. Routine deploys should not stop active executors, but this
 	// keeps maintenance/emergency stops aligned with runtime policy.

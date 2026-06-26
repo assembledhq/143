@@ -4,7 +4,8 @@ This checklist is intentionally minimal and aligned to what is implemented in th
 
 ## 1. Decide Deployment Shape
 
-- [ ] Deploy **backend** (`cmd/server`) and **frontend** (`frontend/`) as two services
+- [ ] For a small single box, start from [single-node.md](single-node.md) and `docker-compose.single-node.yml`
+- [ ] For split production, deploy **backend** (`cmd/server`) and **frontend** (`frontend/`) as app services, with separate worker and database hosts
 - [ ] Put them behind one domain (recommended):
   - frontend serves `/`
   - backend serves `/api/*`, `/healthz`, `/readyz`, `/metrics`
@@ -12,13 +13,18 @@ This checklist is intentionally minimal and aligned to what is implemented in th
 
 Notes:
 - The Go server does not currently bundle/serve the Next.js build directly.
-- `MODE=all` is the default single-node mode.
+- `MODE=all` is the single-node mode. Split production uses `MODE=api` on app nodes and `MODE=worker` on worker nodes.
 
 ## 2. Provision Core Infra
 
-- [ ] PostgreSQL 15+ (managed preferred)
+- [ ] PostgreSQL 15+ (managed preferred for split production; local container is acceptable for single-node with tested backups)
+- [ ] Redis (included in the single-node compose; optional acceleration in code, recommended for production live updates and worker wakeups)
 - [ ] App runtime for backend container
 - [ ] App runtime for frontend (`next build` + `next start`, or managed Next.js host)
+- [ ] Worker runtime with Docker socket access and gVisor `runsc`
+- [ ] Durable snapshot/upload storage:
+  - single-node: host-backed `SINGLE_NODE_DATA_DIR` plus filesystem backups
+  - multi-node: S3-compatible object storage
 - [ ] Automated database backups
 - [ ] Backup restore test completed
 
@@ -37,6 +43,9 @@ Notes:
 ### Backend: strongly recommended for production
 
 - [ ] `ENCRYPTION_MASTER_KEY` (required if you want encrypted credentials at rest)
+- [ ] `CSRF_SIGNING_KEY` (required in production; can be separate from `SESSION_SECRET`)
+- [ ] `SESSION_EXECUTOR_IMAGE` (required for production `MODE=all` or `MODE=worker`)
+- [ ] `SESSION_EXECUTOR_DOCKER_NETWORK` and `SESSION_EXECUTOR_EXTRA_BINDS` when durable session executors need same-host resources such as `SINGLE_NODE_DATA_DIR`
 - [ ] Worker capacity knobs (for `MODE=worker` or mixed `MODE=all` nodes):
   - `WORKER_PROCESS_COUNT` (default `1`) — how many in-process worker loops run on this node
   - For fleet deploys, put worker sizing env vars in `.env.production.enc` like other deploy env vars (the bundle lives in your private secrets checkout — see [docs/secrets/README.md](../secrets/README.md)).
