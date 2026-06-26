@@ -30,6 +30,7 @@ import (
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/assembledhq/143/internal/services/reviewartifact"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -3116,6 +3117,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			agentSessionID = *run.AgentSessionID
 		}
 		if err := o.sessions.UpdateTurnComplete(ctx, run.OrgID, run.ID, turnNumber, runResult, agentSessionID, snapshotKey); err != nil {
+			o.cleanupReviewArtifact(ctx, runResult, log)
 			return fmt.Errorf("update interactive turn result: %w", err)
 		}
 		if primaryThreadID != nil && o.sessionThreads != nil {
@@ -3135,6 +3137,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
+		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
 	if primaryThreadID != nil && o.sessionThreads != nil {
@@ -4540,7 +4543,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if snapshotKey == "" && session.SnapshotKey != nil {
 		snapshotKey = *session.SnapshotKey
 	}
-	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, o.buildRunResult(ctx, session, sandbox, result), agentSessionID, snapshotKey); err != nil {
+	runResult := o.buildRunResult(ctx, session, sandbox, result)
+	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
+		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
 
@@ -5850,8 +5855,9 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 	headSHA := o.captureCurrentHeadSHA(ctx, sandbox)
 	workspaceDirty := o.captureWorkspaceDirty(ctx, sandbox)
 	diff := o.resultDiffOrWorkspaceFallback(ctx, run, sandbox, result.Diff)
+	artifactMeta := o.captureReviewArtifact(ctx, run, sandbox, diff)
 
-	return &models.SessionResult{
+	sessionResult := &models.SessionResult{
 		TokenUsage:         tokenUsage,
 		ModelUsed:          modelUsed,
 		ResultSummary:      strPtr(result.Summary),
@@ -5862,6 +5868,51 @@ func (o *Orchestrator) buildRunResult(ctx context.Context, run *models.Session, 
 		DiffWorkspaceDirty: workspaceDirty,
 		DiffCollectedAt:    timePtr(time.Now().UTC()),
 		DiffSource:         "turn_complete",
+	}
+	if artifactMeta.Key != "" {
+		version := artifactMeta.Version
+		sessionResult.ReviewArtifactKey = &artifactMeta.Key
+		sessionResult.ReviewArtifactVersion = &version
+		sessionResult.ReviewArtifactCompressedBytes = artifactMeta.CompressedBytes
+		sessionResult.ReviewArtifactUncompressedBytes = artifactMeta.UncompressedBytes
+		sessionResult.ReviewArtifactFileCount = artifactMeta.FileCount
+		sessionResult.ReviewArtifactSkippedCount = artifactMeta.SkippedCount
+		sessionResult.ReviewArtifactTruncated = artifactMeta.Truncated
+	}
+	return sessionResult
+}
+
+func (o *Orchestrator) captureReviewArtifact(ctx context.Context, run *models.Session, sandbox *Sandbox, diff string) reviewartifact.Metadata {
+	if o == nil || o.snapshots == nil || o.provider == nil || run == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
+		return reviewartifact.Metadata{}
+	}
+	if run.BaseCommitSHA == nil || strings.TrimSpace(*run.BaseCommitSHA) == "" {
+		return reviewartifact.Metadata{}
+	}
+	meta, err := reviewartifact.Capture(ctx, o.snapshots, func(execCtx context.Context, cmd string, stdout, stderr io.Writer) (int, error) {
+		return o.provider.Exec(execCtx, sandbox, cmd, stdout, stderr)
+	}, run.OrgID, run.ID, diff, reviewartifact.Options{})
+	if err != nil {
+		o.logger.Warn().
+			Err(err).
+			Str("session_id", run.ID.String()).
+			Msg("failed to capture review artifact")
+		return reviewartifact.Metadata{}
+	}
+	return meta
+}
+
+func (o *Orchestrator) cleanupReviewArtifact(ctx context.Context, result *models.SessionResult, log zerolog.Logger) {
+	if o == nil || o.snapshots == nil || result == nil || result.ReviewArtifactKey == nil || *result.ReviewArtifactKey == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := o.snapshots.Delete(cleanupCtx, *result.ReviewArtifactKey); err != nil && !errors.Is(err, storage.ErrSnapshotNotFound) {
+		log.Warn().
+			Err(err).
+			Str("review_artifact_key", *result.ReviewArtifactKey).
+			Msg("failed to delete orphaned review artifact after result persistence failure")
 	}
 }
 

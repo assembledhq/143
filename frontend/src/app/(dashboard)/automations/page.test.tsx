@@ -25,10 +25,10 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    expect(await screen.findByRole("heading", { name: "Automation templates" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /^New$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /^New$/i })).toHaveAttribute("href", "/automations/new");
     expect(screen.getByRole("tab", { name: "Popular" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
@@ -49,7 +49,7 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    expect(await screen.findByRole("heading", { name: "Automation templates" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
@@ -145,7 +145,7 @@ describe("AutomationsPage", () => {
 
     const title = await screen.findByText("Weekly release hardening sweep for mobile checkout reliability");
     expect(title).toHaveClass("break-words", "leading-5");
-    expect(screen.getByRole("heading", { name: "Automation templates" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Use Find flaky tests/i })).toHaveAttribute(
       "href",

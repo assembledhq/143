@@ -64,13 +64,21 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 	diff := "--- a/a.go\n+++ b/a.go\n"
 	headSHA := "head123"
 	baseSHA := "base123"
+	artifactVersion := 1
 	result := &models.SessionResult{
-		Diff:               &diff,
-		DiffBaseCommitSHA:  &baseSHA,
-		DiffHeadCommitSHA:  &headSHA,
-		DiffWorkspaceDirty: true,
-		DiffCollectedAt:    &collectedAt,
-		DiffSource:         "review",
+		Diff:                            &diff,
+		DiffBaseCommitSHA:               &baseSHA,
+		DiffHeadCommitSHA:               &headSHA,
+		DiffWorkspaceDirty:              true,
+		DiffCollectedAt:                 &collectedAt,
+		DiffSource:                      "review",
+		ReviewArtifactKey:               strPtr("review-artifacts/org/session/artifact.json.gz"),
+		ReviewArtifactVersion:           &artifactVersion,
+		ReviewArtifactCompressedBytes:   128,
+		ReviewArtifactUncompressedBytes: 512,
+		ReviewArtifactFileCount:         2,
+		ReviewArtifactSkippedCount:      1,
+		ReviewArtifactTruncated:         true,
 	}
 
 	mock.ExpectBegin()
@@ -81,8 +89,8 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
 			),
 		)
-	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+	mock.ExpectQuery("INSERT INTO session_diff_snapshots[\\s\\S]+review_artifact_key[\\s\\S]+review_artifact_truncated").
+		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -91,6 +99,30 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 
 	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, result)
 	require.NoError(t, err, "UpdateResult should persist a diff snapshot when provenance is present")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_GetLatestReviewArtifactRef(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	key := "review-artifacts/org/session/artifact.json.gz"
+	version := 1
+
+	mock.ExpectQuery("SELECT review_artifact_key, review_artifact_version").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"review_artifact_key", "review_artifact_version"}).AddRow(&key, &version))
+
+	got, err := store.GetLatestReviewArtifactRef(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "GetLatestReviewArtifactRef should return artifact metadata")
+	require.Equal(t, &key, got.Key, "GetLatestReviewArtifactRef should return the artifact key")
+	require.Equal(t, &version, got.Version, "GetLatestReviewArtifactRef should return the artifact version")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -135,7 +167,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotDoesNotPublishWorkspaceEventO
 			),
 		)
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -191,7 +223,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
 	mock.ExpectQuery("UPDATE sessions\\s+SET latest_diff_snapshot_id[\\s\\S]+workspace_revision = workspace_revision \\+ 1[\\s\\S]+workspace_revision_updated_at = @captured_at[\\s\\S]+RETURNING workspace_revision, workspace_revision_updated_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -223,7 +255,7 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshotInsertFailure(t *testin
 		WithArgs(anyDBArgs(13)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(anyDBArgs(19)...).
 		WillReturnError(errors.New("insert failed"))
 	mock.ExpectRollback()
 

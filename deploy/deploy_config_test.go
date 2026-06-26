@@ -725,6 +725,29 @@ func TestRoutineWorkerDeployBuildsSandboxDNSOnlyWhenMissing(t *testing.T) {
 	}, "\n"), "routine worker deploy must not rebuild sandbox-dns unconditionally because that primes the next reconcile to recreate the sidecar")
 }
 
+func TestMaintenanceWorkerSupportServiceRecreateRetriesSandboxDNSAddressConflict(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deployText := string(deployScript)
+	recreateFn := extractShellFunction(t, deployText, "recreate_worker_other_services", "stage_caddy_config_if_changed")
+	clearFn := extractShellFunction(t, deployText, "clear_sandbox_dns_network_endpoints", "recreate_worker_other_services")
+
+	require.Contains(t, recreateFn, `grep -qi "Address already in use"`, "worker maintenance support-service recreate should detect stale Docker address conflicts")
+	require.Contains(t, recreateFn, "clear_sandbox_dns_network_endpoints", "worker maintenance support-service recreate should clear pinned sandbox DNS endpoints before retrying")
+	require.Contains(t, recreateFn, "for attempt in 1 2 3", "worker maintenance support-service recreate should retry endpoint cleanup more than once")
+	require.Contains(t, clearFn, "docker stop -t 10 143-sandbox-dns-1", "worker maintenance cleanup should stop the failed sandbox-dns container before retrying compose")
+	require.Contains(t, clearFn, "docker rm 143-sandbox-dns-1", "worker maintenance cleanup should remove the failed sandbox-dns container before retrying compose")
+	require.Contains(t, clearFn, "143-sandbox 172.30.0.2", "worker maintenance cleanup should clear the default sandbox DNS pinned IP")
+	require.Contains(t, clearFn, "143-sandbox-static-egress 172.31.0.2", "worker maintenance cleanup should clear the static-egress sandbox DNS pinned IP")
+	require.Contains(t, clearFn, "name=143-worker-run-", "worker maintenance cleanup should remove stale deploy-control run containers that can leave endpoints behind")
+	require.Contains(t, deployText, "recreate_worker_other_services", "maintenance worker deploy should use the retrying support-service recreate path")
+	require.Contains(t, deployText, `recreate_other_services "api frontend caddy"`, "generic recreate helper should remain available for non-worker paths")
+	require.NotContains(t, deployText, `echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
+      recreate_other_services "$HEALTH_SERVICE"`, "maintenance worker deploy should not use the generic no-retry recreate path")
+}
+
 func TestWorkerDeployUsesBlueGreenGenerations(t *testing.T) {
 	t.Parallel()
 
