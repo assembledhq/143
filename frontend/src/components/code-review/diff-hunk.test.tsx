@@ -47,10 +47,64 @@ describe("DiffHunk", () => {
 
   it("renders context, add, and remove lines", () => {
     const hunk = makeHunk([contextLine, removeLine, addLine]);
-    render(<DiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const { container } = render(<DiffHunk hunk={hunk} filePath="src/app.ts" />);
     expect(screen.getByText("const x = 1;")).toBeInTheDocument();
-    expect(screen.getByText("const y = 2;")).toBeInTheDocument();
-    expect(screen.getByText("const z = 3;")).toBeInTheDocument();
+    expect(container).toHaveTextContent("const y = 2;");
+    expect(container).toHaveTextContent("const z = 3;");
+  });
+
+  it("highlights only changed text inside paired remove and add lines", () => {
+    const hunk = makeHunk([
+      {
+        type: "remove",
+        content: "const value = 1;",
+        oldLineNumber: 2,
+        newLineNumber: null,
+      },
+      {
+        type: "add",
+        content: "const value = 2;",
+        oldLineNumber: null,
+        newLineNumber: 2,
+      },
+    ]);
+    const { container } = render(<DiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const removedHighlight = container.querySelector(".bg-red-200\\/80");
+    const addedHighlight = container.querySelector(".bg-green-200\\/80");
+    expect(removedHighlight).toHaveTextContent("1");
+    expect(addedHighlight).toHaveTextContent("2");
+  });
+
+  it("highlights multiple changed ranges inside one paired line", () => {
+    const hunk = makeHunk([
+      {
+        type: "remove",
+        content: "alpha: 1, beta: 2",
+        oldLineNumber: 2,
+        newLineNumber: null,
+      },
+      {
+        type: "add",
+        content: "alpha: 9, beta: 8",
+        oldLineNumber: null,
+        newLineNumber: 2,
+      },
+    ]);
+    const { container } = render(<DiffHunk hunk={hunk} filePath="src/app.ts" />);
+    const removedHighlights = container.querySelectorAll(".bg-red-200\\/80");
+    const addedHighlights = container.querySelectorAll(".bg-green-200\\/80");
+    expect(removedHighlights).toHaveLength(2);
+    expect(addedHighlights).toHaveLength(2);
+    expect(removedHighlights[0]).toHaveTextContent("1");
+    expect(removedHighlights[1]).toHaveTextContent("2");
+    expect(addedHighlights[0]).toHaveTextContent("9");
+    expect(addedHighlights[1]).toHaveTextContent("8");
+  });
+
+  it("does not add inline highlights for standalone additions", () => {
+    const hunk = makeHunk([addLine]);
+    const { container } = render(<DiffHunk hunk={hunk} filePath="src/app.ts" />);
+    expect(container.querySelector(".bg-green-200\\/80")).not.toBeInTheDocument();
   });
 
   it("shows add comment buttons when onAddComment is provided", () => {

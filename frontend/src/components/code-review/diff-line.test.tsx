@@ -56,6 +56,47 @@ describe("DiffLineRow", () => {
     expect(screen.getByText("highlighted")).toBeInTheDocument();
   });
 
+  it("preserves syntax-highlighted HTML when applying inline diff ranges", () => {
+    const { container } = render(
+      <DiffLineRow
+        line={makeLine({ type: "add", content: "const value = 2;" })}
+        highlightedContent='<span style="color:#f00">const value = 2;</span>'
+        inlineHighlightRanges={[{ start: 14, end: 15 }]}
+      />
+    );
+    expect(container.querySelector('span[style="color:#f00"]')).toBeInTheDocument();
+    const highlight = container.querySelector(".bg-green-200\\/80");
+    expect(highlight).toHaveTextContent("2");
+  });
+
+  it("renders inline diff ranges with a darker change highlight", () => {
+    const { container } = render(
+      <DiffLineRow
+        line={makeLine({ type: "add", content: "const value = 2;" })}
+        inlineHighlightRanges={[{ start: 14, end: 15 }]}
+      />
+    );
+    const highlight = screen.getByText("2");
+    expect(highlight).toHaveClass("bg-green-200/80");
+    expect(container.textContent).toContain("const value = 2;");
+  });
+
+  it("renders multiple inline diff ranges in one line", () => {
+    const { container } = render(
+      <DiffLineRow
+        line={makeLine({ type: "add", content: "alpha: 9, beta: 8" })}
+        inlineHighlightRanges={[
+          { start: 7, end: 8 },
+          { start: 16, end: 17 },
+        ]}
+      />
+    );
+    const highlights = container.querySelectorAll(".bg-green-200\\/80");
+    expect(highlights).toHaveLength(2);
+    expect(highlights[0]).toHaveTextContent("9");
+    expect(highlights[1]).toHaveTextContent("8");
+  });
+
   it("allows long line content to wrap while preserving whitespace", () => {
     const { container } = render(
       <DiffLineRow line={makeLine({ content: "const token = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';" })} />

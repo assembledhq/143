@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { DiffHunk as DiffHunkType } from "@/lib/diff-parser";
 import type { SessionReviewComment } from "@/lib/types";
 import type { CommentLineKey } from "@/hooks/use-review-comments";
@@ -5,6 +6,7 @@ import { makeCommentLineKey } from "@/hooks/use-review-comments";
 import { DiffLineRow } from "./diff-line";
 import { CommentThread } from "./comment-thread";
 import { CommentInput } from "./comment-input";
+import { buildInlineDiffRanges } from "./inline-diff-highlight";
 
 interface ActiveCommentLine {
   filePath: string;
@@ -41,6 +43,11 @@ export function DiffHunk({
   showInlineCommentComposer = true,
   onRequestEditComment,
 }: DiffHunkProps) {
+  const inlineDiffRanges = useMemo(
+    () => buildInlineDiffRanges(hunk.lines),
+    [hunk.lines]
+  );
+
   return (
     <div>
       {/* Hunk header */}
@@ -74,6 +81,7 @@ export function DiffHunk({
               line={line}
               filePath={filePath}
               highlightedContent={highlightedLines?.get(i)}
+              inlineHighlightRanges={inlineDiffRanges.get(i)}
               onAddComment={
                 onAddComment && commentLineNumber != null
                   ? () => onAddComment(commentLineNumber, commentSide)
