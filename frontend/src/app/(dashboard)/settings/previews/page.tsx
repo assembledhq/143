@@ -3,6 +3,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -48,6 +49,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
@@ -512,6 +518,101 @@ function RuntimeEnvironmentCard() {
   );
 }
 
+// PublishDisabledHint shows the short reason the "Publish to PRs" toggle is
+// locked. When the backend provides specific details (config parse errors,
+// validation failures, or admin-setup requirements), the line becomes a target
+// that reveals them — kept compact so it stays out of the way until the user
+// wants the full story. The Popover is controlled so it opens on tap/click
+// (touch-friendly), pointer hover, and keyboard focus alike.
+function PublishDisabledHint({
+  id,
+  reason,
+  details,
+}: {
+  id: string;
+  reason: string;
+  details: string[];
+}) {
+  const hasDetails = details.length > 0;
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelScheduledClose = () => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+  // Delay close slightly so moving the pointer from the trigger into the
+  // floating content does not close it across the gap.
+  const scheduleClose = () => {
+    cancelScheduledClose();
+    closeTimer.current = setTimeout(() => setOpen(false), 120);
+  };
+  useEffect(() => cancelScheduledClose, []);
+
+  if (!hasDetails) {
+    return (
+      <p
+        id={id}
+        className="flex items-start gap-1.5 text-xs leading-4 text-muted-foreground"
+      >
+        <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
+        <span>{reason}</span>
+      </p>
+    );
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          id={id}
+          onMouseEnter={() => {
+            cancelScheduledClose();
+            setOpen(true);
+          }}
+          onMouseLeave={scheduleClose}
+          onFocus={() => setOpen(true)}
+          onBlur={scheduleClose}
+          className="flex items-start gap-1.5 rounded text-left text-xs leading-4 text-muted-foreground underline decoration-dotted decoration-muted-foreground/50 underline-offset-2 transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{reason}</span>
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        // Keep focus on the trigger so a hover/focus open does not yank the
+        // caret into the popover.
+        onOpenAutoFocus={(event) => event.preventDefault()}
+        onMouseEnter={cancelScheduledClose}
+        onMouseLeave={scheduleClose}
+        className="w-72 space-y-2 p-3"
+      >
+        <p className="text-xs font-medium text-foreground">
+          What&apos;s blocking publish
+        </p>
+        <ul className="list-disc space-y-1 pl-4 text-xs leading-4 text-muted-foreground">
+          {details.map((detail, index) => (
+            <li key={index} className="break-words">
+              {detail}
+            </li>
+          ))}
+        </ul>
+        <p className="text-xs leading-4 text-muted-foreground">
+          Update{" "}
+          <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
+            .143/config.json
+          </code>{" "}
+          on the default branch, then run a test preview.
+        </p>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function RepoPreviewCard({
   policy,
   sessionPrewarmEnabled,
@@ -556,6 +657,10 @@ function RepoPreviewCard({
   const canEnable = policy.preview_ready && !missingPermissions;
   const publishDisabled = !canEnable && !policy.pr_preview_surfaces_enabled;
   const publishDisabledReason = publishDisabled ? disabledReason : "";
+  const publishDisabledDetails =
+    publishDisabled && !policy.preview_ready
+      ? (policy.preview_readiness_missing_details ?? [])
+      : [];
   const configNames = policy.preview_config_names ?? [];
   const defaultConfigName = policy.preview_config_default_name ?? "";
 
@@ -738,13 +843,11 @@ function RepoPreviewCard({
                 internally when publishing is off.
               </p>
               {publishDisabledReason ? (
-                <p
+                <PublishDisabledHint
                   id={`preview-publish-disabled-${policy.repository_id}`}
-                  className="flex items-start gap-1.5 text-xs leading-4 text-muted-foreground"
-                >
-                  <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
-                  <span>{publishDisabledReason}</span>
-                </p>
+                  reason={publishDisabledReason}
+                  details={publishDisabledDetails}
+                />
               ) : null}
             </div>
           </div>

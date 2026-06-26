@@ -620,6 +620,7 @@ export interface PreviewPolicySummary {
   preview_config_requires_selection?: boolean;
   preview_ready: boolean;
   preview_readiness_missing_reason?: string;
+  preview_readiness_missing_details?: string[];
   github_pr_comment_permission_ok: boolean;
   github_commit_status_permission_ok: boolean;
   last_surface_sync_sha?: string;

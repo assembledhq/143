@@ -221,14 +221,19 @@ type RepositoryPreviewPolicySummary struct {
 	// settings-page selection). Distinct from PreviewConfigNames (the profiles
 	// available in .143/config.json) and PreviewConfigDefaultName (that file's
 	// own default).
-	PreviewConfigName              string     `db:"preview_config_name" json:"preview_config_name,omitempty"`
-	PreviewConfigured              bool       `db:"preview_configured" json:"preview_configured"`
-	PreviewSuccessRecorded         bool       `db:"preview_success_recorded" json:"preview_success_recorded"`
-	PreviewConfigNames             []string   `db:"-" json:"preview_config_names,omitempty"`
-	PreviewConfigDefaultName       string     `db:"-" json:"preview_config_default_name,omitempty"`
-	PreviewConfigRequiresSelection bool       `db:"-" json:"preview_config_requires_selection,omitempty"`
-	PreviewReady                   bool       `db:"preview_ready" json:"preview_ready"`
-	PreviewReadinessMissingReason  string     `db:"preview_readiness_missing_reason" json:"preview_readiness_missing_reason,omitempty"`
+	PreviewConfigName              string   `db:"preview_config_name" json:"preview_config_name,omitempty"`
+	PreviewConfigured              bool     `db:"preview_configured" json:"preview_configured"`
+	PreviewSuccessRecorded         bool     `db:"preview_success_recorded" json:"preview_success_recorded"`
+	PreviewConfigNames             []string `db:"-" json:"preview_config_names,omitempty"`
+	PreviewConfigDefaultName       string   `db:"-" json:"preview_config_default_name,omitempty"`
+	PreviewConfigRequiresSelection bool     `db:"-" json:"preview_config_requires_selection,omitempty"`
+	PreviewReady                   bool     `db:"preview_ready" json:"preview_ready"`
+	PreviewReadinessMissingReason  string   `db:"preview_readiness_missing_reason" json:"preview_readiness_missing_reason,omitempty"`
+	// PreviewReadinessMissingDetails carries the specific, actionable reasons
+	// behind the short PreviewReadinessMissingReason headline (config parse
+	// errors, ValidationConfig failures, or admin-setup requirements). The
+	// settings page reveals these on demand so the user knows what to fix.
+	PreviewReadinessMissingDetails []string   `db:"-" json:"preview_readiness_missing_details,omitempty"`
 	GitHubPRCommentPermissionOK    bool       `db:"github_pr_comment_permission_ok" json:"github_pr_comment_permission_ok"`
 	GitHubCommitStatusPermissionOK bool       `db:"github_commit_status_permission_ok" json:"github_commit_status_permission_ok"`
 	LastSurfaceSyncSHA             string     `db:"last_surface_sync_sha" json:"last_surface_sync_sha,omitempty"`
