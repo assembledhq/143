@@ -328,6 +328,47 @@ func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
 	return render("code_review_reviewer.template", data)
 }
 
+func CodeReviewDescriptionCheckSystemPrompt() string {
+	return render("code_review_description_check.template", nil)
+}
+
+type CodeReviewDescriptionCheckUserPromptData struct {
+	Title        string
+	Requirement  string
+	PRTitle      string
+	PRBody       string
+	ChangedFiles []string
+}
+
+func CodeReviewDescriptionCheckUserPrompt(data CodeReviewDescriptionCheckUserPromptData) string {
+	return render("code_review_description_check_user.template", data)
+}
+
+type CodeReviewOrchestratorPromptData struct {
+	Repository             string
+	PullNumber             int
+	PullRequestURL         string
+	Title                  string
+	Author                 string
+	BaseSHA                string
+	HeadSHA                string
+	PolicyVersion          int
+	ReviewDepth            string
+	ApprovalMode           any
+	RequiredReviewerQuorum int
+	InlineCommentLimit     int
+	RiskReasons            []string
+	DescriptionResults     []string
+	ReviewerOutputs        []string
+	Findings               []string
+	ChangedFiles           []string
+	Checklist              []string
+}
+
+func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {
+	return render("code_review_orchestrator.template", data)
+}
+
 // ─── Automations ────────────────────────────────────────────────────────────
 
 type AutomationGoalFastImprovementPromptData struct {

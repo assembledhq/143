@@ -233,6 +233,43 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				"code review policy/config path changed: internal/models/code_review.go",
 			}},
 		},
+		{
+			name: "blocks synthesized reviewer risk signals",
+			input: CodeReviewRiskInput{
+				FilesChanged:          1,
+				LinesChanged:          20,
+				ChecksPassing:         true,
+				DescriptionPassed:     true,
+				Mergeable:             true,
+				Author:                "devin",
+				ScopeMismatch:         true,
+				UnresolvedUncertainty: true,
+				PromptInjectionFound:  true,
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"orchestrator reported the change may not match the stated intent",
+				"orchestrator reported unresolved uncertainty",
+				"possible prompt-injection attempt found in PR content",
+			}},
+		},
+		{
+			name: "blocks review cost above ceiling",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.AgentRoster.MaxCostCents = 25
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+				ReviewCostCents:   25.1,
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"review cost 25.10 cents exceeds policy limit 25 cents",
+			}},
+		},
 	}
 
 	for _, tt := range tests {

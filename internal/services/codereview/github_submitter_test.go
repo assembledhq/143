@@ -70,6 +70,122 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	require.Len(t, comments, 1, "one inline comment should be submitted")
 }
 
+func TestGitHubSubmitter_SubmitReviewReturnsExistingMarkedReview(t *testing.T) {
+	t.Parallel()
+
+	postCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id":       123,
+				"html_url": "https://github.com/acme/repo/pull/42#pullrequestreview-123",
+				"body":     "Done.\n\n" + codeReviewOutputMarker("review-output-key"),
+			}})
+			require.NoError(t, err, "test response should write existing review")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/123/comments":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id":   456,
+				"path": "src/auth/session.go",
+				"line": 42,
+				"body": withCodeReviewFindingMarker("Check this edge case.", "finding-key"),
+			}})
+			require.NoError(t, err, "test response should write existing comments")
+		case r.Method == http.MethodPost:
+			postCalled = true
+			http.Error(w, "unexpected post", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		HeadSHA:        "abc123",
+		OutputKey:      "review-output-key",
+		Decision:       SubmitReviewDecisionApproved,
+		Body:           "Done.",
+		Comments: []SubmitReviewComment{
+			{Path: "src/auth/session.go", Line: 42, Body: "Check this edge case.", DedupeKey: "finding-key"},
+		},
+	})
+
+	require.NoError(t, err, "SubmitReview should reuse an existing marked review")
+	require.False(t, postCalled, "SubmitReview should not create a duplicate review when the output marker already exists")
+	require.Equal(t, int64(123), result.ID, "SubmitReview should return the existing review id")
+	require.Equal(t, []SubmitReviewPostedComment{
+		{ID: 456, Path: "src/auth/session.go", Line: 42, Body: withCodeReviewFindingMarker("Check this edge case.", "finding-key")},
+	}, result.Comments, "SubmitReview should recover comments attached to the existing review")
+}
+
+func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testing.T) {
+	t.Parallel()
+
+	var (
+		patchBody map[string]string
+		postBody  map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id":   456,
+				"path": "src/auth/session.go",
+				"line": 42,
+				"body": withCodeReviewFindingMarker("Old body.", "finding-key"),
+			}})
+			require.NoError(t, err, "test response should write pull comments")
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/pulls/comments/456":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&patchBody), "patch body should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":456}`))
+			require.NoError(t, err, "test response should write patch response")
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&postBody), "post body should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":123,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-123"}`))
+			require.NoError(t, err, "test response should write review")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/123/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should write no new comments")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		HeadSHA:        "abc123",
+		Decision:       SubmitReviewDecisionCommentOnly,
+		Body:           "Review complete.",
+		Comments: []SubmitReviewComment{
+			{Path: "src/auth/session.go", Line: 42, Body: "New body.", DedupeKey: "finding-key"},
+		},
+	})
+
+	require.NoError(t, err, "SubmitReview should update a matching marked inline comment")
+	require.Equal(t, int64(123), result.ID, "SubmitReview should still submit the final review summary")
+	require.Equal(t, withCodeReviewFindingMarker("New body.", "finding-key"), patchBody["body"], "SubmitReview should update the stale inline comment body")
+	require.NotContains(t, postBody, "comments", "SubmitReview should not post a duplicate inline comment when an existing marker was updated")
+	require.Equal(t, []SubmitReviewPostedComment{
+		{ID: 456, Path: "src/auth/session.go", Line: 42, Body: withCodeReviewFindingMarker("New body.", "finding-key"), DedupeKey: "finding-key"},
+	}, result.Comments, "SubmitReview should return the existing updated comment id with the original finding key")
+}
+
 func TestGitHubSubmitter_ListPullRequestFiles(t *testing.T) {
 	t.Parallel()
 

@@ -78,6 +78,27 @@ function statusVariant(status: string): "success" | "secondary" | "destructive" 
   return "outline";
 }
 
+function reviewDurationMinutes(review: CodeReviewListItem): number | null {
+  if (!review.completed_at) return null;
+  const started = new Date(review.created_at).getTime();
+  const completed = new Date(review.completed_at).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
+  return Math.round((completed - started) / 60000);
+}
+
+function formatPercent(numerator: number, denominator: number): string {
+  if (denominator <= 0) return "0%";
+  return `${Math.round((numerator / denominator) * 100)}%`;
+}
+
+function formatMinutes(value: number | null): string {
+  if (value === null) return "-";
+  if (value < 60) return `${value}m`;
+  const hours = Math.floor(value / 60);
+  const minutes = value % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
   return JSON.parse(JSON.stringify(config)) as CodeReviewPolicyConfig;
 }
@@ -149,10 +170,36 @@ export default function CodeReviewsPage() {
         if (review.decision === "approved") acc.approved += 1;
         if (review.decision === "needs_human_review" || review.decision === "comment_only") acc.escalated += 1;
         if (review.stale || review.status === "stale") acc.stale += 1;
+        const duration = reviewDurationMinutes(review);
+        if (duration !== null) {
+          acc.completedDurationMinutes += duration;
+          acc.completedWithDuration += 1;
+        }
         return acc;
       },
-      { total: 0, approved: 0, escalated: 0, stale: 0 },
+      { total: 0, approved: 0, escalated: 0, stale: 0, completedDurationMinutes: 0, completedWithDuration: 0 },
     );
+  }, [reviews]);
+  const averageReviewMinutes =
+    insightCounts.completedWithDuration > 0
+      ? Math.round(insightCounts.completedDurationMinutes / insightCounts.completedWithDuration)
+      : null;
+  const recentEscalations = useMemo(
+    () =>
+      reviews
+        .filter((review) => review.decision === "needs_human_review" || review.decision === "comment_only" || review.decision === "blocked")
+        .slice(0, 5),
+    [reviews],
+  );
+  const topRepositories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const review of reviews) {
+      const label = review.repository_name || review.github_repo;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
   }, [reviews]);
 
   return (
@@ -431,7 +478,43 @@ export default function CodeReviewsPage() {
                       })
                     }
                   />
-                  <ConfigMetric label="Reviewer quorum" value={draftPolicy?.agent_roster.require_reviewer_quorum ?? "-"} />
+                  <NumberPolicyInput
+                    label="Reviewer quorum"
+                    value={draftPolicy?.agent_roster.require_reviewer_quorum}
+                    min={1}
+                    max={Math.max(1, draftPolicy?.agent_roster.reviewers.length ?? 1)}
+                    disabled={!draftPolicy}
+                    onChange={(value) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, require_reviewer_quorum: value } },
+                      })
+                    }
+                  />
+                  <div className="rounded-md border border-border p-4">
+                    <Label className="text-xs text-muted-foreground">Review depth</Label>
+                    <Select
+                      value={draftPolicy?.agent_roster.review_depth ?? "standard"}
+                      disabled={!draftPolicy}
+                      onValueChange={(value) =>
+                        draftPolicy &&
+                        setDraftOverride({
+                          key: policyKey,
+                          config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, review_depth: value } },
+                        })
+                      }
+                    >
+                      <SelectTrigger className="mt-2" aria-label="Review depth">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="shallow">Shallow</SelectItem>
+                        <SelectItem value="standard">Standard</SelectItem>
+                        <SelectItem value="deep">Deep</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-2">
@@ -460,6 +543,18 @@ export default function CodeReviewsPage() {
                     }
                   />
                   <PolicyToggle
+                    label="Enforce sensitive paths"
+                    checked={draftPolicy?.risk_policy.exclude_sensitive_paths ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, exclude_sensitive_paths: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
                     label="Require up-to-date branch"
                     checked={draftPolicy?.risk_policy.require_up_to_date ?? false}
                     disabled={!draftPolicy}
@@ -468,6 +563,30 @@ export default function CodeReviewsPage() {
                       setDraftOverride({
                         key: policyKey,
                         config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_up_to_date: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Allow policy changes"
+                    checked={draftPolicy?.risk_policy.allow_policy_changes ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, allow_policy_changes: checked } },
+                      })
+                    }
+                  />
+                  <PolicyToggle
+                    label="Block reviewer disagreement"
+                    checked={draftPolicy?.agent_roster.disagreement_blocks ?? false}
+                    disabled={!draftPolicy}
+                    onCheckedChange={(checked) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, disagreement_blocks: checked } },
                       })
                     }
                   />
@@ -538,13 +657,25 @@ export default function CodeReviewsPage() {
                     label="Reviewer agents"
                     value={draftPolicy?.agent_roster.reviewers ?? []}
                     disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
+                    onChange={(items) => {
+                      if (!draftPolicy) return;
+                      const reviewers = items.length > 0 ? items : draftPolicy.agent_roster.reviewers;
+                      const requireReviewerQuorum = Math.min(
+                        draftPolicy.agent_roster.require_reviewer_quorum,
+                        Math.max(1, reviewers.length),
+                      );
                       setDraftOverride({
                         key: policyKey,
-                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, reviewers: items } },
-                      })
-                    }
+                        config: {
+                          ...draftPolicy,
+                          agent_roster: {
+                            ...draftPolicy.agent_roster,
+                            reviewers,
+                            require_reviewer_quorum: requireReviewerQuorum,
+                          },
+                        },
+                      });
+                    }}
                   />
                   <div className="space-y-2">
                     <Label className="text-xs text-muted-foreground">Orchestrator</Label>
@@ -712,11 +843,53 @@ export default function CodeReviewsPage() {
           </TabsContent>
 
           <TabsContent value="insights">
-            <div className="grid gap-3 sm:grid-cols-4">
+            <div className="grid gap-3 sm:grid-cols-5">
               <InsightCard label="Reviews" value={insightCounts.total} />
-              <InsightCard label="Approved" value={insightCounts.approved} />
+              <InsightCard label="Approval rate" value={formatPercent(insightCounts.approved, insightCounts.total)} />
               <InsightCard label="Escalated" value={insightCounts.escalated} />
+              <InsightCard label="Avg duration" value={formatMinutes(averageReviewMinutes)} />
               <InsightCard label="Stale" value={insightCounts.stale} />
+            </div>
+            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Recent escalations</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {recentEscalations.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">No escalated reviews in the current filter.</div>
+                  ) : (
+                    recentEscalations.map((review) => (
+                      <div key={review.id} className="flex min-w-0 items-center justify-between gap-3 border-b border-border pb-3 last:border-0 last:pb-0">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-foreground">
+                            #{review.github_pr_number} {review.pull_request_title}
+                          </div>
+                          <div className="mt-1 text-xs text-muted-foreground">{review.repository_name || review.github_repo}</div>
+                        </div>
+                        <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                      </div>
+                    ))
+                  )}
+                </CardContent>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Top repositories</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {topRepositories.length === 0 ? (
+                    <div className="text-sm text-muted-foreground">No repository activity in the current filter.</div>
+                  ) : (
+                    topRepositories.map(([name, count]) => (
+                      <div key={name} className="flex items-center justify-between gap-3 border-b border-border pb-3 last:border-0 last:pb-0">
+                        <div className="truncate text-sm font-medium text-foreground">{name}</div>
+                        <Badge variant="outline">{count}</Badge>
+                      </div>
+                    ))
+                  )}
+                </CardContent>
+              </Card>
             </div>
           </TabsContent>
         </Tabs>
@@ -747,15 +920,6 @@ function FilterSelect({
       </Select>
     </div>
   );
-}
-
-function ConfigMetric({ label, value }: { label: string; value: string | number }) {
-	return (
-		<div className="rounded-md border border-border p-4">
-			<div className="text-xs text-muted-foreground">{label}</div>
-			<div className="mt-2 text-lg font-semibold text-foreground">{value}</div>
-		</div>
-	);
 }
 
 function NumberPolicyInput({
@@ -838,7 +1002,7 @@ function ListTextArea({
   );
 }
 
-function InsightCard({ label, value }: { label: string; value: number }) {
+function InsightCard({ label, value }: { label: string; value: number | string }) {
   return (
     <Card>
       <CardContent className="p-4">

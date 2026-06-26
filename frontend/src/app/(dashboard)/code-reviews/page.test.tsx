@@ -121,6 +121,10 @@ describe("CodeReviewsPage", () => {
     });
     expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
     expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
+    expect(screen.getByText("Enforce sensitive paths")).toBeInTheDocument();
+    expect(screen.getByText("Allow policy changes")).toBeInTheDocument();
+    expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /Review depth/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
@@ -129,5 +133,12 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(screen.getByDisplayValue("Custom requirement")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("tab", { name: /Insights/i }));
+    expect(screen.getByText("Approval rate")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("Avg duration")).toBeInTheDocument();
+    expect(screen.getByText("5m")).toBeInTheDocument();
+    expect(screen.getByText("Top repositories")).toBeInTheDocument();
   });
 });

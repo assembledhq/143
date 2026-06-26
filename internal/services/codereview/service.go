@@ -174,7 +174,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		AutonomyLevel:    models.SessionAutonomySupervised,
 		TokenMode:        models.DefaultSessionTokenMode,
 		RepositoryID:     &repositoryID,
-		BaseCommitSHA:    &input.BaseSHA,
+		BaseCommitSHA:    &input.HeadSHA,
 		RevisionContext:  revisionContext,
 		Title:            &title,
 	}

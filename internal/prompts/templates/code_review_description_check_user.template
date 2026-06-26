@@ -1,0 +1,15 @@
+Requirement: {{.Title}}
+Rubric: {{.Requirement}}
+
+PR title:
+{{.PRTitle}}
+
+PR body:
+{{.PRBody}}
+
+Changed files:
+{{- range .ChangedFiles}}
+- {{.}}
+{{- else}}
+- unavailable
+{{- end}}

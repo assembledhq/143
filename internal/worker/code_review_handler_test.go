@@ -93,6 +93,36 @@ func TestParseCodeReviewFindings(t *testing.T) {
 	}}, findings, "parser should persist concrete directive-backed findings with repo-relative paths")
 }
 
+func TestCodeReviewFindingsOnChangedLines(t *testing.T) {
+	t.Parallel()
+
+	path := "internal/db/users.go"
+	changedLine := 11
+	contextLine := 10
+	otherPath := "internal/db/projects.go"
+	findings := []models.CodeReviewFinding{
+		{ID: uuid.New(), Path: &path, StartLine: &changedLine, Summary: "changed line"},
+		{ID: uuid.New(), Path: &path, StartLine: &contextLine, Summary: "context line"},
+		{ID: uuid.New(), Path: &otherPath, StartLine: &changedLine, Summary: "other file"},
+	}
+	files := []codereview.PullRequestFile{
+		{
+			Filename: path,
+			Patch: `@@ -8,5 +8,6 @@ func load() {
+ context
+ context
+ context
++added guard
+ context
+}`,
+		},
+	}
+
+	filtered := codeReviewFindingsOnChangedLines(findings, files)
+
+	require.Equal(t, []models.CodeReviewFinding{findings[0]}, filtered, "inline selection should keep only findings attached to added diff lines")
+}
+
 func TestCodeReviewDescriptionPassed(t *testing.T) {
 	t.Parallel()
 

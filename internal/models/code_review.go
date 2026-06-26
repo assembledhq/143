@@ -229,7 +229,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
-			Orchestrator:          AgentTypeClaudeCode,
+			Orchestrator:          AgentTypeOpenCode,
 			ReviewDepth:           "standard",
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
@@ -504,6 +504,10 @@ type CodeReviewRiskInput struct {
 	UnresolvedHumanThreads int
 	BlockingFindings       int
 	ReviewerDisagreement   bool
+	ReviewCostCents        float64
+	ScopeMismatch          bool
+	UnresolvedUncertainty  bool
+	PromptInjectionFound   bool
 	ContextFetchFailed     bool
 	HeadSHAChanged         bool
 }
@@ -583,12 +587,28 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.ReviewerDisagreement && policy.AgentRoster.DisagreementBlocks {
 		reasons = append(reasons, "reviewer agents disagreed on material risk")
 	}
+	if policy.AgentRoster.MaxCostCents > 0 && input.ReviewCostCents > float64(policy.AgentRoster.MaxCostCents) {
+		reasons = append(reasons, fmt.Sprintf("review cost %.2f cents exceeds policy limit %d cents", input.ReviewCostCents, policy.AgentRoster.MaxCostCents))
+	}
+	if input.ScopeMismatch {
+		reasons = append(reasons, "orchestrator reported the change may not match the stated intent")
+	}
+	if input.UnresolvedUncertainty {
+		reasons = append(reasons, "orchestrator reported unresolved uncertainty")
+	}
+	if input.PromptInjectionFound {
+		reasons = append(reasons, "possible prompt-injection attempt found in PR content")
+	}
 	if policy.RiskPolicy.ExcludeSensitivePaths {
 		for _, path := range input.ChangedPaths {
 			if matchesAnyCodeReviewPath(path, policy.RiskPolicy.SensitivePaths) {
 				reasons = append(reasons, "sensitive path changed: "+path)
 			}
-			if !policy.RiskPolicy.AllowPolicyChanges && isCodeReviewPolicyPath(path) {
+		}
+	}
+	if !policy.RiskPolicy.AllowPolicyChanges {
+		for _, path := range input.ChangedPaths {
+			if isCodeReviewPolicyPath(path) {
 				reasons = append(reasons, "code review policy/config path changed: "+path)
 			}
 		}
