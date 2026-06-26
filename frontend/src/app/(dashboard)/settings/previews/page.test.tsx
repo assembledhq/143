@@ -169,6 +169,59 @@ describe("PreviewSettingsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows contextual reasons when publish and surface controls are disabled", async () => {
+    server.use(
+      http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),
+      http.get("*/api/v1/repositories/:id/preview-secret-bundles", () => HttpResponse.json({ data: [], meta: {} })),
+      http.get("*/api/v1/previews/policies", () => HttpResponse.json({
+        data: [
+          {
+            repository_id: "repo-1",
+            repository_full_name: "assembledhq/143",
+            auto_mode: "warm",
+            session_prewarm_mode: "off",
+            session_prewarm_untrusted_fork: false,
+            pr_preview_surfaces_enabled: false,
+            github_pr_comment_enabled: true,
+            github_commit_status_enabled: true,
+            preview_configured: true,
+            preview_success_recorded: false,
+            preview_ready: false,
+            preview_readiness_missing_reason:
+              "Run a successful test preview before enabling GitHub PR links",
+            github_pr_comment_permission_ok: true,
+            github_commit_status_permission_ok: true,
+            open_pr_count: 1,
+            updated_at: null,
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    renderWithProviders(<PreviewSettingsPage />);
+
+    expect(
+      await screen.findByRole("switch", {
+        name: /publish preview links to GitHub PRs for assembledhq\/143/i,
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Run a successful test preview before enabling GitHub PR links"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Surfaces")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", {
+        name: /enable pr comment preview link for assembledhq\/143/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", {
+        name: /enable commit status preview link for assembledhq\/143/i,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("falls back to connected repositories when preview policies are empty", async () => {
     server.use(
       http.get("*/api/v1/repositories", () => HttpResponse.json({ data: repos, meta: {} })),

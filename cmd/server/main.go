@@ -41,6 +41,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/domains"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -486,6 +487,7 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			PRReadiness:         db.NewPRReadinessStore(pool),
+			CodeReviews:         db.NewCodeReviewStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
@@ -1192,7 +1194,7 @@ func configureSessionExecutorDispatch(
 	executorLauncher := worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
 		Image:       cfg.SessionExecutorImage,
 		NetworkMode: cfg.SessionExecutorDockerNetwork,
-		Binds:       sessionExecutorBinds(),
+		Binds:       sessionExecutorBinds(cfg.SessionExecutorExtraBinds),
 		GroupAdd:    sessionExecutorGroupAddFromEnv(),
 		Env:         os.Environ(),
 		StopTimeout: cfg.SessionExecutorStopTimeout,
@@ -1210,12 +1212,20 @@ func configureSessionExecutorDispatch(
 	}
 }
 
-func sessionExecutorBinds() []string {
-	return []string{
+func sessionExecutorBinds(extraBinds []string) []string {
+	binds := []string{
 		"/var/run/docker.sock:/var/run/docker.sock",
 		"/var/run/143/sandbox-auth:/var/run/143/sandbox-auth",
 		"/etc/143:/etc/143:ro",
 	}
+	for _, bind := range extraBinds {
+		bind = strings.TrimSpace(bind)
+		if bind == "" {
+			continue
+		}
+		binds = append(binds, bind)
+	}
+	return binds
 }
 
 func sessionExecutorIDFromEnv() (uuid.UUID, bool, error) {
@@ -1728,6 +1738,7 @@ func buildServices(
 		SlackSummarizer:   slackSummarizer,
 		LLM:               llmClient,
 		GitHub:            ghSvc,
+		CodeReviews:       codereviewsvc.NewGitHubSubmitter(ghSvc),
 		GitHubOrgRoster:   ghSvc,
 		Snapshots:         snapshotStore,
 		TitleService:      titleService,

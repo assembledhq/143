@@ -15,6 +15,7 @@ STATIC_EGRESS_CAPABILITY_FILE="/etc/143/static-egress-capable"
 STATIC_EGRESS_ENV_FILE="${STATIC_EGRESS_ENV_FILE:-/opt/143/.env}"
 STATIC_EGRESS_SECRETS_FILE="${STATIC_EGRESS_SECRETS_FILE:-/opt/143/static-egress-worker.env}"
 WORKER_COMPOSE_FILE="${WORKER_COMPOSE_FILE:-/opt/143/docker-compose.worker.yml}"
+DEPLOY_SCRIPT_DIR="${DEPLOY_SCRIPT_DIR:-/opt/143/deploy/scripts}"
 DEFAULT_NETWORK="${2:-143_default}"
 DEPLOY_MODE_FILE="${DEPLOY_MODE_FILE:-/opt/143/.deploy-mode}"
 DEPLOY_MODE_FILE_MAX_AGE_SECONDS="${DEPLOY_MODE_FILE_MAX_AGE_SECONDS:-600}"
@@ -336,25 +337,25 @@ sweep_stopped_worker_run_containers
 # sandbox-firewall.sh still applies the live rules below.
 apt-get install -y --no-install-recommends iptables-persistent >/dev/null 2>&1 || true
 
-if [ -x /opt/143/deploy/scripts/sandbox-firewall.sh ]; then
-  /opt/143/deploy/scripts/sandbox-firewall.sh "$SANDBOX_NETWORK"
-  /opt/143/deploy/scripts/sandbox-firewall.sh "$STATIC_EGRESS_NETWORK"
+if [ -x "$DEPLOY_SCRIPT_DIR/sandbox-firewall.sh" ]; then
+  "$DEPLOY_SCRIPT_DIR/sandbox-firewall.sh" "$SANDBOX_NETWORK"
+  "$DEPLOY_SCRIPT_DIR/sandbox-firewall.sh" "$STATIC_EGRESS_NETWORK"
 else
-  echo "ERROR: /opt/143/deploy/scripts/sandbox-firewall.sh is missing or not executable." >&2
+  echo "ERROR: $DEPLOY_SCRIPT_DIR/sandbox-firewall.sh is missing or not executable." >&2
   exit 1
 fi
 
-if [ -x /opt/143/deploy/scripts/sandbox-resolv-conf.sh ]; then
-  /opt/143/deploy/scripts/sandbox-resolv-conf.sh /etc/143/sandbox-resolv.conf 172.30.0.2
-  /opt/143/deploy/scripts/sandbox-resolv-conf.sh "$STATIC_EGRESS_RESOLV_CONF" "$STATIC_EGRESS_DNS_IP"
+if [ -x "$DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh" ]; then
+  "$DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh" /etc/143/sandbox-resolv.conf 172.30.0.2
+  "$DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh" "$STATIC_EGRESS_RESOLV_CONF" "$STATIC_EGRESS_DNS_IP"
 else
-  echo "ERROR: /opt/143/deploy/scripts/sandbox-resolv-conf.sh is missing or not executable." >&2
+  echo "ERROR: $DEPLOY_SCRIPT_DIR/sandbox-resolv-conf.sh is missing or not executable." >&2
   exit 1
 fi
 
 if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
-  if [ ! -x /opt/143/deploy/scripts/install-static-egress-worker.sh ]; then
-    echo "ERROR: static egress is configured but /opt/143/deploy/scripts/install-static-egress-worker.sh is missing or not executable." >&2
+  if [ ! -x "$DEPLOY_SCRIPT_DIR/install-static-egress-worker.sh" ]; then
+    echo "ERROR: static egress is configured but $DEPLOY_SCRIPT_DIR/install-static-egress-worker.sh is missing or not executable." >&2
     exit 1
   fi
   : "${STATIC_EGRESS_GATEWAY_PUBLIC_IP:?STATIC_EGRESS_GATEWAY_PUBLIC_IP is required when STATIC_EGRESS_PUBLIC_IP is configured}"
@@ -362,7 +363,7 @@ if [ -n "${STATIC_EGRESS_PUBLIC_IP:-}" ]; then
   : "${STATIC_EGRESS_WORKER_PRIVATE_KEY:?STATIC_EGRESS_WORKER_PRIVATE_KEY is required when STATIC_EGRESS_PUBLIC_IP is configured}"
   : "${STATIC_EGRESS_WORKER_WG_ADDRESS:?STATIC_EGRESS_WORKER_WG_ADDRESS is required when STATIC_EGRESS_PUBLIC_IP is configured}"
   ensure_static_egress_dns
-  /opt/143/deploy/scripts/install-static-egress-worker.sh
+  "$DEPLOY_SCRIPT_DIR/install-static-egress-worker.sh"
 else
   rm -f "$STATIC_EGRESS_CAPABILITY_FILE"
 fi

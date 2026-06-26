@@ -1279,7 +1279,7 @@ describe('SessionSidebar', () => {
 
   it('preserves search alongside the existing filters in session detail links', async () => {
     serveSessions([
-      makeSession({ id: 's1', result_summary: 'Linked session' }),
+      makeSession({ id: 's1', title: 'Linked session', result_summary: 'Linked session' }),
     ]);
 
     renderWithProviders(<SessionSidebar />, {

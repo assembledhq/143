@@ -50,6 +50,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -68,7 +69,6 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -81,6 +81,7 @@ import { api, ApiError } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { pollMs } from "@/lib/poll-intervals";
 import { queryKeys } from "@/lib/query-keys";
+import { cn } from "@/lib/utils";
 import {
   DEFAULT_PREVIEW_AUTO_POOL_MAX_ACTIVE,
   DEFAULT_PREVIEW_SESSION_PREWARM_MAX_ACTIVE,
@@ -324,11 +325,6 @@ function AutoPreviewSection() {
           publish their links to GitHub. Warm mode hibernates after a successful
           build so the PR link resumes quickly.
         </p>
-        <p className="text-xs text-muted-foreground">
-          Warm builds each PR preview, saves a resumable snapshot, then stops it.
-          On builds each PR preview and keeps it running until normal idle limits
-          reclaim it.
-        </p>
       </div>
 
       {policiesLoading ? (
@@ -545,6 +541,12 @@ function RepoPreviewCard({
   const testPreviewDisabled =
     testPreviewPending ||
     Boolean(policy.preview_config_requires_selection && !selectedPreviewConfig);
+  const testPreviewDisabledReason =
+    !testPreviewPending &&
+    policy.preview_config_requires_selection &&
+    !selectedPreviewConfig
+      ? "Select a build profile before starting a test preview."
+      : "";
   const disabledReason = !policy.preview_ready
     ? policy.preview_readiness_missing_reason ||
       "Run a successful test preview before enabling GitHub PR links"
@@ -552,6 +554,8 @@ function RepoPreviewCard({
       ? "GitHub App permissions are missing for PR comments or commit statuses"
       : "";
   const canEnable = policy.preview_ready && !missingPermissions;
+  const publishDisabled = !canEnable && !policy.pr_preview_surfaces_enabled;
+  const publishDisabledReason = publishDisabled ? disabledReason : "";
   const configNames = policy.preview_config_names ?? [];
   const defaultConfigName = policy.preview_config_default_name ?? "";
 
@@ -588,10 +592,11 @@ function RepoPreviewCard({
           <div className="text-xs font-medium text-muted-foreground">
             1 · Auto-build
           </div>
-          <div className="space-y-1.5">
-            <span className="block text-xs text-muted-foreground">Mode</span>
-            <ToggleGroup
-              type="single"
+          <div className="space-y-2">
+            <span className="block text-xs font-medium text-foreground">
+              Mode
+            </span>
+            <RadioGroup
               value={policy.auto_mode}
               onValueChange={(value) => {
                 if (!value || value === policy.auto_mode) return;
@@ -599,39 +604,39 @@ function RepoPreviewCard({
                   auto_mode: value as PreviewPolicySummary["auto_mode"],
                 });
               }}
-              className="justify-start"
+              className="gap-2"
             >
-              <ToggleGroupItem
+              <PreviewModeOption
+                id={`preview-auto-${policy.repository_id}-off`}
                 value="off"
-                aria-label={`Turn off auto-preview for ${policy.repository_full_name}`}
-              >
-                Off
-              </ToggleGroupItem>
-              <ToggleGroupItem
+                label="Off"
+                description="Do not build PR previews automatically."
+                selected={policy.auto_mode === "off"}
+                ariaLabel={`Turn off auto-preview for ${policy.repository_full_name}`}
+              />
+              <PreviewModeOption
+                id={`preview-auto-${policy.repository_id}-warm`}
                 value="warm"
-                aria-label={`Use warm auto-preview for ${policy.repository_full_name}`}
-              >
-                Warm
-              </ToggleGroupItem>
-              <ToggleGroupItem
+                label="Warm"
+                description="Warm builds each PR preview, saves a resumable snapshot, then stops it."
+                selected={policy.auto_mode === "warm"}
+                ariaLabel={`Use warm auto-preview for ${policy.repository_full_name}`}
+              />
+              <PreviewModeOption
+                id={`preview-auto-${policy.repository_id}-on`}
                 value="on"
-                aria-label={`Keep auto-preview on for ${policy.repository_full_name}`}
-              >
-                On
-              </ToggleGroupItem>
-            </ToggleGroup>
+                label="On"
+                description="On builds each PR preview and keeps it running until normal idle limits reclaim it."
+                selected={policy.auto_mode === "on"}
+                ariaLabel={`Keep auto-preview on for ${policy.repository_full_name}`}
+              />
+            </RadioGroup>
           </div>
-          <div className="space-y-1.5">
-            <span className="block text-xs text-muted-foreground">
+          <div className="space-y-2">
+            <span className="block text-xs font-medium text-foreground">
               Session prewarm
             </span>
-            <p className="text-xs text-muted-foreground">
-              Cache only installs dependencies ahead of time without starting
-              the app. Smart starts with cache warming and may prepare a full
-              preview when a session looks likely to need one.
-            </p>
-            <ToggleGroup
-              type="single"
+            <RadioGroup
               value={policy.session_prewarm_mode}
               onValueChange={(value) => {
                 if (
@@ -646,30 +651,47 @@ function RepoPreviewCard({
                     value as PreviewPolicySummary["session_prewarm_mode"],
                 });
               }}
-              className="justify-start"
+              className="gap-2"
               disabled={!sessionPrewarmEnabled}
+              aria-describedby={
+                !sessionPrewarmEnabled
+                  ? `preview-prewarm-disabled-${policy.repository_id}`
+                  : undefined
+              }
             >
-              <ToggleGroupItem
+              <PreviewModeOption
+                id={`preview-prewarm-${policy.repository_id}-off`}
                 value="off"
-                aria-label={`Turn off session prewarm for ${policy.repository_full_name}`}
-              >
-                Off
-              </ToggleGroupItem>
-              <ToggleGroupItem
+                label="Off"
+                description="Start only when a user opens Preview."
+                selected={policy.session_prewarm_mode === "off"}
+                disabled={!sessionPrewarmEnabled}
+                ariaLabel={`Turn off session prewarm for ${policy.repository_full_name}`}
+              />
+              <PreviewModeOption
+                id={`preview-prewarm-${policy.repository_id}-cache`}
                 value="cache"
-                aria-label={`Use cache-only session prewarm for ${policy.repository_full_name}`}
-              >
-                Cache only
-              </ToggleGroupItem>
-              <ToggleGroupItem
+                label="Cache only"
+                description="Cache only installs dependencies ahead of time without starting the app."
+                selected={policy.session_prewarm_mode === "cache"}
+                disabled={!sessionPrewarmEnabled}
+                ariaLabel={`Use cache-only session prewarm for ${policy.repository_full_name}`}
+              />
+              <PreviewModeOption
+                id={`preview-prewarm-${policy.repository_id}-smart`}
                 value="smart"
-                aria-label={`Use smart session prewarm for ${policy.repository_full_name}`}
-              >
-                Smart
-              </ToggleGroupItem>
-            </ToggleGroup>
+                label="Smart"
+                description="Smart starts with cache warming and may prepare a full preview when a session looks likely to need one."
+                selected={policy.session_prewarm_mode === "smart"}
+                disabled={!sessionPrewarmEnabled}
+                ariaLabel={`Use smart session prewarm for ${policy.repository_full_name}`}
+              />
+            </RadioGroup>
             {!sessionPrewarmEnabled ? (
-              <p className="text-xs text-muted-foreground">
+              <p
+                id={`preview-prewarm-disabled-${policy.repository_id}`}
+                className="text-xs leading-4 text-muted-foreground"
+              >
                 Set speculative preview slots above 0 to enable session prewarm.
               </p>
             ) : null}
@@ -680,22 +702,21 @@ function RepoPreviewCard({
           <div className="text-xs font-medium text-muted-foreground">
             2 · Publish to PRs
           </div>
-          {disabledReason ? (
-            <div className="flex items-start gap-2 rounded-md bg-muted px-2.5 py-2 text-xs text-muted-foreground">
-              <HelpCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>{disabledReason}</span>
-            </div>
-          ) : null}
           {policy.last_surface_sync_error ? (
             <p className="text-xs text-destructive">
               {policy.last_surface_sync_error}
             </p>
           ) : null}
-          <div className="flex items-center gap-2">
+          <div className="flex items-start gap-2 rounded-md border border-border p-2.5">
             <Switch
               aria-label={`Publish preview links to GitHub PRs for ${policy.repository_full_name}`}
               checked={policy.pr_preview_surfaces_enabled}
-              disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
+              disabled={publishDisabled}
+              aria-describedby={
+                publishDisabledReason
+                  ? `preview-publish-disabled-${policy.repository_id}`
+                  : undefined
+              }
               onCheckedChange={(checked) =>
                 onUpdatePolicy({
                   pr_preview_surfaces_enabled: checked,
@@ -703,33 +724,60 @@ function RepoPreviewCard({
                   github_commit_status_enabled: true,
                 })
               }
+              className="mt-0.5"
             />
-            <span className="text-xs text-muted-foreground">
-              {policy.pr_preview_surfaces_enabled
-                ? "Publishing preview links to GitHub PRs"
-                : "Not publishing preview links to GitHub PRs"}
-            </span>
+            <div className="min-w-0 space-y-1">
+              <span className="block text-xs font-medium text-foreground">
+                {policy.pr_preview_surfaces_enabled
+                  ? "Publishing preview links to GitHub PRs"
+                  : "Not publishing preview links to GitHub PRs"}
+              </span>
+              <p className="text-xs leading-4 text-muted-foreground">
+                When enabled, 143 publishes preview URLs to both GitHub PR
+                comments and commit statuses. Auto-build can still create previews
+                internally when publishing is off.
+              </p>
+              {publishDisabledReason ? (
+                <p
+                  id={`preview-publish-disabled-${policy.repository_id}`}
+                  className="flex items-start gap-1.5 text-xs leading-4 text-muted-foreground"
+                >
+                  <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span>{publishDisabledReason}</span>
+                </p>
+              ) : null}
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            When enabled, 143 publishes preview URLs to both GitHub PR comments
-            and commit statuses. Auto-build can still create previews internally
-            when publishing is off.
-          </p>
           {showTestPreview ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={testPreviewDisabled}
-              onClick={() => onTestPreview(selectedPreviewConfig || undefined)}
-            >
-              {testPreviewPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <MonitorPlay className="mr-2 h-4 w-4" />
-              )}
-              {testPreviewPending ? "Testing preview" : "Test preview"}
-            </Button>
+            <div className="space-y-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={testPreviewDisabled}
+                aria-describedby={
+                  testPreviewDisabledReason
+                    ? `preview-test-disabled-${policy.repository_id}`
+                    : undefined
+                }
+                onClick={() => onTestPreview(selectedPreviewConfig || undefined)}
+              >
+                {testPreviewPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <MonitorPlay className="mr-2 h-4 w-4" />
+                )}
+                {testPreviewPending ? "Testing preview" : "Test preview"}
+              </Button>
+              {testPreviewDisabledReason ? (
+                <p
+                  id={`preview-test-disabled-${policy.repository_id}`}
+                  className="text-xs leading-4 text-muted-foreground"
+                >
+                  {testPreviewDisabledReason}
+                </p>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>
@@ -769,6 +817,51 @@ function RepoPreviewCard({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function PreviewModeOption({
+  id,
+  value,
+  label,
+  description,
+  selected,
+  disabled = false,
+  ariaLabel,
+}: {
+  id: string;
+  value: string;
+  label: string;
+  description: string;
+  selected: boolean;
+  disabled?: boolean;
+  ariaLabel: string;
+}) {
+  return (
+    <Label
+      htmlFor={id}
+      className={cn(
+        "flex cursor-pointer items-start gap-2 rounded-md border border-border bg-background p-2.5 transition-colors",
+        selected && "border-primary bg-primary/5",
+        disabled && "cursor-not-allowed opacity-60",
+      )}
+    >
+      <RadioGroupItem
+        id={id}
+        value={value}
+        aria-label={ariaLabel}
+        disabled={disabled}
+        className="mt-0.5"
+      />
+      <span className="min-w-0 space-y-0.5">
+        <span className="block text-xs font-medium text-foreground">
+          {label}
+        </span>
+        <span className="block text-xs leading-4 text-muted-foreground">
+          {description}
+        </span>
+      </span>
+    </Label>
   );
 }
 

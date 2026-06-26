@@ -1010,6 +1010,7 @@ const (
 	JobTypeSyncPRPreviewSurfaces         = "sync_pr_preview_surfaces"
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
+	JobTypeRunCodeReview                 = "run_code_review"
 )
 
 // Job represents an async work queue item.
