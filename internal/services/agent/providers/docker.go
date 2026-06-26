@@ -763,6 +763,7 @@ func (d *DockerProvider) Create(ctx context.Context, cfg agent.SandboxConfig) (*
 		Metadata: map[string]string{
 			"runtime":                       d.runtime,
 			"network":                       networkName,
+			agent.SandboxMetadataCacheABI:   cfg.CacheABI,
 			agent.SandboxMetadataEgressMode: egressMode,
 		},
 		SessionID: cfg.SessionID,

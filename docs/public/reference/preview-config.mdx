@@ -71,7 +71,7 @@ Use `preview.default` to auto-select one config. If there are multiple configs a
 <ConfigField name="preview.install.cache.build.paths" type="string[]" description="Additive repo-relative build cache paths (globs allowed). Effective paths are build.paths + inferred Turborepo cache dirs next to each JS lockfile." />
 <ConfigField name="preview.install.timeout_seconds" type="integer" defaultValue="420" description="Maximum install duration. Max 1800." />
 
-Install caches are keyed from the install command, declared lockfiles, sandbox image, and effective cache paths. They speed up preview startup without replacing source files from the session workspace.
+Install caches are keyed from the install command, declared lockfiles, the platform sandbox cache ABI, and effective cache paths. They speed up preview startup without replacing source files from the session workspace. Routine 143 deploys do not change the ABI; platform operators bump it only when sandbox OS/toolchain/runtime compatibility changes.
 
 Use `preview.install` for dependency installation only. Source-dependent builds belong in service commands, where they run against the current workspace on every start.
 

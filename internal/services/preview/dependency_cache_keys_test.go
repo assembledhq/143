@@ -34,7 +34,10 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	exec := dependencyKeyExecutor{files: map[string][]byte{
 		"package-lock.json": []byte(`{"lockfileVersion":3}`),
 	}}
-	sb := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{"image": "143-sandbox@sha256:abc"}}
+	sb := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-a",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.26-v1",
+	}}
 	install := &models.PreviewInstallConfig{
 		Command:        []string{"npm", "ci"},
 		Cwd:            ".",
@@ -63,10 +66,21 @@ func TestComputePreviewDependencyCacheKey(t *testing.T) {
 	require.NoError(t, err, "dependency cache key should compute when command changes")
 	require.NotEqual(t, base, commandKey, "install command should affect dependency artifact identity")
 
-	imageChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{"image": "143-sandbox@sha256:def"}}
+	imageChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-b",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.26-v1",
+	}}
 	imageKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, imageChanged, install, []string{"node_modules", ".next/cache"})
-	require.NoError(t, err, "dependency cache key should compute when sandbox image changes")
-	require.NotEqual(t, base, imageKey, "sandbox image should affect dependency artifact identity")
+	require.NoError(t, err, "dependency cache key should compute when deploy image tag changes")
+	require.Equal(t, base, imageKey, "deploy image tag alone should not affect dependency artifact identity")
+
+	abiChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-b",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.27-v1",
+	}}
+	abiKey, _, err := ComputePreviewDependencyCacheKey(context.Background(), exec, abiChanged, install, []string{"node_modules", ".next/cache"})
+	require.NoError(t, err, "dependency cache key should compute when sandbox cache ABI changes")
+	require.NotEqual(t, base, abiKey, "sandbox cache ABI should affect dependency artifact identity")
 }
 
 func TestComputePreviewPackageManagerCacheKey(t *testing.T) {
@@ -75,7 +89,10 @@ func TestComputePreviewPackageManagerCacheKey(t *testing.T) {
 	exec := dependencyKeyExecutor{files: map[string][]byte{
 		"pnpm-lock.yaml": []byte("lockfileVersion: '9.0'\n"),
 	}}
-	sb := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{"image": "143-sandbox@sha256:abc"}}
+	sb := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-a",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.26-v1",
+	}}
 	install := &models.PreviewInstallConfig{
 		Command:   []string{"pnpm", "install", "--frozen-lockfile"},
 		Cwd:       "frontend",
@@ -103,6 +120,22 @@ func TestComputePreviewPackageManagerCacheKey(t *testing.T) {
 	commandKey, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, sb, &commandChanged, []string{".local/share/pnpm/store"}, []string{"pnpm"})
 	require.NoError(t, err, "package-manager cache key should compute when command changes")
 	require.NotEqual(t, base, commandKey, "install command should affect package-manager cache identity")
+
+	imageChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-b",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.26-v1",
+	}}
+	imageKey, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, imageChanged, install, []string{".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute when deploy image changes")
+	require.Equal(t, base, imageKey, "deploy image tag alone should not affect package-manager cache identity")
+
+	abiChanged := &agent.Sandbox{Provider: "docker", Metadata: map[string]string{
+		"image":                       "143-sandbox:deploy-b",
+		agent.SandboxMetadataCacheABI: "ubuntu24.04-node24-go1.27-v1",
+	}}
+	abiKey, _, err := ComputePreviewPackageManagerCacheKey(context.Background(), exec, abiChanged, install, []string{".local/share/pnpm/store"}, []string{"pnpm"})
+	require.NoError(t, err, "package-manager cache key should compute when sandbox cache ABI changes")
+	require.NotEqual(t, base, abiKey, "sandbox cache ABI should affect package-manager cache identity")
 }
 
 func TestComputePreviewDependencyCachePlacementKey(t *testing.T) {
