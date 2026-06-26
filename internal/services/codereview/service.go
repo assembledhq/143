@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/assembledhq/143/internal/db"
@@ -23,7 +24,7 @@ type MetadataStore interface {
 	CreateSessionMetadata(ctx context.Context, metadata *models.CodeReviewSessionMetadata) error
 	GetByOutputKey(ctx context.Context, orgID uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error)
 	GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
-	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string) (int64, error)
+	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error)
 }
 
 type SessionStore interface {
@@ -130,17 +131,26 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	if !resolved.Config.Enabled {
 		return ReviewRequestedResult{IgnoredReason: "policy_disabled", TriggerSource: source}, nil
 	}
-
-	if _, err := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA); err != nil {
-		return ReviewRequestedResult{}, err
+	if policy.RepositoryID != nil && policy.Config().Inheritance.InheritOrgDefaults && !reflect.DeepEqual(policy.Config(), resolved.Config) {
+		record, err := s.policies.SavePolicy(ctx, input.OrgID, &repositoryID, resolved.Config, nil)
+		if err != nil {
+			return ReviewRequestedResult{}, fmt.Errorf("materialize inherited code review policy: %w", err)
+		}
+		policy = &record
 	}
 	if existing, err := s.metadata.GetRunningByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID); err == nil {
+		if _, staleErr := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &existing.SessionID); staleErr != nil {
+			return ReviewRequestedResult{}, staleErr
+		}
 		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: existing.SessionID, MetadataID: existing.ID, TriggerSource: source}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return ReviewRequestedResult{}, fmt.Errorf("lookup running code review: %w", err)
 	}
 	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
 	if existing, err := s.metadata.GetByOutputKey(ctx, input.OrgID, outputKey); err == nil {
+		if _, staleErr := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &existing.SessionID); staleErr != nil {
+			return ReviewRequestedResult{}, staleErr
+		}
 		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: existing.SessionID, MetadataID: existing.ID, TriggerSource: source}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return ReviewRequestedResult{}, fmt.Errorf("lookup code review by output key: %w", err)
@@ -199,7 +209,13 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		return ReviewRequestedResult{}, fmt.Errorf("create code review metadata: %w", err)
 	}
 	if metadata.SessionID != session.ID {
+		if _, staleErr := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &metadata.SessionID); staleErr != nil {
+			return ReviewRequestedResult{}, staleErr
+		}
 		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: metadata.SessionID, MetadataID: metadata.ID, TriggerSource: source}, nil
+	}
+	if _, err := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &session.ID); err != nil {
+		return ReviewRequestedResult{}, err
 	}
 
 	payload := RunCodeReviewJobPayload{

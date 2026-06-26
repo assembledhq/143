@@ -135,10 +135,10 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
-  { label: "Automations", icon: RefreshCw, href: "/automations" },
-  { label: "Code reviews", icon: ClipboardCheck, href: "/code-reviews" },
   { label: "Sessions", icon: Play, href: "/sessions" },
+  { label: "Automations", icon: RefreshCw, href: "/automations" },
   { label: "Autopilot", icon: Zap, href: "/autopilot" },
+  { label: "Code reviews", icon: ClipboardCheck, href: "/code-reviews" },
   { label: "Previews", icon: MonitorPlay, href: "/previews" },
 ];
 

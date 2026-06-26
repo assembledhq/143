@@ -43,7 +43,8 @@ const sessionThreadSelectColumns = `id, session_id, org_id, agent_type, model_ov
 	result_summary, diff, failure_explanation, failure_category,
 	started_at, completed_at, created_at, created_by_source, created_by_thread_id, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
-	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history,
+	execution_mode, filesystem_mode`
 
 // sessionThreadListColumns omits the raw diff while preserving a lightweight
 // truthy marker for UI affordances such as "Revert tab". Server-side actions
@@ -55,7 +56,8 @@ const sessionThreadListColumns = `id, session_id, org_id, agent_type, model_over
 	failure_explanation, failure_category,
 	started_at, completed_at, created_at, created_by_source, created_by_thread_id, archived_at,
 	base_snapshot_key, cost_cents, pending_message_count, cancel_requested_at,
-	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history`
+	runtime_stop_reason, runtime_graceful_stop_at, recovery_state, recovery_reason, recovery_event_history,
+	execution_mode, filesystem_mode`
 
 func qualifiedSessionThreadSelectColumns(alias string) string {
 	columns := strings.Split(sessionThreadSelectColumns, ",")
@@ -70,26 +72,29 @@ func qualifiedSessionThreadSelectColumns(alias string) string {
 var ErrThreadLimitReached = fmt.Errorf("thread limit reached")
 
 func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionThread, maxThreads int) error {
+	normalizeSessionThreadExecutionDefaults(thread)
 	query := `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override,
-			label, instructions, file_scope, status
+			label, instructions, file_scope, status, execution_mode, filesystem_mode
 		)
 		SELECT @session_id, @org_id, @agent_type, @model_override,
-			@label, @instructions, @file_scope, @status
+			@label, @instructions, @file_scope, @status, @execution_mode, @filesystem_mode
 		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
 		RETURNING id, created_at`
 
 	args := pgx.NamedArgs{
-		"session_id":     thread.SessionID,
-		"org_id":         thread.OrgID,
-		"agent_type":     thread.AgentType,
-		"model_override": thread.ModelOverride,
-		"label":          thread.Label,
-		"instructions":   thread.Instructions,
-		"file_scope":     thread.FileScope,
-		"status":         thread.Status,
-		"max_threads":    maxThreads,
+		"session_id":      thread.SessionID,
+		"org_id":          thread.OrgID,
+		"agent_type":      thread.AgentType,
+		"model_override":  thread.ModelOverride,
+		"label":           thread.Label,
+		"instructions":    thread.Instructions,
+		"file_scope":      thread.FileScope,
+		"status":          thread.Status,
+		"execution_mode":  thread.ExecutionMode,
+		"filesystem_mode": thread.FilesystemMode,
+		"max_threads":     maxThreads,
 	}
 
 	row := s.db.QueryRow(ctx, query, args)
@@ -104,6 +109,7 @@ func (s *SessionThreadStore) Create(ctx context.Context, thread *models.SessionT
 }
 
 func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *models.SessionThread, maxThreads int) error {
+	normalizeSessionThreadExecutionDefaults(thread)
 	createdBySource := thread.CreatedBySource
 	if createdBySource == "" {
 		createdBySource = models.ThreadCreatedBySourceUser
@@ -111,10 +117,12 @@ func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *m
 	query := `
 		INSERT INTO session_threads (
 			session_id, org_id, agent_type, model_override,
-			label, instructions, file_scope, status, created_by_source, created_by_thread_id
+			label, instructions, file_scope, status, created_by_source, created_by_thread_id,
+			execution_mode, filesystem_mode
 		)
 		SELECT @session_id, @org_id, @agent_type, @model_override,
-			@label, @instructions, @file_scope, @status, @created_by_source, @created_by_thread_id
+			@label, @instructions, @file_scope, @status, @created_by_source, @created_by_thread_id,
+			@execution_mode, @filesystem_mode
 		WHERE (SELECT count(*) FROM session_threads WHERE session_id = @session_id AND org_id = @org_id AND archived_at IS NULL) < @max_threads
 		RETURNING id, created_at`
 
@@ -129,6 +137,8 @@ func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *m
 		"status":               thread.Status,
 		"created_by_source":    createdBySource,
 		"created_by_thread_id": thread.CreatedByThreadID,
+		"execution_mode":       thread.ExecutionMode,
+		"filesystem_mode":      thread.FilesystemMode,
 		"max_threads":          maxThreads,
 	}
 
@@ -142,6 +152,15 @@ func (s *SessionThreadStore) CreateWithProvenance(ctx context.Context, thread *m
 	}
 	thread.CreatedBySource = createdBySource
 	return nil
+}
+
+func normalizeSessionThreadExecutionDefaults(thread *models.SessionThread) {
+	if thread.ExecutionMode == "" {
+		thread.ExecutionMode = models.ThreadExecutionModeWork
+	}
+	if thread.FilesystemMode == "" {
+		thread.FilesystemMode = models.ThreadFilesystemModeReadWrite
+	}
 }
 
 func (s *SessionThreadStore) GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error) {

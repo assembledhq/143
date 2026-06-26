@@ -30,6 +30,8 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "finding severity invalid", validate: CodeReviewFindingSeverity("bogus").Validate, expectErr: true},
 		{name: "finding confidence high", validate: CodeReviewFindingConfidenceHigh.Validate},
 		{name: "finding confidence invalid", validate: CodeReviewFindingConfidence("bogus").Validate, expectErr: true},
+		{name: "description applicability nontrivial", validate: CodeReviewDescriptionApplicabilityNontrivial.Validate},
+		{name: "description applicability invalid", validate: CodeReviewDescriptionApplicabilityKind("bogus").Validate, expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -112,6 +114,33 @@ func TestCodeReviewPolicyRecordConfigPreservesFinalReviewTemplate(t *testing.T) 
 	config := record.Config()
 
 	require.Equal(t, "custom final review template", config.FinalReviewTemplate, "policy records should round-trip final review templates")
+}
+
+func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
+	t.Parallel()
+
+	base := DefaultCodeReviewPolicyConfig()
+	base.Enabled = true
+	base.ApprovalMode = CodeReviewApprovalModeCommentOnly
+	base.RiskPolicy.MaxFilesChanged = 9
+	base.InlineCommentLimit = 4
+	override := base
+	override.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
+	override.RiskPolicy.MaxFilesChanged = 2
+	override.InlineCommentLimit = 8
+	override.Inheritance = CodeReviewPolicyInheritance{
+		InheritOrgDefaults: true,
+		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy},
+	}
+
+	merged := MergeCodeReviewPolicyConfig(base, override)
+
+	require.True(t, merged.Enabled, "merged policy should inherit fields outside the repository override list")
+	require.Equal(t, CodeReviewApprovalModeApproveAcceptable, merged.ApprovalMode, "merged policy should apply explicitly overridden approval mode")
+	require.Equal(t, 2, merged.RiskPolicy.MaxFilesChanged, "merged policy should apply explicitly overridden risk policy")
+	require.Equal(t, 4, merged.InlineCommentLimit, "merged policy should inherit non-overridden inline comment limit")
+	require.Equal(t, override.Inheritance, merged.Inheritance, "merged policy should preserve inheritance audit metadata")
+	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report changed policy sections")
 }
 
 func TestCodeReviewPolicyTemplates(t *testing.T) {
@@ -253,6 +282,44 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				"orchestrator reported the change may not match the stated intent",
 				"orchestrator reported unresolved uncertainty",
 				"possible prompt-injection attempt found in PR content",
+			}},
+		},
+		{
+			name: "blocks paths outside allowed scope",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.AllowedPathPatterns = []string{"docs/**", "**/*.md"}
+				c.RiskPolicy.ExcludeCategories = nil
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChangedPaths:      []string{"internal/api/router.go"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"path is outside allowed policy scope: internal/api/router.go",
+			}},
+		},
+		{
+			name: "blocks explicit blocked path patterns",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.BlockedPathPatterns = []string{"**/schema/**"}
+				c.RiskPolicy.ExcludeCategories = nil
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChangedPaths:      []string{"internal/db/schema/users.go"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"blocked path changed: internal/db/schema/users.go",
 			}},
 		},
 		{

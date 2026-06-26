@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -159,12 +160,63 @@ func (c CodeReviewFindingConfidence) Validate() error {
 	}
 }
 
+type CodeReviewDescriptionApplicabilityKind string
+
+const (
+	CodeReviewDescriptionApplicabilityAll        CodeReviewDescriptionApplicabilityKind = "all"
+	CodeReviewDescriptionApplicabilityNontrivial CodeReviewDescriptionApplicabilityKind = "nontrivial"
+	CodeReviewDescriptionApplicabilityFrontend   CodeReviewDescriptionApplicabilityKind = "frontend_or_ui_visible"
+	CodeReviewDescriptionApplicabilityPaths      CodeReviewDescriptionApplicabilityKind = "paths"
+	CodeReviewDescriptionApplicabilityCategories CodeReviewDescriptionApplicabilityKind = "categories"
+	CodeReviewDescriptionApplicabilityTests      CodeReviewDescriptionApplicabilityKind = "tests_changed"
+)
+
+func (k CodeReviewDescriptionApplicabilityKind) Validate() error {
+	switch k {
+	case "", CodeReviewDescriptionApplicabilityAll, CodeReviewDescriptionApplicabilityNontrivial,
+		CodeReviewDescriptionApplicabilityFrontend, CodeReviewDescriptionApplicabilityPaths,
+		CodeReviewDescriptionApplicabilityCategories, CodeReviewDescriptionApplicabilityTests:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewDescriptionApplicabilityKind: %q", k)
+	}
+}
+
+type CodeReviewDescriptionApplicability struct {
+	Kind                    CodeReviewDescriptionApplicabilityKind `json:"kind,omitempty"`
+	MinFilesChanged         int                                    `json:"min_files_changed,omitempty"`
+	MinLinesChanged         int                                    `json:"min_lines_changed,omitempty"`
+	PathPatterns            []string                               `json:"path_patterns,omitempty"`
+	Categories              []string                               `json:"categories,omitempty"`
+	RequireTestFilesChanged bool                                   `json:"require_test_files_changed,omitempty"`
+}
+
+func (a CodeReviewDescriptionApplicability) Empty() bool {
+	return a.Kind == "" &&
+		a.MinFilesChanged == 0 &&
+		a.MinLinesChanged == 0 &&
+		len(a.PathPatterns) == 0 &&
+		len(a.Categories) == 0 &&
+		!a.RequireTestFilesChanged
+}
+
+func (a CodeReviewDescriptionApplicability) Validate() error {
+	if err := a.Kind.Validate(); err != nil {
+		return err
+	}
+	if a.MinFilesChanged < 0 || a.MinLinesChanged < 0 {
+		return fmt.Errorf("description applicability thresholds must not be negative")
+	}
+	return nil
+}
+
 type CodeReviewDescriptionRequirement struct {
-	Key           string `json:"key"`
-	Title         string `json:"title"`
-	Prompt        string `json:"prompt"`
-	Required      bool   `json:"required"`
-	Applicability string `json:"applicability,omitempty"`
+	Key           string                             `json:"key"`
+	Title         string                             `json:"title"`
+	Prompt        string                             `json:"prompt"`
+	Required      bool                               `json:"required"`
+	Applicability string                             `json:"applicability,omitempty"`
+	AppliesWhen   CodeReviewDescriptionApplicability `json:"applies_when,omitempty"`
 }
 
 type CodeReviewDescriptionPolicy struct {
@@ -177,6 +229,8 @@ type CodeReviewRiskPolicy struct {
 	RequirePassingChecks  bool     `json:"require_passing_checks"`
 	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
 	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
 	ExcludeCategories     []string `json:"exclude_categories,omitempty"`
 	RequireMergeable      bool     `json:"require_mergeable"`
 	RequireUpToDate       bool     `json:"require_up_to_date"`
@@ -204,6 +258,12 @@ type CodeReviewPolicyConfig struct {
 	AgentRoster         CodeReviewAgentRoster       `json:"agent_roster"`
 	InlineCommentLimit  int                         `json:"inline_comment_limit"`
 	FinalReviewTemplate string                      `json:"final_review_template,omitempty"`
+	Inheritance         CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
+}
+
+type CodeReviewPolicyInheritance struct {
+	InheritOrgDefaults bool     `json:"inherit_org_defaults"`
+	OverrideFields     []string `json:"override_fields,omitempty"`
 }
 
 func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
@@ -212,8 +272,38 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		ApprovalMode: CodeReviewApprovalModeCommentOnly,
 		DescriptionPolicy: CodeReviewDescriptionPolicy{Requirements: []CodeReviewDescriptionRequirement{
 			{Key: "description", Title: "Understandable description", Required: true, Prompt: "Explain what is changing and why clearly enough for a reviewer to understand the intent."},
-			{Key: "testing", Title: "Testing evidence", Required: true, Applicability: "nontrivial", Prompt: "Describe the testing or validation evidence for nontrivial changes."},
-			{Key: "ui_evidence", Title: "Screenshots or preview link", Required: true, Applicability: "frontend_or_ui_visible", Prompt: "Include screenshots or a preview link for frontend or UI-visible changes."},
+			{
+				Key:           "testing",
+				Title:         "Testing evidence",
+				Required:      true,
+				Applicability: "nontrivial",
+				AppliesWhen: CodeReviewDescriptionApplicability{
+					Kind:            CodeReviewDescriptionApplicabilityNontrivial,
+					MinFilesChanged: 2,
+					MinLinesChanged: 31,
+				},
+				Prompt: "Describe the testing or validation evidence for nontrivial changes.",
+			},
+			{
+				Key:           "ui_evidence",
+				Title:         "Screenshots or preview link",
+				Required:      true,
+				Applicability: "frontend_or_ui_visible",
+				AppliesWhen: CodeReviewDescriptionApplicability{
+					Kind: CodeReviewDescriptionApplicabilityFrontend,
+					PathPatterns: []string{
+						"frontend/**",
+						"apps/web/**",
+						"**/app/**",
+						"**/components/**",
+						"**/pages/**",
+						"**/*.tsx",
+						"**/*.jsx",
+						"**/*.css",
+					},
+				},
+				Prompt: "Include screenshots or a preview link for frontend or UI-visible changes.",
+			},
 		}},
 		RiskPolicy: CodeReviewRiskPolicy{
 			MaxFilesChanged:       5,
@@ -237,6 +327,9 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			MaxCostCents:          500,
 		},
 		InlineCommentLimit: 4,
+		Inheritance: CodeReviewPolicyInheritance{
+			InheritOrgDefaults: false,
+		},
 	}
 }
 
@@ -263,6 +356,12 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.SensitivePaths) > 0 {
 		defaults.RiskPolicy.SensitivePaths = config.RiskPolicy.SensitivePaths
 	}
+	if len(config.RiskPolicy.AllowedPathPatterns) > 0 {
+		defaults.RiskPolicy.AllowedPathPatterns = config.RiskPolicy.AllowedPathPatterns
+	}
+	if len(config.RiskPolicy.BlockedPathPatterns) > 0 {
+		defaults.RiskPolicy.BlockedPathPatterns = config.RiskPolicy.BlockedPathPatterns
+	}
 	if len(config.RiskPolicy.ExcludeCategories) > 0 {
 		defaults.RiskPolicy.ExcludeCategories = config.RiskPolicy.ExcludeCategories
 	}
@@ -285,7 +384,42 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if config.FinalReviewTemplate != "" {
 		defaults.FinalReviewTemplate = config.FinalReviewTemplate
 	}
+	defaults.Inheritance = config.Inheritance
+	defaults.DescriptionPolicy = normalizeCodeReviewDescriptionPolicy(defaults.DescriptionPolicy)
 	return defaults
+}
+
+func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) CodeReviewDescriptionPolicy {
+	for i := range policy.Requirements {
+		if !policy.Requirements[i].AppliesWhen.Empty() {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(policy.Requirements[i].Applicability)) {
+		case "nontrivial":
+			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{
+				Kind:            CodeReviewDescriptionApplicabilityNontrivial,
+				MinFilesChanged: 2,
+				MinLinesChanged: 31,
+			}
+		case "frontend_or_ui_visible", "frontend", "ui":
+			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{
+				Kind: CodeReviewDescriptionApplicabilityFrontend,
+				PathPatterns: []string{
+					"frontend/**",
+					"apps/web/**",
+					"**/app/**",
+					"**/components/**",
+					"**/pages/**",
+					"**/*.tsx",
+					"**/*.jsx",
+					"**/*.css",
+				},
+			}
+		case "", "all", "always":
+			policy.Requirements[i].AppliesWhen = CodeReviewDescriptionApplicability{Kind: CodeReviewDescriptionApplicabilityAll}
+		}
+	}
+	return policy
 }
 
 func (c CodeReviewPolicyConfig) Validate() error {
@@ -300,6 +434,11 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	}
 	if c.RiskPolicy.MaxLinesChanged < 1 {
 		return fmt.Errorf("max_lines_changed must be positive")
+	}
+	for _, requirement := range c.DescriptionPolicy.Requirements {
+		if err := requirement.AppliesWhen.Validate(); err != nil {
+			return err
+		}
 	}
 	if len(c.AgentRoster.Reviewers) == 0 {
 		return fmt.Errorf("at least one reviewer agent is required")
@@ -343,6 +482,7 @@ type CodeReviewPolicyRecord struct {
 	AgentRoster         CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
 	InlineCommentLimit  int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
 	FinalReviewTemplate string                      `db:"final_review_template" json:"final_review_template,omitempty"`
+	Inheritance         CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
 	CreatedByUserID     *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
 	CreatedAt           time.Time                   `db:"created_at" json:"created_at"`
 }
@@ -356,13 +496,120 @@ func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 		AgentRoster:         r.AgentRoster,
 		InlineCommentLimit:  r.InlineCommentLimit,
 		FinalReviewTemplate: r.FinalReviewTemplate,
+		Inheritance:         r.Inheritance,
 	}
 }
 
 type CodeReviewResolvedPolicy struct {
-	Config CodeReviewPolicyConfig  `json:"config"`
-	Source string                  `json:"source"`
-	Policy *CodeReviewPolicyRecord `json:"policy,omitempty"`
+	Config          CodeReviewPolicyConfig  `json:"config"`
+	Source          string                  `json:"source"`
+	Policy          *CodeReviewPolicyRecord `json:"policy,omitempty"`
+	InheritedPolicy *CodeReviewPolicyRecord `json:"inherited_policy,omitempty"`
+}
+
+const (
+	CodeReviewPolicyFieldEnabled             = "enabled"
+	CodeReviewPolicyFieldApprovalMode        = "approval_mode"
+	CodeReviewPolicyFieldDescriptionPolicy   = "description_policy"
+	CodeReviewPolicyFieldRiskPolicy          = "risk_policy"
+	CodeReviewPolicyFieldAgentRoster         = "agent_roster"
+	CodeReviewPolicyFieldInlineCommentLimit  = "inline_comment_limit"
+	CodeReviewPolicyFieldFinalReviewTemplate = "final_review_template"
+)
+
+func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
+	base = ResolveCodeReviewPolicyConfig(&base)
+	override = ResolveCodeReviewPolicyConfig(&override)
+	if !override.Inheritance.InheritOrgDefaults {
+		return override
+	}
+	merged := base
+	fields := normalizedCodeReviewPolicyOverrideFields(override.Inheritance.OverrideFields)
+	apply := func(field string) bool {
+		_, ok := fields[field]
+		return ok
+	}
+	if apply(CodeReviewPolicyFieldEnabled) {
+		merged.Enabled = override.Enabled
+	}
+	if apply(CodeReviewPolicyFieldApprovalMode) {
+		merged.ApprovalMode = override.ApprovalMode
+	}
+	if apply(CodeReviewPolicyFieldDescriptionPolicy) {
+		merged.DescriptionPolicy = override.DescriptionPolicy
+	}
+	if apply(CodeReviewPolicyFieldRiskPolicy) {
+		merged.RiskPolicy = override.RiskPolicy
+	}
+	if apply(CodeReviewPolicyFieldAgentRoster) {
+		merged.AgentRoster = override.AgentRoster
+	}
+	if apply(CodeReviewPolicyFieldInlineCommentLimit) {
+		merged.InlineCommentLimit = override.InlineCommentLimit
+	}
+	if apply(CodeReviewPolicyFieldFinalReviewTemplate) {
+		merged.FinalReviewTemplate = override.FinalReviewTemplate
+	}
+	merged.Inheritance = override.Inheritance
+	return ResolveCodeReviewPolicyConfig(&merged)
+}
+
+func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []string {
+	base = ResolveCodeReviewPolicyConfig(&base)
+	override = ResolveCodeReviewPolicyConfig(&override)
+	fields := make([]string, 0, 7)
+	if base.Enabled != override.Enabled {
+		fields = append(fields, CodeReviewPolicyFieldEnabled)
+	}
+	if base.ApprovalMode != override.ApprovalMode {
+		fields = append(fields, CodeReviewPolicyFieldApprovalMode)
+	}
+	if !codeReviewJSONEqual(base.DescriptionPolicy, override.DescriptionPolicy) {
+		fields = append(fields, CodeReviewPolicyFieldDescriptionPolicy)
+	}
+	if !codeReviewJSONEqual(base.RiskPolicy, override.RiskPolicy) {
+		fields = append(fields, CodeReviewPolicyFieldRiskPolicy)
+	}
+	if !codeReviewJSONEqual(base.AgentRoster, override.AgentRoster) {
+		fields = append(fields, CodeReviewPolicyFieldAgentRoster)
+	}
+	if base.InlineCommentLimit != override.InlineCommentLimit {
+		fields = append(fields, CodeReviewPolicyFieldInlineCommentLimit)
+	}
+	if base.FinalReviewTemplate != override.FinalReviewTemplate {
+		fields = append(fields, CodeReviewPolicyFieldFinalReviewTemplate)
+	}
+	return fields
+}
+
+func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		field = strings.ToLower(strings.TrimSpace(field))
+		if field == "" {
+			continue
+		}
+		switch field {
+		case CodeReviewPolicyFieldEnabled,
+			CodeReviewPolicyFieldApprovalMode,
+			CodeReviewPolicyFieldDescriptionPolicy,
+			CodeReviewPolicyFieldRiskPolicy,
+			CodeReviewPolicyFieldAgentRoster,
+			CodeReviewPolicyFieldInlineCommentLimit,
+			CodeReviewPolicyFieldFinalReviewTemplate:
+			out[field] = struct{}{}
+		}
+	}
+	return out
+}
+
+func codeReviewJSONEqual(left, right any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	return string(leftJSON) == string(rightJSON)
 }
 
 type CodeReviewSessionMetadata struct {
@@ -471,20 +718,94 @@ type CodeReviewTemplateOption struct {
 func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {
 	base := DefaultCodeReviewPolicyConfig()
 	return []CodeReviewTemplateOption{
-		{Key: CodeReviewTemplateDocsOnly, Title: "Docs and comments only", Description: "Approve only documentation/comment-only changes with passing checks.", Config: templatePolicy(base, 8, 400, []string{"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations"})},
-		{Key: CodeReviewTemplateTestsOnly, Title: "Tests only", Description: "Approve isolated test and fixture changes with conservative churn limits.", Config: templatePolicy(base, 10, 500, []string{"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations", "generated"})},
-		{Key: CodeReviewTemplateSmallFrontend, Title: "Small frontend change", Description: "Approve small UI changes with screenshot or preview evidence.", Config: templatePolicy(base, 5, 250, []string{"auth", "billing", "permissions", "crypto", "infra", "dependencies"})},
-		{Key: CodeReviewTemplateSmallBackend, Title: "Small backend change", Description: "Approve small backend changes outside sensitive packages with test evidence.", Config: templatePolicy(base, 4, 200, []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"})},
-		{Key: CodeReviewTemplateSmallCombined, Title: "Small combined feature", Description: "Approve tightly scoped frontend/backend changes with evidence and passing checks.", Config: templatePolicy(base, 6, 250, []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"})},
+		{
+			Key:         CodeReviewTemplateDocsOnly,
+			Title:       "Docs and comments only",
+			Description: "Approve only documentation/comment-only changes with passing checks.",
+			Config: templatePolicy(base, templatePolicyOptions{
+				maxFiles: 8,
+				maxLines: 400,
+				excludedCategories: []string{
+					"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations", "generated",
+				},
+				allowedPaths: []string{
+					"docs/**", "**/*.md", "**/*.mdx", "**/*.txt", "**/*.rst", "**/*.adoc", "**/README*", "**/CHANGELOG*",
+				},
+				blockedPaths: []string{".github/**", "deploy/**", "infra/**", "**/.env*", "**/secrets/**"},
+			}),
+		},
+		{
+			Key:         CodeReviewTemplateTestsOnly,
+			Title:       "Tests only",
+			Description: "Approve isolated test and fixture changes with conservative churn limits.",
+			Config: templatePolicy(base, templatePolicyOptions{
+				maxFiles: 10,
+				maxLines: 500,
+				excludedCategories: []string{
+					"dependencies", "auth", "billing", "permissions", "crypto", "infra", "migrations", "generated",
+				},
+				allowedPaths: []string{
+					"tests/**", "test/**", "**/__tests__/**", "**/*_test.go", "**/*.test.ts", "**/*.test.tsx",
+					"**/*.spec.ts", "**/*.spec.tsx", "fixtures/**", "**/fixtures/**", "testdata/**", "**/testdata/**",
+				},
+				blockedPaths: []string{"**/__snapshots__/**", "**/*.snap", "**/*.golden", "**/golden/**"},
+			}),
+		},
+		{
+			Key:         CodeReviewTemplateSmallFrontend,
+			Title:       "Small frontend change",
+			Description: "Approve small UI changes with screenshot or preview evidence.",
+			Config: templatePolicy(base, templatePolicyOptions{
+				maxFiles:           5,
+				maxLines:           250,
+				excludedCategories: []string{"auth", "billing", "permissions", "crypto", "infra", "dependencies"},
+				blockedPaths: []string{
+					"**/auth/**", "**/*auth*", "**/billing/**", "**/*billing*", "**/api/**", "**/queries/**",
+					"**/services/**", "**/data/**", "migrations/**",
+				},
+			}),
+		},
+		{
+			Key:         CodeReviewTemplateSmallBackend,
+			Title:       "Small backend change",
+			Description: "Approve small backend changes outside sensitive packages with test evidence.",
+			Config: templatePolicy(base, templatePolicyOptions{
+				maxFiles:           4,
+				maxLines:           200,
+				excludedCategories: []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
+				blockedPaths:       []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**"},
+			}),
+		},
+		{
+			Key:         CodeReviewTemplateSmallCombined,
+			Title:       "Small combined feature",
+			Description: "Approve tightly scoped frontend/backend changes with evidence and passing checks.",
+			Config: templatePolicy(base, templatePolicyOptions{
+				maxFiles:           6,
+				maxLines:           250,
+				excludedCategories: []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
+				blockedPaths:       []string{"migrations/**", "**/schema/**", "**/auth/**", "**/billing/**", ".github/**", "deploy/**"},
+			}),
+		},
 	}
 }
 
-func templatePolicy(base CodeReviewPolicyConfig, maxFiles, maxLines int, excluded []string) CodeReviewPolicyConfig {
+type templatePolicyOptions struct {
+	maxFiles           int
+	maxLines           int
+	excludedCategories []string
+	allowedPaths       []string
+	blockedPaths       []string
+}
+
+func templatePolicy(base CodeReviewPolicyConfig, opts templatePolicyOptions) CodeReviewPolicyConfig {
 	cfg := base
 	cfg.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
-	cfg.RiskPolicy.MaxFilesChanged = maxFiles
-	cfg.RiskPolicy.MaxLinesChanged = maxLines
-	cfg.RiskPolicy.ExcludeCategories = excluded
+	cfg.RiskPolicy.MaxFilesChanged = opts.maxFiles
+	cfg.RiskPolicy.MaxLinesChanged = opts.maxLines
+	cfg.RiskPolicy.ExcludeCategories = opts.excludedCategories
+	cfg.RiskPolicy.AllowedPathPatterns = opts.allowedPaths
+	cfg.RiskPolicy.BlockedPathPatterns = opts.blockedPaths
 	return cfg
 }
 
@@ -606,6 +927,18 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 			}
 		}
 	}
+	if len(policy.RiskPolicy.AllowedPathPatterns) > 0 {
+		for _, path := range input.ChangedPaths {
+			if !matchesAnyCodeReviewPath(path, policy.RiskPolicy.AllowedPathPatterns) {
+				reasons = append(reasons, "path is outside allowed policy scope: "+path)
+			}
+		}
+	}
+	for _, path := range input.ChangedPaths {
+		if matchesAnyCodeReviewPath(path, policy.RiskPolicy.BlockedPathPatterns) {
+			reasons = append(reasons, "blocked path changed: "+path)
+		}
+	}
 	if !policy.RiskPolicy.AllowPolicyChanges {
 		for _, path := range input.ChangedPaths {
 			if isCodeReviewPolicyPath(path) {
@@ -712,22 +1045,54 @@ func SortCodeReviewFindingsForInline(findings []CodeReviewFinding) []CodeReviewF
 }
 
 func matchesAnyCodeReviewPath(path string, patterns []string) bool {
+	path = normalizeCodeReviewPath(path)
 	for _, pattern := range patterns {
+		pattern = normalizeCodeReviewPath(pattern)
 		if pattern == "" {
 			continue
 		}
-		normalizedPattern := strings.TrimSuffix(pattern, "/**")
-		if ok, err := filepath.Match(pattern, path); err == nil && ok {
-			return true
-		}
-		if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") && strings.Contains(path, strings.Trim(pattern, "*")) {
-			return true
-		}
-		if normalizedPattern == path || strings.HasPrefix(path, normalizedPattern+"/") || strings.HasPrefix(path, pattern) {
+		if codeReviewPathPatternMatches(pattern, path) {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizeCodeReviewPath(path string) string {
+	path = strings.TrimSpace(filepath.ToSlash(path))
+	path = strings.TrimPrefix(path, "./")
+	return strings.ToLower(path)
+}
+
+func codeReviewPathPatternMatches(pattern, path string) bool {
+	if pattern == "*" || pattern == "**" {
+		return true
+	}
+	trimmedTreePattern := strings.TrimSuffix(pattern, "/**")
+	if trimmedTreePattern != pattern && (trimmedTreePattern == path || strings.HasPrefix(path, trimmedTreePattern+"/")) {
+		return true
+	}
+	if ok, err := filepath.Match(pattern, path); err == nil && ok {
+		return true
+	}
+	if strings.Contains(pattern, "**") {
+		regexPattern := regexp.QuoteMeta(pattern)
+		regexPattern = strings.ReplaceAll(regexPattern, `\*\*`, `.*`)
+		regexPattern = strings.ReplaceAll(regexPattern, `\*`, `[^/]*`)
+		if ok, err := regexp.MatchString("^"+regexPattern+"$", path); err == nil && ok {
+			return true
+		}
+	}
+	if strings.HasPrefix(pattern, "**/") {
+		suffix := strings.TrimPrefix(pattern, "**/")
+		if codeReviewPathPatternMatches(suffix, path) || strings.HasSuffix(path, "/"+suffix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(pattern, "*") && strings.HasSuffix(pattern, "*") && strings.Contains(path, strings.Trim(pattern, "*")) {
+		return true
+	}
+	return pattern == path || strings.HasPrefix(path, pattern+"/") || strings.HasPrefix(path, pattern)
 }
 
 func isCodeReviewPolicyPath(path string) bool {

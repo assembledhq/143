@@ -32,6 +32,12 @@ Risk rules:
 {{- if .SensitivePaths}}
 - Sensitive path patterns: {{join .SensitivePaths ", "}}
 {{- end}}
+{{- if .AllowedPathPatterns}}
+- Allowed path patterns: {{join .AllowedPathPatterns ", "}}
+{{- end}}
+{{- if .BlockedPathPatterns}}
+- Blocked path patterns: {{join .BlockedPathPatterns ", "}}
+{{- end}}
 {{- if .ExcludeCategories}}
 - Excluded categories: {{join .ExcludeCategories ", "}}
 {{- end}}

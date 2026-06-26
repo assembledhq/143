@@ -820,7 +820,7 @@ func (s *codeReviewWebhookMetadataStore) GetRunningByPullRequestHead(context.Con
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
-func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string) (int64, error) {
+func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) (int64, error) {
 	return 0, nil
 }
 

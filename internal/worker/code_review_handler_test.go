@@ -1,11 +1,18 @@
 package worker
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/codereview"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -176,6 +183,146 @@ func TestCodeReviewDescriptionPassed(t *testing.T) {
 			require.Equal(t, tt.passed, codeReviewDescriptionPassed(policy, pr, tt.files), "description policy should respect applicability and built-in evidence checks")
 		})
 	}
+}
+
+func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	job := runCodeReviewPayload{
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		PolicyVersion: 3,
+		HeadSHA:       "head-sha",
+	}
+	rootKey := "code-review-prompts/" + sessionID.String() + "/head-sha"
+	artifactKey := rootKey + "/description-01-custom-requirement"
+	passed := false
+	artifactMetadata, err := json.Marshal(map[string]any{
+		"requirement_key": "custom_requirement",
+		"passed":          passed,
+		"reason":          "cached failure",
+		"policy_version":  3,
+		"head_sha":        "head-sha",
+	})
+	require.NoError(t, err, "cached artifact metadata should marshal")
+
+	mock.ExpectQuery("SELECT .+ FROM code_review_prompt_artifacts").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "artifact_key", "role", "agent_provider",
+			"content", "metadata", "created_at",
+		}).AddRow(uuid.New(), orgID, sessionID, artifactKey, "description_policy", "platform_llm", "cached prompt", artifactMetadata, now))
+
+	policyConfig := models.DefaultCodeReviewPolicyConfig()
+	policyConfig.DescriptionPolicy.Requirements = []models.CodeReviewDescriptionRequirement{{
+		Key:      "custom_requirement",
+		Title:    "Custom requirement",
+		Prompt:   "Require a custom statement.",
+		Required: true,
+		AppliesWhen: models.CodeReviewDescriptionApplicability{
+			Kind: models.CodeReviewDescriptionApplicabilityAll,
+		},
+	}}
+	policy := models.CodeReviewPolicyRecord{
+		Version:             3,
+		Enabled:             policyConfig.Enabled,
+		ApprovalMode:        policyConfig.ApprovalMode,
+		DescriptionPolicy:   policyConfig.DescriptionPolicy,
+		RiskPolicy:          policyConfig.RiskPolicy,
+		AgentRoster:         policyConfig.AgentRoster,
+		InlineCommentLimit:  policyConfig.InlineCommentLimit,
+		FinalReviewTemplate: policyConfig.FinalReviewTemplate,
+	}
+	llm := &codeReviewDescriptionLLMStub{response: `{"passed":true,"reason":"fresh call"}`}
+
+	evaluation, err := evaluateCodeReviewDescriptionPolicy(context.Background(), &Stores{
+		CodeReviews: db.NewCodeReviewStore(mock),
+	}, &Services{LLM: llm}, zerolog.Nop(), job, models.PullRequest{Title: "Fix invoices", Body: stringPtr("Body")}, policy, models.CodeReviewSessionMetadata{}, nil)
+
+	require.NoError(t, err, "description evaluation should reuse cached prompt artifact")
+	require.False(t, evaluation.Passed, "cached failed requirement should drive the evaluation result")
+	require.Equal(t, 1, evaluation.FailedRequirementCount, "cached failed requirement should be counted once")
+	require.Equal(t, []string{"Custom requirement: failed (cached failure)"}, evaluation.RequirementSummaries, "cached artifact should produce the same summary as a fresh evaluation")
+	require.Equal(t, 0, llm.calls, "cached description artifact should avoid another LLM call")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
+	t.Parallel()
+
+	files := []codereview.PullRequestFile{
+		{Filename: "frontend/src/Chart.tsx", Additions: 12, Deletions: 1},
+		{Filename: "internal/db/users_test.go", Additions: 4},
+	}
+	tests := []struct {
+		name        string
+		appliesWhen models.CodeReviewDescriptionApplicability
+		expected    bool
+	}{
+		{
+			name:        "matches frontend kind",
+			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityFrontend},
+			expected:    true,
+		},
+		{
+			name:        "matches path patterns",
+			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityPaths, PathPatterns: []string{"frontend/**"}},
+			expected:    true,
+		},
+		{
+			name:        "matches risk categories",
+			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityCategories, Categories: []string{"frontend"}},
+			expected:    true,
+		},
+		{
+			name:        "matches changed test files",
+			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityTests, RequireTestFilesChanged: true},
+			expected:    true,
+		},
+		{
+			name:        "does not match unrelated path patterns",
+			appliesWhen: models.CodeReviewDescriptionApplicability{Kind: models.CodeReviewDescriptionApplicabilityPaths, PathPatterns: []string{"docs/**"}},
+			expected:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			requirement := models.CodeReviewDescriptionRequirement{Key: "custom", Required: true, AppliesWhen: tt.appliesWhen}
+			require.Equal(t, tt.expected, codeReviewDescriptionRequirementApplies(requirement, files), "typed applicability should be evaluated from changed files")
+		})
+	}
+}
+
+func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
+	t.Parallel()
+
+	prompt := "Review PR #42 against policy version 3."
+
+	require.Equal(t, "/review "+prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review")
+	require.Len(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), 1, "native reviewer command metadata should be persisted")
+	require.Equal(t, prompt, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)[0].Arguments, "native reviewer command should carry the review prompt as arguments")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
+	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
+}
+
+type codeReviewDescriptionLLMStub struct {
+	calls    int
+	response string
+}
+
+func (s *codeReviewDescriptionLLMStub) Complete(context.Context, string, string) (string, error) {
+	s.calls++
+	return s.response, nil
 }
 
 func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {

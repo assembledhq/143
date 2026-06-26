@@ -3,7 +3,15 @@ import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import CodeReviewsPage from "./page";
-import type { CodeReviewListItem, CodeReviewResolvedPolicy, CodeReviewTemplateOption, ListResponse, Repository, SingleResponse } from "@/lib/types";
+import type {
+  CodeReviewEvidence,
+  CodeReviewListItem,
+  CodeReviewResolvedPolicy,
+  CodeReviewTemplateOption,
+  ListResponse,
+  Repository,
+  SingleResponse,
+} from "@/lib/types";
 
 const repo: Repository = {
   id: "repo-1",
@@ -28,8 +36,15 @@ const policy: CodeReviewResolvedPolicy = {
     approval_mode: "comment_only",
     description_policy: {
       requirements: [
-        { key: "description", title: "Understandable description", prompt: "Explain intent.", required: true },
-        { key: "testing", title: "Testing evidence", prompt: "Show validation.", required: true },
+        { key: "description", title: "Understandable description", prompt: "Explain intent.", required: true, applies_when: { kind: "all" } },
+        {
+          key: "testing",
+          title: "Testing evidence",
+          prompt: "Show validation.",
+          required: true,
+          applicability: "nontrivial",
+          applies_when: { kind: "nontrivial", min_files_changed: 2, min_lines_changed: 31, categories: ["backend"] },
+        },
       ],
     },
     risk_policy: {
@@ -38,6 +53,8 @@ const policy: CodeReviewResolvedPolicy = {
       require_passing_checks: true,
       exclude_sensitive_paths: true,
       sensitive_paths: ["*auth*"],
+      allowed_path_patterns: ["internal/**"],
+      blocked_path_patterns: ["migrations/**"],
       exclude_categories: ["auth", "billing"],
       require_mergeable: true,
       require_up_to_date: false,
@@ -54,6 +71,9 @@ const policy: CodeReviewResolvedPolicy = {
       max_cost_cents: 500,
     },
     inline_comment_limit: 4,
+    inheritance: {
+      inherit_org_defaults: false,
+    },
   },
 };
 
@@ -83,6 +103,51 @@ const review: CodeReviewListItem = {
   pull_request_author: "anya",
 };
 
+const evidence: CodeReviewEvidence = {
+  agent_results: [
+    {
+      id: "agent-result-1",
+      org_id: "org-1",
+      session_id: "session-1",
+      agent_provider: "codex",
+      role: "reviewer",
+      status: "completed",
+      raw_output: "No blocking issues found.",
+      structured_result: { native_review: true, read_only: true },
+      created_at: "2026-06-26T12:03:00Z",
+    },
+  ],
+  findings: [
+    {
+      id: "finding-1",
+      org_id: "org-1",
+      session_id: "session-1",
+      agent_result_id: "agent-result-1",
+      dedupe_key: "src/app.ts:12",
+      severity: "low",
+      confidence: "high",
+      path: "src/app.ts",
+      start_line: 12,
+      summary: "Clarify branch name",
+      body: "The branch name could be more descriptive.",
+      selected_for_inline: true,
+      created_at: "2026-06-26T12:04:00Z",
+    },
+  ],
+  prompt_artifacts: [
+    {
+      id: "artifact-1",
+      org_id: "org-1",
+      session_id: "session-1",
+      artifact_key: "code-review-prompts/session-1/head/reviewer-01-codex",
+      role: "reviewer",
+      agent_provider: "codex",
+      content: "Review this PR.",
+      created_at: "2026-06-26T12:02:00Z",
+    },
+  ],
+};
+
 const template: CodeReviewTemplateOption = {
   key: "small_backend_change",
   title: "Small backend change",
@@ -103,6 +168,7 @@ describe("CodeReviewsPage", () => {
     server.use(
       http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repo], meta: {} } satisfies ListResponse<Repository>)),
       http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
+      http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
       http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
       http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
     );
@@ -113,6 +179,11 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
     expect(screen.getByText("Acceptable")).toBeInTheDocument();
     expect(screen.getByText("Approved")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Evidence/i }));
+    expect(await screen.findByText(/Evidence for #428/i)).toBeInTheDocument();
+    expect(screen.getByText("No blocking issues found.")).toBeInTheDocument();
+    expect(screen.getByText("Clarify branch name")).toBeInTheDocument();
+    expect(screen.getByText("Review this PR.")).toBeInTheDocument();
 
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
@@ -120,6 +191,9 @@ describe("CodeReviewsPage", () => {
       expect(screen.getByDisplayValue("Understandable description")).toBeInTheDocument();
     });
     expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
     expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
     expect(screen.getByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Allow policy changes")).toBeInTheDocument();

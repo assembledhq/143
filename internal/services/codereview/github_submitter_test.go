@@ -294,6 +294,99 @@ func TestGitHubSubmitter_ListPullRequestFiles(t *testing.T) {
 	}, files, "ListPullRequestFiles should decode file stats")
 }
 
+func TestGitHubSubmitter_ListReviewContextPaginatesGraphQLConnections(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu          sync.Mutex
+		gotPayloads []map[string]any
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/graphql", r.URL.Path, "ListReviewContext should call the GraphQL endpoint")
+		require.Equal(t, "Bearer ghs_token", r.Header.Get("Authorization"), "ListReviewContext should authenticate with installation token")
+
+		var payload struct {
+			Variables map[string]any `json:"variables"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload), "GraphQL request body should decode")
+
+		mu.Lock()
+		gotPayloads = append(gotPayloads, payload.Variables)
+		pageNumber := len(gotPayloads)
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch pageNumber {
+		case 1:
+			require.Nil(t, payload.Variables["threadCursor"], "first page should not send a review thread cursor")
+			require.Nil(t, payload.Variables["reviewCursor"], "first page should not send a reviews cursor")
+			_, err := w.Write([]byte(`{
+				"data": {"repository": {"pullRequest": {
+					"reviewThreads": {
+						"nodes": [
+							{"isResolved": false, "comments": {"nodes": [
+								{"author": {"login": "alice"}, "pullRequestReview": null}
+							]}}
+						],
+						"pageInfo": {"hasNextPage": true, "endCursor": "thread-page-1"}
+					},
+					"reviews": {
+						"nodes": [
+							{"state": "CHANGES_REQUESTED", "author": {"login": "143-code-reviewer"}}
+						],
+						"pageInfo": {"hasNextPage": true, "endCursor": "review-page-1"}
+					}
+				}}}
+			}`))
+			require.NoError(t, err, "test response should write first page")
+		case 2:
+			require.Equal(t, "thread-page-1", payload.Variables["threadCursor"], "second page should advance review thread cursor")
+			require.Equal(t, "review-page-1", payload.Variables["reviewCursor"], "second page should advance reviews cursor")
+			_, err := w.Write([]byte(`{
+				"data": {"repository": {"pullRequest": {
+					"reviewThreads": {
+						"nodes": [
+							{"isResolved": true, "comments": {"nodes": [
+								{"author": {"login": "bob"}, "pullRequestReview": null}
+							]}},
+							{"isResolved": false, "comments": {"nodes": [
+								{"author": {"login": "143-code-reviewer"}, "pullRequestReview": null}
+							]}}
+						],
+						"pageInfo": {"hasNextPage": false, "endCursor": "thread-page-2"}
+					},
+					"reviews": {
+						"nodes": [
+							{"state": "CHANGES_REQUESTED", "author": {"login": "bob"}},
+							{"state": "APPROVED", "author": {"login": "alice"}}
+						],
+						"pageInfo": {"hasNextPage": false, "endCursor": "review-page-2"}
+					}
+				}}}
+			}`))
+			require.NoError(t, err, "test response should write second page")
+		default:
+			http.Error(w, "unexpected GraphQL page", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	ctx, err := submitter.ListReviewContext(context.Background(), ReviewContextRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		BotLogins:      []string{"143-code-reviewer"},
+	})
+
+	require.NoError(t, err, "ListReviewContext should paginate GitHub review context")
+	require.Equal(t, ReviewContext{UnresolvedHumanThreads: 1, BlockingHumanReviews: 1}, ctx, "ListReviewContext should aggregate only human blockers across all pages")
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, gotPayloads, 2, "ListReviewContext should stop after both GraphQL connections are exhausted")
+}
+
 func TestGitHubSubmitter_PublishCommitStatus(t *testing.T) {
 	t.Parallel()
 

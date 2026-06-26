@@ -465,7 +465,23 @@ func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query stri
 	return body, nil
 }
 
+type reviewContextGraphQLPage struct {
+	Context             ReviewContext
+	ReviewThreadsCursor string
+	ReviewThreadsMore   bool
+	ReviewsCursor       string
+	ReviewsMore         bool
+}
+
 func parseReviewContextGraphQL(body []byte, botLogins []string) (ReviewContext, error) {
+	page, err := parseReviewContextGraphQLPage(body, botLogins)
+	if err != nil {
+		return ReviewContext{}, err
+	}
+	return page.Context, nil
+}
+
+func parseReviewContextGraphQLPage(body []byte, botLogins []string) (reviewContextGraphQLPage, error) {
 	var decoded struct {
 		Errors []struct {
 			Message string `json:"message"`
@@ -490,6 +506,10 @@ func parseReviewContextGraphQL(body []byte, botLogins []string) (ReviewContext, 
 								} `json:"nodes"`
 							} `json:"comments"`
 						} `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
 					} `json:"reviewThreads"`
 					Reviews struct {
 						Nodes []struct {
@@ -498,20 +518,24 @@ func parseReviewContextGraphQL(body []byte, botLogins []string) (ReviewContext, 
 								Login string `json:"login"`
 							} `json:"author"`
 						} `json:"nodes"`
+						PageInfo struct {
+							HasNextPage bool   `json:"hasNextPage"`
+							EndCursor   string `json:"endCursor"`
+						} `json:"pageInfo"`
 					} `json:"reviews"`
 				} `json:"pullRequest"`
 			} `json:"repository"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil {
-		return ReviewContext{}, fmt.Errorf("decode GitHub review context: %w", err)
+		return reviewContextGraphQLPage{}, fmt.Errorf("decode GitHub review context: %w", err)
 	}
 	if len(decoded.Errors) > 0 {
 		messages := make([]string, 0, len(decoded.Errors))
 		for _, item := range decoded.Errors {
 			messages = append(messages, strings.TrimSpace(item.Message))
 		}
-		return ReviewContext{}, fmt.Errorf("GitHub review context GraphQL errors: %s", strings.Join(compactStrings(messages), "; "))
+		return reviewContextGraphQLPage{}, fmt.Errorf("GitHub review context GraphQL errors: %s", strings.Join(compactStrings(messages), "; "))
 	}
 	bots := normalizedLoginSet(botLogins)
 	var ctx ReviewContext
@@ -546,7 +570,13 @@ func parseReviewContextGraphQL(body []byte, botLogins []string) (ReviewContext, 
 			ctx.UnresolvedHumanThreads++
 		}
 	}
-	return ctx, nil
+	return reviewContextGraphQLPage{
+		Context:             ctx,
+		ReviewThreadsCursor: decoded.Data.Repository.PullRequest.ReviewThreads.PageInfo.EndCursor,
+		ReviewThreadsMore:   decoded.Data.Repository.PullRequest.ReviewThreads.PageInfo.HasNextPage,
+		ReviewsCursor:       decoded.Data.Repository.PullRequest.Reviews.PageInfo.EndCursor,
+		ReviewsMore:         decoded.Data.Repository.PullRequest.Reviews.PageInfo.HasNextPage,
+	}, nil
 }
 
 func normalizedLoginSet(values []string) map[string]struct{} {
@@ -723,10 +753,10 @@ func (s *GitHubSubmitter) ListReviewContext(ctx context.Context, req ReviewConte
 		return ReviewContext{}, fmt.Errorf("get installation token: %w", err)
 	}
 	query := `
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $threadCursor: String, $reviewCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $threadCursor) {
         nodes {
           isResolved
           comments(first: 20) {
@@ -739,25 +769,60 @@ query($owner: String!, $repo: String!, $number: Int!) {
             }
           }
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
-      reviews(first: 100) {
+      reviews(first: 100, after: $reviewCursor) {
         nodes {
           state
           author { login }
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
-    }
-  }
-}`
-	body, err := s.doGitHubGraphQL(ctx, token, query, map[string]any{
-		"owner":  owner,
-		"repo":   repo,
-		"number": req.PullNumber,
-	})
-	if err != nil {
-		return ReviewContext{}, err
+		  }
+		}
+	}`
+	var out ReviewContext
+	var threadCursor *string
+	var reviewCursor *string
+	for {
+		body, err := s.doGitHubGraphQL(ctx, token, query, map[string]any{
+			"owner":        owner,
+			"repo":         repo,
+			"number":       req.PullNumber,
+			"threadCursor": threadCursor,
+			"reviewCursor": reviewCursor,
+		})
+		if err != nil {
+			return ReviewContext{}, err
+		}
+		page, err := parseReviewContextGraphQLPage(body, req.BotLogins)
+		if err != nil {
+			return ReviewContext{}, err
+		}
+		out.UnresolvedHumanThreads += page.Context.UnresolvedHumanThreads
+		out.BlockingHumanReviews += page.Context.BlockingHumanReviews
+		if !page.ReviewThreadsMore && !page.ReviewsMore {
+			return out, nil
+		}
+		if page.ReviewThreadsMore && strings.TrimSpace(page.ReviewThreadsCursor) == "" {
+			return ReviewContext{}, fmt.Errorf("GitHub review context pagination missing reviewThreads cursor")
+		}
+		if page.ReviewsMore && strings.TrimSpace(page.ReviewsCursor) == "" {
+			return ReviewContext{}, fmt.Errorf("GitHub review context pagination missing reviews cursor")
+		}
+		if cursor := strings.TrimSpace(page.ReviewThreadsCursor); cursor != "" {
+			threadCursor = &cursor
+		}
+		if cursor := strings.TrimSpace(page.ReviewsCursor); cursor != "" {
+			reviewCursor = &cursor
+		}
 	}
-	return parseReviewContextGraphQL(body, req.BotLogins)
 }
 
 func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, path string) ([]PullRequestFile, string, error) {

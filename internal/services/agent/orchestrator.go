@@ -449,6 +449,7 @@ type SessionMessageStore interface {
 }
 
 type SessionThreadStore interface {
+	GetByID(ctx context.Context, orgID, threadID uuid.UUID) (models.SessionThread, error)
 	UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turnNumber int, agentSessionID string) error
 	UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error
@@ -3368,6 +3369,20 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	threadID := latestMsg.ThreadID
 	scopedMessages := messagesInScope(messages, threadID)
+	var readOnlyReviewThread *models.SessionThread
+	if threadID != nil && *threadID != uuid.Nil && o.sessionThreads != nil {
+		thread, threadErr := o.sessionThreads.GetByID(ctx, session.OrgID, *threadID)
+		if errors.Is(threadErr, pgx.ErrNoRows) {
+			// Legacy tests and pre-existing rows may not be readable through
+			// the injected thread store; only read-only review mode needs this
+			// guard.
+		} else if threadErr != nil {
+			log.Warn().Err(threadErr).Str("thread_id", threadID.String()).Msg("failed to load thread for read-only execution guard")
+		} else if thread.ExecutionMode == models.ThreadExecutionModeReview && thread.FilesystemMode == models.ThreadFilesystemModeReadOnly {
+			threadCopy := thread
+			readOnlyReviewThread = &threadCopy
+		}
+	}
 	// Bundle every trailing user message in scope into the prompt seed so
 	// rapid mid-turn sends are all delivered to the agent. The latest
 	// message remains the "carrier" for thread_id, references, and
@@ -4480,6 +4495,15 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return err
 		}
 		return nil
+	}
+	if readOnlyReviewThread != nil {
+		handled, guardErr := o.handleReadOnlyReviewThreadResult(ctx, session, sandbox, *readOnlyReviewThread, result, fallbackStatus, log)
+		if guardErr != nil {
+			return guardErr
+		}
+		if handled {
+			return nil
+		}
 	}
 
 	// 7. Create assistant message with result summary.
@@ -6961,6 +6985,77 @@ func (o *Orchestrator) failHumanInputPause(ctx context.Context, session *models.
 		}
 	}
 	return err
+}
+
+func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, session *models.Session, sandbox *Sandbox, thread models.SessionThread, result *AgentResult, fallbackStatus models.SessionStatus, log zerolog.Logger) (bool, error) {
+	if result == nil {
+		return false, nil
+	}
+	diff := strings.TrimSpace(result.Diff)
+	if diff == "" {
+		diff = strings.TrimSpace(o.resultDiffOrWorkspaceFallback(ctx, session, sandbox, result.Diff))
+	}
+	if diff == "" {
+		return false, nil
+	}
+
+	message := "read-only review thread produced workspace changes"
+	if revertErr := o.revertReadOnlyReviewDiff(ctx, sandbox, diff); revertErr != nil {
+		message += "; automatic revert failed: " + revertErr.Error()
+		log.Warn().Err(revertErr).Str("thread_id", thread.ID.String()).Msg("failed to reverse read-only review thread diff")
+	}
+	category := "read_only_violation"
+	summary := "Read-only review blocked workspace changes"
+	threadResult := &models.SessionResult{
+		ResultSummary:   &summary,
+		Diff:            &diff,
+		Error:           &message,
+		FailureCategory: &category,
+	}
+	if o.sessionThreads != nil {
+		if err := o.sessionThreads.UpdateResult(ctx, session.OrgID, thread.ID, models.ThreadStatusFailed, threadResult); err != nil {
+			return true, fmt.Errorf("mark read-only review thread failed: %w", err)
+		}
+	}
+	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
+		fallbackStatus = models.SessionStatusIdle
+	}
+	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); err != nil {
+		return true, fmt.Errorf("restore session after read-only review violation: %w", err)
+	}
+	log.Warn().
+		Str("thread_id", thread.ID.String()).
+		Int("diff_bytes", len(diff)).
+		Msg("blocked read-only review thread workspace changes")
+	return true, nil
+}
+
+func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
+	if o == nil || o.provider == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
+		return nil
+	}
+	workDir := strings.TrimSpace(sandbox.WorkDir)
+	if workDir == "" {
+		workDir = "."
+	}
+	patchPath := path.Join(workDir, ".143-read-only-review-revert.patch")
+	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(diff)); err != nil {
+		return fmt.Errorf("write revert patch: %w", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := fmt.Sprintf("cd '%s' && git apply -R --whitespace=nowarn '%s'; status=$?; rm -f '%s'; exit $status",
+		shellEscapeSingleQuote(workDir),
+		shellEscapeSingleQuote(patchPath),
+		shellEscapeSingleQuote(patchPath),
+	)
+	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("reverse apply read-only diff: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("reverse apply read-only diff exited %d: %s", exitCode, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the

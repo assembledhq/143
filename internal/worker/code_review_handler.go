@@ -135,7 +135,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err := ensureCodeReviewReviewerThreads(ctx, stores, logger, job, pr, policy, metadata, changedFiles); err != nil {
 				return err
 			}
-			if err := harvestCodeReviewReviewerResults(ctx, stores, logger, job, policy, metadata, changedFiles); err != nil {
+			if err := harvestCodeReviewReviewerResults(ctx, stores, services, logger, job, policy, metadata, changedFiles); err != nil {
 				return err
 			}
 			agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
@@ -152,7 +152,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if err := ensureCodeReviewOrchestratorThread(ctx, stores, logger, job, pr, health, policy, metadata, changedFiles, descriptionEvaluation, reviewContext, reviewContextAvailable, agentResults, findings); err != nil {
 				return err
 			}
-			if err := harvestCodeReviewOrchestratorResult(ctx, stores, logger, job, policy, metadata); err != nil {
+			if err := harvestCodeReviewOrchestratorResult(ctx, stores, services, logger, job, policy, metadata); err != nil {
 				return err
 			}
 			agentResults, err = stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
@@ -296,6 +296,10 @@ type codeReviewReviewerStructuredResult struct {
 	FindingCount      int     `json:"finding_count,omitempty"`
 	CostCents         float64 `json:"cost_cents,omitempty"`
 	RawArtifactKey    string  `json:"raw_artifact_key,omitempty"`
+	NativeReview      bool    `json:"native_review,omitempty"`
+	ReadOnly          bool    `json:"read_only,omitempty"`
+	ReadOnlyViolation bool    `json:"read_only_violation,omitempty"`
+	Reverted          bool    `json:"reverted,omitempty"`
 	Error             string  `json:"error,omitempty"`
 	CompletedAt       string  `json:"completed_at,omitempty"`
 }
@@ -307,6 +311,9 @@ type codeReviewOrchestratorStructuredResult struct {
 	CostCents         float64                         `json:"cost_cents,omitempty"`
 	RawArtifactKey    string                          `json:"raw_artifact_key,omitempty"`
 	Synthesis         codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
+	ReadOnly          bool                            `json:"read_only,omitempty"`
+	ReadOnlyViolation bool                            `json:"read_only_violation,omitempty"`
+	Reverted          bool                            `json:"reverted,omitempty"`
 	Error             string                          `json:"error,omitempty"`
 	CompletedAt       string                          `json:"completed_at,omitempty"`
 }
@@ -383,6 +390,8 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			Label:           codeReviewReviewerThreadLabel(agentType),
 			Instructions:    "Inspect only. Do not edit files, commit, push, or change the workspace.",
 			FileScope:       fileScope,
+			ExecutionMode:   models.ThreadExecutionModeReview,
+			FilesystemMode:  models.ThreadFilesystemModeReadOnly,
 			CreatedBySource: models.ThreadCreatedBySourceSystem,
 		})
 		if err != nil {
@@ -393,6 +402,8 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			ReviewerIndex:     idx,
 			ThreadID:          thread.ID.String(),
 			PromptArtifactKey: artifactKey,
+			NativeReview:      codeReviewAgentHasBuiltinReviewCommand(agentType),
+			ReadOnly:          true,
 		})
 		result := &models.CodeReviewAgentResult{
 			OrgID:            job.OrgID,
@@ -410,7 +421,8 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			SessionID:     job.SessionID,
 			OrgID:         job.OrgID,
 			ThreadID:      thread.ID,
-			Message:       promptText,
+			Message:       codeReviewReviewerMessage(agentType, promptText),
+			Commands:      codeReviewNativeReviewCommands(agentType, promptText),
 			MessageSource: models.SessionMessageSourceAgentTool,
 		}); err != nil {
 			raw := err.Error()
@@ -441,7 +453,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 	return nil
 }
 
-func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
+func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results for harvest: %w", err)
@@ -490,6 +502,27 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, logge
 		}
 		state.CostCents = thread.CostCents
 		if codeReviewThreadStillRunning(thread.Status) {
+			continue
+		}
+		if codeReviewThreadReadOnlyViolation(thread) {
+			raw := "reviewer thread was configured read-only but produced workspace changes"
+			state.Error = raw
+			state.ReadOnly = true
+			state.ReadOnlyViolation = true
+			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
+				state.Reverted = true
+			}
+			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
+				return err
+			}
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
+			if err != nil {
+				return err
+			}
+			state.RawArtifactKey = rawArtifactKey
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+				return fmt.Errorf("mark reviewer read-only violation failed: %w", err)
+			}
 			continue
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
@@ -562,6 +595,42 @@ func codeReviewReviewerThreadLabel(agentType models.AgentType) string {
 		label = "reviewer"
 	}
 	return "Code review: " + label
+}
+
+func codeReviewAgentHasBuiltinReviewCommand(agentType models.AgentType) bool {
+	for _, command := range models.SlashCommandsForAgent(agentType) {
+		if command.Name == "review" {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewNativeReviewCommands(agentType models.AgentType, promptText string) models.SessionInputCommands {
+	if !codeReviewAgentHasBuiltinReviewCommand(agentType) {
+		return nil
+	}
+	arguments := strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review"))
+	return models.SessionInputCommands{{
+		Kind:      "command",
+		AgentType: agentType,
+		Name:      "review",
+		Token:     "/review",
+		Display:   "/review",
+		Arguments: arguments,
+		Source:    models.SessionInputCommandSourceBuiltin,
+	}}
+}
+
+func codeReviewReviewerMessage(agentType models.AgentType, promptText string) string {
+	promptText = strings.TrimSpace(promptText)
+	if !codeReviewAgentHasBuiltinReviewCommand(agentType) || strings.HasPrefix(strings.TrimLeft(promptText, " \t\r\n"), "/review") {
+		return promptText
+	}
+	if promptText == "" {
+		return "/review"
+	}
+	return "/review " + promptText
 }
 
 func codeReviewPromptArtifactRoot(metadata models.CodeReviewSessionMetadata, job runCodeReviewPayload) string {
@@ -673,13 +742,61 @@ func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.
 	return threads.CancelThread(ctx, job.OrgID, job.SessionID, threadID)
 }
 
+func codeReviewThreadReadOnlyViolation(thread models.SessionThread) bool {
+	return thread.ExecutionMode == models.ThreadExecutionModeReview &&
+		thread.FilesystemMode == models.ThreadFilesystemModeReadOnly &&
+		thread.Diff != nil &&
+		strings.TrimSpace(*thread.Diff) != ""
+}
+
+func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, thread models.SessionThread) bool {
+	if stores == nil || stores.Sessions == nil || services == nil || services.Orchestrator == nil {
+		return false
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load code review session for read-only revert")
+		return false
+	}
+	if err := services.Orchestrator.RevertThread(ctx, &session, &thread); err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("thread_id", thread.ID.String()).
+			Msg("failed to revert read-only code review thread")
+		return false
+	}
+	return true
+}
+
+func createCodeReviewReadOnlyViolationFinding(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, resultID uuid.UUID, thread models.SessionThread) error {
+	if store == nil {
+		return nil
+	}
+	summary := "Review tab modified the workspace during read-only review"
+	body := "This review tab was configured for read-only code review but produced a workspace diff. The result is excluded from approval evidence."
+	finding := &models.CodeReviewFinding{
+		OrgID:         job.OrgID,
+		SessionID:     job.SessionID,
+		AgentResultID: &resultID,
+		DedupeKey:     "read_only_violation:" + thread.ID.String(),
+		Severity:      models.CodeReviewFindingSeverityCritical,
+		Confidence:    models.CodeReviewFindingConfidenceHigh,
+		Summary:       summary,
+		Body:          body,
+	}
+	if err := store.CreateFinding(ctx, finding); err != nil {
+		return fmt.Errorf("create read-only violation finding: %w", err)
+	}
+	return nil
+}
+
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
 	requirements := make([]prompts.CodeReviewDescriptionRequirementPromptData, 0, len(cfg.DescriptionPolicy.Requirements))
 	for _, requirement := range cfg.DescriptionPolicy.Requirements {
 		requirements = append(requirements, prompts.CodeReviewDescriptionRequirementPromptData{
 			Title:         requirement.Title,
 			Prompt:        requirement.Prompt,
-			Applicability: requirement.Applicability,
+			Applicability: codeReviewRequirementApplicabilityLabel(requirement),
 		})
 	}
 	return prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
@@ -704,10 +821,22 @@ func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, c
 		AllowForks:              cfg.RiskPolicy.AllowForks,
 		ExcludeSensitivePaths:   cfg.RiskPolicy.ExcludeSensitivePaths,
 		SensitivePaths:          cfg.RiskPolicy.SensitivePaths,
+		AllowedPathPatterns:     cfg.RiskPolicy.AllowedPathPatterns,
+		BlockedPathPatterns:     cfg.RiskPolicy.BlockedPathPatterns,
 		ExcludeCategories:       cfg.RiskPolicy.ExcludeCategories,
 		RequiredChecks:          cfg.RiskPolicy.RequiredChecks,
 		ChangedFiles:            codeReviewChangedPaths(changedFiles),
 	})
+}
+
+func codeReviewRequirementApplicabilityLabel(requirement models.CodeReviewDescriptionRequirement) string {
+	if !requirement.AppliesWhen.Empty() {
+		encoded, err := json.Marshal(requirement.AppliesWhen)
+		if err == nil {
+			return string(encoded)
+		}
+	}
+	return requirement.Applicability
 }
 
 func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
@@ -821,6 +950,16 @@ type codeReviewDescriptionLLMResponse struct {
 	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
 }
 
+type codeReviewDescriptionArtifactMetadata struct {
+	RequirementKey          string `json:"requirement_key"`
+	RequirementTitle        string `json:"requirement_title"`
+	Passed                  *bool  `json:"passed"`
+	Reason                  string `json:"reason"`
+	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
+	PolicyVersion           int    `json:"policy_version"`
+	HeadSHA                 string `json:"head_sha"`
+}
+
 func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) (codeReviewDescriptionEvaluation, error) {
 	cfg := policy.Config()
 	body := ""
@@ -829,47 +968,55 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 	}
 	evaluation := codeReviewDescriptionEvaluation{Passed: true}
 	rootKey := codeReviewPromptArtifactRoot(metadata, job)
+	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey)
+	if err != nil {
+		return codeReviewDescriptionEvaluation{}, err
+	}
 	for idx, requirement := range cfg.DescriptionPolicy.Requirements {
 		if !requirement.Required || strings.TrimSpace(requirement.Key) == "" || !codeReviewDescriptionRequirementApplies(requirement, changedFiles) {
 			continue
 		}
-		userPrompt := prompts.CodeReviewDescriptionCheckUserPrompt(prompts.CodeReviewDescriptionCheckUserPromptData{
-			Title:        requirement.Title,
-			Requirement:  requirement.Prompt,
-			PRTitle:      pr.Title,
-			PRBody:       body,
-			ChangedFiles: codeReviewChangedPaths(changedFiles),
-		})
 		artifactKey := fmt.Sprintf("%s/description-%02d-%s", rootKey, idx+1, safeCodeReviewArtifactSegment(requirement.Key))
-		result, err := evaluateCodeReviewDescriptionRequirement(ctx, services, requirement, body, userPrompt)
-		if err != nil {
-			logger.Warn().Err(err).
-				Str("session_id", job.SessionID.String()).
-				Str("requirement", requirement.Key).
-				Msg("description requirement evaluation failed")
-			result = codeReviewDescriptionLLMResponse{
-				Passed: false,
-				Reason: "description requirement could not be evaluated",
+		result, ok := cachedResults[artifactKey]
+		if !ok {
+			userPrompt := prompts.CodeReviewDescriptionCheckUserPrompt(prompts.CodeReviewDescriptionCheckUserPromptData{
+				Title:        requirement.Title,
+				Requirement:  requirement.Prompt,
+				PRTitle:      pr.Title,
+				PRBody:       body,
+				ChangedFiles: codeReviewChangedPaths(changedFiles),
+			})
+			var evalErr error
+			result, evalErr = evaluateCodeReviewDescriptionRequirement(ctx, services, requirement, body, userPrompt)
+			if evalErr != nil {
+				logger.Warn().Err(evalErr).
+					Str("session_id", job.SessionID.String()).
+					Str("requirement", requirement.Key).
+					Msg("description requirement evaluation failed")
+				result = codeReviewDescriptionLLMResponse{
+					Passed: false,
+					Reason: "description requirement could not be evaluated",
+				}
 			}
-		}
-		if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
-			OrgID:         job.OrgID,
-			SessionID:     job.SessionID,
-			ArtifactKey:   artifactKey,
-			Role:          "description_policy",
-			AgentProvider: codeReviewDescriptionEvaluatorProvider(services),
-			Content:       prompts.CodeReviewDescriptionCheckSystemPrompt() + "\n\n" + userPrompt,
-			Metadata: mustMarshalCodeReviewJSON(map[string]any{
-				"requirement_key":           requirement.Key,
-				"requirement_title":         requirement.Title,
-				"passed":                    result.Passed,
-				"reason":                    result.Reason,
-				"prompt_injection_detected": result.PromptInjectionDetected,
-				"policy_version":            policy.Version,
-				"head_sha":                  job.HeadSHA,
-			}),
-		}); err != nil {
-			return codeReviewDescriptionEvaluation{}, err
+			if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
+				OrgID:         job.OrgID,
+				SessionID:     job.SessionID,
+				ArtifactKey:   artifactKey,
+				Role:          "description_policy",
+				AgentProvider: codeReviewDescriptionEvaluatorProvider(services),
+				Content:       prompts.CodeReviewDescriptionCheckSystemPrompt() + "\n\n" + userPrompt,
+				Metadata: mustMarshalCodeReviewJSON(map[string]any{
+					"requirement_key":           requirement.Key,
+					"requirement_title":         requirement.Title,
+					"passed":                    result.Passed,
+					"reason":                    result.Reason,
+					"prompt_injection_detected": result.PromptInjectionDetected,
+					"policy_version":            policy.Version,
+					"head_sha":                  job.HeadSHA,
+				}),
+			}); err != nil {
+				return codeReviewDescriptionEvaluation{}, err
+			}
 		}
 		summary := requirement.Title + ": passed"
 		if !result.Passed {
@@ -888,6 +1035,56 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 		evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, summary)
 	}
 	return evaluation, nil
+}
+
+func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey string) (map[string]codeReviewDescriptionLLMResponse, error) {
+	if stores == nil || stores.CodeReviews == nil {
+		return nil, nil
+	}
+	artifacts, err := stores.CodeReviews.ListPromptArtifacts(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list cached code review description artifacts: %w", err)
+	}
+	results := make(map[string]codeReviewDescriptionLLMResponse)
+	for _, artifact := range artifacts {
+		if artifact.Role != "description_policy" || !strings.HasPrefix(artifact.ArtifactKey, rootKey+"/description-") {
+			continue
+		}
+		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact)
+		if ok {
+			results[artifact.ArtifactKey] = result
+		}
+	}
+	return results, nil
+}
+
+func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact) (codeReviewDescriptionLLMResponse, bool) {
+	if len(artifact.Metadata) == 0 {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	var metadata codeReviewDescriptionArtifactMetadata
+	if err := json.Unmarshal(artifact.Metadata, &metadata); err != nil || metadata.Passed == nil {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	if strings.TrimSpace(metadata.HeadSHA) != "" && strings.TrimSpace(metadata.HeadSHA) != strings.TrimSpace(job.HeadSHA) {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	if metadata.PolicyVersion != 0 && metadata.PolicyVersion != job.PolicyVersion {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	reason := strings.TrimSpace(metadata.Reason)
+	if reason == "" {
+		if *metadata.Passed {
+			reason = "requirement satisfied"
+		} else {
+			reason = "requirement not satisfied"
+		}
+	}
+	return codeReviewDescriptionLLMResponse{
+		Passed:                  *metadata.Passed,
+		Reason:                  reason,
+		PromptInjectionDetected: metadata.PromptInjectionDetected,
+	}, true
 }
 
 func evaluateCodeReviewDescriptionRequirement(ctx context.Context, services *Services, requirement models.CodeReviewDescriptionRequirement, body, userPrompt string) (codeReviewDescriptionLLMResponse, error) {
@@ -1159,6 +1356,8 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		Label:           "Code review: orchestrator",
 		Instructions:    "Synthesize only. Do not edit files, commit, push, or change the workspace.",
 		FileScope:       codeReviewChangedPaths(changedFiles),
+		ExecutionMode:   models.ThreadExecutionModeReview,
+		FilesystemMode:  models.ThreadFilesystemModeReadOnly,
 		CreatedBySource: models.ThreadCreatedBySourceSystem,
 	})
 	if err != nil {
@@ -1167,6 +1366,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:          thread.ID.String(),
 		PromptArtifactKey: artifactKey,
+		ReadOnly:          true,
 	})
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
@@ -1204,7 +1404,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	return nil
 }
 
-func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata) error {
+func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata) error {
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review orchestrator results for harvest: %w", err)
@@ -1249,6 +1449,27 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, lo
 		}
 		state.CostCents = thread.CostCents
 		if codeReviewThreadStillRunning(thread.Status) {
+			continue
+		}
+		if codeReviewThreadReadOnlyViolation(thread) {
+			raw := "orchestrator thread was configured read-only but produced workspace changes"
+			state.Error = raw
+			state.ReadOnly = true
+			state.ReadOnlyViolation = true
+			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
+				state.Reverted = true
+			}
+			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
+				return err
+			}
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			if err != nil {
+				return err
+			}
+			state.RawArtifactKey = rawArtifactKey
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+				return fmt.Errorf("mark orchestrator read-only violation failed: %w", err)
+			}
 			continue
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
@@ -1727,6 +1948,36 @@ func codeReviewChangedCategories(files []codereviewsvc.PullRequestFile) []string
 func codeReviewPathCategories(path string) []string {
 	normalized := strings.ToLower(strings.TrimSpace(path))
 	categories := make([]string, 0, 2)
+	if strings.HasPrefix(normalized, "docs/") ||
+		strings.HasSuffix(normalized, ".md") ||
+		strings.HasSuffix(normalized, ".mdx") ||
+		strings.HasSuffix(normalized, ".rst") ||
+		strings.HasSuffix(normalized, ".adoc") {
+		categories = append(categories, "docs")
+	}
+	if strings.Contains(normalized, "/test/") ||
+		strings.Contains(normalized, "/tests/") ||
+		strings.Contains(normalized, "/__tests__/") ||
+		strings.HasSuffix(normalized, "_test.go") ||
+		strings.Contains(normalized, ".test.") ||
+		strings.Contains(normalized, ".spec.") {
+		categories = append(categories, "tests")
+	}
+	if codeReviewFrontendPath(normalized) {
+		categories = append(categories, "frontend")
+	}
+	if strings.HasSuffix(normalized, ".go") ||
+		strings.Contains(normalized, "internal/") ||
+		strings.Contains(normalized, "cmd/") ||
+		strings.Contains(normalized, "pkg/") {
+		categories = append(categories, "backend")
+	}
+	if strings.Contains(normalized, "generated") ||
+		strings.HasSuffix(normalized, ".pb.go") ||
+		strings.HasSuffix(normalized, ".gen.go") ||
+		strings.HasSuffix(normalized, ".generated.ts") {
+		categories = append(categories, "generated")
+	}
 	switch {
 	case normalized == "go.mod" || normalized == "go.sum" ||
 		strings.HasSuffix(normalized, "package-lock.json") ||
@@ -1781,6 +2032,9 @@ func codeReviewDescriptionPassed(policy models.CodeReviewPolicyConfig, pr models
 }
 
 func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescriptionRequirement, changedFiles []codereviewsvc.PullRequestFile) bool {
+	if !requirement.AppliesWhen.Empty() {
+		return codeReviewDescriptionApplicabilityApplies(requirement.AppliesWhen, changedFiles)
+	}
 	switch strings.ToLower(strings.TrimSpace(requirement.Applicability)) {
 	case "", "all", "always":
 		return true
@@ -1803,6 +2057,123 @@ func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescri
 	default:
 		return true
 	}
+}
+
+func codeReviewDescriptionApplicabilityApplies(applicability models.CodeReviewDescriptionApplicability, changedFiles []codereviewsvc.PullRequestFile) bool {
+	linesChanged := codeReviewLinesChanged(changedFiles)
+	changedPaths := codeReviewChangedPaths(changedFiles)
+	changedCategories := codeReviewChangedCategories(changedFiles)
+	if applicability.MinFilesChanged > 0 && len(changedFiles) >= applicability.MinFilesChanged {
+		return true
+	}
+	if applicability.MinLinesChanged > 0 && linesChanged >= applicability.MinLinesChanged {
+		return true
+	}
+	if len(applicability.PathPatterns) > 0 {
+		for _, path := range changedPaths {
+			if codeReviewPathMatchesAny(path, applicability.PathPatterns) {
+				return true
+			}
+		}
+	}
+	if len(applicability.Categories) > 0 {
+		for _, category := range changedCategories {
+			if stringInCodeReviewSlice(category, applicability.Categories) {
+				return true
+			}
+		}
+	}
+	if applicability.RequireTestFilesChanged && codeReviewAnyTestFileChanged(changedPaths) {
+		return true
+	}
+	switch applicability.Kind {
+	case "", models.CodeReviewDescriptionApplicabilityAll:
+		return true
+	case models.CodeReviewDescriptionApplicabilityNontrivial:
+		return len(changedFiles) > 1 || linesChanged > 30
+	case models.CodeReviewDescriptionApplicabilityFrontend:
+		for _, path := range changedPaths {
+			if codeReviewFrontendPath(path) {
+				return true
+			}
+		}
+		return false
+	case models.CodeReviewDescriptionApplicabilityPaths:
+		return len(applicability.PathPatterns) == 0
+	case models.CodeReviewDescriptionApplicabilityCategories:
+		return len(applicability.Categories) == 0
+	case models.CodeReviewDescriptionApplicabilityTests:
+		return codeReviewAnyTestFileChanged(changedPaths)
+	default:
+		return true
+	}
+}
+
+func codeReviewPathMatchesAny(path string, patterns []string) bool {
+	path = filepath.ToSlash(strings.ToLower(strings.TrimSpace(path)))
+	for _, pattern := range patterns {
+		pattern = filepath.ToSlash(strings.ToLower(strings.TrimSpace(pattern)))
+		if pattern == "" {
+			continue
+		}
+		if ok, err := filepath.Match(pattern, path); err == nil && ok {
+			return true
+		}
+		if strings.Contains(pattern, "**") {
+			regexPattern := regexp.QuoteMeta(pattern)
+			regexPattern = strings.ReplaceAll(regexPattern, `\*\*`, `.*`)
+			regexPattern = strings.ReplaceAll(regexPattern, `\*`, `[^/]*`)
+			if ok, err := regexp.MatchString("^"+regexPattern+"$", path); err == nil && ok {
+				return true
+			}
+		}
+		trimmedTree := strings.TrimSuffix(pattern, "/**")
+		if trimmedTree != pattern && (path == trimmedTree || strings.HasPrefix(path, trimmedTree+"/")) {
+			return true
+		}
+		if path == pattern || strings.HasPrefix(path, pattern+"/") || strings.HasPrefix(path, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringInCodeReviewSlice(needle string, values []string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(needle), strings.TrimSpace(value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewAnyTestFileChanged(paths []string) bool {
+	for _, path := range paths {
+		normalized := strings.ToLower(filepath.ToSlash(path))
+		if strings.Contains(normalized, "/test/") ||
+			strings.Contains(normalized, "/tests/") ||
+			strings.Contains(normalized, "/__tests__/") ||
+			strings.Contains(normalized, "/fixtures/") ||
+			strings.Contains(normalized, "/testdata/") ||
+			strings.HasSuffix(normalized, "_test.go") ||
+			strings.Contains(normalized, ".test.") ||
+			strings.Contains(normalized, ".spec.") {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewFrontendPath(path string) bool {
+	path = strings.ToLower(filepath.ToSlash(path))
+	return strings.Contains(path, "frontend/") ||
+		strings.Contains(path, "apps/web/") ||
+		strings.Contains(path, "/app/") ||
+		strings.Contains(path, "/components/") ||
+		strings.Contains(path, "/pages/") ||
+		strings.HasSuffix(path, ".tsx") ||
+		strings.HasSuffix(path, ".jsx") ||
+		strings.HasSuffix(path, ".css")
 }
 
 func codeReviewDescriptionRequirementPassed(requirement models.CodeReviewDescriptionRequirement, body string) bool {

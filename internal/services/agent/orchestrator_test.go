@@ -1335,6 +1335,7 @@ type testDeps struct {
 // blocks use updateStatusCalls to assert thread.status was reset.
 type mockSessionThreadStore struct {
 	mu                sync.Mutex
+	getByIDResult     *models.SessionThread
 	updateStatusCalls []struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
@@ -1343,6 +1344,15 @@ type mockSessionThreadStore struct {
 		threadID uuid.UUID
 		turn     int
 	}
+}
+
+func (m *mockSessionThreadStore) GetByID(_ context.Context, _, threadID uuid.UUID) (models.SessionThread, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getByIDResult != nil && m.getByIDResult.ID == threadID {
+		return *m.getByIDResult, nil
+	}
+	return models.SessionThread{}, pgx.ErrNoRows
 }
 
 func (m *mockSessionThreadStore) UpdateStatus(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus) error {

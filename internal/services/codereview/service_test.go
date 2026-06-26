@@ -185,6 +185,7 @@ func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID
 type metadataStub struct {
 	createCalls  int
 	staleCalls   int
+	supersededBy *uuid.UUID
 	created      models.CodeReviewSessionMetadata
 	createResult models.CodeReviewSessionMetadata
 	running      models.CodeReviewSessionMetadata
@@ -221,8 +222,9 @@ func (s *metadataStub) GetRunningByPullRequestHead(_ context.Context, _, _ uuid.
 	return models.CodeReviewSessionMetadata{}, errors.New("unexpected running lookup")
 }
 
-func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string) (int64, error) {
+func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string, supersededBySessionID *uuid.UUID) (int64, error) {
 	s.staleCalls++
+	s.supersededBy = supersededBySessionID
 	return 1, nil
 }
 

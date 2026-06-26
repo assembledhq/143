@@ -313,6 +313,8 @@ type CodeReviewReviewerPromptData struct {
 	AllowForks              bool
 	ExcludeSensitivePaths   bool
 	SensitivePaths          []string
+	AllowedPathPatterns     []string
+	BlockedPathPatterns     []string
 	ExcludeCategories       []string
 	RequiredChecks          []string
 	ChangedFiles            []string

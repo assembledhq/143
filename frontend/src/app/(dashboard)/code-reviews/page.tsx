@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw, Plus, Trash2 } from "lucide-react";
+import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw, Plus, Trash2, FileSearch } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,8 @@ import { queryKeys } from "@/lib/query-keys";
 import type {
   CodeReviewApprovalMode,
   CodeReviewDecision,
+  CodeReviewDescriptionApplicabilityKind,
+  CodeReviewEvidence,
   CodeReviewListItem,
   CodeReviewPolicyConfig,
   CodeReviewSessionStatus,
@@ -45,6 +47,14 @@ const ALL_DECISIONS = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
+const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
+  all: "All PRs",
+  nontrivial: "Nontrivial",
+  frontend_or_ui_visible: "Frontend/UI",
+  paths: "Paths",
+  categories: "Categories",
+  tests_changed: "Tests changed",
+};
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -111,6 +121,7 @@ export default function CodeReviewsPage() {
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
+  const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
@@ -140,6 +151,11 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.templates,
     queryFn: () => api.codeReviews.templates(),
   });
+  const evidenceQuery = useQuery({
+    queryKey: queryKeys.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
+    queryFn: () => api.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
+    enabled: Boolean(selectedEvidenceSessionId),
+  });
 
   const policyKey = `${repositoryId ?? "org"}:${policyQuery.data?.data.policy?.id ?? policyQuery.data?.data.source ?? "loading"}`;
   const serverPolicy = policyQuery.data?.data.config;
@@ -160,6 +176,10 @@ export default function CodeReviewsPage() {
   });
 
   const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
+  const selectedEvidenceReview = useMemo(
+    () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
+    [reviews, selectedEvidenceSessionId],
+  );
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
@@ -201,6 +221,19 @@ export default function CodeReviewsPage() {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 5);
   }, [reviews]);
+  const updateDraftPolicy = (config: CodeReviewPolicyConfig) => {
+    setDraftOverride({ key: policyKey, config });
+  };
+  const updateDescriptionRequirement = (
+    index: number,
+    updater: (requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number]) =>
+      CodeReviewPolicyConfig["description_policy"]["requirements"][number],
+  ) => {
+    if (!draftPolicy) return;
+    const requirements = [...draftPolicy.description_policy.requirements];
+    requirements[index] = updater(requirements[index]);
+    updateDraftPolicy({ ...draftPolicy, description_policy: { requirements } });
+  };
 
   return (
     <main className="min-h-full bg-background">
@@ -281,6 +314,7 @@ export default function CodeReviewsPage() {
                 description="Reviews will appear here after the GitHub reviewer bot is requested on a pull request."
               />
             ) : (
+              <>
               <Card>
                 <CardContent className="p-0">
                   <Table>
@@ -321,6 +355,18 @@ export default function CodeReviewsPage() {
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
                             <div className="flex justify-end gap-2">
+                              <Button
+                                variant={selectedEvidenceSessionId === review.session_id ? "secondary" : "ghost"}
+                                size="sm"
+                                onClick={() =>
+                                  setSelectedEvidenceSessionId((current) =>
+                                    current === review.session_id ? null : review.session_id,
+                                  )
+                                }
+                              >
+                                <FileSearch className="h-4 w-4" />
+                                Evidence
+                              </Button>
                               <Button variant="ghost" size="sm" asChild>
                                 <Link href={`/sessions/${review.session_id}`}>Session</Link>
                               </Button>
@@ -344,6 +390,15 @@ export default function CodeReviewsPage() {
                   </Table>
                 </CardContent>
               </Card>
+              {selectedEvidenceReview ? (
+                <CodeReviewEvidencePanel
+                  review={selectedEvidenceReview}
+                  evidence={evidenceQuery.data?.data}
+                  isLoading={evidenceQuery.isLoading}
+                  error={evidenceQuery.error}
+                />
+              ) : null}
+              </>
             )}
           </TabsContent>
 
@@ -353,6 +408,32 @@ export default function CodeReviewsPage() {
                 <CardTitle>Bot behavior</CardTitle>
               </CardHeader>
               <CardContent className="space-y-5">
+                <div className="rounded-md border border-border p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-medium text-foreground">
+                        {repositoryId ? "Repository policy" : "Organization default"}
+                      </div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        {policyQuery.data?.data.source === "repository"
+                          ? "This repository uses an insert-only override that inherits organization defaults."
+                          : "These settings provide the default policy for repositories without their own override."}
+                      </div>
+                    </div>
+                    <Badge variant={policyQuery.data?.data.source === "repository" ? "secondary" : "outline"}>
+                      {policyQuery.data?.data.source ?? "loading"}
+                    </Badge>
+                  </div>
+                  {draftPolicy?.inheritance?.inherit_org_defaults ? (
+                    <div className="mt-3 text-xs text-muted-foreground">
+                      Inherited from version {policyQuery.data?.data.inherited_policy?.version ?? "default"}.
+                      {draftPolicy.inheritance.override_fields?.length
+                        ? ` Override fields: ${draftPolicy.inheritance.override_fields.join(", ")}.`
+                        : " No explicit override fields."}
+                    </div>
+                  ) : null}
+                </div>
+
                 <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
                   <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
                     <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
@@ -618,6 +699,30 @@ export default function CodeReviewsPage() {
                     }
                   />
                   <ListTextArea
+                    label="Allowed path patterns"
+                    value={draftPolicy?.risk_policy.allowed_path_patterns ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      updateDraftPolicy({
+                        ...draftPolicy,
+                        risk_policy: { ...draftPolicy.risk_policy, allowed_path_patterns: items },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Blocked path patterns"
+                    value={draftPolicy?.risk_policy.blocked_path_patterns ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      updateDraftPolicy({
+                        ...draftPolicy,
+                        risk_policy: { ...draftPolicy.risk_policy, blocked_path_patterns: items },
+                      })
+                    }
+                  />
+                  <ListTextArea
                     label="Excluded categories"
                     value={draftPolicy?.risk_policy.exclude_categories ?? []}
                     disabled={!draftPolicy}
@@ -731,6 +836,7 @@ export default function CodeReviewsPage() {
                                   title: "Custom requirement",
                                   prompt: "",
                                   required: true,
+                                  applies_when: { kind: "all" },
                                 },
                               ],
                             },
@@ -778,21 +884,34 @@ export default function CodeReviewsPage() {
                           </Button>
                         </div>
                         <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
-                          <Input
-                            value={requirement.applicability ?? ""}
-                            disabled={!draftPolicy}
-                            placeholder="Applicability"
-                            aria-label={`${requirement.key} applicability`}
-                            onChange={(event) => {
-                              if (!draftPolicy) return;
-                              const requirements = [...draftPolicy.description_policy.requirements];
-                              requirements[index] = { ...requirement, applicability: event.target.value };
-                              setDraftOverride({
-                                key: policyKey,
-                                config: { ...draftPolicy, description_policy: { requirements } },
-                              });
-                            }}
-                          />
+                          <div className="space-y-2">
+                            <Label className="text-xs text-muted-foreground">Applies when</Label>
+                            <Select
+                              value={requirement.applies_when?.kind ?? "all"}
+                              disabled={!draftPolicy}
+                              onValueChange={(value) =>
+                                updateDescriptionRequirement(index, (current) => ({
+                                  ...current,
+                                  applicability: value,
+                                  applies_when: {
+                                    ...(current.applies_when ?? {}),
+                                    kind: value as CodeReviewDescriptionApplicabilityKind,
+                                  },
+                                }))
+                              }
+                            >
+                              <SelectTrigger aria-label={`${requirement.key} applicability`}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {Object.entries(APPLICABILITY_KIND_LABELS).map(([kind, label]) => (
+                                  <SelectItem key={kind} value={kind}>
+                                    {label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
                           <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
                             <Label className="text-xs text-muted-foreground">Required</Label>
                             <Switch
@@ -809,6 +928,70 @@ export default function CodeReviewsPage() {
                               }}
                             />
                           </div>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <NumberPolicyInput
+                            label="Min files"
+                            value={requirement.applies_when?.min_files_changed}
+                            min={0}
+                            disabled={!draftPolicy}
+                            onChange={(value) =>
+                              updateDescriptionRequirement(index, (current) => ({
+                                ...current,
+                                applies_when: { ...(current.applies_when ?? { kind: "all" }), min_files_changed: value },
+                              }))
+                            }
+                          />
+                          <NumberPolicyInput
+                            label="Min lines"
+                            value={requirement.applies_when?.min_lines_changed}
+                            min={0}
+                            disabled={!draftPolicy}
+                            onChange={(value) =>
+                              updateDescriptionRequirement(index, (current) => ({
+                                ...current,
+                                applies_when: { ...(current.applies_when ?? { kind: "all" }), min_lines_changed: value },
+                              }))
+                            }
+                          />
+                        </div>
+                        <ListTextArea
+                          label="Path patterns"
+                          value={requirement.applies_when?.path_patterns ?? []}
+                          disabled={!draftPolicy}
+                          onChange={(items) =>
+                            updateDescriptionRequirement(index, (current) => ({
+                              ...current,
+                              applies_when: { ...(current.applies_when ?? { kind: "paths" }), path_patterns: items },
+                            }))
+                          }
+                        />
+                        <ListTextArea
+                          label="Categories"
+                          value={requirement.applies_when?.categories ?? []}
+                          disabled={!draftPolicy}
+                          onChange={(items) =>
+                            updateDescriptionRequirement(index, (current) => ({
+                              ...current,
+                              applies_when: { ...(current.applies_when ?? { kind: "categories" }), categories: items },
+                            }))
+                          }
+                        />
+                        <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+                          <Label className="text-xs text-muted-foreground">Require changed test files</Label>
+                          <Switch
+                            checked={requirement.applies_when?.require_test_files_changed ?? false}
+                            disabled={!draftPolicy}
+                            onCheckedChange={(checked) =>
+                              updateDescriptionRequirement(index, (current) => ({
+                                ...current,
+                                applies_when: {
+                                  ...(current.applies_when ?? { kind: "tests_changed" }),
+                                  require_test_files_changed: checked,
+                                },
+                              }))
+                            }
+                          />
                         </div>
                         <Textarea
                           value={requirement.prompt}
@@ -1000,6 +1183,138 @@ function ListTextArea({
       />
     </div>
   );
+}
+
+function CodeReviewEvidencePanel({
+  review,
+  evidence,
+  isLoading,
+  error,
+}: {
+  review: CodeReviewListItem;
+  evidence?: CodeReviewEvidence;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  const agentResults = evidence?.agent_results ?? [];
+  const findings = evidence?.findings ?? [];
+  const artifacts = evidence?.prompt_artifacts ?? [];
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardTitle>
+            Evidence for #{review.github_pr_number} {review.pull_request_title}
+          </CardTitle>
+          <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
+        {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
+        {!isLoading && !error && !evidence ? (
+          <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
+        ) : null}
+        {evidence ? (
+          <>
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-foreground">Agent results</div>
+                {agentResults.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No agent results recorded.</div>
+                ) : (
+                  agentResults.map((result) => (
+                    <div key={result.id} className="rounded-md border border-border p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-foreground">
+                            {result.agent_provider} · {result.role}
+                          </div>
+                          {result.agent_model ? (
+                            <div className="mt-1 text-xs text-muted-foreground">{result.agent_model}</div>
+                          ) : null}
+                        </div>
+                        <Badge variant={statusVariant(result.status)}>{result.status}</Badge>
+                      </div>
+                      {result.raw_output ? (
+                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                          {result.raw_output}
+                        </pre>
+                      ) : null}
+                      {result.structured_result ? (
+                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                          {formatEvidenceJSON(result.structured_result)}
+                        </pre>
+                      ) : null}
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="space-y-2">
+                <div className="text-sm font-medium text-foreground">Findings</div>
+                {findings.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No findings recorded.</div>
+                ) : (
+                  findings.map((finding) => (
+                    <div key={finding.id} className="rounded-md border border-border p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-foreground">{finding.summary}</div>
+                          <div className="mt-1 text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
+                        </div>
+                        <Badge variant={finding.severity === "critical" || finding.severity === "high" ? "destructive" : "outline"}>
+                          {finding.severity}
+                        </Badge>
+                      </div>
+                      <div className="mt-2 text-sm text-muted-foreground">{finding.body}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="text-sm font-medium text-foreground">Prompt artifacts</div>
+              {artifacts.length === 0 ? (
+                <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+              ) : (
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {artifacts.map((artifact) => (
+                    <div key={artifact.id} className="rounded-md border border-border p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
+                        <Badge variant="outline">{artifact.role}</Badge>
+                      </div>
+                      <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                        {artifact.content}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function formatEvidenceJSON(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatFindingLocation(finding: NonNullable<CodeReviewEvidence["findings"]>[number]): string {
+  if (!finding.path) return "General finding";
+  if (finding.start_line && finding.end_line && finding.end_line !== finding.start_line) {
+    return `${finding.path}:${finding.start_line}-${finding.end_line}`;
+  }
+  if (finding.start_line) return `${finding.path}:${finding.start_line}`;
+  return finding.path;
 }
 
 function InsightCard({ label, value }: { label: string; value: number | string }) {

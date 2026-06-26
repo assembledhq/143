@@ -23,7 +23,7 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
 	config.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
-	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
@@ -33,8 +33,8 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
 
@@ -59,7 +59,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
 		}))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
@@ -81,7 +81,7 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
 	config.FinalReviewTemplate = "final review template"
-	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
@@ -91,8 +91,8 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
@@ -112,12 +112,18 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
 	config.FinalReviewTemplate = "custom final review template"
-	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
+	mock.ExpectQuery("repository_id IS NULL").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+		}))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT COALESCE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -129,12 +135,12 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
 	mock.ExpectCommit()
 
 	record, err := NewCodeReviewStore(mock).SavePolicy(context.Background(), orgID, &repoID, config, &userID)
@@ -240,11 +246,12 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
+	supersededBy := uuid.New()
 	mock.ExpectExec("UPDATE code_review_session_metadata").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
-	count, err := NewCodeReviewStore(mock).MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new")
+	count, err := NewCodeReviewStore(mock).MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new", &supersededBy)
 
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should stale older queued/running reviews")
 	require.Equal(t, int64(2), count, "MarkStaleForPullRequestExceptHead should return affected row count")
@@ -374,7 +381,7 @@ func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {
+func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, []byte) {
 	t.Helper()
 	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)
 	require.NoError(t, err, "description policy should marshal")
@@ -382,5 +389,7 @@ func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig
 	require.NoError(t, err, "risk policy should marshal")
 	agentRoster, err := json.Marshal(config.AgentRoster)
 	require.NoError(t, err, "agent roster should marshal")
-	return descriptionPolicy, riskPolicy, agentRoster
+	inheritance, err := json.Marshal(config.Inheritance)
+	require.NoError(t, err, "inheritance should marshal")
+	return descriptionPolicy, riskPolicy, agentRoster, inheritance
 }
