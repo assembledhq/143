@@ -1322,6 +1322,7 @@ func (r *StartRunner) retryBranchPreviewStartupInterruption(ctx context.Context,
 		r.abort(ctx, reservation, sandboxID(sb), fmt.Sprintf("reset preview startup after interruption: %v", err))
 		return fmt.Errorf("reset branch preview after startup interruption: %w", err)
 	}
+	r.registerStartupInterruptionDeadLetter(ctx, reservation)
 	r.destroyBranchPreviewSandboxAfterInterruption(ctx, payload.PreviewID, sb)
 	return fmt.Errorf("%w: %s", ErrPreviewStartupInterrupted, reason)
 }
@@ -1346,6 +1347,28 @@ func sandboxID(sb *agent.Sandbox) string {
 		return ""
 	}
 	return sb.ID
+}
+
+func uuidValueString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+func (r *StartRunner) registerStartupInterruptionDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {
+	if r == nil || r.manager == nil || reservation == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		if deadLetterErr != nil {
+			r.logger.Warn().Err(deadLetterErr).
+				Str("preview_id", reservation.ID.String()).
+				Str("preview_target_id", uuidValueString(reservation.PreviewTargetID)).
+				Msg("branch preview start dead-lettered after startup interruption retries")
+		}
+		r.manager.AbortReservation(hookCtx, reservation, "", "Preview could not start because the sandbox was interrupted repeatedly. Try starting the preview again.")
+	})
 }
 
 func (r *StartRunner) registerCapacityDeadLetter(ctx context.Context, reservation *models.PreviewInstance) {

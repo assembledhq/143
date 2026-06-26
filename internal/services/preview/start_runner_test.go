@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -193,20 +194,25 @@ func TestStartRunnerRetryBranchPreviewStartupInterruptionResetsAndDestroysSandbo
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 	mock.ExpectCommit()
+	expectUpdatePreviewStatusFailed(mock)
 
+	store := db.NewPreviewStore(mock)
 	runner := &StartRunner{
-		previews:        db.NewPreviewStore(mock),
+		manager:         &Manager{store: store, logger: zerolog.Nop()},
+		previews:        store,
 		sandboxProvider: provider,
 		logger:          zerolog.Nop(),
 	}
 	reservation := &models.PreviewInstance{ID: previewID, OrgID: orgID, PreviewTargetID: &targetID, Status: models.PreviewStatusStarting}
 	payload := StartBranchPreviewJobPayload{OrgID: orgID, PreviewID: previewID, PreviewTargetID: targetID}
 	sb := &agent.Sandbox{ID: "sandbox-1", Provider: ProviderDocker}
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
 
-	err = runner.retryBranchPreviewStartupInterruption(context.Background(), payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
+	err = runner.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
 
 	require.ErrorIs(t, err, ErrPreviewStartupInterrupted, "interrupted branch preview startup should return the retryable sentinel")
 	require.Equal(t, []string{"sandbox-1"}, provider.destroyed, "interrupted branch preview startup should destroy the transient sandbox")
+	jobctx.RunDeadLetterHooks(ctx, err)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
