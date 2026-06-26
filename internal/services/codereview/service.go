@@ -21,6 +21,7 @@ type PolicyStore interface {
 
 type MetadataStore interface {
 	CreateSessionMetadata(ctx context.Context, metadata *models.CodeReviewSessionMetadata) error
+	GetByOutputKey(ctx context.Context, orgID uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error)
 	GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string) (int64, error)
 }
@@ -137,6 +138,12 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return ReviewRequestedResult{}, fmt.Errorf("lookup running code review: %w", err)
 	}
+	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
+	if existing, err := s.metadata.GetByOutputKey(ctx, input.OrgID, outputKey); err == nil {
+		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: existing.SessionID, MetadataID: existing.ID, TriggerSource: source}, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return ReviewRequestedResult{}, fmt.Errorf("lookup code review by output key: %w", err)
+	}
 
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
 	revisionContext, err := json.Marshal(map[string]any{
@@ -174,7 +181,6 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		return ReviewRequestedResult{}, fmt.Errorf("create code review session: %w", err)
 	}
 
-	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
 	metadata := &models.CodeReviewSessionMetadata{
 		OrgID:           input.OrgID,
 		SessionID:       session.ID,
@@ -190,6 +196,9 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	}
 	if err := s.metadata.CreateSessionMetadata(ctx, metadata); err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("create code review metadata: %w", err)
+	}
+	if metadata.SessionID != session.ID {
+		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: metadata.SessionID, MetadataID: metadata.ID, TriggerSource: source}, nil
 	}
 
 	payload := RunCodeReviewJobPayload{

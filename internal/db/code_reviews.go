@@ -212,6 +212,21 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 	return nil
 }
 
+func (s *CodeReviewStore) GetByOutputKey(ctx context.Context, orgID uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND review_output_key = @review_output_key`, pgx.NamedArgs{
+		"org_id":            orgID,
+		"review_output_key": outputKey,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query code review by output key: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
 func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewMetadataColumns+`

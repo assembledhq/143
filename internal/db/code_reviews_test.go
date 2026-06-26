@@ -198,6 +198,38 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	outputKey := "pr:head:policy"
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("review_output_key = @review_output_key").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, false, nil, outputKey, nil, nil, nil, nil, nil, nil, now))
+
+	metadata, err := NewCodeReviewStore(mock).GetByOutputKey(context.Background(), orgID, outputKey)
+
+	require.NoError(t, err, "GetByOutputKey should load metadata by stable output key")
+	require.Equal(t, metadataID, metadata.ID, "GetByOutputKey should return the matching metadata")
+	require.Equal(t, orgID, metadata.OrgID, "GetByOutputKey should preserve org-scoped metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	t.Parallel()
 

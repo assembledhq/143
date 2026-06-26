@@ -74,6 +74,36 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
+			name:  "reuses terminal review for same output key",
+			input: newReviewRequestedInput(nil),
+			setup: func(p *policyStub, m *metadataStub) {
+				m.byOutputKey = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "matching duplicate terminal request should be processed")
+				require.True(t, result.Reused, "duplicate terminal request should reuse the existing review")
+				require.Equal(t, metadata.byOutputKey.SessionID, result.SessionID, "result should point to existing terminal session")
+				require.Equal(t, 0, sessions.createCalls, "duplicate terminal request should not create a detached session")
+				require.Equal(t, 0, metadata.createCalls, "duplicate terminal request should not create duplicate metadata")
+				require.Equal(t, 0, jobs.enqueueCalls, "duplicate terminal request should not enqueue a broken job")
+			},
+		},
+		{
+			name:  "does not enqueue when metadata creation races with same output key",
+			input: newReviewRequestedInput(nil),
+			setup: func(p *policyStub, m *metadataStub) {
+				m.createResult = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusQueued}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "raced duplicate request should be processed")
+				require.True(t, result.Reused, "raced duplicate request should reuse the winning metadata row")
+				require.Equal(t, metadata.createResult.SessionID, result.SessionID, "result should point to winning session metadata")
+				require.Equal(t, 1, sessions.createCalls, "raced duplicate request may have created a loser session before conflict detection")
+				require.Equal(t, 1, metadata.createCalls, "raced duplicate request should attempt metadata creation once")
+				require.Equal(t, 0, jobs.enqueueCalls, "raced duplicate request should not enqueue a job for the loser session")
+			},
+		},
+		{
 			name:  "honors disabled policy",
 			input: newReviewRequestedInput(nil),
 			setup: func(p *policyStub, m *metadataStub) {
@@ -151,18 +181,32 @@ func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID
 }
 
 type metadataStub struct {
-	createCalls int
-	staleCalls  int
-	created     models.CodeReviewSessionMetadata
-	running     models.CodeReviewSessionMetadata
-	runningErr  error
+	createCalls  int
+	staleCalls   int
+	created      models.CodeReviewSessionMetadata
+	createResult models.CodeReviewSessionMetadata
+	running      models.CodeReviewSessionMetadata
+	byOutputKey  models.CodeReviewSessionMetadata
+	runningErr   error
 }
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	s.createCalls++
+	if s.createResult.ID != uuid.Nil {
+		*metadata = s.createResult
+		s.created = *metadata
+		return nil
+	}
 	metadata.ID = uuid.New()
 	s.created = *metadata
 	return nil
+}
+
+func (s *metadataStub) GetByOutputKey(_ context.Context, _ uuid.UUID, _ string) (models.CodeReviewSessionMetadata, error) {
+	if s.byOutputKey.ID != uuid.Nil {
+		return s.byOutputKey, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
 func (s *metadataStub) GetRunningByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
