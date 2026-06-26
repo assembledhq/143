@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,18 +10,24 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 type CodeReviewHandler struct {
-	store *db.CodeReviewStore
-	repos *db.RepositoryStore
+	store        *db.CodeReviewStore
+	repos        *db.RepositoryStore
+	triggerSetup *codereviewsvc.GitHubTriggerSetupService
 }
 
 func NewCodeReviewHandler(store *db.CodeReviewStore, repos *db.RepositoryStore) *CodeReviewHandler {
 	return &CodeReviewHandler{store: store, repos: repos}
+}
+
+func (h *CodeReviewHandler) SetGitHubTriggerSetupService(service *codereviewsvc.GitHubTriggerSetupService) {
+	h.triggerSetup = service
 }
 
 func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +162,102 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyRecord]{Data: record})
+}
+
+func (h *CodeReviewHandler) GetGitHubTrigger(w http.ResponseWriter, r *http.Request) {
+	if h.triggerSetup == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_TRIGGER_SETUP_NOT_CONFIGURED", "GitHub reviewer trigger setup is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	repositoryID, ok := parseRequiredUUIDQuery(w, r, "repository_id")
+	if !ok {
+		return
+	}
+	resp, err := h.triggerSetup.Status(r.Context(), orgID, user.ID, repositoryID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_TRIGGER_STATUS_FAILED", "failed to load GitHub reviewer trigger status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewGitHubTriggerResponse]{Data: resp})
+}
+
+func (h *CodeReviewHandler) SetupGitHubTrigger(w http.ResponseWriter, r *http.Request) {
+	if h.triggerSetup == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_TRIGGER_SETUP_NOT_CONFIGURED", "GitHub reviewer trigger setup is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	var req struct {
+		RepositoryID uuid.UUID `json:"repository_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.RepositoryID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_REPOSITORY_ID", "repository_id is required")
+		return
+	}
+	resp, err := h.triggerSetup.Setup(r.Context(), codereviewsvc.GitHubTriggerSetupInput{
+		OrgID:        orgID,
+		UserID:       user.ID,
+		RepositoryID: req.RepositoryID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, codereviewsvc.ErrGitHubTriggerAuthRequired):
+			writeError(w, r, http.StatusConflict, "GITHUB_USER_AUTH_REQUIRED", "connect your GitHub account before creating the reviewer team", err)
+		case errors.Is(err, codereviewsvc.ErrGitHubTriggerPermissionRequired):
+			writeError(w, r, http.StatusForbidden, "GITHUB_TRIGGER_PERMISSION_REQUIRED", "GitHub rejected setup; an org owner may need to approve Organization Members write and Repository Administration write permissions for the GitHub App", err)
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "GITHUB_TRIGGER_SETUP_FAILED", "failed to set up GitHub reviewer trigger", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewGitHubTriggerResponse]{Data: resp})
+}
+
+func (h *CodeReviewHandler) DeleteGitHubTrigger(w http.ResponseWriter, r *http.Request) {
+	if h.triggerSetup == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "GITHUB_TRIGGER_SETUP_NOT_CONFIGURED", "GitHub reviewer trigger setup is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	repositoryID, ok := parseRequiredUUIDQuery(w, r, "repository_id")
+	if !ok {
+		return
+	}
+	if err := h.triggerSetup.Deactivate(r.Context(), orgID, user.ID, repositoryID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "GITHUB_TRIGGER_DELETE_FAILED", "failed to disable GitHub reviewer trigger", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *CodeReviewHandler) CreateAgentResult(w http.ResponseWriter, r *http.Request) {

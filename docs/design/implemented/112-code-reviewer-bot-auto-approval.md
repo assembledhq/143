@@ -31,9 +31,10 @@ Implemented:
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
 - GitHub pending/final commit-status publication for code review runs when the worker has GitHub credentials
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
+- productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
-- `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
-- top-level `Code reviews` dashboard surface with Reviews and Configurations, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
+- `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, `/api/v1/code-review-policies`, and `/api/v1/code-review-github-trigger` API surface
+- top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
 
 Deferred:
 
@@ -70,7 +71,7 @@ Ship **Reviewer Bot With 143 Code Review Sessions**, triggered by explicit GitHu
 
 Recommended v1 scope:
 
-- GitHub App-backed bot reviewer identity.
+- GitHub team trigger (`@org/143-code-reviewer`) backed by GitHub App-authored final reviews.
 - `review_requested` trigger for selected repositories.
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
 - Editable PR-description policy and acceptable-risk starter templates.
@@ -123,9 +124,12 @@ Reviewer assignment should be explicit in v1. Auto-running can come later after 
 
 Primary interaction:
 
-- The installed GitHub App exposes a reviewer identity such as `143-code-reviewer`.
-- A user requests the bot as a reviewer on a PR.
+- A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
+- 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
+- A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
 - The bot posts one pending/running status, then submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines.
+
+This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 
 Example final approval:
 
@@ -535,6 +539,21 @@ code_review_session_metadata (
     created_at timestamptz not null default now()
 );
 
+code_review_github_trigger_settings (
+    id uuid primary key,
+    org_id uuid not null references organizations(id),
+    repository_id uuid not null references repositories(id),
+    installation_id bigint not null,
+    active boolean not null default true,
+    version int not null,
+    team_slug text not null,
+    team_name text not null,
+    team_id bigint not null,
+    repo_permission text not null,
+    created_by_user_id uuid references users(id),
+    created_at timestamptz not null default now()
+);
+
 code_review_agent_results (
     id uuid primary key,
     org_id uuid not null references organizations(id),
@@ -567,7 +586,7 @@ code_review_findings (
 );
 ```
 
-Use insert-only versioning for policies so approvals always point to the policy that produced them. Enforce active policy uniqueness per `(org_id, repository_id)` with partial unique indexes over `active = true`, plus a separate org-default row where `repository_id` is null.
+Use insert-only versioning for policies so approvals always point to the policy that produced them. Enforce active policy uniqueness per `(org_id, repository_id)` with partial unique indexes over `active = true`, plus a separate org-default row where `repository_id` is null. GitHub trigger settings are also insert-only and repo-scoped; only one active trigger setting may exist per `(org_id, repository_id)`.
 
 Code review execution state hangs off normal `sessions` through a dedicated session kind plus companion metadata keyed by `session_id`. Do not create a separate detail/run hierarchy.
 

@@ -5,6 +5,7 @@ import { server } from "@/test/mocks/server";
 import CodeReviewsPage from "./page";
 import type {
   CodeReviewEvidence,
+  CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
   CodeReviewResolvedPolicy,
   CodeReviewTemplateOption,
@@ -162,16 +163,45 @@ const template: CodeReviewTemplateOption = {
   },
 };
 
+const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
+  status: "ready",
+  repository_id: "repo-1",
+  repository_full_name: "acme/api",
+  github_org: "acme",
+  team_slug: "143-code-reviewer",
+  team_name: "143 Code Reviewer",
+  team_reviewer: "@acme/143-code-reviewer",
+  repo_permission: "pull",
+  trigger: {
+    id: "trigger-1",
+    org_id: "org-1",
+    repository_id: "repo-1",
+    installation_id: 123,
+    active: true,
+    version: 1,
+    team_slug: "143-code-reviewer",
+    team_name: "143 Code Reviewer",
+    team_id: 143,
+    repo_permission: "pull",
+    created_at: "2026-06-26T12:00:00Z",
+  },
+};
+
+function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady) {
+  server.use(
+    http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repo], meta: {} } satisfies ListResponse<Repository>)),
+    http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
+    http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
+    http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
+    http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
+    http.get("/api/v1/code-review-github-trigger", () => HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>)),
+  );
+}
+
 describe("CodeReviewsPage", () => {
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
-    server.use(
-      http.get("/api/v1/repositories", () => HttpResponse.json({ data: [repo], meta: {} } satisfies ListResponse<Repository>)),
-      http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
-      http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
-      http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
-      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: policy } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
-    );
+    mockCodeReviewBaseHandlers();
 
     renderWithProviders(<CodeReviewsPage />);
 
@@ -185,11 +215,15 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Clarify branch name")).toBeInTheDocument();
     expect(screen.getByText("Review this PR.")).toBeInTheDocument();
 
+    await user.click(screen.getByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("Understandable description")).toBeInTheDocument();
     });
+    expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
+    expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.getByDisplayValue("*auth*")).toBeInTheDocument();
     expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
     expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
@@ -207,5 +241,65 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(screen.getByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("renders GitHub trigger account-required state", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers({
+      status: "auth_required",
+      repository_id: "repo-1",
+      repository_full_name: "acme/api",
+      github_org: "acme",
+      team_slug: "143-code-reviewer",
+      team_name: "143 Code Reviewer",
+      team_reviewer: "@acme/143-code-reviewer",
+      repo_permission: "pull",
+      message: "Connect your GitHub account before creating the reviewer team.",
+    });
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+
+    expect(await screen.findByText("Needs GitHub account")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
+  });
+
+  it("surfaces GitHub trigger setup permission errors", async () => {
+    const user = userEvent.setup();
+    let setupCalls = 0;
+    mockCodeReviewBaseHandlers({
+      status: "unconfigured",
+      repository_id: "repo-1",
+      repository_full_name: "acme/api",
+      github_org: "acme",
+      team_slug: "143-code-reviewer",
+      team_name: "143 Code Reviewer",
+      team_reviewer: "@acme/143-code-reviewer",
+      repo_permission: "pull",
+    });
+    server.use(
+      http.post("/api/v1/code-review-github-trigger/setup", () => {
+        setupCalls += 1;
+        return HttpResponse.json(
+          { error: { code: "GITHUB_TRIGGER_PERMISSION_REQUIRED", message: "GitHub rejected setup" } },
+          { status: 403 },
+        );
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("button", { name: /Create \/ repair team/i }));
+
+    await waitFor(() => {
+      expect(setupCalls).toBe(1);
+    });
+    expect(await screen.findByText("GitHub rejected setup")).toBeInTheDocument();
   });
 });
