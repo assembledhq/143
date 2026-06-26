@@ -143,6 +143,29 @@ describe("session PR action state", () => {
     expect(state.disabledReason, "Push changes should explain the running-session blocker").toBe("Wait for the session to finish before pushing changes");
   });
 
+  it("disables push retry while the session is still running", () => {
+    const state = derivePushChangesActionState({
+      canShipPR: true,
+      hasOpenPR: true,
+      hasUnpushedChanges: true,
+      hasSnapshot: true,
+      isRunning: true,
+      builderReviewAllowsPR: true,
+      snapshotUnavailable: false,
+      ghBlocked: false,
+      queueingPush: false,
+      pushingChanges: false,
+      pushState: "failed",
+      pushError: "The PR branch has changes that are not in this session checkpoint.",
+    });
+
+    expect(state.visible, "Failed Push changes should remain visible while the session is running").toBe(true);
+    expect(state.disabled, "Failed Push changes should not allow retry while the session is running").toBe(true);
+    expect(state.label, "Failed Push changes should keep the retry affordance visible").toBe("Retry");
+    expect(state.disabledReason, "Disabled retry should explain that the session must finish first").toBe("Wait for the session to finish before pushing changes");
+    expect(state.showError, "Disabled retry should retain the error styling").toBe(true);
+  });
+
   it("hides push changes when PR health is blocked", () => {
     const state = derivePushChangesActionState({
       canShipPR: true,
