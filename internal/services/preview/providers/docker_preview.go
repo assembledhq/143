@@ -1245,7 +1245,7 @@ const previewInstallRuntimeVersion = "docker-preview-install-v1"
 type previewInstallCacheKey struct {
 	RuntimeVersion  string                      `json:"runtime_version"`
 	SandboxProvider string                      `json:"sandbox_provider,omitempty"`
-	SandboxImage    string                      `json:"sandbox_image,omitempty"`
+	SandboxCacheABI string                      `json:"sandbox_cache_abi,omitempty"`
 	Command         []string                    `json:"command"`
 	Cwd             string                      `json:"cwd"`
 	Lockfiles       []previewInstallLockfileKey `json:"lockfiles"`
@@ -1943,7 +1943,7 @@ func (d *DockerPreviewProvider) computePreviewInstallCacheKey(ctx context.Contex
 	if sb != nil {
 		key.SandboxProvider = sb.Provider
 		if sb.Metadata != nil {
-			key.SandboxImage = sb.Metadata["image"]
+			key.SandboxCacheABI = preview.SandboxCacheABIFromMetadata(sb.Metadata)
 		}
 	}
 	payload, err := json.Marshal(key)
