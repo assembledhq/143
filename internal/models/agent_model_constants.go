@@ -95,59 +95,81 @@ var AvailableCodexModels = []string{
 }
 
 const (
-	OpenCodeModelGPT54Mini       = "openai/gpt-5.4-mini"
-	OpenCodeModelGPT53CodexSpark = "openai/gpt-5.3-codex-spark"
-	OpenCodeModelClaudeHaiku45   = "anthropic/claude-haiku-4-5"
-	OpenCodeModelGemini35Flash   = "opencode/gemini-3.5-flash"
-	OpenCodeModelGemini3Flash    = "google/gemini-3-flash"
-	OpenCodeModelMiniMaxM27      = "opencode/minimax-m2.7"
-	OpenCodeModelMiniMaxM25      = "opencode/minimax-m2.5"
-	OpenCodeModelQwen37Plus      = "opencode/qwen3.7-plus"
-	OpenCodeModelQwen36Plus      = "opencode/qwen3.6-plus"
-	OpenCodeModelDeepSeekV4Flash = "opencode/deepseek-v4-flash"
-	OpenCodeModelDeepSeekV4Pro   = "opencode/deepseek-v4-pro"
-	OpenCodeModelGLM52           = "opencode/glm-5.2"
-	OpenCodeModelGLM51           = "opencode/glm-5.1"
-	OpenCodeModelKimiK25         = "opencode/kimi-k2.5"
-	OpenCodeModelGPT54           = "openai/gpt-5.4"
-	OpenCodeModelClaudeSonnet46  = "anthropic/claude-sonnet-4-6"
-	OpenCodeModelGemini31Pro     = "opencode/gemini-3.1-pro"
-	OpenCodeModelQwen37Max       = "opencode/qwen3.7-max"
-	OpenCodeModelKimiK26         = "opencode/kimi-k2.6"
-	OpenCodeModelGPT52           = "opencode/gpt-5.2"
-	OpenCodeModelGPT55           = "opencode/gpt-5.5"
-	OpenCodeModelGPT55Pro        = "opencode/gpt-5.5-pro"
-	OpenCodeModelClaudeOpus48    = "anthropic/claude-opus-4-8"
-	OpenCodeModelClaudeOpus47    = "anthropic/claude-opus-4-7"
-	OpenCodeModelClaudeFable5    = "opencode/claude-fable-5"
+	OpenCodeModelGPT54Mini                 = "openai/gpt-5.4-mini"
+	OpenCodeModelGPT53CodexSpark           = "openai/gpt-5.3-codex-spark"
+	OpenCodeModelClaudeHaiku45             = "anthropic/claude-haiku-4-5"
+	OpenCodeModelGemini35Flash             = "opencode/gemini-3.5-flash"
+	OpenCodeModelOpenRouterGemini35Flash   = "openrouter/google/gemini-3.5-flash"
+	OpenCodeModelGemini3Flash              = "google/gemini-3-flash"
+	OpenCodeModelMiniMaxM27                = "opencode/minimax-m2.7"
+	OpenCodeModelOpenRouterMiniMaxM27      = "openrouter/minimax/minimax-m2.7"
+	OpenCodeModelMiniMaxM25                = "opencode/minimax-m2.5"
+	OpenCodeModelOpenRouterMiniMaxM25      = "openrouter/minimax/minimax-m2.5"
+	OpenCodeModelDeepSeekV4Flash           = "opencode/deepseek-v4-flash"
+	OpenCodeModelOpenRouterDeepSeekV4Flash = "openrouter/deepseek/deepseek-v4-flash"
+	OpenCodeModelDeepSeekV4Pro             = "opencode/deepseek-v4-pro"
+	OpenCodeModelOpenRouterDeepSeekV4Pro   = "openrouter/deepseek/deepseek-v4-pro"
+	OpenCodeModelGLM52                     = "opencode/glm-5.2"
+	OpenCodeModelOpenRouterGLM52           = "openrouter/z-ai/glm-5.2"
+	OpenCodeModelGLM51                     = "opencode/glm-5.1"
+	OpenCodeModelOpenRouterGLM51           = "openrouter/z-ai/glm-5.1"
+	OpenCodeModelKimiK25                   = "opencode/kimi-k2.5"
+	OpenCodeModelOpenRouterKimiK25         = "openrouter/moonshotai/kimi-k2.5"
+	OpenCodeModelGPT54                     = "openai/gpt-5.4"
+	OpenCodeModelClaudeSonnet46            = "anthropic/claude-sonnet-4-6"
+	OpenCodeModelGemini31Pro               = "opencode/gemini-3.1-pro"
+	OpenCodeModelOpenRouterGemini31Pro     = "openrouter/google/gemini-3.1-pro-preview"
+	OpenCodeModelKimiK26                   = "opencode/kimi-k2.6"
+	OpenCodeModelOpenRouterKimiK26         = "openrouter/moonshotai/kimi-k2.6"
+	OpenCodeModelGPT52                     = "opencode/gpt-5.2"
+	OpenCodeModelOpenRouterGPT52           = "openrouter/openai/gpt-5.2"
+	OpenCodeModelGPT55                     = "opencode/gpt-5.5"
+	OpenCodeModelOpenRouterGPT55           = "openrouter/openai/gpt-5.5"
+	OpenCodeModelGPT55Pro                  = "opencode/gpt-5.5-pro"
+	OpenCodeModelOpenRouterGPT55Pro        = "openrouter/openai/gpt-5.5-pro"
+	OpenCodeModelClaudeOpus48              = "anthropic/claude-opus-4-8"
+	OpenCodeModelClaudeOpus47              = "anthropic/claude-opus-4-7"
+	OpenCodeModelClaudeFable5              = "opencode/claude-fable-5"
+	OpenCodeModelOpenRouterClaudeFable5    = "openrouter/anthropic/claude-fable-5"
 )
 
 var AvailableOpenCodeModels = []string{
+	OpenCodeModelGLM52,
+	OpenCodeModelOpenRouterGLM52,
 	OpenCodeModelGPT54Mini,
 	OpenCodeModelGPT53CodexSpark,
 	OpenCodeModelClaudeHaiku45,
 	OpenCodeModelGemini35Flash,
+	OpenCodeModelOpenRouterGemini35Flash,
 	OpenCodeModelGemini3Flash,
 	OpenCodeModelMiniMaxM27,
+	OpenCodeModelOpenRouterMiniMaxM27,
 	OpenCodeModelMiniMaxM25,
-	OpenCodeModelQwen37Plus,
-	OpenCodeModelQwen36Plus,
+	OpenCodeModelOpenRouterMiniMaxM25,
 	OpenCodeModelDeepSeekV4Flash,
+	OpenCodeModelOpenRouterDeepSeekV4Flash,
 	OpenCodeModelDeepSeekV4Pro,
-	OpenCodeModelGLM52,
+	OpenCodeModelOpenRouterDeepSeekV4Pro,
 	OpenCodeModelGLM51,
+	OpenCodeModelOpenRouterGLM51,
 	OpenCodeModelKimiK25,
+	OpenCodeModelOpenRouterKimiK25,
 	OpenCodeModelGPT54,
 	OpenCodeModelClaudeSonnet46,
 	OpenCodeModelGemini31Pro,
-	OpenCodeModelQwen37Max,
+	OpenCodeModelOpenRouterGemini31Pro,
 	OpenCodeModelKimiK26,
+	OpenCodeModelOpenRouterKimiK26,
 	OpenCodeModelGPT52,
+	OpenCodeModelOpenRouterGPT52,
 	OpenCodeModelGPT55,
+	OpenCodeModelOpenRouterGPT55,
 	OpenCodeModelGPT55Pro,
+	OpenCodeModelOpenRouterGPT55Pro,
 	OpenCodeModelClaudeOpus48,
 	OpenCodeModelClaudeOpus47,
 	OpenCodeModelClaudeFable5,
+	OpenCodeModelOpenRouterClaudeFable5,
 }
 
 // CodexRuntimeSpec is the resolved execution spec for a Codex model alias.
