@@ -226,7 +226,7 @@ export function derivePushChangesActionState(input: PushChangesActionInput): Lab
     input.pushErrorCode === "branch_diverged" ||
     input.localErrorCode === "PR_BRANCH_DIVERGED";
   const hasRetryablePushError = (Boolean(input.localError) || input.pushState === "failed") && !hasBranchDivergedError;
-  const branchDivergedReason = input.pushError || input.localError || "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.";
+  const branchDivergedReason = "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.";
   if (input.isRunning) {
     return {
       visible: true,

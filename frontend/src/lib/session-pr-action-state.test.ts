@@ -175,14 +175,14 @@ describe("session PR action state", () => {
         name: "persisted error code",
         input: {
           pushState: "failed" as const,
-          pushError: "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.",
+          pushError: "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again.",
           pushErrorCode: "branch_diverged" as const,
         },
       },
       {
         name: "local API error code",
         input: {
-          localError: "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.",
+          localError: "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again.",
           localErrorCode: "PR_BRANCH_DIVERGED",
         },
       },
@@ -206,6 +206,7 @@ describe("session PR action state", () => {
       expect(state.visible, `${tt.name} should keep Push changes visible`).toBe(true);
       expect(state.disabled, `${tt.name} should allow the corrective continuation`).toBe(false);
       expect(state.label, `${tt.name} should replace Retry with the branch continuation CTA`).toBe("Continue from PR branch");
+      expect(state.disabledReason, `${tt.name} should show continuation-specific guidance instead of the raw backend error`).toBe("The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.");
       expect(state.showError, `${tt.name} should retain error styling`).toBe(true);
       expect(state.requiresBranchSync, `${tt.name} should route clicks to the send-message path`).toBe(true);
     }
