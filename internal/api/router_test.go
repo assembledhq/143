@@ -144,6 +144,26 @@ func TestNewRouter_WiresCodeReviewTriggerConfig(t *testing.T) {
 	require.Greater(t, setService, teamConfig, "webhook handler should receive the configured service")
 }
 
+func TestNewRouter_MountsCodeReviewGitHubTriggerSetupAsAdminOnly(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for code review GitHub trigger route regression test")
+
+	readRoute := strings.Index(string(source), `r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)`)
+	adminGroup := strings.Index(string(source), `// Admin-only routes`)
+	setupRoute := strings.Index(string(source), `r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)`)
+	deleteRoute := strings.Index(string(source), `r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)`)
+
+	require.NotEqual(t, -1, readRoute, "router should expose trigger status as a read route")
+	require.NotEqual(t, -1, adminGroup, "router should keep an admin-only route block")
+	require.NotEqual(t, -1, setupRoute, "router should expose trigger setup route")
+	require.NotEqual(t, -1, deleteRoute, "router should expose trigger delete route")
+	require.Less(t, readRoute, adminGroup, "trigger status should stay in the read-only org route block")
+	require.Greater(t, setupRoute, adminGroup, "trigger setup should stay in the admin-only route block")
+	require.Greater(t, deleteRoute, adminGroup, "trigger delete should stay in the admin-only route block")
+}
+
 func testRouterPrivateKeyPEM(t *testing.T) string {
 	t.Helper()
 

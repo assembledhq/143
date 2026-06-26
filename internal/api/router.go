@@ -354,11 +354,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		AliasLogins:       cfg.CodeReviewAliasLogins,
 		TeamSlugs:         cfg.CodeReviewTeamSlugs,
 	})
+	codeReviewSvc.SetGitHubTriggerStore(codeReviewStore)
+	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
+	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
 	sessionHandler := handlers.NewSessionHandler(
 		sessionStore,
@@ -1173,6 +1176,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/code-reviews/templates", codeReviewHandler.Templates)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
+				r.Get("/api/v1/code-review-github-trigger", codeReviewHandler.GetGitHubTrigger)
 
 				// GitHub connection status for PR authorship
 				r.Get("/api/v1/users/me/github-status", githubStatusHandler.GetStatus)
@@ -1533,6 +1537,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
+				r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)
+				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)
 				r.Post("/api/v1/code-reviews/{id}/findings", codeReviewHandler.CreateFinding)
 				r.Put("/api/v1/pr-readiness-policies", sessionHandler.PutReadinessPolicy)

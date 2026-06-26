@@ -40,6 +40,7 @@ type Service struct {
 	metadata MetadataStore
 	sessions SessionStore
 	jobs     JobStore
+	triggers GitHubTriggerStore
 	logger   zerolog.Logger
 	cfg      Config
 }
@@ -103,16 +104,23 @@ func NewService(policies PolicyStore, metadata MetadataStore, sessions SessionSt
 	}
 }
 
+func (s *Service) SetGitHubTriggerStore(triggers GitHubTriggerStore) {
+	s.triggers = triggers
+}
+
 func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequestedInput) (ReviewRequestedResult, error) {
-	source, ok := s.matchRequestedReviewer(input)
-	if !ok {
-		return ReviewRequestedResult{IgnoredReason: "reviewer_not_configured"}, nil
-	}
 	if input.OrgID == uuid.Nil || input.RepositoryID == uuid.Nil || input.PullRequestID == uuid.Nil {
 		return ReviewRequestedResult{}, fmt.Errorf("org_id, repository_id, and pull_request_id are required")
 	}
 	if strings.TrimSpace(input.HeadSHA) == "" {
 		return ReviewRequestedResult{}, fmt.Errorf("head_sha is required")
+	}
+	source, ok, err := s.matchRequestedReviewer(ctx, input)
+	if err != nil {
+		return ReviewRequestedResult{}, err
+	}
+	if !ok {
+		return ReviewRequestedResult{IgnoredReason: "reviewer_not_configured"}, nil
 	}
 
 	repositoryID := input.RepositoryID
@@ -251,19 +259,28 @@ func StableOutputKey(pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID
 	return fmt.Sprintf("pr:%s:head:%s:policy:%s:v%d", pullRequestID, headSHA, policyID, policyVersion)
 }
 
-func (s *Service) matchRequestedReviewer(input ReviewRequestedInput) (models.CodeReviewTriggerSource, bool) {
+func (s *Service) matchRequestedReviewer(ctx context.Context, input ReviewRequestedInput) (models.CodeReviewTriggerSource, bool, error) {
 	login := strings.ToLower(strings.TrimSpace(input.RequestedLogin))
 	team := strings.ToLower(strings.TrimSpace(input.RequestedTeam))
+	if team != "" && s.triggers != nil {
+		trigger, err := s.triggers.GetActiveGitHubTrigger(ctx, input.OrgID, input.RepositoryID)
+		if err == nil && strings.EqualFold(strings.TrimSpace(trigger.TeamSlug), team) {
+			return models.CodeReviewTriggerSourceTeamReviewer, true, nil
+		}
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", false, fmt.Errorf("load code review GitHub trigger: %w", err)
+		}
+	}
 	if login != "" && containsFold(s.cfg.AppReviewerLogins, login) {
-		return models.CodeReviewTriggerSourceAppReviewer, true
+		return models.CodeReviewTriggerSourceAppReviewer, true, nil
 	}
 	if login != "" && containsFold(s.cfg.AliasLogins, login) {
-		return models.CodeReviewTriggerSourceAliasReviewer, true
+		return models.CodeReviewTriggerSourceAliasReviewer, true, nil
 	}
 	if team != "" && containsFold(s.cfg.TeamSlugs, team) {
-		return models.CodeReviewTriggerSourceTeamReviewer, true
+		return models.CodeReviewTriggerSourceTeamReviewer, true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 func normalizeConfig(cfg Config) Config {
@@ -284,3 +301,4 @@ func containsFold(values []string, needle string) bool {
 
 var _ PolicyStore = (*db.CodeReviewStore)(nil)
 var _ MetadataStore = (*db.CodeReviewStore)(nil)
+var _ GitHubTriggerStore = (*db.CodeReviewStore)(nil)

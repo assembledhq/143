@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -35,6 +36,178 @@ const codeReviewFindingColumns = `id, org_id, session_id, agent_result_id, dedup
 
 const codeReviewPromptArtifactColumns = `id, org_id, session_id, artifact_key, role, agent_provider,
 	content, metadata, created_at`
+
+const codeReviewGitHubTriggerSettingColumns = `id, org_id, repository_id, installation_id, active, version,
+	team_slug, team_name, team_id, repo_permission, created_by_user_id, created_at`
+
+type SaveCodeReviewGitHubTriggerParams struct {
+	RepositoryID    uuid.UUID
+	InstallationID  int64
+	TeamSlug        string
+	TeamName        string
+	TeamID          int64
+	RepoPermission  models.CodeReviewGitHubTriggerRepoPermission
+	CreatedByUserID *uuid.UUID
+}
+
+func (s *CodeReviewStore) GetActiveGitHubTrigger(ctx context.Context, orgID, repositoryID uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewGitHubTriggerSettingColumns+`
+		FROM code_review_github_trigger_settings
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND active = true`, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": repositoryID,
+	})
+	if err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("query code review GitHub trigger: %w", err)
+	}
+	return collectOneCodeReviewGitHubTriggerSetting(rows)
+}
+
+func (s *CodeReviewStore) SaveGitHubTrigger(ctx context.Context, orgID uuid.UUID, params SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
+	if params.RepositoryID == uuid.Nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("repository_id is required")
+	}
+	if strings.TrimSpace(params.TeamSlug) == "" || strings.TrimSpace(params.TeamName) == "" {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("team slug and name are required")
+	}
+	if err := params.RepoPermission.Validate(); err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, err
+	}
+	if params.RepoPermission != models.DefaultCodeReviewGitHubTriggerRepoPerm {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("repo permission must be %q", models.DefaultCodeReviewGitHubTriggerRepoPerm)
+	}
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("save code review GitHub trigger requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("begin code review GitHub trigger tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var version int
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) + 1
+		FROM code_review_github_trigger_settings
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id`, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": params.RepositoryID,
+	}).Scan(&version); err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("select next code review GitHub trigger version: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE code_review_github_trigger_settings
+		SET active = false
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND active = true`, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": params.RepositoryID,
+	}); err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("inactivate code review GitHub trigger: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		INSERT INTO code_review_github_trigger_settings (
+			org_id, repository_id, installation_id, active, version, team_slug, team_name,
+			team_id, repo_permission, created_by_user_id
+		) VALUES (
+			@org_id, @repository_id, @installation_id, true, @version, @team_slug, @team_name,
+			@team_id, @repo_permission, @created_by_user_id
+		)
+		RETURNING `+codeReviewGitHubTriggerSettingColumns, pgx.NamedArgs{
+		"org_id":             orgID,
+		"repository_id":      params.RepositoryID,
+		"installation_id":    params.InstallationID,
+		"version":            version,
+		"team_slug":          strings.TrimSpace(params.TeamSlug),
+		"team_name":          strings.TrimSpace(params.TeamName),
+		"team_id":            params.TeamID,
+		"repo_permission":    params.RepoPermission,
+		"created_by_user_id": params.CreatedByUserID,
+	})
+	if err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("insert code review GitHub trigger: %w", err)
+	}
+	record, err := collectOneCodeReviewGitHubTriggerSetting(rows)
+	if err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, fmt.Errorf("commit code review GitHub trigger tx: %w", err)
+	}
+	return record, nil
+}
+
+func (s *CodeReviewStore) DeactivateGitHubTrigger(ctx context.Context, orgID, repositoryID uuid.UUID, createdByUserID *uuid.UUID) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return fmt.Errorf("deactivate code review GitHub trigger requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin code review GitHub trigger deactivate tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var version int
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(MAX(version), 0) + 1
+		FROM code_review_github_trigger_settings
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id`, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": repositoryID,
+	}).Scan(&version); err != nil {
+		return fmt.Errorf("select next code review GitHub trigger tombstone version: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `
+		UPDATE code_review_github_trigger_settings
+		SET active = false
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND active = true
+		RETURNING `+codeReviewGitHubTriggerSettingColumns, pgx.NamedArgs{
+		"org_id":        orgID,
+		"repository_id": repositoryID,
+	})
+	if err != nil {
+		return fmt.Errorf("deactivate code review GitHub trigger: %w", err)
+	}
+	previous, err := collectOneCodeReviewGitHubTriggerSetting(rows)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tx.Commit(ctx)
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO code_review_github_trigger_settings (
+			org_id, repository_id, installation_id, active, version, team_slug, team_name,
+			team_id, repo_permission, created_by_user_id
+		) VALUES (
+			@org_id, @repository_id, @installation_id, false, @version, @team_slug, @team_name,
+			@team_id, @repo_permission, @created_by_user_id
+		)`, pgx.NamedArgs{
+		"org_id":             orgID,
+		"repository_id":      repositoryID,
+		"installation_id":    previous.InstallationID,
+		"version":            version,
+		"team_slug":          previous.TeamSlug,
+		"team_name":          previous.TeamName,
+		"team_id":            previous.TeamID,
+		"repo_permission":    previous.RepoPermission,
+		"created_by_user_id": createdByUserID,
+	}); err != nil {
+		return fmt.Errorf("insert code review GitHub trigger tombstone: %w", err)
+	}
+	return tx.Commit(ctx)
+}
 
 func (s *CodeReviewStore) ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	rows, err := s.db.Query(ctx, `
@@ -809,6 +982,15 @@ func collectOneCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, e
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	return record, rows.Err()
+}
+
+func collectOneCodeReviewGitHubTriggerSetting(rows pgx.Rows) (models.CodeReviewGitHubTriggerSetting, error) {
+	defer rows.Close()
+	setting, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewGitHubTriggerSetting])
+	if err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, err
+	}
+	return setting, nil
 }
 
 func collectCodeReviewPolicies(rows pgx.Rows) ([]models.CodeReviewPolicyRecord, error) {
