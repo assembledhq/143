@@ -360,6 +360,7 @@ type testInternalSandboxProvider struct {
 	execErr    error
 	execStderr string
 	execCalls  []string
+	execFn     func(cmd string, stdout, stderr io.Writer) (int, error)
 	readFiles  map[string][]byte
 	readErr    error
 	writes     map[string][]byte
@@ -377,6 +378,9 @@ func (p *testInternalSandboxProvider) CloneRepo(context.Context, *Sandbox, strin
 
 func (p *testInternalSandboxProvider) Exec(_ context.Context, _ *Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
 	p.execCalls = append(p.execCalls, cmd)
+	if p.execFn != nil {
+		return p.execFn(cmd, stdout, stderr)
+	}
 	if p.execStderr != "" {
 		_, _ = io.WriteString(stderr, p.execStderr)
 	}
@@ -1276,6 +1280,131 @@ func TestBuildRunResult_DoesNotPersistUnavailableTokenUsage(t *testing.T) {
 	})
 
 	require.Nil(t, result.TokenUsage, "buildRunResult should leave token usage nil when the provider reported no token payload")
+}
+
+func TestBuildRunResult_CapturesReviewArtifact(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.MustParse("12121212-3434-5656-7878-909090909090")
+	runID := uuid.MustParse("abababab-cdcd-efef-0101-121212121212")
+	baseSHA := "base123"
+	diff := strings.Join([]string{
+		"diff --git a/src/app.ts b/src/app.ts",
+		"--- a/src/app.ts",
+		"+++ b/src/app.ts",
+		"@@ -1 +1 @@",
+		"-old",
+		"+new",
+	}, "\n")
+	store := &internalReviewArtifactStore{saved: map[string][]byte{}}
+	provider := &testInternalSandboxProvider{
+		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
+			switch {
+			case cmd == "git rev-parse HEAD":
+				_, _ = io.WriteString(stdout, "head123\n")
+				return 0, nil
+			case strings.HasPrefix(cmd, "git status --porcelain"):
+				return 0, nil
+			case strings.Contains(cmd, "src/app.ts"):
+				_, _ = io.WriteString(stdout, "export const value = 1\n")
+				return 0, nil
+			default:
+				_, _ = io.WriteString(stderr, "unexpected command")
+				return 1, nil
+			}
+		},
+	}
+	orch := &Orchestrator{
+		provider:  provider,
+		snapshots: store,
+		logger:    zerolog.Nop(),
+	}
+	run := &models.Session{ID: runID, OrgID: orgID, BaseCommitSHA: &baseSHA}
+
+	result := orch.buildRunResult(context.Background(), run, &Sandbox{WorkDir: "/workspace"}, &AgentResult{Diff: diff, Summary: "done"})
+
+	require.NotNil(t, result.ReviewArtifactKey, "buildRunResult should attach a review artifact key")
+	require.Contains(t, *result.ReviewArtifactKey, "review-artifacts/"+orgID.String()+"/"+runID.String()+"/", "artifact key should be scoped by org and session")
+	require.Equal(t, 1, result.ReviewArtifactFileCount, "buildRunResult should record stored file count")
+	require.Len(t, store.saved, 1, "buildRunResult should upload one artifact")
+}
+
+func TestBuildRunResult_ReviewArtifactUploadFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	baseSHA := "base123"
+	diff := "diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n"
+	store := &internalReviewArtifactStore{saveErr: errors.New("upload failed")}
+	provider := &testInternalSandboxProvider{
+		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
+			switch {
+			case cmd == "git rev-parse HEAD":
+				_, _ = io.WriteString(stdout, "head123\n")
+				return 0, nil
+			case strings.HasPrefix(cmd, "git status --porcelain"):
+				return 0, nil
+			case strings.Contains(cmd, "src/app.ts"):
+				_, _ = io.WriteString(stdout, "export const value = 1\n")
+				return 0, nil
+			default:
+				return 0, nil
+			}
+		},
+	}
+	orch := &Orchestrator{provider: provider, snapshots: store, logger: zerolog.Nop()}
+	run := &models.Session{ID: runID, OrgID: orgID, BaseCommitSHA: &baseSHA}
+
+	result := orch.buildRunResult(context.Background(), run, &Sandbox{WorkDir: "/workspace"}, &AgentResult{Diff: diff, Summary: "done"})
+
+	require.NotNil(t, result.Diff, "buildRunResult should still return the session diff")
+	require.Nil(t, result.ReviewArtifactKey, "buildRunResult should omit artifact metadata when upload fails")
+}
+
+func TestCleanupReviewArtifactDeletesUploadedArtifact(t *testing.T) {
+	t.Parallel()
+
+	key := "review-artifacts/org/session/artifact.json.gz"
+	store := &internalReviewArtifactStore{saved: map[string][]byte{key: []byte("payload")}}
+	orch := &Orchestrator{snapshots: store, logger: zerolog.Nop()}
+
+	orch.cleanupReviewArtifact(context.Background(), &models.SessionResult{ReviewArtifactKey: &key}, zerolog.Nop())
+
+	require.Equal(t, []string{key}, store.deleted, "cleanupReviewArtifact should delete the uploaded artifact")
+	require.Empty(t, store.saved, "cleanupReviewArtifact should remove the stored payload")
+}
+
+type internalReviewArtifactStore struct {
+	saved   map[string][]byte
+	deleted []string
+	saveErr error
+}
+
+func (s *internalReviewArtifactStore) Save(_ context.Context, key string, reader io.Reader) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	if s.saved == nil {
+		s.saved = map[string][]byte{}
+	}
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	s.saved[key] = body
+	return nil
+}
+
+func (s *internalReviewArtifactStore) Load(_ context.Context, key string, writer io.Writer) error {
+	_, err := writer.Write(s.saved[key])
+	return err
+}
+
+func (s *internalReviewArtifactStore) Delete(_ context.Context, key string) error {
+	s.deleted = append(s.deleted, key)
+	delete(s.saved, key)
+	return nil
 }
 
 func TestStreamLogs_CarriesThreadID(t *testing.T) {
