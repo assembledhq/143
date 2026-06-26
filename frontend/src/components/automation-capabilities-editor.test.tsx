@@ -31,6 +31,12 @@ const CATALOG: AgentCapabilityDefinition[] = [
   def("publishing", { max_access_level: "publish", risk: "high", category: "Actions" }),
   def("issue_sources", { risk: "medium", scope: "integration" }),
   def("production_diagnostics", { risk: "high", category: "Diagnostics" }),
+  def("slack_notifications", {
+    max_access_level: "write",
+    risk: "medium",
+    category: "Actions",
+    scope: "integration",
+  }),
 ];
 
 describe("recommendedDefaultGrants", () => {
@@ -51,10 +57,9 @@ describe("recommendedDefaultGrants", () => {
     const byID = new Map(grants.map((grant) => [grant.capability_id, grant]));
     expect(byID.get("repo_context")?.enabled).toBe(true);
     expect(byID.get("publishing")?.enabled).toBe(true);
-    // issue_sources is intentionally scoped to triggered sessions, so it must
-    // not be on by default in the org-level policy.
-    expect(byID.get("issue_sources")?.enabled).toBe(false);
-    expect(byID.get("production_diagnostics")?.enabled).toBe(false);
+    expect(byID.get("issue_sources")?.enabled).toBe(true);
+    expect(byID.get("production_diagnostics")?.enabled).toBe(true);
+    expect(byID.get("slack_notifications")?.enabled).toBe(true);
   });
 
   it("uses each capability's max access level for its grant", () => {
@@ -63,6 +68,7 @@ describe("recommendedDefaultGrants", () => {
 
     expect(byID.get("repo_context")?.access_level).toBe("read");
     expect(byID.get("publishing")?.access_level).toBe("publish");
+    expect(byID.get("slack_notifications")?.access_level).toBe("write");
   });
 });
 

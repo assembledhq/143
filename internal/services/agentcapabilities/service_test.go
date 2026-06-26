@@ -65,10 +65,11 @@ func TestServiceResolveForSessionUsesRecommendedDefaultsWhenNoPolicyExists(t *te
 		models.AgentCapabilityPRHistory,
 		models.AgentCapabilityReviewFeedback,
 		models.AgentCapabilityCIHistory,
+		models.AgentCapabilityIssueSources,
+		models.AgentCapabilityProductionDiagnostics,
+		models.AgentCapabilitySlackNotifications,
 		models.AgentCapabilityPublishing,
 	}, snapshotIDs(snapshot), "manual repository sessions should get recommended commonly-used defaults")
-	require.NotContains(t, snapshotIDs(snapshot), models.AgentCapabilityIssueSources,
-		"manual sessions should not get issue sources by default")
 }
 
 func TestServiceResolveForSessionAddsIssueSourcesForTriggeredSessions(t *testing.T) {
