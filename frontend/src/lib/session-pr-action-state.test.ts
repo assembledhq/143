@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PullRequestHealthResponse } from "./types";
 import {
+  continueFromPRBranchMessage,
   deriveCreatePRActionState,
   deriveMergeActionState,
   deriveMergeWhenReadyActionState,
@@ -143,7 +144,7 @@ describe("session PR action state", () => {
     expect(state.disabledReason, "Push changes should explain the running-session blocker").toBe("Wait for the session to finish before pushing changes");
   });
 
-  it("disables push retry while the session is still running", () => {
+  it("disables branch-diverged continuation while the session is still running", () => {
     const state = derivePushChangesActionState({
       canShipPR: true,
       hasOpenPR: true,
@@ -157,13 +158,63 @@ describe("session PR action state", () => {
       pushingChanges: false,
       pushState: "failed",
       pushError: "The PR branch has changes that are not in this session checkpoint.",
+      pushErrorCode: "branch_diverged",
     });
 
     expect(state.visible, "Failed Push changes should remain visible while the session is running").toBe(true);
-    expect(state.disabled, "Failed Push changes should not allow retry while the session is running").toBe(true);
-    expect(state.label, "Failed Push changes should keep the retry affordance visible").toBe("Retry");
-    expect(state.disabledReason, "Disabled retry should explain that the session must finish first").toBe("Wait for the session to finish before pushing changes");
-    expect(state.showError, "Disabled retry should retain the error styling").toBe(true);
+    expect(state.disabled, "Failed Push changes should not allow branch continuation while the session is running").toBe(true);
+    expect(state.label, "Branch-diverged Push changes should expose the corrective CTA").toBe("Continue from PR branch");
+    expect(state.disabledReason, "Disabled continuation should explain that the session must finish first").toBe("Wait for the session to finish before continuing from the PR branch");
+    expect(state.showError, "Disabled continuation should retain the error styling").toBe(true);
+    expect(state.requiresBranchSync, "Branch-diverged Push changes should route clicks to continuation").toBe(true);
+  });
+
+  it("maps branch-diverged push failures to a continuation CTA", () => {
+    const tests = [
+      {
+        name: "persisted error code",
+        input: {
+          pushState: "failed" as const,
+          pushError: "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.",
+          pushErrorCode: "branch_diverged" as const,
+        },
+      },
+      {
+        name: "local API error code",
+        input: {
+          localError: "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.",
+          localErrorCode: "PR_BRANCH_DIVERGED",
+        },
+      },
+    ];
+
+    for (const tt of tests) {
+      const state = derivePushChangesActionState({
+        canShipPR: true,
+        hasOpenPR: true,
+        hasUnpushedChanges: true,
+        hasSnapshot: true,
+        isRunning: false,
+        builderReviewAllowsPR: true,
+        snapshotUnavailable: false,
+        ghBlocked: false,
+        queueingPush: false,
+        pushingChanges: false,
+        ...tt.input,
+      });
+
+      expect(state.visible, `${tt.name} should keep Push changes visible`).toBe(true);
+      expect(state.disabled, `${tt.name} should allow the corrective continuation`).toBe(false);
+      expect(state.label, `${tt.name} should replace Retry with the branch continuation CTA`).toBe("Continue from PR branch");
+      expect(state.showError, `${tt.name} should retain error styling`).toBe(true);
+      expect(state.requiresBranchSync, `${tt.name} should route clicks to the send-message path`).toBe(true);
+    }
+  });
+
+  it("builds the branch reconciliation follow-up prompt with the PR head branch", () => {
+    expect(continueFromPRBranchMessage("feature/pr-head"), "continuation prompt should include the active PR head branch").toBe(
+      "The PR branch has changes that are not in this session checkpoint. Fetch and reconcile the latest PR branch (feature/pr-head) into this session, preserve the current PR branch changes, reapply any still-needed local changes, and stop for review. Do not push changes yet.",
+    );
   });
 
   it("hides push changes when PR health is blocked", () => {

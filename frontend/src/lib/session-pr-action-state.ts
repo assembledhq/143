@@ -1,4 +1,4 @@
-import type { PRCreationState, PRPushState, PullRequestHealthResponse } from "./types";
+import type { PRCreationState, PRPushErrorCode, PRPushState, PullRequestHealthResponse } from "./types";
 
 type RepairableFailedChecksInput = Pick<PullRequestHealthResponse, "can_fix_tests" | "failing_test_count" | "checks" | "sync_status">;
 
@@ -16,6 +16,12 @@ export function hasRepairableFailedChecks(health: RepairableFailedChecksInput | 
   return health.can_fix_tests || health.failing_test_count > 0 || (health.checks ?? []).some((check) => check.status === "failed");
 }
 
+export function continueFromPRBranchMessage(headRef?: string | null): string {
+  const branch = headRef?.trim();
+  const branchClause = branch ? ` (${branch})` : "";
+  return `The PR branch has changes that are not in this session checkpoint. Fetch and reconcile the latest PR branch${branchClause} into this session, preserve the current PR branch changes, reapply any still-needed local changes, and stop for review. Do not push changes yet.`;
+}
+
 export type LifecycleActionState = {
   visible: boolean;
   disabled: boolean;
@@ -26,6 +32,7 @@ export type LabeledLifecycleActionState = LifecycleActionState & {
   label: string;
   spinning: boolean;
   showError?: boolean;
+  requiresBranchSync?: boolean;
 };
 
 export type CreatePRActionInput = {
@@ -173,7 +180,9 @@ export type PushChangesActionInput = {
   prHealthBlocked?: boolean;
   pushState?: PRPushState;
   pushError?: string;
+  pushErrorCode?: PRPushErrorCode;
   localError?: string;
+  localErrorCode?: string;
 };
 
 export function derivePushChangesActionState(input: PushChangesActionInput): LabeledLifecycleActionState {
@@ -213,15 +222,32 @@ export function derivePushChangesActionState(input: PushChangesActionInput): Lab
     };
   }
 
-  const hasRetryablePushError = Boolean(input.localError) || input.pushState === "failed";
+  const hasBranchDivergedError =
+    input.pushErrorCode === "branch_diverged" ||
+    input.localErrorCode === "PR_BRANCH_DIVERGED";
+  const hasRetryablePushError = (Boolean(input.localError) || input.pushState === "failed") && !hasBranchDivergedError;
+  const branchDivergedReason = input.pushError || input.localError || "The PR branch changed since this session checkpoint. Continue from the PR branch before pushing again.";
   if (input.isRunning) {
     return {
       visible: true,
       disabled: true,
-      disabledReason: "Wait for the session to finish before pushing changes",
-      label: hasRetryablePushError ? "Retry" : "Push changes",
+      disabledReason: hasBranchDivergedError ? "Wait for the session to finish before continuing from the PR branch" : "Wait for the session to finish before pushing changes",
+      label: hasBranchDivergedError ? "Continue from PR branch" : hasRetryablePushError ? "Retry" : "Push changes",
       spinning: false,
-      showError: hasRetryablePushError,
+      showError: hasRetryablePushError || hasBranchDivergedError,
+      requiresBranchSync: hasBranchDivergedError,
+    };
+  }
+
+  if (hasBranchDivergedError) {
+    return {
+      visible: true,
+      disabled: false,
+      disabledReason: branchDivergedReason,
+      label: "Continue from PR branch",
+      spinning: false,
+      showError: true,
+      requiresBranchSync: true,
     };
   }
 

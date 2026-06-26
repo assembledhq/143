@@ -1082,6 +1082,7 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: PRPushState;
   pr_push_error?: string;
+  pr_push_error_code?: PRPushErrorCode;
   branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
@@ -1779,6 +1780,8 @@ export interface PullRequest {
   body: string;
   status: PullRequestStatus;
   branch_name: string;
+  head_ref?: string;
+  head_sha?: string;
   review_status: PullRequestReviewStatus | null;
   ci_status: PullRequestCIStatus;
   merged_at: string | null;
@@ -3420,6 +3423,13 @@ export type PRCreationState = SessionPublishState;
 
 // Mirrors models.PRPushState.
 export type PRPushState = SessionPublishState;
+
+// Mirrors models.PRPushErrorCode.
+export type PRPushErrorCode =
+  | "branch_diverged"
+  | "push_rejected"
+  | "sandbox_auth_unavailable"
+  | "generic";
 
 // Mirrors models.BranchCreationState.
 export type BranchCreationState = SessionPublishState;

@@ -166,7 +166,7 @@ import {
   type UseSessionKeyboardShortcutsOptions,
 } from "@/hooks/use-session-keyboard-shortcuts";
 import { prMergedAccent } from "@/lib/pr-status-styles";
-import { deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
+import { continueFromPRBranchMessage, deriveCreatePRActionState, derivePushChangesActionState, hasRepairableFailedChecks, prHealthBlocksPRActions } from "@/lib/session-pr-action-state";
 import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
@@ -4824,6 +4824,33 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
   });
 
+  const continueFromPRBranchMutation = useMutation({
+    mutationFn: async () => {
+      const headRef = prData?.data?.head_ref ?? prData?.data?.branch_name;
+      const message = continueFromPRBranchMessage(headRef);
+      if (activeThread?.id) {
+        const clientMessageID =
+          typeof crypto !== "undefined" && "randomUUID" in crypto
+            ? crypto.randomUUID()
+            : `${id}:${activeThread.id}:continue-pr-branch:${Date.now()}:${Math.random()}`;
+        return api.sessions.sendThreadMessage(id, activeThread.id, { message, clientMessageID });
+      }
+      return api.sessions.sendMessage(id, { message });
+    },
+    onSuccess: () => {
+      setLocalPushActionError(null);
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      void queryClient.invalidateQueries({ queryKey: ["session", id, "timeline"] });
+      if (activeThread?.id) {
+        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(id, activeThread.id) });
+      }
+      toast.success("Continuing from the PR branch");
+    },
+    onError: (err) => {
+      toast.error(err instanceof Error ? err.message : "Failed to continue from the PR branch");
+    },
+  });
+
   useEffect(() => {
     if (!resumePRParam) return;
     if (resumeAttemptRef.current === resumePRParam) return;
@@ -5743,6 +5770,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, []);
 
   const ghBlocked = ghStatus?.pr_authorship_mode === "user_required" && !ghStatus?.connected;
+  const pushBranchDiverged =
+    session?.pr_push_error_code === "branch_diverged" ||
+    localPushActionError?.code === "PR_BRANCH_DIVERGED";
 
   const createPRFromKeyboard = useCallback(() => {
     if (localPRState !== "idle" || createPRMutation.isPending) {
@@ -5778,7 +5808,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [canCreatePR, createPRMutation.isPending, ghBlocked, localPRState, submitCreatePR]);
 
   const pushChangesFromKeyboard = useCallback(() => {
-    if (localPushState !== "idle" || pushChangesMutation.isPending) {
+    if (localPushState !== "idle" || pushChangesMutation.isPending || continueFromPRBranchMutation.isPending) {
+      return;
+    }
+    if (pushBranchDiverged) {
+      continueFromPRBranchMutation.mutate();
       return;
     }
     if (ghBlocked) {
@@ -5786,7 +5820,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       return;
     }
     pushChangesMutation.mutate(undefined);
-  }, [ghBlocked, localPushState, pushChangesMutation]);
+  }, [continueFromPRBranchMutation, ghBlocked, localPushState, pushBranchDiverged, pushChangesMutation]);
 
   const viewPRFromKeyboard = useCallback(() => {
     if (!prData?.data?.github_pr_url) {
@@ -5835,7 +5869,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
       canView: !!prData?.data?.github_pr_url,
-      canPush: !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending,
+      canPush: !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
       canFixTests: !prHealthActionsBlocked && canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: !prHealthActionsBlocked && canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: !prHealthActionsBlocked && canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
@@ -5973,13 +6007,16 @@ export function SessionDetailContent({ id }: { id: string }) {
     pushingChanges,
     pushState,
     pushError: session.pr_push_error,
+    pushErrorCode: session.pr_push_error_code,
     localError: localPushActionError?.message,
+    localErrorCode: localPushActionError?.code,
   });
   const showPushAction = pushAction.visible;
   const pushActionLabel = pushAction.label;
   const pushActionSpinning = pushAction.spinning;
-  const pushActionDisabled = pushAction.disabled;
+  const pushActionDisabled = pushAction.disabled || continueFromPRBranchMutation.isPending;
   const pushActionTitle = pushAction.disabledReason;
+  const pushActionRequiresBranchSync = !!pushAction.requiresBranchSync;
 
   function handleMergeAction() {
     if (ghBlocked) {
@@ -6369,10 +6406,16 @@ export function SessionDetailContent({ id }: { id: string }) {
                 pushChanges={showPushAction ? {
                   label: pushActionLabel,
                   disabled: pushActionDisabled,
-                  spinning: pushActionSpinning,
+                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
                   showError: pushState === "failed" || !!localPushActionError,
                   title: pushActionTitle,
-                  onClick: () => pushChangesMutation.mutate(undefined),
+                  onClick: () => {
+                    if (pushActionRequiresBranchSync) {
+                      continueFromPRBranchMutation.mutate();
+                      return;
+                    }
+                    pushChangesMutation.mutate(undefined);
+                  },
                 } : undefined}
               />
             ) : isPRHealthLoading ? (
