@@ -215,6 +215,31 @@ CREATE INDEX idx_project_tasks_status ON project_tasks(project_id, status);
 CREATE INDEX idx_project_tasks_batch ON project_tasks(project_id, batch_number);
 ```
 
+### `session_pm_context` table
+
+Project and PM execution context is linked to normal sessions without widening the core `sessions` row. The session API still exposes `pm_plan_id`, `pm_approach`, `pm_reasoning`, and `project_task_id` for compatibility, but the store hydrates them from `session_pm_context`.
+
+```sql
+CREATE TABLE session_pm_context (
+    session_id      UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    org_id          UUID NOT NULL REFERENCES organizations(id),
+    pm_plan_id      UUID REFERENCES pm_plans(id),
+    pm_approach     TEXT,
+    pm_reasoning    TEXT,
+    project_task_id UUID REFERENCES project_tasks(id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_session_pm_context_pm_plan
+    ON session_pm_context (org_id, pm_plan_id)
+    WHERE pm_plan_id IS NOT NULL;
+
+CREATE INDEX idx_session_pm_context_project_task
+    ON session_pm_context (org_id, project_task_id)
+    WHERE project_task_id IS NOT NULL;
+```
+
 ### `project_cycles` table
 
 Records each PM planning cycle for a project. This is the audit trail — what the PM decided each cycle and why.

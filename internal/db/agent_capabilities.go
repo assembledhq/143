@@ -195,10 +195,12 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 	var snapshot []models.AgentCapabilitySnapshotItem
 	var automationRunID *uuid.UUID
 	rows, err := tx.Query(ctx, `
-		SELECT capability_snapshot, automation_run_id
-		FROM sessions
-		WHERE org_id = @org_id AND id = @session_id AND deleted_at IS NULL
-		FOR UPDATE`,
+		SELECT s.capability_snapshot, sal.automation_run_id
+		FROM sessions s
+		LEFT JOIN session_automation_links sal
+		  ON sal.org_id = s.org_id AND sal.session_id = s.id
+		WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL
+		FOR UPDATE OF s`,
 		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
 	)
 	if err != nil {
