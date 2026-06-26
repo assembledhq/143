@@ -486,6 +486,7 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			PRReadiness:         db.NewPRReadinessStore(pool),
+			CodeReviews:         db.NewCodeReviewStore(pool),
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,

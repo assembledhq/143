@@ -352,6 +352,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	if stores.Automations != nil && stores.AutomationRuns != nil {
 		w.Register(models.JobTypeAutomationRun, newAutomationRunHandler(stores, services, logger))
 	}
+	if stores.CodeReviews != nil {
+		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, logger))
+	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
 	}
@@ -477,6 +480,7 @@ type Stores struct {
 	AutomationRuns      *db.AutomationRunStore // nil-safe: automations feature disabled if nil
 	ReviewLoops         *db.SessionReviewLoopStore
 	PRReadiness         *db.PRReadinessStore
+	CodeReviews         *db.CodeReviewStore
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore

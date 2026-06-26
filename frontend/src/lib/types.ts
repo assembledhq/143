@@ -75,6 +75,139 @@ export interface UserSettingsUpdateRequest {
   manual_session_planes_hidden?: boolean | null;
 }
 
+export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
+export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
+export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
+
+export interface CodeReviewDescriptionRequirement {
+  key: string;
+  title: string;
+  prompt: string;
+  required: boolean;
+  applicability?: string;
+}
+
+export interface CodeReviewPolicyConfig {
+  enabled: boolean;
+  approval_mode: CodeReviewApprovalMode;
+  description_policy: {
+    requirements: CodeReviewDescriptionRequirement[];
+  };
+  risk_policy: {
+    max_files_changed: number;
+    max_lines_changed: number;
+    require_passing_checks: boolean;
+    exclude_sensitive_paths: boolean;
+    sensitive_paths?: string[];
+    exclude_categories?: string[];
+    require_mergeable: boolean;
+    require_up_to_date: boolean;
+    allow_forks: boolean;
+    allow_policy_changes: boolean;
+    eligible_authors?: string[];
+    required_checks?: string[];
+  };
+  agent_roster: {
+    reviewers: string[];
+    orchestrator: string;
+    review_depth: string;
+    disagreement_blocks: boolean;
+    require_reviewer_quorum: number;
+    timeout_seconds: number;
+    max_cost_cents: number;
+  };
+  inline_comment_limit: number;
+  final_review_template?: string;
+}
+
+export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
+  id: string;
+  org_id: string;
+  repository_id?: string;
+  active: boolean;
+  version: number;
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CodeReviewResolvedPolicy {
+  config: CodeReviewPolicyConfig;
+  source: "default" | "organization" | "repository" | string;
+  policy?: CodeReviewPolicyRecord;
+}
+
+export interface CodeReviewTemplateOption {
+  key: string;
+  title: string;
+  description: string;
+  config: CodeReviewPolicyConfig;
+}
+
+export interface CodeReviewListItem {
+  id: string;
+  org_id: string;
+  session_id: string;
+  repository_id: string;
+  pull_request_id: string;
+  policy_id: string;
+  base_sha: string;
+  head_sha: string;
+  trigger_source: string;
+  status: CodeReviewSessionStatus;
+  decision?: CodeReviewDecision;
+  acceptable?: boolean;
+  stale: boolean;
+  superseded_by_session_id?: string;
+  review_output_key: string;
+  prompt_artifact_key?: string;
+  github_review_id?: number;
+  completed_at?: string;
+  created_at: string;
+  session_title?: string;
+  repository_name?: string;
+  github_repo: string;
+  github_pr_number: number;
+  github_pr_url: string;
+  pull_request_title: string;
+  pull_request_author: string;
+}
+
+export interface CodeReviewAgentResult {
+  id: string;
+  org_id: string;
+  session_id: string;
+  agent_provider: string;
+  agent_model?: string;
+  role: "reviewer" | "orchestrator";
+  status: "queued" | "running" | "completed" | "failed" | "timed_out";
+  raw_output?: string;
+  structured_result?: unknown;
+  created_at: string;
+}
+
+export interface CodeReviewFinding {
+  id: string;
+  org_id: string;
+  session_id: string;
+  agent_result_id?: string;
+  dedupe_key: string;
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  confidence: "low" | "medium" | "high";
+  path?: string;
+  start_line?: number;
+  end_line?: number;
+  summary: string;
+  body: string;
+  selected_for_inline: boolean;
+  github_comment_id?: number;
+  created_at: string;
+}
+
+export interface CodeReviewEvidence {
+  agent_results: CodeReviewAgentResult[];
+  findings: CodeReviewFinding[];
+}
+
 export type AgentCapabilityID =
   | 'repo_context'
   | 'pr_history'

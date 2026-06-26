@@ -28,6 +28,7 @@ func TestSessionOrigin_Validate(t *testing.T) {
 		{name: "eval bootstrap", value: SessionOriginEvalBootstrap},
 		{name: "eval run", value: SessionOriginEvalRun},
 		{name: "automation goal improvement", value: SessionOriginAutomationGoalImprovement},
+		{name: "code review", value: SessionOriginCodeReview},
 		{name: "invalid", value: SessionOrigin("bogus"), expectErr: true},
 	}
 

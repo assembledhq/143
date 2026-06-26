@@ -421,6 +421,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		AutomationRuns:      deps.AutomationRuns,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 		PRReadiness:         db.NewPRReadinessStore(pool),
+		CodeReviews:         db.NewCodeReviewStore(pool),
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        deps.PullRequests,

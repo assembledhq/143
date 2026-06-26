@@ -41,6 +41,13 @@ export const queryKeys = {
     branches: (id: string, query = "") => ["repositories", id, "branches", query] as const,
     previewSecretBundles: (id: string) => ["repositories", id, "preview-secret-bundles"] as const,
   },
+  codeReviews: {
+    all: ["code-reviews"] as const,
+    list: (repositoryId?: string | null) => ["code-reviews", "list", repositoryId ?? null] as const,
+    policy: (repositoryId?: string | null) => ["code-reviews", "policy", repositoryId ?? null] as const,
+    templates: ["code-reviews", "templates"] as const,
+    evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,
+  },
   sessionComposer: {
     files: (repositoryId: string, branch: string, query: string) => ["session-composer", "files", repositoryId, branch, query] as const,
     slashCommands: (agentType: string, repositoryId: string, branch: string, query: string) =>

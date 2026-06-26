@@ -99,6 +99,7 @@ const (
 	SessionOriginEvalBootstrap             SessionOrigin = "eval_bootstrap"
 	SessionOriginEvalRun                   SessionOrigin = "eval_run"
 	SessionOriginAutomationGoalImprovement SessionOrigin = "automation_goal_improvement"
+	SessionOriginCodeReview                SessionOrigin = "code_review"
 )
 
 func (o SessionOrigin) Validate() error {
@@ -112,7 +113,8 @@ func (o SessionOrigin) Validate() error {
 		SessionOriginExternalAPI,
 		SessionOriginEvalBootstrap,
 		SessionOriginEvalRun,
-		SessionOriginAutomationGoalImprovement:
+		SessionOriginAutomationGoalImprovement,
+		SessionOriginCodeReview:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionOrigin: %q", o)

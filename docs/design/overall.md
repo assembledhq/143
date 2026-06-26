@@ -21,6 +21,7 @@ The public homepage positions 143 as shared coding-agent infrastructure for engi
 - **Project** is the higher-level planning surface for PM-proposed or human-authored multi-step work. Projects group related tasks and can feed sessions over time.
 - **Preview** is a temporary isolated web runtime for a session or branch. It is addressed by a preview origin, controlled by backend state, and backed by a worker-owned sandbox/runtime.
 - **Branch or PR** is the publish artifact. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, running policy-driven pre-PR readiness checks with reviewer-facing evidence when configured, and leaving repository-native CI/CD as the validation source of truth.
+- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. It stores policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, and GitHub review output on top of normal sessions so approval decisions remain auditable.
 
 ## Core Flow
 
@@ -84,7 +85,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 
 ### Integration Plane
 
-- GitHub is the repository, branch, PR, check, mergeability, review, and deploy-signal integration. Repository-native CI/CD is authoritative after 143 publishes a branch or PR.
+- GitHub is the repository, branch, PR, check, mergeability, review, and deploy-signal integration. Repository-native CI/CD is authoritative after 143 publishes a branch or PR. The Code reviews surface is the post-PR reviewer-bot view over code review sessions and versioned acceptable-risk policy; the GitHub reviewer-request trigger and final review submission path are still being wired.
 - Sentry is the primary production-error ingestion source and still anchors the canonical "error to PR" loop.
 - Linear integration supports issue linking, bidirectional session updates, and agent-triggered work from assignments or mentions. Linear-started sessions resolve the AgentSession creator through a persistent Linear-user-to-143-user bridge before PR authorship falls back to issue-creator email or the GitHub App. See [implemented/62-linear-session-linking.md](implemented/62-linear-session-linking.md) and [implemented/69-linear-agent.md](implemented/69-linear-agent.md).
 - PagerDuty is a first-class incident source and automation trigger. Signed or shared-secret webhooks are persisted through the durable ingress ledger, normalized into issues and `pagerduty_incidents`, matched against generic automation event triggers, and exposed to sandbox agents through `143-tools pagerduty`. See [implemented/107-pagerduty-integration.md](implemented/107-pagerduty-integration.md).
