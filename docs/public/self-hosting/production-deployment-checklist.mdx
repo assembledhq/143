@@ -2,7 +2,7 @@
 title: Production deployment checklist
 description: Verify a self-hosted deployment before allowing real coding-agent work.
 section: Self-hosting
-order: 33
+order: 34
 status: stable
 audience: operator
 tags:
@@ -12,15 +12,17 @@ tags:
 llm_summary: Use this checklist before running real agent work on a self-hosted 143 deployment.
 ---
 
-Run through this checklist before routing real repositories or user work through a self-hosted deployment. The goal is to verify that credentials, persistence, workers, observability, and rollback paths are ready before agents touch production code.
+Run through this checklist after the [single-node quickstart](/docs/self-hosting/single-node) and before routing real repositories or user work through a self-hosted deployment. The goal is to verify that credentials, persistence, workers, observability, and rollback paths are ready before agents touch production code.
 
 ## Core services
 
 - API and frontend are reachable over HTTPS.
 - Postgres migrations have run successfully.
-- Redis is reachable by API and worker processes.
+- Redis is reachable by API and worker processes when configured.
 - Workers can claim jobs and report health.
+- For single-node, `MODE=all` is running and logs include `worker started`.
 - Logs are shipped to the configured log backend.
+- Durable session snapshots and uploads are backed by either S3-compatible storage or a backed-up single-node `SINGLE_NODE_DATA_DIR` mount.
 
 ## GitHub
 
@@ -33,6 +35,9 @@ Run through this checklist before routing real repositories or user work through
 ## Workers and sandboxes
 
 - Sandbox runtime health check passes.
+- Single-node production uses `SANDBOX_RUNTIME=runsc` and `SANDBOX_REQUIRE_GVISOR=true`.
+- Production worker-capable processes have `SESSION_EXECUTOR_IMAGE` configured.
+- Session executors can reach Postgres and any required same-host storage.
 - Worker concurrency is configured for host size.
 - Disk limits and cleanup are enabled.
 - Preview routing works for a simple app.
