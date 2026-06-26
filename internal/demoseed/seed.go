@@ -43,8 +43,9 @@ var (
 		{name: "production env reference", pattern: regexp.MustCompile(`(?i)\.env\.production|ENCRYPTION_MASTER_KEY|GITHUB_APP_PRIVATE_KEY|SLACK_(BOT|SIGNING)_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY`)},
 	}
 
-	allowedSeedURLHosts = map[string]struct{}{
-		"github.com": {},
+	allowedSeedGitHubRepos = map[string]struct{}{
+		"assembledhq/143":             {},
+		"assembledhq/example-service": {},
 	}
 )
 
@@ -127,8 +128,8 @@ func ScanSeedSafety(body []byte) error {
 		if parsed.User != nil {
 			return fmt.Errorf("URL %q contains credentials", candidate)
 		}
-		if _, ok := allowedSeedURLHosts[strings.ToLower(parsed.Hostname())]; !ok {
-			return fmt.Errorf("unapproved URL host %q found in demo seed", parsed.Hostname())
+		if err := validateSeedURL(parsed); err != nil {
+			return err
 		}
 	}
 	for _, match := range emailPattern.FindAllString(text, -1) {
@@ -142,6 +143,35 @@ func ScanSeedSafety(body []byte) error {
 		}
 	}
 	return nil
+}
+
+func validateSeedURL(parsed *url.URL) error {
+	switch strings.ToLower(parsed.Hostname()) {
+	case "github.com":
+		ownerRepo, ok := githubOwnerRepo(parsed.Path)
+		if !ok {
+			return fmt.Errorf("unapproved URL path %q found in demo seed", parsed.Path)
+		}
+		if _, ok := allowedSeedGitHubRepos[ownerRepo]; !ok {
+			return fmt.Errorf("unapproved URL path %q found in demo seed", parsed.Path)
+		}
+		return nil
+	default:
+		return fmt.Errorf("unapproved URL host %q found in demo seed", parsed.Hostname())
+	}
+}
+
+func githubOwnerRepo(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) < 2 {
+		return "", false
+	}
+	owner := strings.ToLower(parts[0])
+	repo := strings.ToLower(strings.TrimSuffix(parts[1], ".git"))
+	if owner == "" || repo == "" {
+		return "", false
+	}
+	return owner + "/" + repo, true
 }
 
 func Check(ctx context.Context, opts CheckOptions) error {

@@ -71,7 +71,6 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - The job queue is Postgres-backed. Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED`, and durable state transitions are committed before Redis wakeups or SSE notifications.
 - Redis is an optional acceleration layer for cache, pub/sub, SSE fan-out, and coordination. Losing Redis should degrade live updates, not lose durable work. See [implemented/52-redis.md](implemented/52-redis.md).
 - Session snapshots and multi-node recovery use shared object storage so workers and API nodes do not depend on one machine's local disk. See [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
-- The public/demo workspace is seeded from `.143/seed.sql`, validated by `make demo-seed-check`, and applied to intentional demo databases through guarded tooling. See [implemented/112-demo-seed-workspace.md](implemented/112-demo-seed-workspace.md).
 
 ### Runtime Plane
 

@@ -272,6 +272,11 @@ func TestScanSeedSafety(t *testing.T) {
 			body:      "INSERT INTO pull_requests (github_pr_url) VALUES ('https://linear.app/acme/issue/BUG-1/private');",
 			expectErr: "unapproved URL host",
 		},
+		{
+			name:      "rejects unapproved GitHub repository URL",
+			body:      "INSERT INTO repositories (clone_url) VALUES ('https://github.com/customer/private-repo.git');",
+			expectErr: "unapproved URL path",
+		},
 	}
 
 	for _, tt := range tests {
