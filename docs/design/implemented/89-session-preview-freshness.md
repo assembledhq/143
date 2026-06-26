@@ -21,7 +21,7 @@ Suggested copy:
 - Out of date marker: `New changes available`
 - Out of date action: `Refresh preview`
 - Out of date helper text: `Restart the preview to see the latest session changes.`
-- Updating: `Updating preview...`
+- Updating: no extra startup copy; the startup checklist already indicates that the preview is being prepared.
 - Unknown: `Preview freshness could not be verified.`
 
 The stale state should be visible inside the Preview tab even before the user opens the secondary preview actions menu. The marker should look like a small inline status callout or amber-tinted badge row near the Preview command header, not a blocking modal and not a global toast. The user should understand two things at a glance: the preview still exists, and there is newer session code available.
@@ -350,7 +350,7 @@ Preview tab behavior in `frontend/src/components/preview/preview-panel.tsx`:
 - Show a visible `Refresh preview` button in the command header when stale, wired to the existing `startMutation` / `api.sessions.preview.ensure(sessionId)`.
 - Keep `Open Preview` available for ready stale previews, but do not let it visually suppress the freshness marker.
 - Keep the existing secondary `Restart preview` menu item. `Refresh preview` is the promoted stale-state action; `Restart preview` remains the generic lifecycle command.
-- While the mutation is pending or status is `starting` with current revision, render `Updating preview...`.
+- While the mutation is pending or status is `starting` with current revision, keep the startup copy focused on the current startup step instead of rendering an additional updating label.
 - For `unknown`, avoid a loud warning; show quiet metadata only if useful for support.
 
 The preview status query already polls/refetches around active states. The session detail SSE/polling path should invalidate `["preview-status", sessionId]` when session detail receives a new `latest_diff_snapshot_id`, `diff_collected_at`, or future explicit `workspace_revision` change. This keeps the Preview tab aware soon after the agent completes a change even if the tab was already open.

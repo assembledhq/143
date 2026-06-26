@@ -142,9 +142,13 @@ func TestJobStore_WorkerLoadSamples(t *testing.T) {
 			"preview_held_containers",
 			"running_jobs",
 			"running_session_jobs",
+			"active_usage_containers",
+			"active_memory_allocated_mb",
+			"active_cpu_allocated",
+			"active_disk_allocated_mb",
 		}).
-			AddRow("worker-1", "active", int64(2), int64(1), int64(3), int64(4), int64(2), int64(5), int64(2)).
-			AddRow("unassigned", "", int64(1), int64(0), int64(1), int64(0), int64(0), int64(0), int64(0)))
+			AddRow("worker-1", "active", int64(2), int64(1), int64(3), int64(4), int64(2), int64(5), int64(2), int64(2), int64(6144), float64(4), int64(20480)).
+			AddRow("unassigned", "", int64(1), int64(0), int64(1), int64(0), int64(0), int64(0), int64(0), int64(1), int64(3072), float64(2), int64(10240)))
 
 	samples, err := store.WorkerLoadSamples(context.Background())
 	require.NoError(t, err, "WorkerLoadSamples should not return an error")
@@ -159,13 +163,49 @@ func TestJobStore_WorkerLoadSamples(t *testing.T) {
 			PreviewHeldContainers: 2,
 			RunningJobs:           5,
 			RunningSessionJobs:    2,
+			ActiveUsageContainers: 2,
+			ActiveMemoryAllocated: 6144,
+			ActiveCPUAllocated:    4,
+			ActiveDiskAllocated:   20480,
 		},
 		{
-			WorkerNodeID:      "unassigned",
-			RunningSessions:   1,
-			SandboxContainers: 1,
+			WorkerNodeID:          "unassigned",
+			RunningSessions:       1,
+			SandboxContainers:     1,
+			ActiveUsageContainers: 1,
+			ActiveMemoryAllocated: 3072,
+			ActiveCPUAllocated:    2,
+			ActiveDiskAllocated:   10240,
 		},
 	}, samples, "WorkerLoadSamples should return the expected per-worker load samples")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_RunningJobSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	mock.ExpectQuery("SELECT[\\s\\S]+locked_by_node_id[\\s\\S]+job_type[\\s\\S]+COUNT").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"worker_node_id",
+			"job_type",
+			"running",
+		}).
+			AddRow("worker-1", "run_agent", int64(2)).
+			AddRow("worker-2", "start_preview", int64(1)).
+			AddRow("unassigned", "sync_pull_request_state", int64(1)))
+
+	samples, err := store.RunningJobSamples(context.Background())
+	require.NoError(t, err, "RunningJobSamples should not return an error")
+	require.Equal(t, []RunningJobSample{
+		{WorkerNodeID: "worker-1", JobType: "run_agent", Running: 2},
+		{WorkerNodeID: "worker-2", JobType: "start_preview", Running: 1},
+		{WorkerNodeID: "unassigned", JobType: "sync_pull_request_state", Running: 1},
+	}, samples, "RunningJobSamples should return running jobs grouped by worker and type")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

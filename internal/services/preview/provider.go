@@ -28,7 +28,10 @@ type PreviewCapableProvider interface {
 	// is merged into every service's environment after the user's
 	// declared env and any infrastructure-injected credentials, so it can
 	// carry platform-level values (e.g. PREVIEW_ORIGIN) that must always be
-	// available and should win over user overrides.
+	// available and should win over user overrides. It is also injected into
+	// service build commands so build steps can detect the preview runtime;
+	// unlike credentials and secret bundles, ExtraEnv carries only non-secret
+	// platform context, so exposing it at build time leaks nothing.
 	//
 	// observer receives per-service Ready/Failed transitions as they happen,
 	// so callers (typically the manager) can persist per-service state to the

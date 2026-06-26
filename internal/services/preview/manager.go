@@ -2487,12 +2487,16 @@ func (m *Manager) WorkerNodeID() string {
 }
 
 // platformEnv returns environment variables the platform injects into every
-// service of the given preview. It always exposes ONEFORTYTHREE=true and
-// ONEFORTYTHREE_ENV=preview so apps can detect 143 preview runtimes and disable
-// background workers, profilers, schedulers, and other non-serving work;
-// validation rejects user-declared values for those reserved names so collisions
-// fail before launch. When configured, it also exposes PREVIEW_ORIGIN (computed
-// from PreviewOriginTemplate with "{id}" replaced by the preview UUID).
+// service of the given preview, in both its build and runtime env. It always
+// exposes ONEFORTYTHREE=true and ONEFORTYTHREE_ENV=preview so apps can detect
+// 143 preview runtimes and disable background workers, profilers, schedulers,
+// and other non-serving work — including at build time, e.g. a static frontend
+// baking a preview flag into its bundle; validation rejects user-declared
+// values for those reserved names so collisions fail before launch. When
+// configured, it also exposes PREVIEW_ORIGIN (computed from
+// PreviewOriginTemplate with "{id}" replaced by the preview UUID). These values
+// are non-secret platform context, so injecting them at build time leaks
+// nothing.
 func (m *Manager) platformEnv(previewID uuid.UUID) map[string]string {
 	env := map[string]string{
 		previewPlatformNameEnv:    previewPlatformNameValue,

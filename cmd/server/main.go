@@ -718,6 +718,7 @@ func main() {
 		go recoveryLoop.Start(ctx, 30*time.Second)
 		go worker.RunQueueHealthSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunWorkerLoadSampler(ctx, jobStore, logger, time.Minute)
+		go worker.RunRunningJobSampler(ctx, jobStore, logger, time.Minute)
 		go worker.RunPreviewHealthSampler(ctx, db.NewPreviewStore(pool), logger, time.Minute)
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
