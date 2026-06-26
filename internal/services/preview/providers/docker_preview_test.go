@@ -3336,6 +3336,64 @@ func goBuildPreviewConfig() *models.PreviewConfig {
 	}
 }
 
+// TestStartPreview_BuildPhaseInjectsPlatformEnv verifies the platform context
+// env (ONEFORTYTHREE, ONEFORTYTHREE_ENV, PREVIEW_ORIGIN) is exposed to service
+// build commands, so build steps can detect the preview runtime — e.g. a static
+// frontend baking a preview flag into its bundle.
+func TestStartPreview_BuildPhaseInjectsPlatformEnv(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var buildCmd string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, cmd string, _ func([]byte)) (int, error) {
+			if strings.Contains(cmd, "cmd/web") {
+				mu.Lock()
+				buildCmd = cmd
+				mu.Unlock()
+				return 0, nil
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return 0, nil
+		},
+		execFn: func(_ context.Context, _ string) (int, error) { return 0, nil },
+		readFileFn: func(_ context.Context, path string) ([]byte, error) {
+			if path == "package-lock.json" {
+				return []byte(`{"lockfileVersion":3}`), nil
+			}
+			return []byte("ok"), nil
+		},
+	}
+	cache := &fakeDependencyCache{findHit: &preview.DependencyCacheHit{}}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer), WithDependencyCache(cache))
+
+	handle, err := d.StartPreview(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo", HomeDir: "/home/codex"}, goBuildPreviewConfig(), preview.StartPreviewOptions{
+		OrgID:        uuid.New(),
+		RepositoryID: uuid.New(),
+		SessionID:    uuid.New(),
+		ExtraEnv: map[string]string{
+			"ONEFORTYTHREE":     "true",
+			"ONEFORTYTHREE_ENV": "preview",
+			"PREVIEW_ORIGIN":    "http://abc.preview.localhost:9090",
+		},
+	}, &recordingObserver{})
+	require.NoError(t, err, "StartPreview should succeed")
+	require.NotNil(t, handle, "StartPreview should return a handle")
+
+	mu.Lock()
+	require.Contains(t, buildCmd, "ONEFORTYTHREE_ENV='preview'", "build command should expose ONEFORTYTHREE_ENV so build steps can detect the preview runtime")
+	require.Contains(t, buildCmd, "ONEFORTYTHREE='true'", "build command should expose the ONEFORTYTHREE marker")
+	require.Contains(t, buildCmd, "PREVIEW_ORIGIN='http://abc.preview.localhost:9090'", "build command should expose PREVIEW_ORIGIN")
+	mu.Unlock()
+
+	close(release)
+	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
+}
+
 // TestStartPreview_BuildPhaseRunsBeforeStartAndSavesHomeCache covers the happy
 // path: the build command compiles before the service starts, GOCACHE/GOMODCACHE
 // are pinned to the archived default locations, and the home build cache is
