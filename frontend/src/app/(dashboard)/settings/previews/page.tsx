@@ -323,6 +323,11 @@ function AutoPreviewSection() {
           publish their links to GitHub. Warm mode hibernates after a successful
           build so the PR link resumes quickly.
         </p>
+        <p className="text-xs text-muted-foreground">
+          Warm builds each PR preview, saves a resumable snapshot, then stops it.
+          On builds each PR preview and keeps it running until normal idle limits
+          reclaim it.
+        </p>
       </div>
 
       {policiesLoading ? (
@@ -621,6 +626,11 @@ function RepoPreviewCard({
             <span className="block text-xs text-muted-foreground">
               Session prewarm
             </span>
+            <p className="text-xs text-muted-foreground">
+              Cache only installs dependencies ahead of time without starting
+              the app. Smart starts with cache warming and may prepare a full
+              preview when a session looks likely to need one.
+            </p>
             <ToggleGroup
               type="single"
               value={policy.session_prewarm_mode}
@@ -665,28 +675,6 @@ function RepoPreviewCard({
               </p>
             ) : null}
           </div>
-          <div className="space-y-1.5">
-            <span className="block text-xs text-muted-foreground">Forks</span>
-            <div className="flex items-center gap-2">
-              <Switch
-                checked={policy.session_prewarm_untrusted_fork}
-                disabled={!sessionPrewarmEnabled}
-                aria-label={`Allow session prewarm for untrusted forks in ${policy.repository_full_name}`}
-                onCheckedChange={(checked) => {
-                  if (
-                    checked === policy.session_prewarm_untrusted_fork ||
-                    !sessionPrewarmEnabled
-                  ) {
-                    return;
-                  }
-                  onUpdatePolicy({ session_prewarm_untrusted_fork: checked });
-                }}
-              />
-              <span className="text-xs text-muted-foreground">
-                Untrusted forks
-              </span>
-            </div>
-          </div>
         </div>
 
         <div className="space-y-3 md:border-l md:border-border md:pl-4">
@@ -706,7 +694,7 @@ function RepoPreviewCard({
           ) : null}
           <div className="flex items-center gap-2">
             <Switch
-              aria-label={`Enable PR preview links for ${policy.repository_full_name}`}
+              aria-label={`Publish preview links to GitHub PRs for ${policy.repository_full_name}`}
               checked={policy.pr_preview_surfaces_enabled}
               disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
               onCheckedChange={(checked) =>
@@ -715,10 +703,15 @@ function RepoPreviewCard({
             />
             <span className="text-xs text-muted-foreground">
               {policy.pr_preview_surfaces_enabled
-                ? "Links enabled"
-                : "Links disabled"}
+                ? "Publishing preview links to GitHub PRs"
+                : "Not publishing preview links to GitHub PRs"}
             </span>
           </div>
+          <p className="text-xs text-muted-foreground">
+            When enabled, 143 publishes preview URLs to GitHub PR comments or
+            commit statuses. Auto-build can still create previews internally
+            when publishing is off.
+          </p>
           <div className="space-y-1.5">
             <span className="block text-xs text-muted-foreground">Surfaces</span>
             <div className="flex flex-wrap gap-3">

@@ -37,6 +37,8 @@ Package-manager paths reject absolute paths, `..`, globs, broad `.`, sensitive d
 
 The DB tables `preview_dependency_cache` and `preview_dependency_cache_locations` now include `cache_kind`; uniqueness and placement indexes include `(org_id, repo_id, cache_kind, cache_key)`. Worker-local L1 blob paths are also kind-aware, with legacy install-artifact local paths still readable during rollout.
 
+Preview dependency and package-manager cache keys use a stable sandbox cache ABI (`SANDBOX_CACHE_ABI`, persisted in sandbox metadata as `cache_abi`) instead of the deploy-specific sandbox image tag. Routine worker/server deploys therefore do not invalidate warm caches just because `IMAGE_TAG` changed. Operators must bump the ABI when the sandbox OS, libc, Node/Python/Go toolchains, package-manager behavior, or other baked runtime compatibility changes can make cached install artifacts unsafe to reuse. Older sandboxes without `cache_abi` fall back to their recorded image string for conservative compatibility.
+
 Preview startup uses cache placement as a scheduling hint, not a correctness primitive. Exact config-derived placement keys prefer workers with known L1 blobs. When the API cannot know the exact config before worker selection, the repo-level fallback is marked approximate and the scheduler prefers recent repo cache holders before rendezvous hashing. The worker still recomputes exact cache keys inside the hydrated workspace before restore.
 
 Cache saves are kept out of the readiness-critical path. Normal preview launches compute cache keys during install, but defer package-manager and install-artifact archive/upload work until after the primary readiness path succeeds. Prewarm jobs still save synchronously because cache creation is their primary work.
@@ -89,13 +91,13 @@ The new flow:
    - `preview.install.cache.enabled: false` disables restore and save.
 4. Compute the preview install marker key and check whether the marker exists.
 5. If caching is enabled and the install marker exists:
-   - Compute a dependency cache key from install config, declared lockfiles, sandbox runtime/image, and effective cache paths.
+   - Compute a dependency cache key from install config, declared lockfiles, sandbox provider/cache ABI, and effective cache paths.
    - Look up the shared L2 blob metadata by `(org_id, repo_id, cache_key)`. The DB metadata is authoritative for effective paths and checksum.
    - If metadata is found, check worker-local L1 by `cache_key` and use it when the checksum matches; otherwise stream the L2 blob from object storage into a bounded worker temp file.
    - Preflight the recorded compressed size, verify checksum, validate tar members against the stored effective paths on the worker, stage downloaded compressed blobs under the worker-local dependency cache staging directory instead of `/tmp`, stream extraction into the sandbox over stdin, populate worker-local L1 when configured, and upsert the worker's L1 location hint.
    - If both L1 and L2 miss, continue to the normal install path.
    - If the install marker is absent and the config declares no `verify_paths`, skip restore entirely and go straight to the normal install path; commands such as `npm ci` clean/reinstall the same paths, so restoring first only adds latency on first-ever cold starts.
-   - If the install marker is absent but the config declares `verify_paths`, attempt the restore anyway: the cache key proves the blob was produced by this exact install command against these exact lockfile contents on this sandbox image, so when every declared verify path exists after restore, the marker is written and install skips with restore status `restored_satisfied_install`. When verify paths are incomplete after restore, the normal install command runs.
+   - If the install marker is absent but the config declares `verify_paths`, attempt the restore anyway: the cache key proves the blob was produced by this exact install command against these exact lockfile contents on this sandbox cache ABI, so when every declared verify path exists after restore, the marker is written and install skips with restore status `restored_satisfied_install`. When verify paths are incomplete after restore, the normal install command runs.
 6. Run the existing `preview.install` flow:
    - If the dependency-cache restore did not fail and the marker and `verify_paths` are present, skip install.
    - Otherwise clean `clean_paths`, run `command`, then write the marker.
@@ -235,7 +237,7 @@ Rules:
 - Empty paths and `.` are rejected because they are too broad.
 - Shell metacharacters should be rejected using the same conservative character policy as `clean_paths`, unless path handling is fully tar-list based and never shell-interpolated.
 
-> **Mutable image tag warning:** The cache key includes sandbox image metadata. If a repo's preview config references a mutable image tag (e.g. `image: myapp:latest`) that is rebuilt and repushed, the cache key will not change and a stale dependency cache may be used. The docs must warn that immutable digests or versioned tags are strongly preferred, and that repos on rolling tags should set `cache.enabled: false` or accept the risk of stale installs.
+> **Sandbox ABI warning:** The cache key includes the platform sandbox cache ABI, not the deploy image tag. If the sandbox image changes its baked OS/toolchain/runtime compatibility without bumping `SANDBOX_CACHE_ABI`, stale install artifacts can be reused. Bump the ABI for runtime compatibility changes; do not bump it for ordinary server/worker deploys.
 
 ### Named Config Merge Semantics
 
@@ -426,7 +428,7 @@ Inputs:
 
 - a new runtime version string, e.g. `preview-dependency-cache-v1` (provider-agnostic; the provider is already captured by `SandboxProvider`),
 - sandbox provider,
-- sandbox image metadata when available,
+- sandbox cache ABI metadata when available,
 - install command,
 - install cwd,
 - sorted lockfile paths and SHA-256 contents,
@@ -812,7 +814,7 @@ Backend tests:
   - path order does not matter,
   - lockfile content changes key,
   - command changes key,
-  - sandbox image changes key,
+  - sandbox cache ABI changes key while deploy image tag changes do not,
   - verify paths do not change key.
 - Dependency cache service tests:
   - save archives only declared existing paths and uploads to object storage,
