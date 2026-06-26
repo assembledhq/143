@@ -1201,6 +1201,25 @@ export const handlers = [
     });
   }),
 
+  http.get('/api/v1/settings/runtime/status', () => {
+    return HttpResponse.json({
+      data: {
+        static_egress: {
+          available: true,
+          enabled: false,
+          public_ip: '203.0.113.10',
+        },
+        capacity: {
+          state: 'normal',
+          active_agent_runs: 0,
+          max_concurrent_agent_runs: 5,
+          active_previews: 0,
+          max_previews_per_user: 5,
+        },
+      },
+    });
+  }),
+
   // Default unified coding-credentials handler. Returns an empty stack for
   // every scope (org / personal / resolved); the scope is echoed back in
   // meta so failing tests are easier to diagnose.

@@ -222,6 +222,40 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 		"pr_readiness_custom_checks_source": toStrings(
 			PRReadinessCustomCheckSourceOrgSettings, PRReadinessCustomCheckSourceRepoConfig,
 		),
+		// code_review.go
+		"code_review_policies_approval_mode": toStrings(
+			CodeReviewApprovalModeCommentOnly, CodeReviewApprovalModeApproveAcceptable,
+		),
+		"code_review_session_metadata_trigger_source": toStrings(
+			CodeReviewTriggerSourceAppReviewer, CodeReviewTriggerSourceAliasReviewer,
+			CodeReviewTriggerSourceTeamReviewer, CodeReviewTriggerSourceSlashCommand,
+			CodeReviewTriggerSourceAutoPolicy,
+		),
+		"code_review_session_metadata_status": toStrings(
+			CodeReviewSessionStatusQueued, CodeReviewSessionStatusRunning,
+			CodeReviewSessionStatusCompleted, CodeReviewSessionStatusFailed,
+			CodeReviewSessionStatusStale, CodeReviewSessionStatusCancelled,
+		),
+		"code_review_session_metadata_decision": toStrings(
+			CodeReviewDecisionApproved, CodeReviewDecisionCommentOnly,
+			CodeReviewDecisionNeedsHumanReview, CodeReviewDecisionBlocked,
+		),
+		"code_review_agent_results_role": toStrings(
+			CodeReviewAgentRoleReviewer, CodeReviewAgentRoleOrchestrator,
+		),
+		"code_review_agent_results_status": toStrings(
+			CodeReviewAgentResultStatusQueued, CodeReviewAgentResultStatusRunning,
+			CodeReviewAgentResultStatusCompleted, CodeReviewAgentResultStatusFailed,
+			CodeReviewAgentResultStatusTimedOut,
+		),
+		"code_review_findings_severity": toStrings(
+			CodeReviewFindingSeverityInfo, CodeReviewFindingSeverityLow,
+			CodeReviewFindingSeverityMedium, CodeReviewFindingSeverityHigh,
+			CodeReviewFindingSeverityCritical,
+		),
+		"code_review_findings_confidence": toStrings(
+			CodeReviewFindingConfidenceLow, CodeReviewFindingConfidenceMedium, CodeReviewFindingConfidenceHigh,
+		),
 	}
 
 	for _, c := range constraints {

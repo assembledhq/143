@@ -15,6 +15,7 @@ import {
   X,
   Settings,
   MonitorPlay,
+  ClipboardCheck,
   BookOpen,
   type LucideIcon,
 } from "lucide-react";
@@ -134,8 +135,9 @@ type NavItem = {
 };
 
 const navItems: NavItem[] = [
-  { label: "Sessions", icon: Play, href: "/sessions" },
   { label: "Automations", icon: RefreshCw, href: "/automations" },
+  { label: "Code reviews", icon: ClipboardCheck, href: "/code-reviews" },
+  { label: "Sessions", icon: Play, href: "/sessions" },
   { label: "Autopilot", icon: Zap, href: "/autopilot" },
   { label: "Previews", icon: MonitorPlay, href: "/previews" },
 ];

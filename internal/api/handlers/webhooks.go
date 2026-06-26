@@ -13,6 +13,7 @@ import (
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,8 @@ type WebhookHandler struct {
 	integrationStore    *db.IntegrationStore
 	githubInstallations *db.GitHubInstallationStore
 	prService           *ghservice.PRService
+	pullRequests        *db.PullRequestStore
+	codeReviews         *codereviewsvc.Service
 }
 
 func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userStore *db.UserStore, repoStore *db.RepositoryStore, integrationStore *db.IntegrationStore, prService *ghservice.PRService) *WebhookHandler {
@@ -41,6 +44,11 @@ func NewWebhookHandler(cfg *config.Config, orgStore *db.OrganizationStore, userS
 
 func (h *WebhookHandler) SetGitHubInstallationStore(store *db.GitHubInstallationStore) {
 	h.githubInstallations = store
+}
+
+func (h *WebhookHandler) SetCodeReviewService(service *codereviewsvc.Service, pullRequests *db.PullRequestStore) {
+	h.codeReviews = service
+	h.pullRequests = pullRequests
 }
 
 func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
@@ -342,8 +350,108 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "PR_EVENT_FAILED", "failed to process pull_request event", err)
 		return
 	}
+	if event.Action == "review_requested" && h.codeReviews != nil && h.pullRequests != nil {
+		if ok := h.handleCodeReviewRequested(w, r, body, owner); !ok {
+			return
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+type codeReviewRequestedWebhook struct {
+	Action     string `json:"action"`
+	Number     int    `json:"number"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	RequestedReviewer *struct {
+		Login string `json:"login"`
+	} `json:"requested_reviewer"`
+	RequestedTeam *struct {
+		Slug string `json:"slug"`
+	} `json:"requested_team"`
+	PullRequest struct {
+		HTMLURL string `json:"html_url"`
+		Title   string `json:"title"`
+		User    struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Head struct {
+			SHA string `json:"sha"`
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			SHA string `json:"sha"`
+		} `json:"base"`
+	} `json:"pull_request"`
+}
+
+func (h *WebhookHandler) handleCodeReviewRequested(w http.ResponseWriter, r *http.Request, body []byte, owner db.GitHubRepoOwner) bool {
+	var event codeReviewRequestedWebhook
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse review_requested event")
+		return false
+	}
+	pr, err := h.pullRequests.GetByOrgRepoAndNumber(r.Context(), owner.OrgID, event.Repository.FullName, event.Number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		created := &models.PullRequest{
+			OrgID:          owner.OrgID,
+			GitHubPRNumber: event.Number,
+			GitHubPRURL:    event.PullRequest.HTMLURL,
+			GitHubRepo:     event.Repository.FullName,
+			Title:          event.PullRequest.Title,
+			Status:         models.PullRequestStatusOpen,
+			ReviewStatus:   models.PullRequestReviewStatusPending,
+			AuthoredBy:     models.GitIdentitySourceUser,
+			HeadSHA:        nilIfEmpty(event.PullRequest.Head.SHA),
+			HeadRef:        nilIfEmpty(event.PullRequest.Head.Ref),
+		}
+		if err := h.pullRequests.Create(r.Context(), created); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PR_MIRROR_CREATE_FAILED", "failed to create pull request mirror", err)
+			return false
+		}
+		pr = *created
+	} else if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_LOAD_FAILED", "failed to load pull request mirror", err)
+		return false
+	}
+	requestedLogin := ""
+	if event.RequestedReviewer != nil {
+		requestedLogin = event.RequestedReviewer.Login
+	}
+	requestedTeam := ""
+	if event.RequestedTeam != nil {
+		requestedTeam = event.RequestedTeam.Slug
+	}
+	headSHA := event.PullRequest.Head.SHA
+	if headSHA == "" && pr.HeadSHA != nil {
+		headSHA = *pr.HeadSHA
+	}
+	result, err := h.codeReviews.HandleReviewRequested(r.Context(), codereviewsvc.ReviewRequestedInput{
+		OrgID:             owner.OrgID,
+		RepositoryID:      owner.RepositoryID,
+		PullRequestID:     pr.ID,
+		GitHubRepo:        event.Repository.FullName,
+		GitHubPRNumber:    event.Number,
+		GitHubPRURL:       event.PullRequest.HTMLURL,
+		PullRequestTitle:  event.PullRequest.Title,
+		PullRequestAuthor: event.PullRequest.User.Login,
+		BaseSHA:           event.PullRequest.Base.SHA,
+		HeadSHA:           headSHA,
+		RequestedLogin:    requestedLogin,
+		RequestedTeam:     requestedTeam,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REQUEST_FAILED", "failed to process code review request", err)
+		return false
+	}
+	if !result.Processed {
+		// Non-matching reviewer requests are valid GitHub events; they are just
+		// not for this product surface.
+		return true
+	}
+	return true
 }
 
 func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.Request, body []byte) {

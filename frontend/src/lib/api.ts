@@ -263,6 +263,38 @@ export const api = {
         del(`/api/v1/repositories/${id}/preview-secret-bundles/${encodeURIComponent(name)}`),
     },
   },
+  codeReviews: {
+    list: (params?: {
+      repository_id?: string;
+      decision?: import('./types').CodeReviewDecision;
+      status?: import('./types').CodeReviewSessionStatus;
+      risk?: "acceptable" | "needs_review";
+      search?: string;
+      limit?: number;
+    }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
+      if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.status) searchParams.set('status', params.status);
+      if (params?.risk) searchParams.set('risk', params.risk);
+      if (params?.search) searchParams.set('search', params.search);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
+    },
+    templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
+    evidence: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
+    getPolicy: (repositoryId?: string | null) => {
+      const qs = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : '';
+      return get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>(`/api/v1/code-review-policies${qs}`);
+    },
+    updatePolicy: (body: { repository_id?: string | null; config: import('./types').CodeReviewPolicyConfig }) =>
+      request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      }),
+  },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
     fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
