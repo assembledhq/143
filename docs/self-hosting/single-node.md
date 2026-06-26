@@ -16,7 +16,7 @@ Use it for a small team, an evaluation instance, or a cost-conscious self-hosted
 - `sandbox-dns`: DNS sidecar for gVisor sandboxes on the `143-sandbox` bridge.
 - `gvisor-check`: startup preflight for the `runsc` runtime.
 
-Durable app data is stored under `/var/lib/143` and bind-mounted into both the API/worker container and durable session-executor containers through `SESSION_EXECUTOR_EXTRA_BINDS=/var/lib/143:/var/lib/143`.
+Durable app data is stored under `SINGLE_NODE_DATA_DIR` (`/var/lib/143` by default) and bind-mounted into both the API/worker container and durable session-executor containers. `docker-compose.single-node.yml` derives the default session-executor bind from `SINGLE_NODE_DATA_DIR`; if you override `SESSION_EXECUTOR_EXTRA_BINDS` directly, keep the data root included.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ Durable app data is stored under `/var/lib/143` and bind-mounted into both the A
 - Access to the runtime images in `IMAGE_REGISTRY` (`ghcr.io/assembledhq` by default). If those packages are private for your deployment, run `docker login ghcr.io` on the host or mirror the images and set `IMAGE_REGISTRY`.
 - Cloudflare DNS API token for the bundled Caddy wildcard certificate flow. If you do not use Cloudflare, replace `deploy/Caddyfile`/`Dockerfile.caddy` or put your own proxy in front.
 - gVisor `runsc` installed and registered with Docker for production isolation.
-- Backups for the Postgres Docker volume and `/var/lib/143`.
+- Backups for the Postgres Docker volume and `SINGLE_NODE_DATA_DIR`.
 
 ## Setup
 
@@ -44,7 +44,7 @@ Durable app data is stored under `/var/lib/143` and bind-mounted into both the A
    sudo deploy/scripts/prepare-single-node.sh
    ```
 
-   Copy the printed `DOCKER_GID` value into `.env.single-node`.
+   The script reads `SINGLE_NODE_DATA_DIR` from `.env.single-node`. Copy the printed `DOCKER_GID` value into `.env.single-node`.
 
 3. Start the stack:
 
@@ -91,7 +91,7 @@ Raise worker counts only after watching CPU, memory, Docker disk usage, and run 
 At minimum, back up:
 
 - the `pgdata` Docker volume,
-- `/var/lib/143`,
+- `SINGLE_NODE_DATA_DIR` (`/var/lib/143` by default),
 - `.env.single-node`,
 - Caddy data if you want to preserve issued certificates (`caddy_data` volume).
 

@@ -634,12 +634,34 @@ func TestSingleNodeComposeRunsProductionAllMode(t *testing.T) {
 	require.Contains(t, composeText, "condition: service_completed_successfully", "API startup should wait for migrations to complete")
 	require.Contains(t, composeText, "${DOCKER_GID:?", "single-node compose should require the host docker group GID for docker.sock access")
 	require.Contains(t, composeText, "SESSION_EXECUTOR_DOCKER_NETWORK: ${SESSION_EXECUTOR_DOCKER_NETWORK:-143-single-node}", "session executors should join the single-node app network")
-	require.Contains(t, composeText, "SESSION_EXECUTOR_EXTRA_BINDS: ${SESSION_EXECUTOR_EXTRA_BINDS:-/var/lib/143:/var/lib/143}", "session executors should share local durable data on single-node installs")
+	require.Contains(t, composeText, "SESSION_EXECUTOR_EXTRA_BINDS: ${SESSION_EXECUTOR_EXTRA_BINDS:-${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}}", "session executors should share the configured local durable data path on single-node installs")
 	require.Contains(t, composeText, "${SINGLE_NODE_DATA_DIR:-/var/lib/143}:${SINGLE_NODE_DATA_DIR:-/var/lib/143}", "API/worker container should mount the same host-backed durable data path")
 	require.Contains(t, composeText, "${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}:${SANDBOX_AUTH_SOCKET_DIR:-/var/run/143/sandbox-auth}", "single-node compose should allow sandbox auth socket paths to be overridden for local smoke tests")
 	require.Contains(t, composeText, "name: 143-sandbox", "single-node compose should use the canonical sandbox bridge")
 	require.Contains(t, composeText, "container_name: 143-sandbox-dns-1", "single-node sandbox DNS should use the canonical container name expected by host reconciliation")
 	require.Contains(t, composeText, "condition: service_healthy\n    restart: unless-stopped\n    deploy:", "single-node chrome should wait for sandbox DNS so dynamic sandbox-network allocation cannot take the DNS sidecar's pinned IP")
+}
+
+func TestSingleNodeDataDirContractStaysInSync(t *testing.T) {
+	t.Parallel()
+
+	envExample, err := os.ReadFile("../.env.single-node.example")
+	require.NoError(t, err, "test should read the single-node env example")
+	envText := string(envExample)
+
+	require.Contains(t, envText, "SINGLE_NODE_DATA_DIR=/var/lib/143", "env example should expose the data root as the single override point")
+	require.NotContains(t, envText, "\nSESSION_EXECUTOR_EXTRA_BINDS=/var/lib/143:/var/lib/143", "env example should not pin executor binds to the default data root")
+
+	prepareScript, err := os.ReadFile("../deploy/scripts/prepare-single-node.sh")
+	require.NoError(t, err, "test should read the single-node host preparation script")
+	prepareText := string(prepareScript)
+
+	require.Contains(t, prepareText, `ENV_FILE="${SINGLE_NODE_ENV_FILE:-$PROJECT_DIR/.env.single-node}"`, "host prep should read the same env file operators use for compose")
+	require.Contains(t, prepareText, `read_env_value SINGLE_NODE_DATA_DIR "$ENV_FILE"`, "host prep should honor SINGLE_NODE_DATA_DIR from the single-node env file")
+	require.Contains(t, prepareText, `"$data_dir/uploads"`, "host prep should create uploads under the configured data root")
+	require.Contains(t, prepareText, `"$data_dir/snapshots"`, "host prep should create snapshots under the configured data root")
+	require.Contains(t, prepareText, `"$data_dir/session-files-cache"`, "host prep should create session file cache under the configured data root")
+	require.Contains(t, prepareText, `chown -R 1000:1000 "$data_dir"`, "host prep should set ownership on the configured data root")
 }
 
 func TestWorkerDependencyCacheL1UsesHostBackedPath(t *testing.T) {

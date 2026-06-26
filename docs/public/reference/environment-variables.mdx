@@ -45,7 +45,7 @@ Use these settings as the deployment contract for a self-hosted 143 environment.
 <ConfigField name="WORKER_MAX_ACTIVE_SANDBOXES" type="integer" description="Maximum live sandboxes on a worker host." />
 <ConfigField name="SESSION_EXECUTOR_IMAGE" type="string" description="Server image used for durable session-executor containers in production worker-capable modes." />
 <ConfigField name="SESSION_EXECUTOR_DOCKER_NETWORK" type="string" description="Docker network session executors join to reach Postgres and worker APIs." />
-<ConfigField name="SESSION_EXECUTOR_EXTRA_BINDS" type="string" description="Comma-separated extra host bind mounts for session executors, such as /var/lib/143:/var/lib/143 on single-node installs." />
+<ConfigField name="SESSION_EXECUTOR_EXTRA_BINDS" type="string" description="Comma-separated extra host bind mounts for session executors. In the single-node compose file, the default is derived from SINGLE_NODE_DATA_DIR; if overriding directly, keep the data root included." />
 <ConfigField name="DOCKER_GID" type="string" description="Host docker group id passed to worker and executor containers for docker.sock access." />
 <ConfigField name="SANDBOX_IMAGE" type="string" description="Sandbox runtime image used by worker-created sandbox containers." />
 <ConfigField name="SANDBOX_RUNTIME" type="string" description="Docker runtime for sandboxes, usually runsc in production." />
@@ -57,7 +57,7 @@ Use these settings as the deployment contract for a self-hosted 143 environment.
 
 ## Single-node storage
 
-<ConfigField name="SINGLE_NODE_DATA_DIR" type="path" description="Host-backed durable data root mounted into the API/worker container. Defaults to /var/lib/143." />
+<ConfigField name="SINGLE_NODE_DATA_DIR" type="path" description="Host-backed durable data root mounted into the API/worker container and, by default, durable session executors. Defaults to /var/lib/143." />
 <ConfigField name="HOST_143_DIR" type="path" description="Host directory mounted read-only at /etc/143 for sandbox resolver and capability files. Defaults to /etc/143." />
 <ConfigField name="SANDBOX_RESOLV_CONF" type="path" description="Resolver config file passed to sandbox containers. Defaults to /etc/143/sandbox-resolv.conf." />
 <ConfigField name="SANDBOX_AUTH_SOCKET_DIR" type="path" description="Host directory for the worker-owned sandbox credential socket. Defaults to /var/run/143/sandbox-auth and must be 0750 or stricter." />

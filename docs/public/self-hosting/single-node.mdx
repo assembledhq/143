@@ -35,7 +35,7 @@ It is not high availability. Use it for small teams, evaluation, and low-volume 
 - Access to the runtime images in `IMAGE_REGISTRY` (`ghcr.io/assembledhq` by default). If those packages are private for your deployment, run `docker login ghcr.io` on the host or mirror the images and set `IMAGE_REGISTRY`.
 - Cloudflare DNS API token for the bundled wildcard certificate Caddyfile.
 - gVisor `runsc` installed and registered with Docker for production sandbox isolation.
-- Backups for Postgres and `/var/lib/143`.
+- Backups for Postgres and `SINGLE_NODE_DATA_DIR` (`/var/lib/143` by default).
 
 ## Start the instance
 
@@ -55,7 +55,7 @@ sudo deploy/scripts/prepare-single-node.sh
 make single-node-up
 ```
 
-The host preparation script creates the Docker networks, sandbox resolver config, sandbox-auth socket directory, preview dependency cache directory, and `/var/lib/143` data directories. It also prints the host Docker socket group id required by `DOCKER_GID`.
+The host preparation script creates the Docker networks, sandbox resolver config, sandbox-auth socket directory, preview dependency cache directory, and the data directories under `SINGLE_NODE_DATA_DIR`. It reads `SINGLE_NODE_DATA_DIR` from `.env.single-node` and prints the host Docker socket group id required by `DOCKER_GID`.
 
 ## Required env
 
@@ -68,6 +68,7 @@ Fill these groups in `.env.single-node`:
 - GitHub OAuth and GitHub App values from [GitHub App setup](/docs/self-hosting/github-app-setup).
 - At least one provider key for platform LLM features, plus `LLM_MODEL` and `PLATFORM_LLM_MODEL`.
 - Worker capacity and sandbox settings: start with `WORKER_PROCESS_COUNT=1` and `WORKER_MAX_ACTIVE_SANDBOXES=1`.
+- Storage: `SINGLE_NODE_DATA_DIR` defaults to `/var/lib/143` and is also the default session-executor bind mount.
 
 Keep `SANDBOX_RUNTIME=runsc` and `SANDBOX_REQUIRE_GVISOR=true` for production. Use `runc` only for trusted local smoke tests.
 
@@ -136,11 +137,11 @@ make single-node-up
 ## Tradeoffs
 
 - The bundled Caddyfile assumes Cloudflare for wildcard preview certificates.
-- Local storage under `/var/lib/143` must be backed up with Postgres.
+- Local storage under `SINGLE_NODE_DATA_DIR` must be backed up with Postgres.
 - Multi-node deployments should use S3-compatible snapshot/upload storage instead of local disk.
 - `SANDBOX_REQUIRE_DISK_QUOTA` defaults to `false` for storage-driver compatibility; set it to `true` when Docker can enforce container rootfs size limits.
 - Single-node restarts drain or interrupt all workers and previews on that host.
 
 <Callout type="warning" title="Backups first">
-Before routing real repository work through a single-node install, test restoring the Postgres volume, `/var/lib/143`, and `.env.single-node` onto a fresh host.
+Before routing real repository work through a single-node install, test restoring the Postgres volume, `SINGLE_NODE_DATA_DIR`, and `.env.single-node` onto a fresh host.
 </Callout>

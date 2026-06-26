@@ -23,7 +23,7 @@ Notes:
 - [ ] App runtime for frontend (`next build` + `next start`, or managed Next.js host)
 - [ ] Worker runtime with Docker socket access and gVisor `runsc`
 - [ ] Durable snapshot/upload storage:
-  - single-node: host-backed `/var/lib/143` plus filesystem backups
+  - single-node: host-backed `SINGLE_NODE_DATA_DIR` plus filesystem backups
   - multi-node: S3-compatible object storage
 - [ ] Automated database backups
 - [ ] Backup restore test completed
@@ -45,7 +45,7 @@ Notes:
 - [ ] `ENCRYPTION_MASTER_KEY` (required if you want encrypted credentials at rest)
 - [ ] `CSRF_SIGNING_KEY` (required in production; can be separate from `SESSION_SECRET`)
 - [ ] `SESSION_EXECUTOR_IMAGE` (required for production `MODE=all` or `MODE=worker`)
-- [ ] `SESSION_EXECUTOR_DOCKER_NETWORK` and `SESSION_EXECUTOR_EXTRA_BINDS` when durable session executors need same-host resources such as `/var/lib/143`
+- [ ] `SESSION_EXECUTOR_DOCKER_NETWORK` and `SESSION_EXECUTOR_EXTRA_BINDS` when durable session executors need same-host resources such as `SINGLE_NODE_DATA_DIR`
 - [ ] Worker capacity knobs (for `MODE=worker` or mixed `MODE=all` nodes):
   - `WORKER_PROCESS_COUNT` (default `1`) — how many in-process worker loops run on this node
   - For fleet deploys, put worker sizing env vars in `.env.production.enc` like other deploy env vars (the bundle lives in your private secrets checkout — see [docs/secrets/README.md](../secrets/README.md)).
