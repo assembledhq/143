@@ -3756,6 +3756,17 @@ func (s *PreviewStore) DeleteDependencyCache(ctx context.Context, orgID, id uuid
 	return nil
 }
 
+func (s *PreviewStore) DeleteDependencyCacheIfBlobKey(ctx context.Context, orgID, id uuid.UUID, blobKey string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache WHERE id = @id AND org_id = @org_id AND blob_key = @blob_key`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "blob_key": blobKey},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache by blob key: %w", err)
+	}
+	return nil
+}
+
 func (s *PreviewStore) ListDependencyCacheLRU(ctx context.Context, orgID, repoID uuid.UUID, keepNewest, limit int) ([]models.PreviewDependencyCache, error) {
 	if limit <= 0 {
 		limit = 500
