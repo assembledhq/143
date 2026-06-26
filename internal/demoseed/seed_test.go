@@ -249,6 +249,10 @@ func TestScanSeedSafety(t *testing.T) {
 				"INSERT INTO repositories (clone_url) VALUES ('https://github.com/assembledhq/143.git');",
 		},
 		{
+			name: "allows approved demo PR URL",
+			body: "INSERT INTO pull_requests (github_pr_url) VALUES ('https://github.com/assembledhq/143/pull/42');",
+		},
+		{
 			name:      "rejects non-demo email",
 			body:      "INSERT INTO users (email) VALUES ('alice@example.com');",
 			expectErr: "non-demo email",
@@ -276,6 +280,11 @@ func TestScanSeedSafety(t *testing.T) {
 		{
 			name:      "rejects unapproved GitHub repository URL",
 			body:      "INSERT INTO repositories (clone_url) VALUES ('https://github.com/customer/private-repo.git');",
+			expectErr: "unapproved URL path",
+		},
+		{
+			name:      "rejects unapproved GitHub path in approved repository",
+			body:      "INSERT INTO pull_requests (github_pr_url) VALUES ('https://github.com/assembledhq/143/issues/1');",
 			expectErr: "unapproved URL path",
 		},
 	}
@@ -355,6 +364,19 @@ func TestCurrentSeedUsesConvergentConflictHandlers(t *testing.T) {
 	}
 	for _, columnAssignment := range requiredIssueColumns {
 		require.Contains(t, issueBlock, columnAssignment, "issue seed conflict handler should converge canonical issue fields")
+	}
+
+	previewBlock := seedBlock(t, seed, "DELETE FROM preview_links", "-- A seeded \"ready\" preview instance")
+	requiredPreviewCleanup := []string{
+		"DELETE FROM preview_links",
+		"id <> '00000000-0000-4000-a000-000000000432'::uuid",
+		"DELETE FROM preview_targets",
+		"id <> '00000000-0000-4000-a000-000000000431'::uuid",
+		"DELETE FROM preview_groups",
+		"id <> '00000000-0000-4000-a000-000000000430'::uuid",
+	}
+	for _, statement := range requiredPreviewCleanup {
+		require.Contains(t, previewBlock, statement, "preview seed should remove matching natural-key rows before fixed-id inserts")
 	}
 }
 

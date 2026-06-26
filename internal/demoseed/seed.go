@@ -43,9 +43,12 @@ var (
 		{name: "production env reference", pattern: regexp.MustCompile(`(?i)\.env\.production|ENCRYPTION_MASTER_KEY|GITHUB_APP_PRIVATE_KEY|SLACK_(BOT|SIGNING)_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY`)},
 	}
 
-	allowedSeedGitHubRepos = map[string]struct{}{
-		"assembledhq/143":             {},
-		"assembledhq/example-service": {},
+	allowedSeedGitHubPaths = map[string]struct{}{
+		"assembledhq/143":                 {},
+		"assembledhq/143.git":             {},
+		"assembledhq/143/pull/42":         {},
+		"assembledhq/example-service":     {},
+		"assembledhq/example-service.git": {},
 	}
 )
 
@@ -148,30 +151,17 @@ func ScanSeedSafety(body []byte) error {
 func validateSeedURL(parsed *url.URL) error {
 	switch strings.ToLower(parsed.Hostname()) {
 	case "github.com":
-		ownerRepo, ok := githubOwnerRepo(parsed.Path)
-		if !ok {
+		if parsed.RawQuery != "" || parsed.Fragment != "" {
 			return fmt.Errorf("unapproved URL path %q found in demo seed", parsed.Path)
 		}
-		if _, ok := allowedSeedGitHubRepos[ownerRepo]; !ok {
+		path := strings.ToLower(strings.Trim(parsed.Path, "/"))
+		if _, ok := allowedSeedGitHubPaths[path]; !ok {
 			return fmt.Errorf("unapproved URL path %q found in demo seed", parsed.Path)
 		}
 		return nil
 	default:
 		return fmt.Errorf("unapproved URL host %q found in demo seed", parsed.Hostname())
 	}
-}
-
-func githubOwnerRepo(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if len(parts) < 2 {
-		return "", false
-	}
-	owner := strings.ToLower(parts[0])
-	repo := strings.ToLower(strings.TrimSuffix(parts[1], ".git"))
-	if owner == "" || repo == "" {
-		return "", false
-	}
-	return owner + "/" + repo, true
 }
 
 func Check(ctx context.Context, opts CheckOptions) error {
