@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ExternalLink, Settings2, RefreshCw, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
+import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, RefreshCw, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Table,
   TableBody,
@@ -32,6 +33,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
+import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
+import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
+import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
 import type {
   CodeReviewApprovalMode,
   CodeReviewDecision,
@@ -40,7 +46,9 @@ import type {
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
   CodeReviewPolicyConfig,
+  CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
+  SingleResponse,
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
@@ -149,23 +157,31 @@ export default function CodeReviewsPage() {
     enabled: Boolean(selectedEvidenceSessionId),
   });
 
-  const policyKey = `${repositoryId ?? "org"}:${policyQuery.data?.data.policy?.id ?? policyQuery.data?.data.source ?? "loading"}`;
-  const serverPolicy = policyQuery.data?.data.config;
-  const baseDraftPolicy = useMemo(
-    () => (serverPolicy ? clonePolicy(serverPolicy) : null),
-    [serverPolicy],
-  );
-  const [draftOverride, setDraftOverride] = useState<{ key: string; config: CodeReviewPolicyConfig } | null>(null);
-  const draftPolicy = draftOverride?.key === policyKey ? draftOverride.config : baseDraftPolicy;
-
-  const savePolicy = useMutation({
-    mutationFn: (config: CodeReviewPolicyConfig) =>
-      api.codeReviews.updatePolicy({ repository_id: repositoryId ?? null, config }),
-    onSuccess: () => {
-      setDraftOverride(null);
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
+  // The policy is autosaved as a single whole-config PUT. Each control reads
+  // the live config straight from the query cache and commits a fully-merged
+  // config built from the freshest cache value (per settings/AGENTS.md), so
+  // back-to-back edits never clobber one another.
+  const config = policyQuery.data?.data.config ?? null;
+  const autosave = useAutosave<CodeReviewPolicyConfig>({
+    queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
+    mutationFn: async (next: CodeReviewPolicyConfig) => {
+      try {
+        return await api.codeReviews.updatePolicy({ repository_id: repositoryId ?? null, config: next });
+      } finally {
+        // Editing the org default cascades into repo-scoped resolved policies
+        // cached under other keys, so invalidate the whole code-reviews
+        // namespace (matches the prior manual save).
+        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
+      }
     },
+    applyOptimistic: applyCodeReviewPolicyOptimistic,
+    coalesce: coalesceCodeReviewPolicy,
+    debounceMs: 0,
   });
+  const readLatestConfig = (): CodeReviewPolicyConfig | null =>
+    queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(
+      queryKeys.codeReviews.policy(repositoryId ?? null),
+    )?.data?.config ?? config;
   const setupGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.setupGitHubTrigger(targetRepositoryId),
     onSuccess: (_data, targetRepositoryId) => {
@@ -187,18 +203,35 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
-  const updateDraftPolicy = (config: CodeReviewPolicyConfig) => {
-    setDraftOverride({ key: policyKey, config });
+  // Build a fully-merged config from the freshest cache value. Returns null
+  // only before the policy has loaded (controls are disabled until then).
+  const draftFrom = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig | null => {
+    const base = readLatestConfig();
+    if (!base) return null;
+    const next = clonePolicy(base);
+    mutate(next);
+    return next;
   };
-  const updateDescriptionRequirement = (
+  // Instant commit for toggles/selects/buttons.
+  const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void) => {
+    const next = draftFrom(mutate);
+    if (next) autosave.save(next);
+  };
+  // toPatch builder for numeric fields, which require a non-null payload. Safe
+  // because numeric inputs are disabled until the policy has loaded.
+  const buildConfig = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig => {
+    const next = draftFrom(mutate);
+    if (!next) return config as CodeReviewPolicyConfig;
+    return next;
+  };
+  const commitRequirement = (
     index: number,
     updater: (requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number]) =>
       CodeReviewPolicyConfig["description_policy"]["requirements"][number],
   ) => {
-    if (!draftPolicy) return;
-    const requirements = [...draftPolicy.description_policy.requirements];
-    requirements[index] = updater(requirements[index]);
-    updateDraftPolicy({ ...draftPolicy, description_policy: { requirements } });
+    commitPolicy((next) => {
+      next.description_policy.requirements[index] = updater(next.description_policy.requirements[index]);
+    });
   };
 
   return (
@@ -367,7 +400,10 @@ export default function CodeReviewsPage() {
           <TabsContent value="config" className="space-y-4">
             <Card>
               <CardHeader>
-                <CardTitle>Bot behavior</CardTitle>
+                <div className="flex items-center justify-between gap-3">
+                  <CardTitle>Bot behavior</CardTitle>
+                  <AutosaveIndicator status={autosave.status} />
+                </div>
               </CardHeader>
               <CardContent className="space-y-5">
                 <div className="rounded-md border border-border p-4">
@@ -386,11 +422,11 @@ export default function CodeReviewsPage() {
                       {policyQuery.data?.data.source ?? "loading"}
                     </Badge>
                   </div>
-                  {draftPolicy?.inheritance?.inherit_org_defaults ? (
+                  {config?.inheritance?.inherit_org_defaults ? (
                     <div className="mt-3 text-xs text-muted-foreground">
                       Inherited from version {policyQuery.data?.data.inherited_policy?.version ?? "default"}.
-                      {draftPolicy.inheritance.override_fields?.length
-                        ? ` Override fields: ${draftPolicy.inheritance.override_fields.join(", ")}.`
+                      {config.inheritance.override_fields?.length
+                        ? ` Override fields: ${config.inheritance.override_fields.join(", ")}.`
                         : " No explicit override fields."}
                     </div>
                   ) : null}
@@ -414,592 +450,418 @@ export default function CodeReviewsPage() {
                   }}
                 />
 
-                <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
-                  <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
-                    <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
-                    {templates.map((template) => (
-                      <SelectItem key={template.key} value={template.key}>
-                        {template.title}
-                      </SelectItem>
-                    ))}
-                  </FilterSelect>
-                  <Button
-                    variant="outline"
-                    disabled={!selectedTemplate}
-                    onClick={() => {
-                      if (!selectedTemplate) return;
-                      setDraftOverride({ key: policyKey, config: clonePolicy(selectedTemplate.config) });
-                    }}
-                  >
-                    Apply template
-                  </Button>
-                </div>
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-foreground">Essentials</div>
 
-                <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="text-sm font-medium text-foreground">Enable 143 Code Reviewer</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      When off, reviewer requests are acknowledged but no review session is started.
+                  <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-medium text-foreground">Enable 143 Code Reviewer</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        When off, reviewer requests are acknowledged but no review session is started.
+                      </div>
                     </div>
+                    <Switch
+                      checked={config?.enabled ?? false}
+                      disabled={!config}
+                      onCheckedChange={(checked) => commitPolicy((next) => { next.enabled = checked; })}
+                    />
                   </div>
-                  <Switch
-                    checked={draftPolicy?.enabled ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) => {
-                      if (!draftPolicy) return;
-                      setDraftOverride({ key: policyKey, config: { ...draftPolicy, enabled: checked } });
-                    }}
-                  />
-                </div>
 
-                <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <div className="text-sm font-medium text-foreground">Approve acceptable PRs</div>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      When off, the bot always submits comment-only GitHub reviews.
+                  <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="text-sm font-medium text-foreground">Approve acceptable PRs</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        When off, the bot always submits comment-only GitHub reviews.
+                      </div>
                     </div>
-                  </div>
-                  <Switch
-                    checked={draftPolicy?.approval_mode === "approve_acceptable"}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) => {
-                      if (!draftPolicy) return;
-                      setDraftOverride({
-                        key: policyKey,
-                        config: {
-                          ...draftPolicy,
-                          approval_mode: (checked ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode,
-                        },
-                      });
-                    }}
-                  />
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-3">
-                  <NumberPolicyInput
-                    label="Files changed"
-                    value={draftPolicy?.risk_policy.max_files_changed}
-                    min={1}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, max_files_changed: value } },
-                      })
-                    }
-                  />
-                  <NumberPolicyInput
-                    label="Lines changed"
-                    value={draftPolicy?.risk_policy.max_lines_changed}
-                    min={1}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, max_lines_changed: value } },
-                      })
-                    }
-                  />
-                  <NumberPolicyInput
-                    label="Inline comments"
-                    value={draftPolicy?.inline_comment_limit}
-                    min={1}
-                    max={10}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({ key: policyKey, config: { ...draftPolicy, inline_comment_limit: value } })
-                    }
-                  />
-                  <NumberPolicyInput
-                    label="Timeout seconds"
-                    value={draftPolicy?.agent_roster.timeout_seconds}
-                    min={60}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, timeout_seconds: value } },
-                      })
-                    }
-                  />
-                  <NumberPolicyInput
-                    label="Cost ceiling cents"
-                    value={draftPolicy?.agent_roster.max_cost_cents}
-                    min={0}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, max_cost_cents: value } },
-                      })
-                    }
-                  />
-                  <NumberPolicyInput
-                    label="Reviewer quorum"
-                    value={draftPolicy?.agent_roster.require_reviewer_quorum}
-                    min={1}
-                    max={Math.max(1, draftPolicy?.agent_roster.reviewers.length ?? 1)}
-                    disabled={!draftPolicy}
-                    onChange={(value) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, require_reviewer_quorum: value } },
-                      })
-                    }
-                  />
-                  <div className="rounded-md border border-border p-4">
-                    <Label className="text-xs text-muted-foreground">Review depth</Label>
-                    <Select
-                      value={draftPolicy?.agent_roster.review_depth ?? "standard"}
-                      disabled={!draftPolicy}
-                      onValueChange={(value) =>
-                        draftPolicy &&
-                        setDraftOverride({
-                          key: policyKey,
-                          config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, review_depth: value } },
-                        })
-                      }
-                    >
-                      <SelectTrigger className="mt-2" aria-label="Review depth">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="shallow">Shallow</SelectItem>
-                        <SelectItem value="standard">Standard</SelectItem>
-                        <SelectItem value="deep">Deep</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 md:grid-cols-2">
-                  <PolicyToggle
-                    label="Require passing checks"
-                    checked={draftPolicy?.risk_policy.require_passing_checks ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_passing_checks: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Require mergeable PR"
-                    checked={draftPolicy?.risk_policy.require_mergeable ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_mergeable: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Enforce sensitive paths"
-                    checked={draftPolicy?.risk_policy.exclude_sensitive_paths ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, exclude_sensitive_paths: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Require up-to-date branch"
-                    checked={draftPolicy?.risk_policy.require_up_to_date ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, require_up_to_date: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Allow policy changes"
-                    checked={draftPolicy?.risk_policy.allow_policy_changes ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, allow_policy_changes: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Block reviewer disagreement"
-                    checked={draftPolicy?.agent_roster.disagreement_blocks ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, disagreement_blocks: checked } },
-                      })
-                    }
-                  />
-                  <PolicyToggle
-                    label="Allow fork PRs"
-                    checked={draftPolicy?.risk_policy.allow_forks ?? false}
-                    disabled={!draftPolicy}
-                    onCheckedChange={(checked) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, allow_forks: checked } },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-2">
-                  <ListTextArea
-                    label="Sensitive paths"
-                    value={draftPolicy?.risk_policy.sensitive_paths ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, sensitive_paths: items } },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Allowed path patterns"
-                    value={draftPolicy?.risk_policy.allowed_path_patterns ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      updateDraftPolicy({
-                        ...draftPolicy,
-                        risk_policy: { ...draftPolicy.risk_policy, allowed_path_patterns: items },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Blocked path patterns"
-                    value={draftPolicy?.risk_policy.blocked_path_patterns ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      updateDraftPolicy({
-                        ...draftPolicy,
-                        risk_policy: { ...draftPolicy.risk_policy, blocked_path_patterns: items },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Excluded categories"
-                    value={draftPolicy?.risk_policy.exclude_categories ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, exclude_categories: items } },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Required checks"
-                    value={draftPolicy?.risk_policy.required_checks ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, required_checks: items } },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Eligible authors"
-                    value={draftPolicy?.risk_policy.eligible_authors ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, eligible_authors: items } },
-                      })
-                    }
-                  />
-                  <ListTextArea
-                    label="Reviewer agents"
-                    value={draftPolicy?.agent_roster.reviewers ?? []}
-                    disabled={!draftPolicy}
-                    onChange={(items) => {
-                      if (!draftPolicy) return;
-                      const reviewers = items.length > 0 ? items : draftPolicy.agent_roster.reviewers;
-                      const requireReviewerQuorum = Math.min(
-                        draftPolicy.agent_roster.require_reviewer_quorum,
-                        Math.max(1, reviewers.length),
-                      );
-                      setDraftOverride({
-                        key: policyKey,
-                        config: {
-                          ...draftPolicy,
-                          agent_roster: {
-                            ...draftPolicy.agent_roster,
-                            reviewers,
-                            require_reviewer_quorum: requireReviewerQuorum,
-                          },
-                        },
-                      });
-                    }}
-                  />
-                  <div className="space-y-2">
-                    <Label className="text-xs text-muted-foreground">Orchestrator</Label>
-                    <Input
-                      value={draftPolicy?.agent_roster.orchestrator ?? ""}
-                      disabled={!draftPolicy}
-                      onChange={(event) =>
-                        draftPolicy &&
-                        setDraftOverride({
-                          key: policyKey,
-                          config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, orchestrator: event.target.value } },
+                    <Switch
+                      checked={config?.approval_mode === "approve_acceptable"}
+                      disabled={!config}
+                      onCheckedChange={(checked) =>
+                        commitPolicy((next) => {
+                          next.approval_mode = (checked ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
                         })
                       }
                     />
                   </div>
-                </div>
 
-                <div className="space-y-3">
-                  <Label className="text-xs text-muted-foreground">Final review template</Label>
-                  <Textarea
-                    value={draftPolicy?.final_review_template ?? ""}
-                    disabled={!draftPolicy}
-                    rows={4}
-                    onChange={(event) =>
-                      draftPolicy &&
-                      setDraftOverride({
-                        key: policyKey,
-                        config: { ...draftPolicy, final_review_template: event.target.value },
-                      })
-                    }
-                  />
-                </div>
-
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-medium text-foreground">Description requirements</div>
+                  <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
+                    <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
+                      <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
+                      {templates.map((template) => (
+                        <SelectItem key={template.key} value={template.key}>
+                          {template.title}
+                        </SelectItem>
+                      ))}
+                    </FilterSelect>
                     <Button
                       variant="outline"
-                      size="sm"
-                      disabled={!draftPolicy}
+                      disabled={!selectedTemplate || !config}
                       onClick={() => {
-                        if (!draftPolicy) return;
-                        const nextIndex = draftPolicy.description_policy.requirements.length + 1;
-                        setDraftOverride({
-                          key: policyKey,
-                          config: {
-                            ...draftPolicy,
-                            description_policy: {
-                              requirements: [
-                                ...draftPolicy.description_policy.requirements,
-                                {
+                        if (!selectedTemplate) return;
+                        autosave.save(clonePolicy(selectedTemplate.config));
+                      }}
+                    >
+                      Apply template
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-foreground">Fine-tuning</div>
+
+                  <FineTuningSection title="Approval criteria" summary="Size thresholds, limits, timeout, and reviewer quorum">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <NumberPolicyInput
+                        label="Files changed"
+                        serverValue={config?.risk_policy.max_files_changed}
+                        min={1}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.risk_policy.max_files_changed = value; })}
+                      />
+                      <NumberPolicyInput
+                        label="Lines changed"
+                        serverValue={config?.risk_policy.max_lines_changed}
+                        min={1}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.risk_policy.max_lines_changed = value; })}
+                      />
+                      <NumberPolicyInput
+                        label="Inline comments"
+                        serverValue={config?.inline_comment_limit}
+                        min={1}
+                        max={10}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
+                      />
+                      <NumberPolicyInput
+                        label="Timeout seconds"
+                        serverValue={config?.agent_roster.timeout_seconds}
+                        min={60}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.timeout_seconds = value; })}
+                      />
+                      <NumberPolicyInput
+                        label="Cost ceiling cents"
+                        serverValue={config?.agent_roster.max_cost_cents}
+                        min={0}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.max_cost_cents = value; })}
+                      />
+                      <NumberPolicyInput
+                        label="Reviewer quorum"
+                        serverValue={config?.agent_roster.require_reviewer_quorum}
+                        min={1}
+                        max={Math.max(1, config?.agent_roster.reviewers.length ?? 1)}
+                        disabled={!config}
+                        autosave={autosave}
+                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.require_reviewer_quorum = value; })}
+                      />
+                    </div>
+                  </FineTuningSection>
+
+                  <FineTuningSection title="Quality gates" summary="Merge and check requirements before approval">
+                <div className="grid gap-3 md:grid-cols-2">
+                      <PolicyToggle
+                        label="Require passing checks"
+                        checked={config?.risk_policy.require_passing_checks ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_passing_checks = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Require mergeable PR"
+                        checked={config?.risk_policy.require_mergeable ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_mergeable = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Enforce sensitive paths"
+                        checked={config?.risk_policy.exclude_sensitive_paths ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.exclude_sensitive_paths = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Require up-to-date branch"
+                        checked={config?.risk_policy.require_up_to_date ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_up_to_date = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Allow policy changes"
+                        checked={config?.risk_policy.allow_policy_changes ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_policy_changes = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Block reviewer disagreement"
+                        checked={config?.agent_roster.disagreement_blocks ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.agent_roster.disagreement_blocks = checked; })}
+                      />
+                      <PolicyToggle
+                        label="Allow fork PRs"
+                        checked={config?.risk_policy.allow_forks ?? false}
+                        disabled={!config}
+                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_forks = checked; })}
+                      />
+                    </div>
+                  </FineTuningSection>
+
+                  <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks">
+                <div className="grid gap-3 lg:grid-cols-2">
+                      <ListTextArea
+                        label="Sensitive paths"
+                        serverValue={config?.risk_policy.sensitive_paths ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.sensitive_paths = items; })}
+                      />
+                      <ListTextArea
+                        label="Allowed path patterns"
+                        serverValue={config?.risk_policy.allowed_path_patterns ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.allowed_path_patterns = items; })}
+                      />
+                      <ListTextArea
+                        label="Blocked path patterns"
+                        serverValue={config?.risk_policy.blocked_path_patterns ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.blocked_path_patterns = items; })}
+                      />
+                      <ListTextArea
+                        label="Excluded categories"
+                        serverValue={config?.risk_policy.exclude_categories ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.exclude_categories = items; })}
+                      />
+                      <ListTextArea
+                        label="Required checks"
+                        serverValue={config?.risk_policy.required_checks ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.required_checks = items; })}
+                      />
+                      <ListTextArea
+                        label="Eligible authors"
+                        serverValue={config?.risk_policy.eligible_authors ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.eligible_authors = items; })}
+                      />
+                    </div>
+                  </FineTuningSection>
+
+                  <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent">
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <ListTextArea
+                        label="Reviewer agents"
+                        serverValue={config?.agent_roster.reviewers ?? []}
+                        disabled={!config}
+                        onCommitItems={(items) =>
+                          commitPolicy((next) => {
+                            const reviewers = items.length > 0 ? items : next.agent_roster.reviewers;
+                            next.agent_roster.reviewers = reviewers;
+                            next.agent_roster.require_reviewer_quorum = Math.min(
+                              next.agent_roster.require_reviewer_quorum,
+                              Math.max(1, reviewers.length),
+                            );
+                          })
+                        }
+                      />
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">Orchestrator</Label>
+                        <PolicyTextInput
+                          serverValue={config?.agent_roster.orchestrator ?? ""}
+                          disabled={!config}
+                          onCommit={(value) => commitPolicy((next) => { next.agent_roster.orchestrator = value; })}
+                        />
+                      </div>
+                    </div>
+                  </FineTuningSection>
+
+                  <FineTuningSection title="Description requirements" summary="Final review template and per-PR description rules">
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label className="text-xs text-muted-foreground">Final review template</Label>
+                        <PolicyTextarea
+                          serverValue={config?.final_review_template ?? ""}
+                          disabled={!config}
+                          rows={4}
+                          onCommit={(value) => commitPolicy((next) => { next.final_review_template = value; })}
+                        />
+                      </div>
+
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-medium text-foreground">Requirements</div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={!config}
+                            onClick={() =>
+                              commitPolicy((next) => {
+                                const nextIndex = next.description_policy.requirements.length + 1;
+                                next.description_policy.requirements.push({
                                   key: `custom_${nextIndex}`,
                                   title: "Custom requirement",
                                   prompt: "",
                                   required: true,
                                   applies_when: { kind: "all" },
-                                },
-                              ],
-                            },
-                          },
-                        });
-                      }}
-                    >
-                      <Plus className="h-4 w-4" />
-                      Add requirement
-                    </Button>
-                  </div>
-                  <div className="grid gap-3 lg:grid-cols-3">
-                    {draftPolicy?.description_policy.requirements.map((requirement, index) => (
-                      <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
-                        <div className="flex items-center gap-2">
-                          <Input
-                            value={requirement.title}
-                            disabled={!draftPolicy}
-                            aria-label={`${requirement.key} title`}
-                            onChange={(event) => {
-                              if (!draftPolicy) return;
-                              const requirements = [...draftPolicy.description_policy.requirements];
-                              requirements[index] = { ...requirement, title: event.target.value };
-                              setDraftOverride({
-                                key: policyKey,
-                                config: { ...draftPolicy, description_policy: { requirements } },
-                              });
-                            }}
-                          />
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            disabled={!draftPolicy || draftPolicy.description_policy.requirements.length <= 1}
-                            aria-label={`Remove ${requirement.title}`}
-                            onClick={() => {
-                              if (!draftPolicy) return;
-                              const requirements = draftPolicy.description_policy.requirements.filter((_, itemIndex) => itemIndex !== index);
-                              setDraftOverride({
-                                key: policyKey,
-                                config: { ...draftPolicy, description_policy: { requirements } },
-                              });
-                            }}
+                                });
+                              })
+                            }
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Plus className="h-4 w-4" />
+                            Add requirement
                           </Button>
                         </div>
-                        <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
-                          <div className="space-y-2">
-                            <Label className="text-xs text-muted-foreground">Applies when</Label>
-                            <Select
-                              value={requirement.applies_when?.kind ?? "all"}
-                              disabled={!draftPolicy}
-                              onValueChange={(value) =>
-                                updateDescriptionRequirement(index, (current) => ({
-                                  ...current,
-                                  applicability: value,
-                                  applies_when: {
-                                    ...(current.applies_when ?? {}),
-                                    kind: value as CodeReviewDescriptionApplicabilityKind,
-                                  },
-                                }))
-                              }
-                            >
-                              <SelectTrigger aria-label={`${requirement.key} applicability`}>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {Object.entries(APPLICABILITY_KIND_LABELS).map(([kind, label]) => (
-                                  <SelectItem key={kind} value={kind}>
-                                    {label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-                            <Label className="text-xs text-muted-foreground">Required</Label>
-                            <Switch
-                              checked={requirement.required}
-                              disabled={!draftPolicy}
-                              onCheckedChange={(checked) => {
-                                if (!draftPolicy) return;
-                                const requirements = [...draftPolicy.description_policy.requirements];
-                                requirements[index] = { ...requirement, required: checked };
-                                setDraftOverride({
-                                  key: policyKey,
-                                  config: { ...draftPolicy, description_policy: { requirements } },
-                                });
-                              }}
-                            />
-                          </div>
+                        <div className="grid gap-3 lg:grid-cols-3">
+                          {config?.description_policy.requirements.map((requirement, index) => (
+                            <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
+                              <div className="flex items-center gap-2">
+                                <PolicyTextInput
+                                  serverValue={requirement.title}
+                                  disabled={!config}
+                                  aria-label={`${requirement.key} title`}
+                                  onCommit={(value) => commitRequirement(index, (current) => ({ ...current, title: value }))}
+                                />
+                                <Button
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  disabled={!config || (config?.description_policy.requirements.length ?? 0) <= 1}
+                                  aria-label={`Remove ${requirement.title}`}
+                                  onClick={() =>
+                                    commitPolicy((next) => {
+                                      next.description_policy.requirements = next.description_policy.requirements.filter(
+                                        (_, itemIndex) => itemIndex !== index,
+                                      );
+                                    })
+                                  }
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              </div>
+                              <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                                <div className="space-y-2">
+                                  <Label className="text-xs text-muted-foreground">Applies when</Label>
+                                  <Select
+                                    value={requirement.applies_when?.kind ?? "all"}
+                                    disabled={!config}
+                                    onValueChange={(value) =>
+                                      commitRequirement(index, (current) => ({
+                                        ...current,
+                                        applicability: value,
+                                        applies_when: {
+                                          ...(current.applies_when ?? {}),
+                                          kind: value as CodeReviewDescriptionApplicabilityKind,
+                                        },
+                                      }))
+                                    }
+                                  >
+                                    <SelectTrigger aria-label={`${requirement.key} applicability`}>
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {Object.entries(APPLICABILITY_KIND_LABELS).map(([kind, label]) => (
+                                        <SelectItem key={kind} value={kind}>
+                                          {label}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+                                  <Label className="text-xs text-muted-foreground">Required</Label>
+                                  <Switch
+                                    checked={requirement.required}
+                                    disabled={!config}
+                                    onCheckedChange={(checked) =>
+                                      commitRequirement(index, (current) => ({ ...current, required: checked }))
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <div className="grid gap-2 sm:grid-cols-2">
+                                <NumberPolicyInput
+                                  label="Min files"
+                                  serverValue={requirement.applies_when?.min_files_changed ?? 0}
+                                  min={0}
+                                  disabled={!config}
+                                  autosave={autosave}
+                                  buildPatch={(value) =>
+                                    buildConfig((next) => {
+                                      const req = next.description_policy.requirements[index];
+                                      req.applies_when = { ...(req.applies_when ?? { kind: "all" }), min_files_changed: value };
+                                    })
+                                  }
+                                />
+                                <NumberPolicyInput
+                                  label="Min lines"
+                                  serverValue={requirement.applies_when?.min_lines_changed ?? 0}
+                                  min={0}
+                                  disabled={!config}
+                                  autosave={autosave}
+                                  buildPatch={(value) =>
+                                    buildConfig((next) => {
+                                      const req = next.description_policy.requirements[index];
+                                      req.applies_when = { ...(req.applies_when ?? { kind: "all" }), min_lines_changed: value };
+                                    })
+                                  }
+                                />
+                              </div>
+                              <ListTextArea
+                                label="Path patterns"
+                                serverValue={requirement.applies_when?.path_patterns ?? []}
+                                disabled={!config}
+                                onCommitItems={(items) =>
+                                  commitRequirement(index, (current) => ({
+                                    ...current,
+                                    applies_when: { ...(current.applies_when ?? { kind: "paths" }), path_patterns: items },
+                                  }))
+                                }
+                              />
+                              <ListTextArea
+                                label="Categories"
+                                serverValue={requirement.applies_when?.categories ?? []}
+                                disabled={!config}
+                                onCommitItems={(items) =>
+                                  commitRequirement(index, (current) => ({
+                                    ...current,
+                                    applies_when: { ...(current.applies_when ?? { kind: "categories" }), categories: items },
+                                  }))
+                                }
+                              />
+                              <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
+                                <Label className="text-xs text-muted-foreground">Require changed test files</Label>
+                                <Switch
+                                  checked={requirement.applies_when?.require_test_files_changed ?? false}
+                                  disabled={!config}
+                                  onCheckedChange={(checked) =>
+                                    commitRequirement(index, (current) => ({
+                                      ...current,
+                                      applies_when: {
+                                        ...(current.applies_when ?? { kind: "tests_changed" }),
+                                        require_test_files_changed: checked,
+                                      },
+                                    }))
+                                  }
+                                />
+                              </div>
+                              <PolicyTextarea
+                                serverValue={requirement.prompt}
+                                disabled={!config}
+                                rows={4}
+                                aria-label={`${requirement.key} prompt`}
+                                onCommit={(value) => commitRequirement(index, (current) => ({ ...current, prompt: value }))}
+                              />
+                            </div>
+                          ))}
                         </div>
-                        <div className="grid gap-2 sm:grid-cols-2">
-                          <NumberPolicyInput
-                            label="Min files"
-                            value={requirement.applies_when?.min_files_changed}
-                            min={0}
-                            disabled={!draftPolicy}
-                            onChange={(value) =>
-                              updateDescriptionRequirement(index, (current) => ({
-                                ...current,
-                                applies_when: { ...(current.applies_when ?? { kind: "all" }), min_files_changed: value },
-                              }))
-                            }
-                          />
-                          <NumberPolicyInput
-                            label="Min lines"
-                            value={requirement.applies_when?.min_lines_changed}
-                            min={0}
-                            disabled={!draftPolicy}
-                            onChange={(value) =>
-                              updateDescriptionRequirement(index, (current) => ({
-                                ...current,
-                                applies_when: { ...(current.applies_when ?? { kind: "all" }), min_lines_changed: value },
-                              }))
-                            }
-                          />
-                        </div>
-                        <ListTextArea
-                          label="Path patterns"
-                          value={requirement.applies_when?.path_patterns ?? []}
-                          disabled={!draftPolicy}
-                          onChange={(items) =>
-                            updateDescriptionRequirement(index, (current) => ({
-                              ...current,
-                              applies_when: { ...(current.applies_when ?? { kind: "paths" }), path_patterns: items },
-                            }))
-                          }
-                        />
-                        <ListTextArea
-                          label="Categories"
-                          value={requirement.applies_when?.categories ?? []}
-                          disabled={!draftPolicy}
-                          onChange={(items) =>
-                            updateDescriptionRequirement(index, (current) => ({
-                              ...current,
-                              applies_when: { ...(current.applies_when ?? { kind: "categories" }), categories: items },
-                            }))
-                          }
-                        />
-                        <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-                          <Label className="text-xs text-muted-foreground">Require changed test files</Label>
-                          <Switch
-                            checked={requirement.applies_when?.require_test_files_changed ?? false}
-                            disabled={!draftPolicy}
-                            onCheckedChange={(checked) =>
-                              updateDescriptionRequirement(index, (current) => ({
-                                ...current,
-                                applies_when: {
-                                  ...(current.applies_when ?? { kind: "tests_changed" }),
-                                  require_test_files_changed: checked,
-                                },
-                              }))
-                            }
-                          />
-                        </div>
-                        <Textarea
-                          value={requirement.prompt}
-                          disabled={!draftPolicy}
-                          rows={4}
-                          aria-label={`${requirement.key} prompt`}
-                          onChange={(event) => {
-                            if (!draftPolicy) return;
-                            const requirements = [...draftPolicy.description_policy.requirements];
-                            requirements[index] = { ...requirement, prompt: event.target.value };
-                            setDraftOverride({
-                              key: policyKey,
-                              config: { ...draftPolicy, description_policy: { requirements } },
-                            });
-                          }}
-                        />
                       </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex justify-end">
-                  <Button
-                    disabled={!draftPolicy || savePolicy.isPending}
-                    onClick={() => draftPolicy && savePolicy.mutate(draftPolicy)}
-                  >
-                    Save policy
-                  </Button>
+                    </div>
+                  </FineTuningSection>
                 </div>
               </CardContent>
             </Card>
@@ -1162,38 +1024,43 @@ function FilterSelect({
 }
 
 function NumberPolicyInput({
-	label,
-	value,
-	min,
-	max,
-	disabled,
-	onChange,
+  label,
+  serverValue,
+  min,
+  max,
+  disabled,
+  autosave,
+  buildPatch,
 }: {
-	label: string;
-	value?: number;
-	min: number;
-	max?: number;
-	disabled?: boolean;
-	onChange: (value: number) => void;
+  label: string;
+  serverValue?: number;
+  min: number;
+  max?: number;
+  disabled?: boolean;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  buildPatch: (value: number) => CodeReviewPolicyConfig;
 }) {
-	return (
-		<div className="rounded-md border border-border p-4">
-			<Label className="text-xs text-muted-foreground">{label}</Label>
-			<Input
-				className="mt-2"
-				type="number"
-				min={min}
-				max={max}
-				value={value ?? ""}
-				disabled={disabled}
-				onChange={(event) => {
-					const parsed = Number.parseInt(event.target.value, 10);
-					if (Number.isNaN(parsed)) return;
-					onChange(Math.max(min, max ? Math.min(max, parsed) : parsed));
-				}}
-			/>
-		</div>
-	);
+  const field = useAutosaveNumericField<CodeReviewPolicyConfig>({
+    serverValue: serverValue ?? min,
+    autosave,
+    toPatch: buildPatch,
+    clamp: (value) => Math.max(min, max !== undefined ? Math.min(max, value) : value),
+  });
+  return (
+    <div className="rounded-md border border-border p-4">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Input
+        className="mt-2"
+        type="number"
+        min={min}
+        max={max}
+        value={field.value}
+        disabled={disabled}
+        onChange={field.onChange}
+        onBlur={field.onBlur}
+      />
+    </div>
+  );
 }
 
 function PolicyToggle({
@@ -1217,27 +1084,100 @@ function PolicyToggle({
 
 function ListTextArea({
   label,
-  value,
+  serverValue,
   disabled,
-  onChange,
+  onCommitItems,
 }: {
   label: string;
-  value: string[];
+  serverValue: string[];
   disabled?: boolean;
-  onChange: (items: string[]) => void;
+  onCommitItems: (items: string[]) => void;
 }) {
+  const field = useDebouncedTextField({
+    serverValue: serverValue.join("\n"),
+    onCommit: (text) =>
+      onCommitItems(text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)),
+  });
   return (
     <div className="space-y-2">
       <Label className="text-xs text-muted-foreground">{label}</Label>
       <Textarea
-        value={value.join("\n")}
+        value={field.value}
         disabled={disabled}
         rows={4}
-        onChange={(event) =>
-          onChange(event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))
-        }
+        onChange={(event) => field.onChange(event.target.value)}
+        onBlur={field.onBlur}
       />
     </div>
+  );
+}
+
+function PolicyTextInput({
+  serverValue,
+  disabled,
+  onCommit,
+  ...props
+}: {
+  serverValue: string;
+  onCommit: (value: string) => void;
+} & Omit<ComponentProps<typeof Input>, "value" | "onChange" | "onBlur">) {
+  const field = useDebouncedTextField({ serverValue, onCommit });
+  return (
+    <Input
+      {...props}
+      value={field.value}
+      disabled={disabled}
+      onChange={(event) => field.onChange(event.target.value)}
+      onBlur={field.onBlur}
+    />
+  );
+}
+
+function PolicyTextarea({
+  serverValue,
+  disabled,
+  onCommit,
+  ...props
+}: {
+  serverValue: string;
+  onCommit: (value: string) => void;
+} & Omit<ComponentProps<typeof Textarea>, "value" | "onChange" | "onBlur">) {
+  const field = useDebouncedTextField({ serverValue, onCommit });
+  return (
+    <Textarea
+      {...props}
+      value={field.value}
+      disabled={disabled}
+      onChange={(event) => field.onChange(event.target.value)}
+      onBlur={field.onBlur}
+    />
+  );
+}
+
+function FineTuningSection({
+  title,
+  summary,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  summary?: string;
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Collapsible defaultOpen={defaultOpen} className="rounded-md border border-border">
+      <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-md p-4 text-left hover:bg-muted/40">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-foreground">{title}</div>
+          {summary ? <div className="mt-0.5 text-xs text-muted-foreground">{summary}</div> : null}
+        </div>
+        <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+      </CollapsibleTrigger>
+      <CollapsibleContent className="space-y-3 border-t border-border p-4">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
