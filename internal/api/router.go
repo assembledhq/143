@@ -43,6 +43,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
+	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -735,8 +736,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			sessionFilesSnapshotCache = sc
 		}
 	}
+	var reviewArtifactReader *reviewartifact.CachedReader
+	if snapshotStore != nil {
+		reviewArtifactReader = reviewartifact.NewCachedReader(snapshotStore, reviewartifact.DefaultCacheBytes)
+	}
 	sessionComposerHandler := handlers.NewSessionComposerHandlerWithWorkspace(repoStore, sessionStore, prService, fileReader, sessionFilesSnapshotCache, redisClient, logger)
-	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, logger)
+	sessionFileHandler := handlers.NewSessionFileHandler(sessionStore, repoStore, fileReader, sessionFilesSnapshotCache, reviewArtifactReader, logger)
 
 	// Preview system: inspector, snapshot cache, HMR watcher, manager, recycler, gateway.
 	var previewInspector preview.PreviewInspector
