@@ -1,4 +1,8 @@
-Use docs/design/overall.md as the overall design of the system, think of it as a living doc that should get parts added to it, but only high level details. As more designs are made, put them into folders and subdocs inside of docs/design, and build them out. Please keep track of updates and keep them updated as designs are completed.
+## Documentation
+
+Use `docs/design/overall.md` as the high-level architecture map when you need system context. Do not update internal design docs for routine code changes. Update `docs/design` only when a change materially affects architecture, durable product contracts, data models, APIs, operational procedures, or when the user explicitly asks for a design update.
+
+Update public Fumadocs (`docs/public`) only for significant user-facing behavior, setup, API, or integration changes. Most PRs should not need documentation updates.
 
 ## Debugging Production
 
@@ -76,28 +80,15 @@ A **git pre-commit hook** (`.githooks/pre-commit`, installed by `./setup.sh` or 
 
 **Filter state**: Use `nuqs` to store filter/search state in URL params so views are bookmarkable and shareable.
 
-**Verify after every frontend change**: After modifying any frontend code, always run these checks from the `frontend/` directory before considering the work done:
-1. `npm run typecheck` — TypeScript must pass with zero errors
-2. `npm run lint` — ESLint must pass with zero errors
-3. `npm run build` — the production build must succeed
+**Verification**: Prefer focused verification during ordinary implementation. For frontend changes, run targeted Vitest tests for changed components/pages when useful, and lint the touched files when practical. Run full `npm run typecheck`, `npm run lint`, and `npm run build` only for broad changes, routing/build/config changes, public docs/MDX changes, shared type/API contract changes, or pre-PR final verification when explicitly requested.
 
-Do not skip any of these steps. A change that breaks types, lint, or the build is not complete.
+## Go Toolchain and Verification
 
-## Go Toolchain: `go vet` and `go fix`
+Prefer focused Go verification during ordinary implementation. Run tests for the touched package(s) first, and broaden only when the change crosses package boundaries or shared contracts.
 
-**Always run `go vet`** after writing or modifying Go code. `go vet` catches subtle bugs that the compiler doesn't — misuse of `printf` format strings, unreachable code, struct tags with typos, copying locks, and more. Run it from the repo root:
+Run `go vet` on touched packages when the change affects Go logic, struct tags, format strings, concurrency, atomic operations, command code, or other vet-sensitive areas. Fix every issue `go vet` reports.
 
-```bash
-go vet ./...
-```
-
-Fix every issue `go vet` reports before considering the code done. Common catches:
-- `printf`-style format/arg mismatches (e.g., `%d` with a string arg)
-- Struct field tags with bad syntax (e.g., missing quotes, wrong separators)
-- Copying a `sync.Mutex` or `sync.WaitGroup` by value
-- Unreachable code after `return`, `panic`, or infinite loops
-- Incorrect usage of `atomic` operations
-- Unused results of certain function calls
+Run full `go test ./...`, `go vet ./...`, or `go build ./...` only when the change is broad, crosses shared contracts, touches build/deploy wiring, or before preparing a PR/commit when explicitly requested. `go test` already compiles packages; use `go build ./...` mainly for command/build packaging changes or when no useful test path compiles the affected command.
 
 **Use `go fix`** when upgrading Go versions or updating APIs. `go fix` rewrites source code to use newer API signatures after a Go release deprecates old ones. Run it when:
 - Upgrading the Go version in `go.mod` — run `go fix ./...` afterward to migrate deprecated API calls
@@ -109,30 +100,20 @@ go fix ./...
 
 `go fix` modifies files in place, so review the diff afterward. It is safe to run repeatedly — if nothing needs fixing, it makes no changes.
 
-**Verification checklist for Go code changes**:
-1. `go vet ./...` — must pass with zero issues
-2. `go build ./...` — must compile cleanly
-3. `go test ./...` — tests must pass
+**Verification examples**:
+- Touched one backend package: run `go test ./internal/path/to/package`, plus `go vet ./internal/path/to/package` if vet-relevant.
+- Touched related backend packages: run tests for each touched package and any package whose contract changed.
+- Touched command, migration tooling, or deploy/build wiring: consider `go test ./...`, `go vet ./...`, or `go build ./...` based on the blast radius.
 
-Do not skip `go vet`. A change that passes compilation but fails `go vet` is not complete.
+## Testing Expectations
 
-## Test-First Development (Mandatory)
-
-**All code changes MUST have tests written BEFORE the implementation.** Write the failing test first, confirm it fails, then implement. No PR should be opened without corresponding tests.
-
-### Workflow
-
-1. Write a test file for the new function/method/component
-2. Run the test, confirm it **fails** (red)
-3. Write the minimum implementation to make it pass (green)
-4. Refactor if needed, confirm tests still pass
-5. Only then move on to the next function
+Behavior changes should include tests. Prefer updating or adding focused tests near the changed code. Strict red-green TDD is encouraged for non-trivial logic, bug fixes, and shared contracts, but it is not required for small constant, copy, fixture, or configuration-default updates. No PR should be opened without appropriate tests for the behavior changed.
 
 ### Coverage Requirements (enforced in CI)
 
 - **Backend**: minimum **70%** line coverage — CI will fail PRs below this
 - **Frontend**: minimum **80%** line coverage — CI will fail PRs below this
-- New code without tests will not be merged
+- New behavior without appropriate tests will not be merged
 - Coverage is checked by GitHub Actions on every PR via `go test -coverprofile` and `vitest --coverage`
 
 ### Backend Test Patterns (Go)
