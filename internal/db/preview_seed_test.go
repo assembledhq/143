@@ -1,10 +1,11 @@
 package db
 
 import (
-	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 
+	"github.com/assembledhq/143/internal/demoseed"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -12,7 +13,7 @@ import (
 func TestPreviewSeedUsers(t *testing.T) {
 	t.Parallel()
 
-	body, err := os.ReadFile("../../.143/seed.sql")
+	body, err := demoseed.ReadAndScanSeed(filepath.Join("..", "..", demoseed.DefaultSeedPath))
 	require.NoError(t, err, "test should read preview seed SQL")
 	sql := string(body)
 
