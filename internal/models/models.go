@@ -388,6 +388,7 @@ type Session struct {
 	// session can show "PR opened" while a follow-up push is mid-flight.
 	PRPushState                PRPushState         `db:"pr_push_state" json:"pr_push_state"`
 	PRPushError                *string             `db:"pr_push_error" json:"pr_push_error,omitempty"`
+	PRPushErrorCode            PRPushErrorCode     `db:"pr_push_error_code" json:"pr_push_error_code,omitempty"`
 	BranchCreationState        BranchCreationState `db:"branch_creation_state" json:"branch_creation_state"`
 	BranchCreationError        *string             `db:"branch_creation_error" json:"branch_creation_error,omitempty"`
 	BranchURL                  *string             `db:"branch_url" json:"branch_url,omitempty"`

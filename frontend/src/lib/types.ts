@@ -160,6 +160,41 @@ export interface CodeReviewResolvedPolicy {
   inherited_policy?: CodeReviewPolicyRecord;
 }
 
+export type CodeReviewGitHubTriggerStatus =
+  | "unconfigured"
+  | "ready"
+  | "auth_required"
+  | "permission_required"
+  | "error";
+
+export interface CodeReviewGitHubTriggerSetting {
+  id: string;
+  org_id: string;
+  repository_id: string;
+  installation_id: number;
+  active: boolean;
+  version: number;
+  team_slug: string;
+  team_name: string;
+  team_id: number;
+  repo_permission: "pull";
+  created_by_user_id?: string;
+  created_at: string;
+}
+
+export interface CodeReviewGitHubTriggerResponse {
+  status: CodeReviewGitHubTriggerStatus;
+  repository_id: string;
+  repository_full_name?: string;
+  github_org?: string;
+  team_slug: string;
+  team_name: string;
+  team_reviewer?: string;
+  repo_permission: "pull";
+  trigger?: CodeReviewGitHubTriggerSetting;
+  message?: string;
+}
+
 export interface CodeReviewTemplateOption {
   key: string;
   title: string;
@@ -585,6 +620,7 @@ export interface PreviewPolicySummary {
   preview_config_requires_selection?: boolean;
   preview_ready: boolean;
   preview_readiness_missing_reason?: string;
+  preview_readiness_missing_details?: string[];
   github_pr_comment_permission_ok: boolean;
   github_commit_status_permission_ok: boolean;
   last_surface_sync_sha?: string;
@@ -1120,6 +1156,7 @@ export interface Session {
   pr_creation_error?: string;
   pr_push_state?: PRPushState;
   pr_push_error?: string;
+  pr_push_error_code?: PRPushErrorCode;
   branch_creation_state?: BranchCreationState;
   branch_creation_error?: string;
   branch_url?: string;
@@ -1819,6 +1856,8 @@ export interface PullRequest {
   body: string;
   status: PullRequestStatus;
   branch_name: string;
+  head_ref?: string;
+  head_sha?: string;
   review_status: PullRequestReviewStatus | null;
   ci_status: PullRequestCIStatus;
   merged_at: string | null;
@@ -3460,6 +3499,13 @@ export type PRCreationState = SessionPublishState;
 
 // Mirrors models.PRPushState.
 export type PRPushState = SessionPublishState;
+
+// Mirrors models.PRPushErrorCode.
+export type PRPushErrorCode =
+  | "branch_diverged"
+  | "push_rejected"
+  | "sandbox_auth_unavailable"
+  | "generic";
 
 // Mirrors models.BranchCreationState.
 export type BranchCreationState = SessionPublishState;

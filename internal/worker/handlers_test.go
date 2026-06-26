@@ -668,6 +668,68 @@ func TestSlackRepositoryDefaultsForContextUsesMatchingInstallationDefault(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "helper should scope Slack install default lookup to installation id")
 }
 
+func TestSlackRepositoryDefaultsForContextFallsBackToFirstRepo(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	installationID := uuid.New()
+	firstRepoID := uuid.New()
+	secondRepoID := uuid.New()
+	integrationID := uuid.New()
+	now := time.Now()
+	stores := &Stores{
+		SlackChannels:    db.NewSlackChannelSettingsStore(mock),
+		SlackBotSettings: db.NewSlackBotSettingsStore(mock),
+		Repositories:     db.NewRepositoryStore(mock),
+	}
+
+	// No channel default configured.
+	mock.ExpectQuery("SELECT id, org_id, slack_installation_id").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "slack_team_id", "slack_channel_id", "slack_channel_name",
+			"channel_type", "default_repository_id", "default_branch", "routing_mode", "response_visibility", "allowed_actions",
+			"notification_preset", "notification_subscriptions", "active", "created_at", "updated_at",
+		}))
+	// No install default configured.
+	mock.ExpectQuery("FROM slack_bot_settings").
+		WithArgs(orgID, installationID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "slack_installation_id", "default_repository_id", "default_branch",
+			"routing_mode", "response_visibility", "allowed_actions", "notification_preset",
+			"notification_subscriptions", "active", "created_at", "updated_at",
+		}))
+	// Org has multiple connected repos; ListByOrg returns them ordered by full_name.
+	mock.ExpectQuery("SELECT .+ FROM repositories").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "integration_id", "github_id", "full_name", "default_branch",
+			"private", "language", "description", "clone_url", "installation_id", "status",
+			"last_synced_at", "context_quality", "settings", "created_at", "updated_at",
+		}).AddRow(
+			firstRepoID, orgID, integrationID, int64(1), "assembledhq/aardvark", "main",
+			false, nil, nil, "https://github.com/assembledhq/aardvark.git", int64(123), models.RepositoryStatusActive,
+			nil, nil, []byte(`{}`), now, now,
+		).AddRow(
+			secondRepoID, orgID, integrationID, int64(2), "assembledhq/zebra", "main",
+			false, nil, nil, "https://github.com/assembledhq/zebra.git", int64(123), models.RepositoryStatusActive,
+			nil, nil, []byte(`{}`), now, now,
+		))
+
+	defaults := slackRepositoryDefaultsForContext(context.Background(), stores, zerolog.Nop(), orgID, installationID, "T123", "C123")
+
+	require.Len(t, defaults, 1, "with no configured default the helper should fall back to the first repo")
+	require.Equal(t, firstRepoID, defaults[0].RepositoryID, "fallback should attach the first repository in the list")
+	require.Equal(t, "assembledhq/aardvark", defaults[0].RepositoryName, "fallback should carry the repo name")
+	require.Equal(t, "main", defaults[0].Branch, "fallback should default to the repo's default branch")
+	require.Equal(t, slackbotsvc.SlackRepositoryResolutionSourceFirstRepo, defaults[0].Source, "multi-repo fallback should be tagged as first_repo_fallback")
+	require.NoError(t, mock.ExpectationsWereMet(), "fallback should query repositories once defaults are exhausted")
+}
+
 func TestSlackContextReferencesForSessionInput(t *testing.T) {
 	t.Parallel()
 
@@ -1376,6 +1438,72 @@ func TestEnqueueSlackFinalIfLinkedEnqueuesFinalResponseForAssistantMessage(t *te
 	enqueueSlackFinalIfLinked(context.Background(), stores, zerolog.Nop(), orgID, sessionID)
 
 	require.NoError(t, mock.ExpectationsWereMet(), "Slack-linked successful run should enqueue one final response job")
+}
+
+func TestEnqueueSlackSessionContinuationMessageUsesPrimaryThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	session := models.Session{
+		ID:          sessionID,
+		OrgID:       orgID,
+		CurrentTurn: 3,
+	}
+	expectedDedupeKey := db.ContinueSessionDedupeKey(threadID)
+
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusIdle)...,
+		))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(
+			sessionID,
+			orgID,
+			uuidPtrEqualsArg{expected: threadID},
+			uuidPtrEqualsArg{expected: userID},
+			2,
+			models.MessageRoleUser,
+			"follow up from Slack",
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(101), now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			orgID,
+			"agent",
+			"continue_session",
+			jsonStringFieldsArg{expected: map[string]string{
+				"org_id":     orgID.String(),
+				"session_id": sessionID.String(),
+				"thread_id":  threadID.String(),
+			}},
+			5,
+			stringPtrEqualsArg{expected: expectedDedupeKey},
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	stores := &Stores{
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+		Jobs:            db.NewJobStore(mock),
+	}
+
+	err = enqueueSlackSessionContinuationMessage(context.Background(), stores, orgID, session, &userID, "follow up from Slack", nil)
+
+	require.NoError(t, err, "Slack continuation should append and enqueue against the primary thread")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack continuation should persist the thread id and queue a thread-scoped continuation")
 }
 
 func TestSlackSelectRepositoryUpdatesIdleSessionAndEnqueuesRun(t *testing.T) {
@@ -2331,7 +2459,7 @@ var workerSessionColumns = []string{
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest",
-	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
+	"archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
@@ -2524,7 +2652,7 @@ func expandLegacyWorkerSessionRow(values []any) []any {
 // current sessionColumns; we pad after dispatch so the shape matches.
 const (
 	preLinearWorkerSessionColumnsLen              = 76
-	workerSessionColumnsWithLegacyConfidenceCount = 93
+	workerSessionColumnsWithLegacyConfidenceCount = 94
 )
 
 func workerLinearSessionDefaults() []any {
@@ -2593,14 +2721,16 @@ func padWorkerIdentityNils(row []any) []any {
 		return row
 	}
 	if len(row) == workerSessionColumnsWithLegacyConfidenceCount-3 {
-		const branchCreationStateIndex = 76
+		const branchCreationStateIndex = 77
 		padded := make([]any, 0, workerSessionColumnsWithLegacyConfidenceCount)
 		padded = append(padded, row[:branchCreationStateIndex]...)
 		padded = append(padded, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
 		padded = append(padded, row[branchCreationStateIndex:]...)
 		return padded
 	}
-	if len(row) != workerSessionColumnsWithLegacyConfidenceCount-10 {
+	legacyPreWorkspaceLen := workerSessionColumnsWithLegacyConfidenceCount - 11
+	legacyPostWorkspaceLen := workerSessionColumnsWithLegacyConfidenceCount - 10
+	if len(row) != legacyPreWorkspaceLen && len(row) != legacyPostWorkspaceLen {
 		return row
 	}
 	const pendingSnapshotKeyIndex = 42
@@ -2617,12 +2747,12 @@ func padWorkerIdentityNils(row []any) []any {
 	// a NULL would fail pgx scanning. The migration mirrors this with NOT
 	// NULL DEFAULT 'idle'.
 	const prPushStateIndex = 74
-	withPRPush := make([]any, 0, len(withPending)+2)
+	withPRPush := make([]any, 0, len(withPending)+3)
 	withPRPush = append(withPRPush, withPending[:prPushStateIndex]...)
-	withPRPush = append(withPRPush, "idle", (*string)(nil)) // pr_push_state, pr_push_error
+	withPRPush = append(withPRPush, "idle", (*string)(nil), (*string)(nil)) // pr_push_state, pr_push_error, pr_push_error_code
 	withPRPush = append(withPRPush, withPending[prPushStateIndex:]...)
 
-	const branchCreationStateIndex = prPushStateIndex + 2
+	const branchCreationStateIndex = prPushStateIndex + 3
 	withBranch := make([]any, 0, len(withPRPush)+3)
 	withBranch = append(withBranch, withPRPush[:branchCreationStateIndex]...)
 	withBranch = append(withBranch, "idle", (*string)(nil), (*string)(nil)) // branch_creation_state, branch_creation_error, branch_url
@@ -2740,6 +2870,100 @@ func workerAnyArgs(n int) []interface{} {
 		args[i] = pgxmock.AnyArg()
 	}
 	return args
+}
+
+type uuidPtrEqualsArg struct {
+	expected uuid.UUID
+}
+
+func (a uuidPtrEqualsArg) Match(v interface{}) bool {
+	switch got := v.(type) {
+	case *uuid.UUID:
+		return got != nil && *got == a.expected
+	case uuid.UUID:
+		return got == a.expected
+	default:
+		return false
+	}
+}
+
+type stringPtrEqualsArg struct {
+	expected string
+}
+
+func (a stringPtrEqualsArg) Match(v interface{}) bool {
+	got, ok := v.(*string)
+	return ok && got != nil && *got == a.expected
+}
+
+type jsonStringFieldsArg struct {
+	expected map[string]string
+}
+
+func (a jsonStringFieldsArg) Match(v interface{}) bool {
+	var raw []byte
+	switch got := v.(type) {
+	case []byte:
+		raw = got
+	case json.RawMessage:
+		raw = got
+	case string:
+		raw = []byte(got)
+	default:
+		return false
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false
+	}
+	for key, expected := range a.expected {
+		if payload[key] != expected {
+			return false
+		}
+	}
+	return true
+}
+
+type jsonPayloadFieldsArg struct {
+	expectedStrings map[string]string
+	expectedInts    map[string]int64
+}
+
+func (a jsonPayloadFieldsArg) Match(v interface{}) bool {
+	var raw []byte
+	switch got := v.(type) {
+	case []byte:
+		raw = got
+	case json.RawMessage:
+		raw = got
+	case string:
+		raw = []byte(got)
+	default:
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return false
+	}
+	for key, expected := range a.expectedStrings {
+		got, ok := payload[key].(string)
+		if !ok || got != expected {
+			return false
+		}
+	}
+	for key, expected := range a.expectedInts {
+		number, ok := payload[key].(json.Number)
+		if !ok {
+			return false
+		}
+		got, err := number.Int64()
+		if err != nil || got != expected {
+			return false
+		}
+	}
+	return true
 }
 
 type fakeSlackMessagePoster struct {
@@ -2876,6 +3100,24 @@ type prCreationStateArg struct {
 func (a prCreationStateArg) Match(v interface{}) bool {
 	s, ok := v.(string)
 	return ok && s == string(a.state)
+}
+
+type prPushStateArg struct {
+	state models.PRPushState
+}
+
+func (a prPushStateArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.state)
+}
+
+type prPushErrorCodeArg struct {
+	code models.PRPushErrorCode
+}
+
+func (a prPushErrorCodeArg) Match(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == string(a.code)
 }
 
 func expectWorkerLoadSamples(mock pgxmock.PgxPoolIface) {
@@ -4444,10 +4686,10 @@ func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// Two state-machine writes: pushing → succeeded.
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	called := false
@@ -4534,10 +4776,10 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 	// pushing → succeeded (NOT failed, despite the error from the service).
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
 
 	services := &Services{
@@ -4554,6 +4796,51 @@ func TestPushPRChangesHandler_NoChangesIsTreatedAsSuccess(t *testing.T) {
 
 	require.NoError(t, err, "push_pr_changes handler should swallow ErrNoChanges as a benign no-op")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met (succeeded write must fire, not failed)")
+}
+
+func TestPushPRChangesHandler_BranchDivergedPersistsErrorCode(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-branch-diverged"
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(prPushStateArg{state: models.PRPushStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(
+			prPushStateArg{state: models.PRPushStateFailed},
+			ghservice.PushBranchDivergedPRMessage,
+			prPushErrorCodeArg{code: models.PRPushErrorCodeBranchDiverged},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrPushBranchDiverged
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var fatalErr *FatalError
+	require.ErrorAs(t, err, &fatalErr, "branch-diverged push failures should dead-letter after persisting state")
+	require.ErrorIs(t, fatalErr, ghservice.ErrPushBranchDiverged, "branch-diverged push failure should preserve the terminal cause")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
@@ -4592,10 +4879,10 @@ func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
 			// stub returning rows so the publish path stays no-op (streams
 			// are nil).
 			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 			mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*RETURNING").
-				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)...))
 
 			services := &Services{
@@ -5432,6 +5719,29 @@ func TestUserFacingPRError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.want, userFacingPRError(tt.err), "userFacingPRError should map internal PR errors to the expected UI-safe message")
+		})
+	}
+}
+
+func TestPRPushErrorCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want models.PRPushErrorCode
+	}{
+		{name: "branch diverged", err: ghservice.ErrPushBranchDiverged, want: models.PRPushErrorCodeBranchDiverged},
+		{name: "wrapped push rejected", err: fmt.Errorf("push: %w", ghservice.ErrPushRejected), want: models.PRPushErrorCodePushRejected},
+		{name: "sandbox auth unavailable", err: fmt.Errorf("socket: %w", ghservice.ErrSandboxAuthUnavailable), want: models.PRPushErrorCodeSandboxAuthUnavailable},
+		{name: "generic", err: errors.New("boom"), want: models.PRPushErrorCodeGeneric},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, prPushErrorCode(tt.err), "prPushErrorCode should classify push failures for UI state")
 		})
 	}
 }
@@ -6489,6 +6799,36 @@ func TestStartBranchPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(
 	require.Equal(t, "worker-with-space", *retryable.TargetNodeID, "branch preview capacity retry should avoid retrying the full worker when another worker has capacity")
 	require.False(t, retryable.ClearTargetNodeID, "branch preview capacity retry should keep the selected replacement worker pin")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestStartBranchPreviewHandler_StartupInterruptedRetriesWithFreshWorkerSelection(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("launch preview: %w", previewsvc.ErrPreviewStartupInterrupted)}
+	handler := newStartBranchPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartBranchPreviewJobPayload{
+		OrgID:           uuid.New(),
+		UserID:          uuid.New(),
+		PreviewID:       uuid.New(),
+		PreviewTargetID: uuid.New(),
+		RepositoryID:    uuid.New(),
+		Branch:          "feature/previews",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_branch_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartBranchPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "branch preview startup interruptions should retry instead of dead-lettering")
+	require.True(t, retryable.ConsumeAttempt, "startup interruption retries should consume attempts so they remain bounded")
+	require.True(t, retryable.BypassMaxRetryDuration, "startup interruption retries should bypass the generic retry window")
+	require.True(t, retryable.ClearTargetNodeID, "startup interruption retries should clear stale worker affinity")
+	require.NotNil(t, retryable.RetryAfter, "startup interruption retry should use a short fixed delay")
+	require.Equal(t, previewStartupInterruptedRetryDelay, *retryable.RetryAfter, "startup interruption retry should use the configured delay")
 }
 
 func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
@@ -9106,6 +9446,158 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_EnqueuesSlackFinalAfterSuccess(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SlackSessionLinks = db.NewSlackSessionLinkStore(mock)
+	stores.SessionMessages = db.NewSessionMessageStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+	installationID := uuid.New()
+	now := time.Now()
+	link := models.SlackSessionLink{
+		ID:                  linkID,
+		OrgID:               orgID,
+		SessionID:           sessionID,
+		SlackInstallationID: installationID,
+		SlackTeamID:         "T123",
+		SlackChannelID:      "C123",
+		SlackThreadTS:       "1700000000.000100",
+		SlackRootTS:         "1700000000.000100",
+		SlackUserID:         "U123",
+		TeamSession:         true,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT id, org_id, session_id, slack_installation_id").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(slackSessionLinkRows(link))
+	mock.ExpectQuery("SELECT .+ FROM session_messages").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(sessionMessageRows(
+			models.SessionMessage{ID: 51, SessionID: sessionID, OrgID: orgID, TurnNumber: 1, Role: models.MessageRoleUser, Content: "next question", CreatedAt: now},
+			models.SessionMessage{ID: 52, SessionID: sessionID, OrgID: orgID, TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "next answer", CreatedAt: now},
+		))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(orgID, "default", "slack_post_final_response", pgxmock.AnyArg(), 3, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	orch := &orchestratorServiceStub{}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack-linked continuations should enqueue a final response job")
+}
+
+func TestContinueSessionHandler_EnqueuesSlackFinalForCompletedThreadTurn(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SlackSessionLinks = db.NewSlackSessionLinkStore(mock)
+	stores.SessionMessages = db.NewSessionMessageStore(mock)
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	linkID := uuid.New()
+	installationID := uuid.New()
+	now := time.Now()
+	link := models.SlackSessionLink{
+		ID:                  linkID,
+		OrgID:               orgID,
+		SessionID:           sessionID,
+		SlackInstallationID: installationID,
+		SlackTeamID:         "T123",
+		SlackChannelID:      "C123",
+		SlackThreadTS:       "1700000000.000100",
+		SlackRootTS:         "1700000000.000100",
+		SlackUserID:         "U123",
+		TeamSession:         true,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 5, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+	mock.ExpectExec(`UPDATE session_threads`).
+		WithArgs(2, pgxmock.AnyArg(), threadID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("SELECT id, org_id, session_id, slack_installation_id").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(slackSessionLinkRows(link))
+	mock.ExpectQuery("SELECT .+ FROM session_messages[\\s\\S]+WHERE org_id = @org_id AND thread_id = @thread_id").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(sessionMessageRows(
+			models.SessionMessage{ID: 51, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "thread question", CreatedAt: now},
+			models.SessionMessage{ID: 52, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleAssistant, Content: "completed turn answer", CreatedAt: now},
+			models.SessionMessage{ID: 53, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 3, Role: models.MessageRoleAssistant, Content: "newer unrelated answer", CreatedAt: now},
+		))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			orgID,
+			"default",
+			"slack_post_final_response",
+			jsonPayloadFieldsArg{
+				expectedStrings: map[string]string{
+					"org_id":                orgID.String(),
+					"session_id":            sessionID.String(),
+					"slack_session_link_id": linkID.String(),
+				},
+				expectedInts: map[string]int64{"final_message_id": 52},
+			},
+			3,
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread continuation should pass options to the orchestrator")
+			require.NotNil(t, opts.ThreadID, "thread continuation should include the thread id")
+			require.Equal(t, threadID, *opts.ThreadID, "thread continuation should preserve the requested thread id")
+			return nil
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.NoError(t, err, "thread-scoped continue_session should succeed when the orchestrator returns success")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "Slack final response should use the assistant from the completed thread turn")
 }
 
 func TestContinueSessionHandler_PassesPRRepairCommandOptions(t *testing.T) {

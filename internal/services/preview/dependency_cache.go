@@ -301,10 +301,10 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	if hit.Entry.SizeBytes > dependencyCacheMaxBlobBytes {
 		return fmt.Errorf("dependency cache restore: blob too large (%d bytes, max %d); narrow preview.install.cache.paths or disable dependency caching for this preview", hit.Entry.SizeBytes, dependencyCacheMaxBlobBytes)
 	}
-	blob, err := c.stageBlob(ctx, hit)
+	blob, err := c.stageBlob(ctx, hit, metadata.ChecksumSHA256)
 	if err != nil {
 		if errors.Is(err, storage.ErrSnapshotNotFound) && c.store.Configured() {
-			if deleteErr := c.store.DeleteDependencyCache(ctx, hit.Entry.OrgID, hit.Entry.ID); deleteErr != nil {
+			if deleteErr := c.store.DeleteDependencyCacheIfBlobKey(ctx, hit.Entry.OrgID, hit.Entry.ID, hit.BlobKey); deleteErr != nil {
 				c.logger.Warn().Err(deleteErr).Str("cache_key", hit.Entry.CacheKey).Msg("failed to delete stale dependency cache metadata after missing blob")
 			}
 		}
@@ -316,7 +316,7 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 			c.removeLocalBlob(ctx, hit.Entry.CacheKind, hit.Entry.CacheKey)
 		}
 		if c.store.Configured() {
-			if deleteErr := c.store.DeleteDependencyCache(ctx, hit.Entry.OrgID, hit.Entry.ID); deleteErr != nil {
+			if deleteErr := c.store.DeleteDependencyCacheIfBlobKey(ctx, hit.Entry.OrgID, hit.Entry.ID, hit.BlobKey); deleteErr != nil {
 				c.logger.Warn().Err(deleteErr).Str("cache_key", hit.Entry.CacheKey).Msg("failed to delete corrupted dependency cache metadata")
 			}
 		}
@@ -561,23 +561,45 @@ func (c *SharedDependencyCache) makeStagingDir(pattern string) (string, error) {
 	return os.MkdirTemp(c.stagingDir, pattern)
 }
 
-func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCacheHit) (*dependencyCacheStagedBlob, error) {
+func (c *SharedDependencyCache) stageBlob(ctx context.Context, hit *DependencyCacheHit, expectedChecksum string) (*dependencyCacheStagedBlob, error) {
 	if c.localDir != "" {
 		localPath := c.localBlobPath(hit.Entry.CacheKind, hit.Entry.CacheKey)
 		if blob, err := c.stageLocalBlob(localPath); err == nil {
-			if err := os.Chtimes(localPath, time.Now(), time.Now()); err != nil {
-				c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to touch dependency cache local blob")
+			if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
+				blob.cleanup()
+				c.logger.Warn().
+					Str("path", localPath).
+					Str("cache_key", hit.Entry.CacheKey).
+					Str("expected_checksum", expectedChecksum).
+					Str("actual_checksum", blob.checksum).
+					Msg("dependency cache local blob checksum mismatch; falling back to object storage")
+				c.removeLocalBlob(ctx, hit.Entry.CacheKind, hit.Entry.CacheKey)
+			} else {
+				if err := os.Chtimes(localPath, time.Now(), time.Now()); err != nil {
+					c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to touch dependency cache local blob")
+				}
+				return blob, nil
 			}
-			return blob, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			c.logger.Warn().Err(err).Str("path", localPath).Msg("failed to read dependency cache local blob; falling back to object storage")
 		} else if hit.Entry.CacheKind == "" || hit.Entry.CacheKind == models.PreviewCacheKindInstallArtifact {
 			legacyLocalPath := c.legacyLocalBlobPath(hit.Entry.CacheKey)
 			if blob, legacyErr := c.stageLocalBlob(legacyLocalPath); legacyErr == nil {
-				if touchErr := os.Chtimes(legacyLocalPath, time.Now(), time.Now()); touchErr != nil {
-					c.logger.Warn().Err(touchErr).Str("path", legacyLocalPath).Msg("failed to touch legacy dependency cache local blob")
+				if expectedChecksum != "" && !strings.EqualFold(expectedChecksum, blob.checksum) {
+					blob.cleanup()
+					c.logger.Warn().
+						Str("path", legacyLocalPath).
+						Str("cache_key", hit.Entry.CacheKey).
+						Str("expected_checksum", expectedChecksum).
+						Str("actual_checksum", blob.checksum).
+						Msg("legacy dependency cache local blob checksum mismatch; falling back to object storage")
+					c.removeLocalBlobPath(legacyLocalPath)
+				} else {
+					if touchErr := os.Chtimes(legacyLocalPath, time.Now(), time.Now()); touchErr != nil {
+						c.logger.Warn().Err(touchErr).Str("path", legacyLocalPath).Msg("failed to touch legacy dependency cache local blob")
+					}
+					return blob, nil
 				}
-				return blob, nil
 			} else if !errors.Is(legacyErr, os.ErrNotExist) {
 				c.logger.Warn().Err(legacyErr).Str("path", legacyLocalPath).Msg("failed to read legacy dependency cache local blob; falling back to object storage")
 			}
@@ -945,16 +967,20 @@ func (c *SharedDependencyCache) removeLocalBlob(ctx context.Context, kind models
 		return
 	}
 	path := c.localBlobPath(kind, cacheKey)
+	c.removeLocalBlobPath(path)
+	if c.workerNodeID != "" {
+		if err := c.store.DeleteDependencyCacheLocationByWorkerCacheKey(ctx, c.workerNodeID, kind, cacheKey); err != nil {
+			c.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("failed to delete dependency cache local location")
+		}
+	}
+}
+
+func (c *SharedDependencyCache) removeLocalBlobPath(path string) {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		c.logger.Warn().Err(err).Str("path", path).Msg("failed to remove dependency cache local blob")
 	}
 	if err := os.Remove(path + ".sha256"); err != nil && !os.IsNotExist(err) {
 		c.logger.Warn().Err(err).Str("path", path+".sha256").Msg("failed to remove dependency cache local checksum")
-	}
-	if c.workerNodeID != "" {
-		if err := c.store.DeleteDependencyCacheLocationByWorkerCacheKey(ctx, c.workerNodeID, kind, cacheKey); err != nil {
-			c.logger.Warn().Err(err).Str("cache_key", cacheKey).Msg("failed to delete dependency cache local location")
-		}
 	}
 }
 

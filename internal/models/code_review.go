@@ -87,6 +87,76 @@ func (s CodeReviewTriggerSource) Validate() error {
 	}
 }
 
+const (
+	DefaultCodeReviewGitHubTriggerTeamName = "143 Code Reviewer"
+	DefaultCodeReviewGitHubTriggerTeamSlug = "143-code-reviewer"
+	DefaultCodeReviewGitHubTriggerRepoPerm = CodeReviewGitHubTriggerRepoPermissionPull
+)
+
+type CodeReviewGitHubTriggerRepoPermission string
+
+const (
+	CodeReviewGitHubTriggerRepoPermissionPull CodeReviewGitHubTriggerRepoPermission = "pull"
+)
+
+func (p CodeReviewGitHubTriggerRepoPermission) Validate() error {
+	switch p {
+	case CodeReviewGitHubTriggerRepoPermissionPull:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewGitHubTriggerRepoPermission: %q", p)
+	}
+}
+
+type CodeReviewGitHubTriggerStatus string
+
+const (
+	CodeReviewGitHubTriggerStatusUnconfigured       CodeReviewGitHubTriggerStatus = "unconfigured"
+	CodeReviewGitHubTriggerStatusReady              CodeReviewGitHubTriggerStatus = "ready"
+	CodeReviewGitHubTriggerStatusAuthRequired       CodeReviewGitHubTriggerStatus = "auth_required"
+	CodeReviewGitHubTriggerStatusPermissionRequired CodeReviewGitHubTriggerStatus = "permission_required"
+	CodeReviewGitHubTriggerStatusError              CodeReviewGitHubTriggerStatus = "error"
+)
+
+func (s CodeReviewGitHubTriggerStatus) Validate() error {
+	switch s {
+	case CodeReviewGitHubTriggerStatusUnconfigured, CodeReviewGitHubTriggerStatusReady,
+		CodeReviewGitHubTriggerStatusAuthRequired, CodeReviewGitHubTriggerStatusPermissionRequired,
+		CodeReviewGitHubTriggerStatusError:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewGitHubTriggerStatus: %q", s)
+	}
+}
+
+type CodeReviewGitHubTriggerSetting struct {
+	ID              uuid.UUID                             `db:"id" json:"id"`
+	OrgID           uuid.UUID                             `db:"org_id" json:"org_id"`
+	RepositoryID    uuid.UUID                             `db:"repository_id" json:"repository_id"`
+	InstallationID  int64                                 `db:"installation_id" json:"installation_id"`
+	Active          bool                                  `db:"active" json:"active"`
+	Version         int                                   `db:"version" json:"version"`
+	TeamSlug        string                                `db:"team_slug" json:"team_slug"`
+	TeamName        string                                `db:"team_name" json:"team_name"`
+	TeamID          int64                                 `db:"team_id" json:"team_id"`
+	RepoPermission  CodeReviewGitHubTriggerRepoPermission `db:"repo_permission" json:"repo_permission"`
+	CreatedByUserID *uuid.UUID                            `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt       time.Time                             `db:"created_at" json:"created_at"`
+}
+
+type CodeReviewGitHubTriggerResponse struct {
+	Status             CodeReviewGitHubTriggerStatus         `json:"status"`
+	RepositoryID       uuid.UUID                             `json:"repository_id"`
+	RepositoryFullName string                                `json:"repository_full_name,omitempty"`
+	GitHubOrg          string                                `json:"github_org,omitempty"`
+	TeamSlug           string                                `json:"team_slug"`
+	TeamName           string                                `json:"team_name"`
+	TeamReviewer       string                                `json:"team_reviewer,omitempty"`
+	RepoPermission     CodeReviewGitHubTriggerRepoPermission `json:"repo_permission"`
+	Trigger            *CodeReviewGitHubTriggerSetting       `json:"trigger,omitempty"`
+	Message            string                                `json:"message,omitempty"`
+}
+
 type CodeReviewAgentRole string
 
 const (

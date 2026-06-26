@@ -97,7 +97,10 @@ Under **Permissions**, configure:
 | **Repository > Checks** | Read | Monitor CI status on PRs |
 | **Repository > Deployments** | Read | Detect when fixes are deployed |
 | **Repository > Metadata** | Read | Required for all GitHub Apps (auto-selected) |
-| **Organization > Members** | Read | Sync org membership rosters for GitHub organization auto-join |
+| **Repository > Administration** | Read & Write | Optional: create or repair the 143 Code Reviewer trigger team's repo access during setup |
+| **Organization > Members** | Read & Write | Sync org membership rosters and optionally create or repair the 143 Code Reviewer trigger team |
+
+If you do not use the productized 143 Code Reviewer team setup flow, you can keep **Organization > Members** at **Read** and omit **Repository > Administration**. Normal code review execution does not use those elevated permissions; the setup endpoint uses them only to create the GitHub team and grant it read access to selected repositories.
 
 ### Step 4: Subscribe to events
 
@@ -181,7 +184,8 @@ Once configured, the flow is:
 2. **Admin installs the GitHub App** on their org — 143 receives the `installation` webhook and stores the installation ID + repo list
 3. **When 143 needs to act** (create a PR, push a commit), it signs a JWT with the App's private key, exchanges it for a short-lived installation token (valid 1 hour), and uses that token for API calls
 4. **When a user wants a PR created as themselves**, 143 sends them through the GitHub App user authorization flow at `/api/v1/users/me/github/callback`, stores a GitHub App user token, and then reuses or refreshes that token for future PRs
-5. **GitHub sends webhooks** when PRs are reviewed, merged, or closed — 143 updates its records and triggers follow-up actions (deploy detection, review feedback loops, etc.)
+5. **When an admin sets up the 143 Code Reviewer trigger team**, 143 uses that admin's GitHub App user token to create or repair the `143-code-reviewer` team and grant it read access to selected repositories. Humans can then manually request `@org/143-code-reviewer` on a PR to start a review.
+6. **GitHub sends webhooks** when PRs are reviewed, merged, or closed — 143 updates its records and triggers follow-up actions (deploy detection, review feedback loops, etc.)
 
 ## Local development tips
 
@@ -216,6 +220,7 @@ Create separate GitHub OAuth Apps and GitHub Apps for development and production
 | First-time `Create PR` fails with `GITHUB_APP_USER_AUTH_NOT_CONFIGURED` | Check that `GITHUB_APP_CLIENT_ID` and `GITHUB_APP_CLIENT_SECRET` are set and that the GitHub App has a user authorization callback URL pointing to `{BASE_URL}/api/v1/users/me/github/callback` |
 | Webhook signature verification fails (401) | Make sure `GITHUB_WEBHOOK_SECRET` matches what you entered in the GitHub App settings |
 | "Resource not accessible by integration" on API calls | The app is missing a required permission — check the permissions table above and update in GitHub App settings |
+| Code Reviewer trigger setup says GitHub permissions are required | Grant **Organization > Members: Read & Write** and **Repository > Administration: Read & Write**, then have the GitHub org owner approve the installation permission update |
 | `refusing to allow a GitHub App to ... workflow '.github/workflows/...' without 'workflows' permission` on push | Add **Workflows: Read & Write** in the GitHub App permissions, then accept the new permission on each installation (GitHub emails the org owner). Existing installation tokens are cached up to 1 hour — restart workers or wait for the cache to expire after accepting |
 | PRs aren't being created | Verify the app is installed on the target repo and has Contents + Pull Requests write access |
 | Webhooks not arriving | Check that the webhook URL is correct and reachable. Use the Recent Deliveries tab in GitHub App settings to debug |

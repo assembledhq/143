@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw, Plus, Trash2, FileSearch } from "lucide-react";
+import { ClipboardCheck, ExternalLink, Settings2, RefreshCw, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -30,13 +30,14 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodeReviewApprovalMode,
   CodeReviewDecision,
   CodeReviewDescriptionApplicabilityKind,
   CodeReviewEvidence,
+  CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
   CodeReviewPolicyConfig,
   CodeReviewSessionStatus,
@@ -88,29 +89,15 @@ function statusVariant(status: string): "success" | "secondary" | "destructive" 
   return "outline";
 }
 
-function reviewDurationMinutes(review: CodeReviewListItem): number | null {
-  if (!review.completed_at) return null;
-  const started = new Date(review.created_at).getTime();
-  const completed = new Date(review.completed_at).getTime();
-  if (!Number.isFinite(started) || !Number.isFinite(completed) || completed < started) return null;
-  return Math.round((completed - started) / 60000);
-}
-
-function formatPercent(numerator: number, denominator: number): string {
-  if (denominator <= 0) return "0%";
-  return `${Math.round((numerator / denominator) * 100)}%`;
-}
-
-function formatMinutes(value: number | null): string {
-  if (value === null) return "-";
-  if (value < 60) return `${value}m`;
-  const hours = Math.floor(value / 60);
-  const minutes = value % 60;
-  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
-}
-
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
   return JSON.parse(JSON.stringify(config)) as CodeReviewPolicyConfig;
+}
+
+function apiErrorMessage(error: unknown): string | null {
+  if (!error) return null;
+  if (error instanceof ApiError) return error.message;
+  if (error instanceof Error) return error.message;
+  return "Request failed";
 }
 
 export default function CodeReviewsPage() {
@@ -147,6 +134,11 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
   });
+  const githubTriggerQuery = useQuery({
+    queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null),
+    queryFn: () => api.codeReviews.getGitHubTrigger(repositoryId as string),
+    enabled: Boolean(repositoryId),
+  });
   const templatesQuery = useQuery({
     queryKey: queryKeys.codeReviews.templates,
     queryFn: () => api.codeReviews.templates(),
@@ -174,6 +166,18 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
     },
   });
+  const setupGitHubTrigger = useMutation({
+    mutationFn: (targetRepositoryId: string) => api.codeReviews.setupGitHubTrigger(targetRepositoryId),
+    onSuccess: (_data, targetRepositoryId) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
+    },
+  });
+  const deleteGitHubTrigger = useMutation({
+    mutationFn: (targetRepositoryId: string) => api.codeReviews.deleteGitHubTrigger(targetRepositoryId),
+    onSuccess: (_data, targetRepositoryId) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
+    },
+  });
 
   const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
   const selectedEvidenceReview = useMemo(
@@ -183,44 +187,6 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
-  const insightCounts = useMemo(() => {
-    return reviews.reduce(
-      (acc, review) => {
-        acc.total += 1;
-        if (review.decision === "approved") acc.approved += 1;
-        if (review.decision === "needs_human_review" || review.decision === "comment_only") acc.escalated += 1;
-        if (review.stale || review.status === "stale") acc.stale += 1;
-        const duration = reviewDurationMinutes(review);
-        if (duration !== null) {
-          acc.completedDurationMinutes += duration;
-          acc.completedWithDuration += 1;
-        }
-        return acc;
-      },
-      { total: 0, approved: 0, escalated: 0, stale: 0, completedDurationMinutes: 0, completedWithDuration: 0 },
-    );
-  }, [reviews]);
-  const averageReviewMinutes =
-    insightCounts.completedWithDuration > 0
-      ? Math.round(insightCounts.completedDurationMinutes / insightCounts.completedWithDuration)
-      : null;
-  const recentEscalations = useMemo(
-    () =>
-      reviews
-        .filter((review) => review.decision === "needs_human_review" || review.decision === "comment_only" || review.decision === "blocked")
-        .slice(0, 5),
-    [reviews],
-  );
-  const topRepositories = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const review of reviews) {
-      const label = review.repository_name || review.github_repo;
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    }
-    return Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
-  }, [reviews]);
   const updateDraftPolicy = (config: CodeReviewPolicyConfig) => {
     setDraftOverride({ key: policyKey, config });
   };
@@ -299,10 +265,6 @@ export default function CodeReviewsPage() {
             <TabsTrigger value="config">
               <Settings2 className="h-4 w-4" />
               Configurations
-            </TabsTrigger>
-            <TabsTrigger value="insights">
-              <BarChart3 className="h-4 w-4" />
-              Insights
             </TabsTrigger>
           </TabsList>
 
@@ -433,6 +395,24 @@ export default function CodeReviewsPage() {
                     </div>
                   ) : null}
                 </div>
+
+                <GitHubTriggerPanel
+                  repositorySelected={Boolean(repositoryId)}
+                  trigger={githubTriggerQuery.data?.data}
+                  isLoading={githubTriggerQuery.isLoading || githubTriggerQuery.isFetching}
+                  errorMessage={apiErrorMessage(githubTriggerQuery.error)}
+                  setupErrorMessage={apiErrorMessage(setupGitHubTrigger.error)}
+                  setupPending={setupGitHubTrigger.isPending}
+                  deletePending={deleteGitHubTrigger.isPending}
+                  onSetup={() => {
+                    if (!repositoryId) return;
+                    setupGitHubTrigger.mutate(repositoryId);
+                  }}
+                  onDelete={() => {
+                    if (!repositoryId) return;
+                    deleteGitHubTrigger.mutate(repositoryId);
+                  }}
+                />
 
                 <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
                   <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
@@ -1025,60 +1005,136 @@ export default function CodeReviewsPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="insights">
-            <div className="grid gap-3 sm:grid-cols-5">
-              <InsightCard label="Reviews" value={insightCounts.total} />
-              <InsightCard label="Approval rate" value={formatPercent(insightCounts.approved, insightCounts.total)} />
-              <InsightCard label="Escalated" value={insightCounts.escalated} />
-              <InsightCard label="Avg duration" value={formatMinutes(averageReviewMinutes)} />
-              <InsightCard label="Stale" value={insightCounts.stale} />
-            </div>
-            <div className="mt-3 grid gap-3 lg:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Recent escalations</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {recentEscalations.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No escalated reviews in the current filter.</div>
-                  ) : (
-                    recentEscalations.map((review) => (
-                      <div key={review.id} className="flex min-w-0 items-center justify-between gap-3 border-b border-border pb-3 last:border-0 last:pb-0">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium text-foreground">
-                            #{review.github_pr_number} {review.pull_request_title}
-                          </div>
-                          <div className="mt-1 text-xs text-muted-foreground">{review.repository_name || review.github_repo}</div>
-                        </div>
-                        <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
-                      </div>
-                    ))
-                  )}
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle>Top repositories</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {topRepositories.length === 0 ? (
-                    <div className="text-sm text-muted-foreground">No repository activity in the current filter.</div>
-                  ) : (
-                    topRepositories.map(([name, count]) => (
-                      <div key={name} className="flex items-center justify-between gap-3 border-b border-border pb-3 last:border-0 last:pb-0">
-                        <div className="truncate text-sm font-medium text-foreground">{name}</div>
-                        <Badge variant="outline">{count}</Badge>
-                      </div>
-                    ))
-                  )}
-                </CardContent>
-              </Card>
-            </div>
-          </TabsContent>
         </Tabs>
       </div>
     </main>
   );
+}
+
+function GitHubTriggerPanel({
+  repositorySelected,
+  trigger,
+  isLoading,
+  errorMessage,
+  setupErrorMessage,
+  setupPending,
+  deletePending,
+  onSetup,
+  onDelete,
+}: {
+  repositorySelected: boolean;
+  trigger?: CodeReviewGitHubTriggerResponse;
+  isLoading: boolean;
+  errorMessage: string | null;
+  setupErrorMessage: string | null;
+  setupPending: boolean;
+  deletePending: boolean;
+  onSetup: () => void;
+  onDelete: () => void;
+}) {
+  const status = trigger?.status ?? "unconfigured";
+  const ready = status === "ready";
+  const authRequired = status === "auth_required";
+  const permissionRequired = status === "permission_required";
+  const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
+
+  return (
+    <div className="rounded-md border border-border p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-sm font-medium text-foreground">GitHub reviewer trigger</div>
+            <Badge variant={githubTriggerStatusVariant(status)}>
+              {isLoading ? "Checking" : githubTriggerStatusLabel(status)}
+            </Badge>
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {repositorySelected
+              ? "Humans request this GitHub team on a PR to start a 143 code review."
+              : "Select a repository to create or repair its reviewer team trigger."}
+          </div>
+          {repositorySelected ? (
+            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <div className="text-muted-foreground">Reviewer</div>
+                <div className="mt-1 truncate font-medium text-foreground">{reviewer}</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <div className="text-muted-foreground">Repository access</div>
+                <div className="mt-1 font-medium text-foreground">Read</div>
+              </div>
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <div className="text-muted-foreground">Team slug</div>
+                <div className="mt-1 truncate font-medium text-foreground">
+                  {trigger?.team_slug ?? "143-code-reviewer"}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {trigger?.message ? (
+            <div className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{trigger.message}</span>
+            </div>
+          ) : null}
+          {errorMessage || setupErrorMessage ? (
+            <div className="mt-3 flex items-start gap-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{setupErrorMessage ?? errorMessage}</span>
+            </div>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {authRequired ? (
+            <Button variant="outline" size="sm" onClick={() => api.githubStatus.connect()}>
+              <Users className="h-4 w-4" />
+              Connect GitHub
+            </Button>
+          ) : null}
+          <Button
+            variant={ready ? "outline" : "default"}
+            size="sm"
+            disabled={!repositorySelected || authRequired || setupPending || deletePending || isLoading}
+            onClick={onSetup}
+          >
+            {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+            {ready ? "Repair team" : "Create / repair team"}
+          </Button>
+          {ready ? (
+            <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
+              <Trash2 className="h-4 w-4" />
+              Disable
+            </Button>
+          ) : null}
+          {permissionRequired ? (
+            <Badge variant="destructive">Permission approval needed</Badge>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["status"]): string {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "auth_required":
+      return "Needs GitHub account";
+    case "permission_required":
+      return "Needs app permissions";
+    case "error":
+      return "Needs attention";
+    default:
+      return "Not configured";
+  }
+}
+
+function githubTriggerStatusVariant(status: CodeReviewGitHubTriggerResponse["status"]): "success" | "secondary" | "destructive" | "outline" {
+  if (status === "ready") return "success";
+  if (status === "permission_required" || status === "error") return "destructive";
+  if (status === "auth_required") return "secondary";
+  return "outline";
 }
 
 function FilterSelect({
@@ -1315,15 +1371,4 @@ function formatFindingLocation(finding: NonNullable<CodeReviewEvidence["findings
   }
   if (finding.start_line) return `${finding.path}:${finding.start_line}`;
   return finding.path;
-}
-
-function InsightCard({ label, value }: { label: string; value: number | string }) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="text-xs text-muted-foreground">{label}</div>
-        <div className="mt-2 text-2xl font-semibold text-foreground">{value}</div>
-      </CardContent>
-    </Card>
-  );
 }

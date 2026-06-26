@@ -289,6 +289,17 @@ export const api = {
       const qs = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : '';
       return get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>(`/api/v1/code-review-policies${qs}`);
     },
+    getGitHubTrigger: (repositoryId: string) =>
+      get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
+        `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,
+      ),
+    setupGitHubTrigger: (repositoryId: string) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
+        '/api/v1/code-review-github-trigger/setup',
+        { repository_id: repositoryId },
+      ),
+    deleteGitHubTrigger: (repositoryId: string) =>
+      del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
     updatePolicy: (body: { repository_id?: string | null; config: import('./types').CodeReviewPolicyConfig }) =>
       request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', {
         method: 'PUT',

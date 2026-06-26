@@ -1,8 +1,8 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-26
+> **Status:** Implemented | **Last reviewed:** 2026-06-26
 >
-> **Depends on:** [../overall.md](../overall.md), [../implemented/78-review-agent-loops.md](../implemented/78-review-agent-loops.md), [../implemented/107-pr-readiness-checks.md](../implemented/107-pr-readiness-checks.md), [../implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
+> **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
 ## Summary
 
@@ -13,31 +13,34 @@ Create a GitHub-native **Code Reviewer** bot that teams can request as a PR revi
 
 The goal is not to replace meaningful human review. It is to move basic acceptable-risk PRs out of the human queue so reviewers can focus on changes where judgment, architecture, ownership, or risk actually matter.
 
-Implemented foundation:
+Implemented:
 
 - versioned insert-only code review policies with org defaults and repository overrides
 - lossless policy persistence for final review templates
-- code review session metadata, agent result, and finding tables tied to normal `sessions`
+- code review session metadata, agent result, finding, and prompt-artifact tables tied to normal `sessions`
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
-- conservative `run_code_review` worker handler that loads the captured policy version, records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
-- evidence-gated `run_code_review` approval path that evaluates stored reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
+- `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
+- live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
+- evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, unresolved human review threads, and the captured policy before choosing approval vs comment-only
+- LLM-backed PR description requirement evaluation with prompt-injection screening
+- prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
+- inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
 - GitHub pending/final commit-status publication for code review runs when the worker has GitHub credentials
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
+- productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
-- `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
+- `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, `/api/v1/code-review-policies`, and `/api/v1/code-review-github-trigger` API surface
 - top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
 
-Still pending:
+Deferred:
 
-- live multi-agent worker orchestration that fans out reviewer tabs and runs native `/review`
-- reviewer-result ingestion backed by live reviewer/orchestrator evidence rather than pre-existing stored result rows
-- inline-comment retry/update and posted-comment id persistence
-- prompt artifact storage and recovery for rendered approval prompts
-- unresolved human review-thread checks and richer PR description prompt evaluation
+- always-on auto-review and slash-command triggers (the `slash_command` and `auto_policy` trigger sources are reserved but unwired; only explicit `review_requested` assignment runs the bot)
+- structural review-depth behavior (quick/standard/deep is passed to reviewer/orchestrator prompts but does not change fan-out)
+- aggregate reporting/insights across reviews
 
 ## Problem
 
@@ -68,7 +71,7 @@ Ship **Reviewer Bot With 143 Code Review Sessions**, triggered by explicit GitHu
 
 Recommended v1 scope:
 
-- GitHub App-backed bot reviewer identity.
+- GitHub team trigger (`@org/143-code-reviewer`) backed by GitHub App-authored final reviews.
 - `review_requested` trigger for selected repositories.
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
 - Editable PR-description policy and acceptable-risk starter templates.
@@ -76,7 +79,7 @@ Recommended v1 scope:
 - GitHub final review with summary body and a configurable number of inline comments.
 - Approval only for acceptable PRs; otherwise comment with escalation reasons.
 - Idempotent reruns for duplicate requests, stale heads, and GitHub review retries.
-- Top-level `Code reviews` surface for filtered sessions, configuration, and later insights.
+- Top-level `Code reviews` surface for filtered sessions and configuration.
 
 Defer:
 
@@ -121,9 +124,12 @@ Reviewer assignment should be explicit in v1. Auto-running can come later after 
 
 Primary interaction:
 
-- The installed GitHub App exposes a reviewer identity such as `143-code-reviewer`.
-- A user requests the bot as a reviewer on a PR.
+- A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
+- 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
+- A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
 - The bot posts one pending/running status, then submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines.
+
+This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 
 Example final approval:
 
@@ -190,7 +196,6 @@ Recommended tabs:
 | --- | --- |
 | Reviews | Filtered session list containing code review sessions, with PR, repository, author, risk, decision, status, requested-at, and completed-at columns. |
 | Configurations | Org and repository code review policies: enablement, description requirements, risk thresholds, agent roster, orchestrator, and approval mode. |
-| Insights | Lightweight reporting on approvals, non-approvals, escalation reasons, false approvals, and review latency. This can be deferred until enough usage exists. |
 
 The Reviews tab reuses the normal session list/detail route. Primary action opens the session; secondary actions open the GitHub PR, policy version, or final GitHub review.
 
@@ -198,7 +203,7 @@ Reviews wireframe:
 
 ```text
 Code reviews
-[Reviews] [Configurations] [Insights]
+[Reviews] [Configurations]
 
 Repository [All v]  Decision [All v]  Risk [All v]  Search [PR, author, title]
 
@@ -214,7 +219,7 @@ Configurations wireframe:
 
 ```text
 Code reviews
-[Reviews] [Configurations] [Insights]
+[Reviews] [Configurations]
 
 Scope
 Organization default [Acme v]          Repository override [All repositories v]
@@ -534,6 +539,21 @@ code_review_session_metadata (
     created_at timestamptz not null default now()
 );
 
+code_review_github_trigger_settings (
+    id uuid primary key,
+    org_id uuid not null references organizations(id),
+    repository_id uuid not null references repositories(id),
+    installation_id bigint not null,
+    active boolean not null default true,
+    version int not null,
+    team_slug text not null,
+    team_name text not null,
+    team_id bigint not null,
+    repo_permission text not null,
+    created_by_user_id uuid references users(id),
+    created_at timestamptz not null default now()
+);
+
 code_review_agent_results (
     id uuid primary key,
     org_id uuid not null references organizations(id),
@@ -566,7 +586,7 @@ code_review_findings (
 );
 ```
 
-Use insert-only versioning for policies so approvals always point to the policy that produced them. Enforce active policy uniqueness per `(org_id, repository_id)` with partial unique indexes over `active = true`, plus a separate org-default row where `repository_id` is null.
+Use insert-only versioning for policies so approvals always point to the policy that produced them. Enforce active policy uniqueness per `(org_id, repository_id)` with partial unique indexes over `active = true`, plus a separate org-default row where `repository_id` is null. GitHub trigger settings are also insert-only and repo-scoped; only one active trigger setting may exist per `(org_id, repository_id)`.
 
 Code review execution state hangs off normal `sessions` through a dedicated session kind plus companion metadata keyed by `session_id`. Do not create a separate detail/run hierarchy.
 

@@ -1330,10 +1330,27 @@ func TestWorkerBlockingDrainAllowsDefaultEndpointReuse(t *testing.T) {
 	require.Contains(t, deploy, `[ "$endpoint_reuse_mode" = "after-blocking-drain" ]`, "worker port selection should retain explicit maintenance-only reuse after the old worker generation has fully drained")
 	require.Contains(t, functionBody, `deploy_mode="${DEPLOY_MODE:-routine}"`, "worker deploy should resolve deploy mode once before selecting a rollout path")
 	require.Contains(t, functionBody, `if [ "$deploy_mode" = "maintenance" ]; then`, "maintenance worker deploy should take an explicit blocking drain path")
-	require.Contains(t, functionBody, `drain_worker_containers_blocking "$old_containers"`, "maintenance worker deploy should stop old containers before reusing their endpoint")
+	require.Contains(t, functionBody, `drain_worker_containers_blocking "$old_containers" "$deploy_id" "${IMAGE_TAG:-}"`, "maintenance worker deploy should drain old containers with a durable deploy identity before endpoint reuse")
 	require.Contains(t, functionBody, `host_port="$(find_free_worker_port "$worker_private_ip" "after-blocking-drain")"`, "maintenance worker deploy should allow default endpoint reuse after the blocking drain")
 	require.Contains(t, functionBody, `host_port="$(find_free_worker_port "$worker_private_ip")"`, "routine worker deploy should keep strict endpoint selection")
 	require.Contains(t, functionBody, `routine blue/green deploy refuses blocking drain fallback`, "routine worker deploy should still explain why it refuses endpoint reuse")
+}
+
+func TestWorkerMaintenanceBlockingDrainUsesDeployControl(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+	functionBody := extractShellFunction(t, deploy, "drain_worker_containers_blocking", "read_worker_env_value")
+
+	require.Contains(t, functionBody, `run_worker_deployctl mark-draining`, "maintenance drain should record DB drain state before stopping workers")
+	require.Contains(t, functionBody, `--intent host_maintenance`, "maintenance drain should use the host maintenance drain intent")
+	require.Contains(t, functionBody, `FORCE_INTERRUPT_ACTIVE_RUNTIMES`, "maintenance drain should require explicit force before interrupting active work")
+	require.Contains(t, functionBody, `run_worker_deployctl expire-budget`, "maintenance drain should reuse deploy budget expiry handling")
+	require.Contains(t, functionBody, `run_worker_deployctl retire-ready`, "maintenance drain should wait for retire readiness")
+	require.Contains(t, functionBody, `docker stop -t 60 "$cid"`, "maintenance drain should stop containers only after retire-ready or explicit forced timeout")
+	require.NotContains(t, functionBody, `docker kill --signal=TERM "$cid"`, "maintenance drain must not bypass DB-backed drain state with a direct TERM")
 }
 
 func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
