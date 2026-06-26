@@ -383,13 +383,12 @@ describe("NewAutomationPage", () => {
 
     renderWithProviders(<NewAutomationPage />);
 
-    await user.clear(await screen.findByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "PR feedback responder");
-    await user.clear(screen.getByLabelText("Goal"));
-    await user.type(
-      screen.getByLabelText("Goal"),
-      "Respond to new PR feedback.",
-    );
+    fireEvent.change(await screen.findByLabelText("Name"), {
+      target: { value: "PR feedback responder" },
+    });
+    fireEvent.change(screen.getByLabelText("Goal"), {
+      target: { value: "Respond to new PR feedback." },
+    });
     await user.click(screen.getByLabelText("On a schedule"));
     await user.click(screen.getByLabelText("When there is new PR feedback"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));
@@ -485,23 +484,33 @@ describe("NewAutomationPage", () => {
 
     renderWithProviders(<NewAutomationPage />);
 
-    await user.clear(await screen.findByLabelText("Name"));
-    await user.type(screen.getByLabelText("Name"), "PagerDuty responder");
-    await user.clear(screen.getByLabelText("Goal"));
-    await user.type(
-      screen.getByLabelText("Goal"),
-      "Investigate triggered PagerDuty incidents.",
-    );
+    fireEvent.change(await screen.findByLabelText("Name"), {
+      target: { value: "PagerDuty responder" },
+    });
+    fireEvent.change(screen.getByLabelText("Goal"), {
+      target: { value: "Investigate triggered PagerDuty incidents." },
+    });
     await user.click(screen.getByLabelText("On a schedule"));
     await user.click(screen.getByLabelText("PagerDuty incidents"));
     await user.click(screen.getByLabelText("PagerDuty annotated events"));
-    await user.type(screen.getByLabelText("PagerDuty service IDs"), "P123, P456");
-    await user.type(screen.getByLabelText("PagerDuty team IDs"), "TEAM1");
-    await user.type(screen.getByLabelText("PagerDuty statuses"), "triggered, acknowledged");
-    await user.type(screen.getByLabelText("PagerDuty priority names"), "P1, Sev 1");
-    await user.type(screen.getByLabelText("PagerDuty title contains"), "checkout");
-    await user.clear(screen.getByLabelText("PagerDuty cooldown minutes"));
-    await user.type(screen.getByLabelText("PagerDuty cooldown minutes"), "30");
+    fireEvent.change(screen.getByLabelText("PagerDuty service IDs"), {
+      target: { value: "P123, P456" },
+    });
+    fireEvent.change(screen.getByLabelText("PagerDuty team IDs"), {
+      target: { value: "TEAM1" },
+    });
+    fireEvent.change(screen.getByLabelText("PagerDuty statuses"), {
+      target: { value: "triggered, acknowledged" },
+    });
+    fireEvent.change(screen.getByLabelText("PagerDuty priority names"), {
+      target: { value: "P1, Sev 1" },
+    });
+    fireEvent.change(screen.getByLabelText("PagerDuty title contains"), {
+      target: { value: "checkout" },
+    });
+    fireEvent.change(screen.getByLabelText("PagerDuty cooldown minutes"), {
+      target: { value: "30" },
+    });
     await user.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() => {
