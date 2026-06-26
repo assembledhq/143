@@ -7,6 +7,7 @@ import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import {
   apiKeyHelp,
+  DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
   OPENCODE_BACKING_PROVIDER_OPTIONS,
   OPENCODE_US_INFERENCE_HELP_TEXT,
@@ -234,9 +235,9 @@ export default function AccountPage() {
   const [authType, setAuthType] = useState<PersonalAuthType>("subscription");
   const [apiKey, setApiKey] = useState("");
   const [authLabel, setAuthLabel] = useState("");
-  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>("opencode");
+  const [openCodeBackingProvider, setOpenCodeBackingProvider] = useState<OpenCodeBackingProvider>(DEFAULT_OPENCODE_BACKING_PROVIDER);
   const [openCodeBackingProviderTouched, setOpenCodeBackingProviderTouched] = useState(false);
-  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider("opencode"));
+  const [openCodeModel, setOpenCodeModel] = useState<string>(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
   const [openCodeModelTouched, setOpenCodeModelTouched] = useState(false);
   const [openCodeCustomModel, setOpenCodeCustomModel] = useState("");
   const openCodeKeyDetection = useMemo(
@@ -295,8 +296,7 @@ export default function AccountPage() {
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["coding-credentials"] });
-      setApiKey("");
-      setAuthLabel("");
+      resetModalState();
       setAddOpen(false);
       toast.success("Personal auth saved");
     },
@@ -424,9 +424,9 @@ export default function AccountPage() {
     setAuthLabel("");
     setProvider("openai");
     setAuthType("subscription");
-    setOpenCodeBackingProvider("opencode");
+    setOpenCodeBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER);
     setOpenCodeBackingProviderTouched(false);
-    setOpenCodeModel(openCodeDefaultModelForBackingProvider("opencode"));
+    setOpenCodeModel(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER));
     setOpenCodeModelTouched(false);
     setOpenCodeCustomModel("");
   }

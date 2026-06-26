@@ -687,10 +687,10 @@ func openCodeModelFromDefaults(defaults map[string]string) string {
 
 func openCodeBackingProviderFromInput(input string) models.ProviderName {
 	switch models.ProviderName(input) {
-	case models.ProviderAnthropic, models.ProviderOpenAI, models.ProviderGemini, models.ProviderOpenRouter:
+	case models.ProviderOpenCode, models.ProviderAnthropic, models.ProviderOpenAI, models.ProviderGemini, models.ProviderOpenRouter:
 		return models.ProviderName(input)
 	default:
-		return models.ProviderOpenCode
+		return models.ProviderOpenRouter
 	}
 }
 
