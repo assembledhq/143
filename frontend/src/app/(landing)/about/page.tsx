@@ -46,8 +46,7 @@ export default function AboutPage() {
       <main className="flex-1 px-6 sm:px-10 py-14 sm:py-20">
         <article aria-label="Why we built 143" className="mx-auto max-w-[720px]">
           <header className="space-y-5">
-            <p className={metaClass}>143.dev</p>
-            <h1 className={pageTitleClass}>Why we built 143</h1>
+            <h1 className={pageTitleClass}>Why we built 143.dev</h1>
             <p className={ledeClass}>
               Coding agents feel magical in a fresh repo and fall apart in a
               complex codebase. The hard part was never the prompt, it&apos;s
@@ -55,6 +54,19 @@ export default function AboutPage() {
               review, and handoff. 143.dev is an open-source project that
               helps teams actually ship production code with agents.
             </p>
+            <div className="space-y-1">
+              <p className={metaClass}>
+                <a
+                  href="https://www.linkedin.com/in/johnjianwang/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={linkClass}
+                >
+                  John Wang
+                </a>
+              </p>
+              <p className={metaClass}>Co-founder &amp; CTO, Assembled</p>
+            </div>
           </header>
 
           <div className={ruleClass} aria-hidden="true" />
@@ -75,77 +87,91 @@ export default function AboutPage() {
               production.
             </p>
 
-            <p>
-              143 started at{" "}
-              <a
-                href="https://www.assembled.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className={linkClass}
-              >
-                Assembled
-              </a>
-              . We wanted coding agents to help with real product work, not just
-              demos and internal tools. But even heading into 2026, we weren&apos;t
-              seeing the velocity gains we expected. Other teams seemed to be
-              getting huge leverage from fresh repos, while we were still losing
-              time to setup, context, CI, review, and handoff.
-            </p>
+            <section className="space-y-3 pt-2">
+              <h2 className={headingClass}>Where it started</h2>
+              <div className="space-y-6">
+                <p>
+                  143.dev is the internal tool we built at{" "}
+                  <a
+                    href="https://www.assembled.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={linkClass}
+                  >
+                    Assembled
+                  </a>{" "}
+                  to help ourselves build better software. We wanted coding
+                  agents to help with real product work, not just demos and
+                  internal tools. But even heading into 2026, we weren&apos;t
+                  seeing the velocity gains we expected. Other teams seemed to be
+                  getting huge leverage from fresh repos, while we were still
+                  losing time to setup, context, CI, review, and handoff.
+                </p>
 
-            <p>
-              We kept asking what we were doing wrong. After talking to a lot of
-              other teams, the answer got much clearer: this was a shared
-              infrastructure problem, not just an individual prompting problem.
-            </p>
+                <p>
+                  We kept asking what we were doing wrong. After talking to a lot
+                  of other teams, the answer got much clearer: this was a shared
+                  infrastructure problem, not just an individual prompting
+                  problem.
+                </p>
 
-            <InlineCallout isDark={isDark} label="What was missing">
-              The useful unit was not one better prompt. It was everything
-              around the agent: setup, context, CI, credentials, logs, review,
-              handoff, and the product knowledge needed to make good changes.
-            </InlineCallout>
+                <InlineCallout isDark={isDark} label="What was missing">
+                  The useful unit was not one better prompt. It was everything
+                  around the agent: setup, context, CI, credentials, logs,
+                  review, handoff, and the product knowledge needed to make good
+                  changes.
+                </InlineCallout>
+              </div>
+            </section>
 
-            <p>
-              So we started with a small tiger team. We cleaned up our
-              instructions, invested more in CI/CD, built agent hooks, and made
-              the agent environment less fragile. All of that helped, but
-              it also made the bigger issue obvious: we needed a system that made
-              this work shared across the team as opposed to being trapped inside one
-              engineer&apos;s terminal.
-            </p>
+            <section className="space-y-3 pt-2">
+              <h2 className={headingClass}>What we built</h2>
+              <div className="space-y-6">
+                <p>
+                  So we started with a small tiger team. We cleaned up our
+                  instructions, invested more in CI/CD, built agent hooks, and
+                  made the agent environment less fragile. All of that helped,
+                  but it also made the bigger issue obvious: we needed a system
+                  that made this work shared across the team as opposed to being
+                  trapped inside one engineer&apos;s terminal.
+                </p>
 
-            <p>
-              That is why we built 143.dev. We were inspired by internal systems
-              like Stripe Minions and Ramp Inspect, but those were never
-              available to the public. We wanted something open source that other
-              teams could use, adapt, and improve.
-            </p>
+                <p>
+                  That is why we built 143.dev. We were inspired by internal
+                  systems like Stripe Minions and Ramp Inspect, but those were
+                  never available to the public. We wanted something open source
+                  that other teams could use, adapt, and improve.
+                </p>
 
-            <p>We built around a few convictions:</p>
+                <p>We built around a few convictions:</p>
 
-            <ul className="list-disc space-y-2 pl-5">
-              <li>
-                Automations should be visible to the team, not hidden on one
-                person&apos;s laptop.
-              </li>
-              <li>
-                Teams should be able to swap out intelligence and harnesses as coding agents
-                and models improve.
-              </li>
-              <li>
-                Hooks should make it natural to start work automatically from Sentry issues,
-                Linear assignments, PR comments, or scheduled checks.
-              </li>
-              <li>
-                Code review should be handled by agents on some or all PRs, and
-                they should be able to auto-approve low-risk changes against
-                thresholds you define.
-              </li>
-              <li>
-                You should be able to set up a great environment once for
-                everyone, with the same repos, credentials, tools, logs, docs,
-                and product context available to the whole team.
-              </li>
-            </ul>
+                <ul className="list-disc space-y-2 pl-5">
+                  <li>
+                    Automations should be visible to the team, not hidden on one
+                    person&apos;s laptop.
+                  </li>
+                  <li>
+                    Teams should be able to swap out intelligence and harnesses
+                    as coding agents and models improve.
+                  </li>
+                  <li>
+                    Hooks should make it natural to start work automatically from
+                    Sentry issues, Linear assignments, PR comments, or scheduled
+                    checks.
+                  </li>
+                  <li>
+                    Code review should be handled by agents on some or all PRs,
+                    and they should be able to auto-approve low-risk changes
+                    against thresholds you define.
+                  </li>
+                  <li>
+                    You should be able to set up a great environment once for
+                    everyone, with the same repos, credentials, tools, logs,
+                    docs, and product context available to the whole team.
+                  </li>
+                </ul>
+              </div>
+            </section>
 
             <section className="space-y-3 pt-2">
               <h2 className={headingClass}>Open source from day one</h2>
@@ -171,30 +197,7 @@ export default function AboutPage() {
               </p>
             </section>
 
-            <p>
-              <Link href="/why-143" className={linkClass}>
-                The name for 143 comes from
-              </Link>{" "}
-              1943, when the Lockheed Skunk Works team built the XP-80 Shooting
-              Star in 143 days. It is a nod to what it takes to move that fast: a small
-              team with high ownership and the infrastructure to support it.
-            </p>
-
             <p>I really hope you like it.</p>
-
-            <div className="space-y-1">
-              <p className={isDark ? "text-white/78" : "text-slate-800"}>John</p>
-              <p className={metaClass}>
-                <a
-                  href="https://www.linkedin.com/in/johnjianwang/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={linkClass}
-                >
-                  Co-founder/CTO, Assembled
-                </a>
-              </p>
-            </div>
           </div>
         </article>
       </main>
