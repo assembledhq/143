@@ -36,5 +36,6 @@ export default function robots(): MetadataRoute.Robots {
         ],
       },
     ],
+    sitemap: "https://143.dev/sitemap.xml",
   };
 }
