@@ -1,6 +1,0 @@
-./mention_index.go
-./mention_index_cache.go
-./reader.go
-./snapshot_cache.go
-./snapshot_reader.go
-./tar_extract.go
