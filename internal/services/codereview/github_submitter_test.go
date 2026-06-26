@@ -132,15 +132,20 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testi
 		patchBody map[string]string
 		postBody  map[string]any
 	)
+	outputKey := "review-output-key"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should write no existing reviews")
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode([]map[string]any{{
 				"id":   456,
 				"path": "src/auth/session.go",
 				"line": 42,
-				"body": withCodeReviewFindingMarker("Old body.", "finding-key"),
+				"body": withCodeReviewFindingMarker("Old body.", codeReviewFindingMarkerKey(outputKey, "finding-key")),
 			}})
 			require.NoError(t, err, "test response should write pull comments")
 		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/pulls/comments/456":
@@ -170,6 +175,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testi
 		Repository:     "acme/repo",
 		PullNumber:     42,
 		HeadSHA:        "abc123",
+		OutputKey:      outputKey,
 		Decision:       SubmitReviewDecisionCommentOnly,
 		Body:           "Review complete.",
 		Comments: []SubmitReviewComment{
@@ -179,11 +185,82 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testi
 
 	require.NoError(t, err, "SubmitReview should update a matching marked inline comment")
 	require.Equal(t, int64(123), result.ID, "SubmitReview should still submit the final review summary")
-	require.Equal(t, withCodeReviewFindingMarker("New body.", "finding-key"), patchBody["body"], "SubmitReview should update the stale inline comment body")
+	require.Equal(t, withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")), patchBody["body"], "SubmitReview should update the stale inline comment body")
 	require.NotContains(t, postBody, "comments", "SubmitReview should not post a duplicate inline comment when an existing marker was updated")
 	require.Equal(t, []SubmitReviewPostedComment{
-		{ID: 456, Path: "src/auth/session.go", Line: 42, Body: withCodeReviewFindingMarker("New body.", "finding-key"), DedupeKey: "finding-key"},
+		{ID: 456, Path: "src/auth/session.go", Line: 42, Body: withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")), DedupeKey: "finding-key"},
 	}, result.Comments, "SubmitReview should return the existing updated comment id with the original finding key")
+}
+
+func TestGitHubSubmitter_SubmitReviewDoesNotReuseMarkedInlineCommentFromDifferentOutput(t *testing.T) {
+	t.Parallel()
+
+	var (
+		patchCalled bool
+		postBody    map[string]any
+	)
+	outputKey := "new-output-key"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should write no existing reviews")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id":   456,
+				"path": "src/auth/session.go",
+				"line": 42,
+				"body": withCodeReviewFindingMarker("Old body.", codeReviewFindingMarkerKey("old-output-key", "finding-key")),
+			}})
+			require.NoError(t, err, "test response should write pull comments")
+		case r.Method == http.MethodPatch:
+			patchCalled = true
+			http.Error(w, "unexpected patch", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&postBody), "post body should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":123,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-123"}`))
+			require.NoError(t, err, "test response should write review")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/123/comments":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id":   789,
+				"path": "src/auth/session.go",
+				"line": 42,
+				"body": withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")),
+			}})
+			require.NoError(t, err, "test response should write created review comments")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		HeadSHA:        "abc123",
+		OutputKey:      outputKey,
+		Decision:       SubmitReviewDecisionCommentOnly,
+		Body:           "Review complete.",
+		Comments: []SubmitReviewComment{
+			{Path: "src/auth/session.go", Line: 42, Body: "New body.", DedupeKey: "finding-key"},
+		},
+	})
+
+	require.NoError(t, err, "SubmitReview should post a fresh inline comment when only old-output markers exist")
+	require.False(t, patchCalled, "SubmitReview should not patch comments marked for a different review output")
+	comments, ok := postBody["comments"].([]any)
+	require.True(t, ok, "new review payload should include inline comments")
+	require.Len(t, comments, 1, "new review payload should include the finding for the new output")
+	require.Equal(t, []SubmitReviewPostedComment{
+		{ID: 789, Path: "src/auth/session.go", Line: 42, Body: withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")), DedupeKey: "finding-key"},
+	}, result.Comments, "SubmitReview should return the newly posted comment with the original finding key")
 }
 
 func TestGitHubSubmitter_ListPullRequestFiles(t *testing.T) {

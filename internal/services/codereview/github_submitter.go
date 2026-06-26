@@ -200,10 +200,11 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 			}
 			markerDigest := ""
 			if strings.TrimSpace(comment.DedupeKey) != "" {
-				markerDigest = codeReviewMarkerDigest(comment.DedupeKey)
+				markerKey := codeReviewFindingMarkerKey(req.OutputKey, comment.DedupeKey)
+				markerDigest = codeReviewMarkerDigest(markerKey)
 				dedupeKeysByMarker[markerDigest] = comment.DedupeKey
 			}
-			body := withCodeReviewFindingMarker(comment.Body, comment.DedupeKey)
+			body := withCodeReviewFindingMarker(comment.Body, codeReviewFindingMarkerKey(req.OutputKey, comment.DedupeKey))
 			if markerDigest != "" {
 				if existing, ok := existingByMarker[markerDigest]; ok {
 					if strings.TrimSpace(existing.Body) != strings.TrimSpace(body) {
@@ -806,13 +807,13 @@ func withCodeReviewOutputMarker(body, outputKey string) string {
 	return body + "\n\n" + marker
 }
 
-func withCodeReviewFindingMarker(body, dedupeKey string) string {
-	dedupeKey = strings.TrimSpace(dedupeKey)
+func withCodeReviewFindingMarker(body, markerKey string) string {
+	markerKey = strings.TrimSpace(markerKey)
 	body = strings.TrimSpace(body)
-	if dedupeKey == "" {
+	if markerKey == "" {
 		return body
 	}
-	marker := codeReviewFindingMarker(dedupeKey)
+	marker := codeReviewFindingMarker(markerKey)
 	if strings.Contains(body, marker) {
 		return body
 	}
@@ -826,8 +827,20 @@ func codeReviewOutputMarker(outputKey string) string {
 	return "<!-- 143-code-review-output:" + codeReviewMarkerDigest(outputKey) + " -->"
 }
 
-func codeReviewFindingMarker(dedupeKey string) string {
-	return "<!-- 143-code-review-finding:" + codeReviewMarkerDigest(dedupeKey) + " -->"
+func codeReviewFindingMarkerKey(outputKey, dedupeKey string) string {
+	dedupeKey = strings.TrimSpace(dedupeKey)
+	if dedupeKey == "" {
+		return ""
+	}
+	outputKey = strings.TrimSpace(outputKey)
+	if outputKey == "" {
+		return dedupeKey
+	}
+	return outputKey + "\n" + dedupeKey
+}
+
+func codeReviewFindingMarker(markerKey string) string {
+	return "<!-- 143-code-review-finding:" + codeReviewMarkerDigest(markerKey) + " -->"
 }
 
 func codeReviewMarkerDigest(value string) string {

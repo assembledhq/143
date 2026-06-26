@@ -606,6 +606,7 @@ func TestWebhook_HandleCodeReviewRequestedCreatesMirrorWithBody(t *testing.T) {
 			"authored_by":      models.GitIdentitySourceUser,
 			"head_sha":         stringPointerArg{value: "head-sha"},
 			"head_ref":         stringPointerArg{value: "feature/code-review"},
+			"base_sha":         stringPointerArg{value: "base-sha"},
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(prID, now, now))
 
@@ -637,6 +638,89 @@ func TestWebhook_HandleCodeReviewRequestedCreatesMirrorWithBody(t *testing.T) {
 	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the created pull request mirror")
 	require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "code review job should preserve the GitHub PR author")
 	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror should be created with the webhook PR body")
+}
+
+func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	jobID := uuid.New()
+	now := time.Now().UTC()
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policies := &codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}
+	metadata := &codeReviewWebhookMetadataStore{}
+	sessions := &codeReviewWebhookSessionStore{}
+	jobs := &codeReviewWebhookJobStore{jobID: jobID}
+	codeReviews := codereviewsvc.NewService(policies, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{
+		AppReviewerLogins: []string{"143-code-reviewer"},
+	})
+	handler := &WebhookHandler{
+		pullRequests: db.NewPullRequestStore(mock),
+		codeReviews:  codeReviews,
+	}
+
+	staleBody := "stale description"
+	staleHead := "stale-head"
+	staleRef := "stale-ref"
+	staleBase := "stale-base"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+			prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Stale title", &staleBody, "open", "pending", "app", "", &staleHead, &staleRef, &staleBase,
+			"unknown", false, 0, false, nil, int64(0),
+			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+			nil, now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha[\\s\\S]*base_sha = @base_sha").
+		WithArgs(pgx.NamedArgs{
+			"id":            prID,
+			"org_id":        orgID,
+			"github_pr_url": "https://github.com/assembledhq/143/pull/42",
+			"title":         "Fresh title",
+			"body":          stringPointerArg{value: "Fresh body with testing evidence"},
+			"head_sha":      stringPointerArg{value: "fresh-head"},
+			"head_ref":      stringPointerArg{value: "feature/code-review"},
+			"base_sha":      stringPointerArg{value: "fresh-base"},
+			"merge_state":   models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body := []byte(`{
+		"action": "review_requested",
+		"number": 42,
+		"repository": {"full_name": "assembledhq/143"},
+		"requested_reviewer": {"login": "143-code-reviewer"},
+		"pull_request": {
+			"html_url": "https://github.com/assembledhq/143/pull/42",
+			"title": "Fresh title",
+			"body": "Fresh body with testing evidence",
+			"user": {"login": "anya"},
+			"head": {"sha": "fresh-head", "ref": "feature/code-review", "repo": {"fork": false}},
+			"base": {"sha": "fresh-base"}
+		}
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", strings.NewReader(string(body)))
+	rr := httptest.NewRecorder()
+
+	ok := handler.handleCodeReviewRequested(rr, req, body, db.GitHubRepoOwner{
+		RepositoryID: repoID,
+		OrgID:        orgID,
+		FullName:     "assembledhq/143",
+		Status:       "active",
+	})
+
+	require.True(t, ok, "review_requested webhook should be processed: %s", rr.Body.String())
+	require.Equal(t, prID, jobs.payload.PullRequestID, "code review job should use the existing pull request mirror")
+	require.Equal(t, "fresh-head", jobs.payload.HeadSHA, "code review job should target the fresh webhook head SHA")
+	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request mirror should be refreshed from the webhook payload")
 }
 
 func TestWebhook_HandleIssueComment_InvalidJSON(t *testing.T) {
