@@ -1189,21 +1189,24 @@ func configureSessionExecutorDispatch(
 	}
 
 	svc.RequireSessionExecutorDispatcher = true
+	executorLauncher := worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
+		Image:       cfg.SessionExecutorImage,
+		NetworkMode: cfg.SessionExecutorDockerNetwork,
+		Binds:       sessionExecutorBinds(),
+		GroupAdd:    sessionExecutorGroupAddFromEnv(),
+		Env:         os.Environ(),
+		StopTimeout: cfg.SessionExecutorStopTimeout,
+	})
+	executorLauncher.SetLogger(logger)
 	svc.SessionExecutorDispatcher = &worker.DurableSessionExecutorDispatcher{
-		Executors: db.NewSessionExecutorStore(pool),
-		Jobs:      jobStore,
-		Launcher: worker.NewDockerExecutorLauncher(dockerCli, worker.DockerExecutorLauncherConfig{
-			Image:       cfg.SessionExecutorImage,
-			NetworkMode: cfg.SessionExecutorDockerNetwork,
-			Binds:       sessionExecutorBinds(),
-			GroupAdd:    sessionExecutorGroupAddFromEnv(),
-			Env:         os.Environ(),
-			StopTimeout: cfg.SessionExecutorStopTimeout,
-		}),
+		Executors:             db.NewSessionExecutorStore(pool),
+		Jobs:                  jobStore,
+		Launcher:              executorLauncher,
 		NodeID:                cfg.NodeID,
 		Image:                 cfg.SessionExecutorImage,
 		BuildSHA:              version.BuildSHA,
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
+		Logger:                logger,
 	}
 }
 

@@ -1,11 +1,13 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/jobctx"
@@ -22,6 +24,10 @@ type executorCreatorStub struct {
 	params         models.CreateSessionExecutorParams
 	id             uuid.UUID
 	err            error
+	containerCalls int
+	containerID    string
+	containerOK    bool
+	containerErr   error
 	terminalCalls  int
 	terminalStatus models.SessionExecutorStatus
 	terminalError  string
@@ -46,6 +52,15 @@ func (s *executorCreatorStub) CreateStarting(ctx context.Context, orgID uuid.UUI
 		s.id = uuid.New()
 	}
 	return s.id, nil
+}
+
+func (s *executorCreatorStub) RecordContainerIDWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, containerID string) (bool, error) {
+	s.containerCalls++
+	s.containerID = containerID
+	if s.containerErr != nil {
+		return false, s.containerErr
+	}
+	return s.containerOK, nil
 }
 
 func (s *executorCreatorStub) MarkTerminalWithLease(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, status models.SessionExecutorStatus, _ *int, lastError string) (bool, error) {
@@ -86,10 +101,13 @@ type executorLauncherStub struct {
 	cleanupErr   error
 }
 
-func (s *executorLauncherStub) Launch(ctx context.Context, spec ExecutorLaunchSpec) error {
+func (s *executorLauncherStub) Launch(ctx context.Context, spec ExecutorLaunchSpec) (ExecutorLaunchResult, error) {
 	s.calls++
 	s.spec = spec
-	return s.err
+	if s.err != nil {
+		return ExecutorLaunchResult{}, s.err
+	}
+	return ExecutorLaunchResult{ContainerID: "container-" + spec.ExecutorID.String()}, nil
 }
 
 func (s *executorLauncherStub) Cleanup(ctx context.Context, spec ExecutorLaunchSpec) error {
@@ -110,7 +128,7 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	ctx := jobctx.WithJobID(context.Background(), jobID)
 	ctx = jobctx.WithLockToken(ctx, lockToken)
 
-	executors := &executorCreatorStub{id: executorID}
+	executors := &executorCreatorStub{id: executorID, containerOK: true}
 	jobs := &jobHandoffStoreStub{ok: true}
 	launcher := &executorLauncherStub{}
 	dispatcher := &DurableSessionExecutorDispatcher{
@@ -134,11 +152,47 @@ func TestDurableSessionExecutorDispatcher_DispatchPreservesLockToken(t *testing.
 	require.Equal(t, lockToken, executors.params.LockToken, "executor row should preserve the worker lock token")
 	require.Equal(t, 1, launcher.calls, "Dispatch should launch exactly one executor")
 	require.Equal(t, lockToken, launcher.spec.LockToken, "launch spec should preserve the worker lock token")
+	require.Equal(t, 1, executors.containerCalls, "Dispatch should persist the launched container id before handoff")
+	require.Equal(t, "container-"+executorID.String(), executors.containerID, "Dispatch should persist the Docker container id for forensic lookup")
 	require.Equal(t, 1, jobs.calls, "Dispatch should hand off the job exactly once")
 	require.Equal(t, orgID, jobs.orgID, "handoff should be org-scoped")
 	require.Equal(t, jobID, jobs.jobID, "handoff should target the running job")
 	require.Equal(t, lockToken, jobs.lockToken, "handoff should preserve the existing fencing token")
 	require.Equal(t, executorID, jobs.executorID, "handoff should assign ownership to the created executor")
+}
+
+func TestDurableSessionExecutorDispatcher_DispatchLogsHandoffLifecycle(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
+	executorID := uuid.New()
+	ctx := jobctx.WithJobID(context.Background(), jobID)
+	ctx = jobctx.WithLockToken(ctx, lockToken)
+
+	var logs bytes.Buffer
+	dispatcher := &DurableSessionExecutorDispatcher{
+		Executors: &executorCreatorStub{id: executorID, containerOK: true},
+		Jobs:      &jobHandoffStoreStub{ok: true},
+		Launcher:  &executorLauncherStub{},
+		NodeID:    "worker-a",
+		Image:     "ghcr.io/assembledhq/143-server:test",
+		BuildSHA:  "build-sha",
+		Logger:    zerolog.New(&logs),
+	}
+
+	got, err := dispatcher.Dispatch(ctx, "run_agent", models.Session{ID: sessionID, OrgID: orgID}, &threadID)
+
+	require.NoError(t, err, "Dispatch should complete successfully before inspecting logs")
+	require.Equal(t, executorID, got, "Dispatch should return the created executor id")
+	require.Contains(t, logs.String(), "session executor dispatch starting", "dispatch logs should include the start breadcrumb")
+	require.Contains(t, logs.String(), "session executor row created", "dispatch logs should include executor row creation")
+	require.Contains(t, logs.String(), "session executor job handoff completed", "dispatch logs should include handoff completion")
+	require.Contains(t, logs.String(), executorID.String(), "dispatch logs should include the executor id for correlation")
+	require.Contains(t, logs.String(), jobID.String(), "dispatch logs should include the job id for correlation")
 }
 
 func TestDurableSessionExecutorDispatcher_CleansUpWhenLaunchFails(t *testing.T) {
@@ -152,7 +206,7 @@ func TestDurableSessionExecutorDispatcher_CleansUpWhenLaunchFails(t *testing.T) 
 	ctx := jobctx.WithJobID(context.Background(), jobID)
 	ctx = jobctx.WithLockToken(ctx, lockToken)
 
-	executors := &executorCreatorStub{id: executorID}
+	executors := &executorCreatorStub{id: executorID, containerOK: true}
 	launcher := &executorLauncherStub{err: errors.New("docker unavailable")}
 	dispatcher := &DurableSessionExecutorDispatcher{
 		Executors: executors,
@@ -180,7 +234,7 @@ func TestDurableSessionExecutorDispatcher_CleansUpLaunchedContainerWhenHandoffFa
 	ctx := jobctx.WithJobID(context.Background(), jobID)
 	ctx = jobctx.WithLockToken(ctx, lockToken)
 
-	executors := &executorCreatorStub{id: executorID}
+	executors := &executorCreatorStub{id: executorID, containerOK: true}
 	launcher := &executorLauncherStub{}
 	dispatcher := &DurableSessionExecutorDispatcher{
 		Executors: executors,
