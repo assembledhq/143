@@ -49,6 +49,29 @@ func TestSessionExecutorStore_CreateStarting(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionExecutorStore_RecordContainerIDWithLease(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionExecutorStore(mock)
+	orgID := uuid.New()
+	executorID := uuid.New()
+	lockToken := uuid.New()
+
+	mock.ExpectExec("UPDATE session_executors").
+		WithArgs(orgID, executorID, lockToken, "container-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	ok, err := store.RecordContainerIDWithLease(context.Background(), orgID, executorID, lockToken, "container-1")
+
+	require.NoError(t, err, "RecordContainerIDWithLease should persist the Docker container id")
+	require.True(t, ok, "RecordContainerIDWithLease should report a successful fenced update")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionExecutorStore_ClearPreHandoffReservation(t *testing.T) {
 	t.Parallel()
 
@@ -235,13 +258,13 @@ func TestSessionExecutorStore_GetByID(t *testing.T) {
 		WithArgs(executorID).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "thread_id", "job_id", "job_type",
-			"host_node_id", "owner_id", "lock_token", "status", "image", "build_sha",
+			"host_node_id", "owner_id", "lock_token", "status", "container_id", "image", "build_sha",
 			"heartbeat_at", "lease_expires_at", "runtime_deadline_at", "drain_intent",
 			"drain_requested_at", "drain_deadline_at", "started_at", "completed_at",
 			"exit_code", "last_error", "created_at", "updated_at",
 		}).AddRow(
 			executorID, orgID, sessionID, nil, jobID, "run_agent",
-			"worker-1", "worker-1", lockToken, string(models.SessionExecutorStatusStarting), "143:sha", "build-sha",
+			"worker-1", "worker-1", lockToken, string(models.SessionExecutorStatusStarting), "container-1", "143:sha", "build-sha",
 			now, now.Add(time.Minute), now.Add(90*time.Minute), "none", nil, nil, now, nil, nil, nil, now, now,
 		))
 
@@ -250,6 +273,8 @@ func TestSessionExecutorStore_GetByID(t *testing.T) {
 	require.Equal(t, executorID, executor.ID, "GetByID should return the matching executor")
 	require.Equal(t, orgID, executor.OrgID, "GetByID should preserve org scope on the model")
 	require.Equal(t, lockToken, executor.LockToken, "GetByID should return the fencing token")
+	require.NotNil(t, executor.ContainerID, "GetByID should return the recorded Docker container id")
+	require.Equal(t, "container-1", *executor.ContainerID, "GetByID should preserve the Docker container id")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

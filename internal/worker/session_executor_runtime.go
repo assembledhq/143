@@ -71,37 +71,64 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 
 	executor, err := r.Executors.GetByID(ctx, executorID)
 	if err != nil {
+		r.loggerPtr().Error().Err(err).Str("executor_id", executorID.String()).Msg("session executor failed to load executor row")
 		return err
 	}
+	logger := r.logger().With().
+		Str("org_id", executor.OrgID.String()).
+		Str("session_id", executor.SessionID.String()).
+		Str("job_id", executor.JobID.String()).
+		Str("job_type", executor.JobType).
+		Str("executor_id", executor.ID.String()).
+		Str("host_node_id", executor.HostNodeID).
+		Str("build_sha", executor.BuildSHA).
+		Logger()
+	logger.Info().Str("executor_status", string(executor.Status)).Msg("session executor boot loaded executor row")
 	if executor.Status == models.SessionExecutorStatusCompleted ||
 		executor.Status == models.SessionExecutorStatusFailed ||
 		executor.Status == models.SessionExecutorStatusLost {
+		logger.Warn().Str("executor_status", string(executor.Status)).Msg("session executor boot found terminal executor row")
 		return fmt.Errorf("%w: executor is already terminal: %s", ErrExecutorInvalidHandoff, executor.Status)
 	}
 
+	bootStartedAt := time.Now()
+	logger.Info().Msg("session executor boot waiting for job handoff")
 	job, ok, err := r.waitForRunningJob(ctx, executor)
 	if err != nil {
+		logger.Error().Err(err).Dur("wait_duration", time.Since(bootStartedAt)).Msg("session executor boot failed while waiting for job handoff")
 		return err
 	}
 	if !ok || job == nil {
+		logger.Error().Dur("wait_duration", time.Since(bootStartedAt)).Msg("session executor boot validation timed out waiting for job handoff")
 		r.markExecutorTerminal(context.WithoutCancel(ctx), executor, models.SessionExecutorStatusFailed, 1, "executor boot validation timed out waiting for job handoff")
 		return fmt.Errorf("%w: running job ownership does not match executor", ErrExecutorInvalidHandoff)
 	}
+	logger.Info().
+		Dur("wait_duration", time.Since(bootStartedAt)).
+		Str("job_status", string(job.Status)).
+		Int("attempts", job.Attempts).
+		Int("max_attempts", job.MaxAttempts).
+		Msg("session executor boot observed job handoff")
 	if job.LockToken == nil || *job.LockToken != executor.LockToken {
+		logger.Error().Msg("session executor boot found job lock token mismatch")
 		return fmt.Errorf("%w: job lock token mismatch", ErrExecutorInvalidHandoff)
 	}
 
 	ok, err = r.Executors.MarkRunningWithLease(ctx, executor.OrgID, executor.ID, executor.LockToken, leaseDuration)
 	if err != nil {
+		logger.Error().Err(err).Msg("session executor failed to mark executor running")
 		return err
 	}
 	if !ok {
+		logger.Warn().Msg("session executor lost lease before marking executor running")
 		return fmt.Errorf("%w: executor row was not claimable", ErrExecutorLostLease)
 	}
+	logger.Info().Dur("lease_duration", leaseDuration).Msg("session executor marked executor running")
 
 	handler, ok := r.handlerFor(job.JobType)
 	if !ok {
 		err := fmt.Errorf("no handler for job type: %s", job.JobType)
+		logger.Error().Err(err).Msg("session executor has no handler for job type")
 		r.markJobFailed(ctx, executor, job, err.Error())
 		r.markExecutorTerminal(ctx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
 		return err
@@ -125,7 +152,7 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	r.startOwnershipLoops(handlerCtx, &wg, executor, job, leaseDuration, &lostOwnership, &drainHandled, cancelHandler)
 	drainDone := r.startDrainWatcher(ctx, executor, &drainHandled)
 
-	r.loggerPtr().Info().
+	logger.Info().
 		Str("executor_id", executor.ID.String()).
 		Str("job_id", job.ID.String()).
 		Str("job_type", job.JobType).
@@ -142,6 +169,7 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	}
 
 	if lostOwnership.Load() {
+		logger.Warn().Msg("session executor lost ownership while handler was running")
 		r.markExecutorTerminal(context.WithoutCancel(ctx), executor, models.SessionExecutorStatusLost, 1, ErrExecutorLostLease.Error())
 		return ErrExecutorLostLease
 	}
@@ -161,6 +189,11 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 		}
 	}
 
+	if runErr != nil {
+		logger.Warn().Err(runErr).Msg("session executor handler finished with error")
+	} else {
+		logger.Info().Msg("session executor handler finished successfully")
+	}
 	return r.finishAttempt(ctx, handlerCtx, executor, job, runErr)
 }
 

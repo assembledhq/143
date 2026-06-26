@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/google/uuid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,6 +17,7 @@ type fakeDockerExecutorClient struct {
 	createConfig     *container.Config
 	createHostConfig *container.HostConfig
 	createName       string
+	inspectIDs       []string
 	startID          string
 	removeID         string
 	removeOptions    container.RemoveOptions
@@ -25,6 +28,22 @@ func (c *fakeDockerExecutorClient) ContainerCreate(ctx context.Context, config *
 	c.createHostConfig = hostConfig
 	c.createName = containerName
 	return container.CreateResponse{ID: "container-1"}, nil
+}
+
+func (c *fakeDockerExecutorClient) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
+	c.inspectIDs = append(c.inspectIDs, containerID)
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
+			ID:   containerID,
+			Name: "143-session-executor-test",
+			State: &container.State{
+				Status:    "running",
+				Running:   true,
+				Pid:       1234,
+				StartedAt: "2026-06-26T04:13:46Z",
+			},
+		},
+	}, nil
 }
 
 func (c *fakeDockerExecutorClient) ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error {
@@ -42,6 +61,7 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 	t.Parallel()
 
 	client := &fakeDockerExecutorClient{}
+	var logs bytes.Buffer
 	launcher := &DockerExecutorLauncher{
 		client: client,
 		cfg: DockerExecutorLauncherConfig{
@@ -51,13 +71,14 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 			GroupAdd:    []string{"123"},
 			Env:         []string{"DATABASE_URL=postgres://example"},
 		},
+		logger: zerolog.New(&logs),
 	}
 	executorID := uuid.New()
 	orgID := uuid.New()
 	sessionID := uuid.New()
 	jobID := uuid.New()
 
-	err := launcher.Launch(context.Background(), ExecutorLaunchSpec{
+	result, err := launcher.Launch(context.Background(), ExecutorLaunchSpec{
 		ExecutorID: executorID,
 		OrgID:      orgID,
 		SessionID:  sessionID,
@@ -68,6 +89,7 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 		NodeID:     "worker-a",
 	})
 	require.NoError(t, err, "Launch should create and start the executor container")
+	require.Equal(t, "container-1", result.ContainerID, "Launch should return the Docker container id for durable recording")
 	require.Equal(t, "143-session-executor-"+executorID.String(), client.createName, "Launch should use a stable executor container name")
 	require.Equal(t, "ghcr.io/assembledhq/143-server:test", client.createConfig.Image, "Launch should use the configured executor image")
 	require.Equal(t, []string{"/bin/session-executor", "--executor-id", executorID.String()}, []string(client.createConfig.Cmd), "Launch should run the session executor command")
@@ -79,6 +101,13 @@ func TestDockerExecutorLauncher_LaunchCreatesLabeledExecutorContainer(t *testing
 	require.Equal(t, []string{"/var/run/docker.sock:/var/run/docker.sock"}, client.createHostConfig.Binds, "Launch should mount required host resources")
 	require.Equal(t, []string{"123"}, client.createHostConfig.GroupAdd, "Launch should add the configured supplemental groups")
 	require.Equal(t, "container-1", client.startID, "Launch should start the created container")
+	require.Contains(t, logs.String(), "created session executor Docker container", "Launch should log container creation")
+	require.Contains(t, logs.String(), "started session executor Docker container", "Launch should log container start")
+	require.Contains(t, logs.String(), "container-1", "Launch logs should include the Docker container id")
+	require.Contains(t, logs.String(), "143-session-executor-"+executorID.String(), "Launch logs should include the stable container name")
+	require.Contains(t, logs.String(), "inspected session executor Docker container", "Launch should log inspected container state")
+	require.Contains(t, logs.String(), `"container_running":true`, "Launch inspect logs should include running state")
+	require.Contains(t, logs.String(), `"container_oom_killed":false`, "Launch inspect logs should include OOM state")
 }
 
 func TestDockerExecutorLauncher_CleanupRemovesExecutorContainer(t *testing.T) {
