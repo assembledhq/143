@@ -295,18 +295,20 @@ func (s *Service) resolvePolicyGrants(ctx context.Context, in ResolveInput) ([]m
 
 // recommendedDefaultEnabledCapabilities is the set of capabilities that ship
 // enabled by default when an org has not configured a session-default policy.
-// These cover the broadly-useful, commonly-needed capabilities (code/PR/test
-// context plus branch & PR publishing); higher-risk write and production-data
-// capabilities stay opt-in. Keep in sync with RECOMMENDED_DEFAULT_CAPABILITY_IDS
-// in frontend/src/components/automation-capabilities-editor.tsx. Note that
-// issue_sources is intentionally excluded here and instead added only for
-// triggered sessions below.
+// These cover broadly-useful capabilities (code/PR/test context, integration
+// issue context, read-only production diagnostics, Slack status notifications,
+// plus branch & PR publishing). Keep in sync with
+// RECOMMENDED_DEFAULT_CAPABILITY_IDS in
+// frontend/src/components/automation-capabilities-editor.tsx.
 var recommendedDefaultEnabledCapabilities = map[models.AgentCapabilityID]bool{
-	models.AgentCapabilityRepoContext:    true,
-	models.AgentCapabilityPRHistory:      true,
-	models.AgentCapabilityReviewFeedback: true,
-	models.AgentCapabilityCIHistory:      true,
-	models.AgentCapabilityPublishing:     true,
+	models.AgentCapabilityRepoContext:           true,
+	models.AgentCapabilityPRHistory:             true,
+	models.AgentCapabilityReviewFeedback:        true,
+	models.AgentCapabilityCIHistory:             true,
+	models.AgentCapabilityIssueSources:          true,
+	models.AgentCapabilityProductionDiagnostics: true,
+	models.AgentCapabilitySlackNotifications:    true,
+	models.AgentCapabilityPublishing:            true,
 }
 
 func recommendedDefaultGrants(in ResolveInput) []models.AgentCapabilityGrant {
@@ -322,12 +324,6 @@ func recommendedDefaultGrants(in ResolveInput) []models.AgentCapabilityGrant {
 			Enabled:      true,
 			Config:       json.RawMessage(`{}`),
 		})
-	}
-	// Issue context (Linear/Sentry/support) is only relevant when a session was
-	// triggered by an external issue source, so scope it to those origins
-	// rather than enabling it for every manual session.
-	if in.SessionOrigin == models.SessionOriginIssueTrigger || in.SessionOrigin == models.SessionOriginSlack || in.SessionOrigin == models.SessionOriginExternalAPI {
-		grants = append(grants, models.AgentCapabilityGrant{CapabilityID: models.AgentCapabilityIssueSources, AccessLevel: models.AgentCapabilityAccessRead, Enabled: true, Config: json.RawMessage(`{}`)})
 	}
 	return grants
 }
