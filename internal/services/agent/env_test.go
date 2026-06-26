@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -636,6 +637,84 @@ func TestOpenCodeRuntimeConfigContent_ReferencesSelectedProviderEnv(t *testing.T
 			require.Equal(t, tt.expectedEnvRef, options["apiKey"], "OpenCode runtime config should reference the provider key through env")
 			if tt.expectedBaseURL != "" {
 				require.Equal(t, tt.expectedBaseURL, options["baseURL"], "OpenCode runtime config should preserve base URL overrides")
+			}
+		})
+	}
+}
+
+func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders(t *testing.T) {
+	t.Parallel()
+
+	var config map[string]any
+	cfg := models.OpenCodeConfig{
+		APIKey:          "or-key",
+		BackingProvider: models.ProviderOpenRouter,
+		Model:           models.OpenCodeModelOpenRouterGLM52,
+	}
+	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
+	require.Equal(t, []any{"openrouter"}, config["enabled_providers"], "OpenCode should only enable the selected OpenRouter provider")
+
+	providers := config["provider"].(map[string]any)
+	openRouterProvider := providers["openrouter"].(map[string]any)
+	modelsConfig := openRouterProvider["models"].(map[string]any)
+	glmConfig := modelsConfig["~z-ai/glm-5.2"].(map[string]any)
+	options := glmConfig["options"].(map[string]any)
+	providerRouting := options["provider"].(map[string]any)
+
+	require.Equal(t, []any{"deepinfra", "together", "fireworks"}, providerRouting["only"], "OpenRouter GLM should only route to audited US-based inference providers")
+	require.Equal(t, []any{"deepinfra", "together", "fireworks"}, providerRouting["order"], "OpenRouter GLM should prefer audited US-based inference providers in deterministic order")
+	require.Equal(t, false, providerRouting["allow_fallbacks"], "OpenRouter GLM should not fall back to unaudited providers")
+	require.Equal(t, "deny", providerRouting["data_collection"], "OpenRouter GLM should deny providers that may collect data")
+	require.Equal(t, true, providerRouting["require_parameters"], "OpenRouter GLM should require full parameter support")
+}
+
+func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProviderRouting(t *testing.T) {
+	t.Parallel()
+
+	expectedProvidersByModelKey := map[string][]string{
+		"~anthropic/claude-fable-5":      {"anthropic", "amazon-bedrock/us", "azure"},
+		"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
+		"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
+		"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
+		"~google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
+		"~minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
+		"~minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
+		"~moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
+		"~moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
+		"~openai/gpt-5.2":                {"openai", "azure"},
+		"~openai/gpt-5.5":                {"openai", "azure"},
+		"~openai/gpt-5.5-pro":            {"openai"},
+		"~z-ai/glm-5.1":                  {"deepinfra", "baseten", "together"},
+		"~z-ai/glm-5.2":                  {"deepinfra", "together", "fireworks"},
+	}
+
+	curatedOpenRouterModels := make([]string, 0, len(expectedProvidersByModelKey))
+	for _, model := range models.AvailableOpenCodeModels {
+		if !strings.HasPrefix(model, "openrouter/") {
+			continue
+		}
+		curatedOpenRouterModels = append(curatedOpenRouterModels, model)
+	}
+	require.Len(t, curatedOpenRouterModels, len(expectedProvidersByModelKey), "each audited provider route should correspond to one curated OpenRouter model")
+
+	for _, model := range curatedOpenRouterModels {
+		t.Run(model, func(t *testing.T) {
+			t.Parallel()
+
+			configs := openCodeOpenRouterModelConfigs(model)
+			require.NotEmpty(t, configs, "curated OpenRouter model should define audited provider routing")
+			for modelKey, config := range configs {
+				require.NotEmpty(t, modelKey, "curated OpenRouter model should define a model config key")
+				providerRouting, ok := config.Options["provider"].(map[string]any)
+				require.True(t, ok, "curated OpenRouter model should define provider routing options")
+				require.Equal(t, expectedProvidersByModelKey[modelKey], providerRouting["only"], "curated OpenRouter model should restrict provider routing to the audited provider")
+				require.Equal(t, expectedProvidersByModelKey[modelKey], providerRouting["order"], "curated OpenRouter model should prefer the audited provider in deterministic order")
+				if modelKey != "~openai/gpt-5.5-pro" {
+					require.GreaterOrEqual(t, len(expectedProvidersByModelKey[modelKey]), 2, "curated OpenRouter model should include at least one audited fallback provider when OpenRouter exposes one")
+				}
+				require.Equal(t, false, providerRouting["allow_fallbacks"], "curated OpenRouter model should disable fallback to unaudited providers")
+				require.Equal(t, "deny", providerRouting["data_collection"], "curated OpenRouter model should deny provider data collection")
+				require.Equal(t, true, providerRouting["require_parameters"], "curated OpenRouter model should require full parameter support")
 			}
 		})
 	}
@@ -1392,7 +1471,7 @@ func TestAgentEnvResolveForModel_OpenCodeThirdPartyModelsRouteToOpenRouter(t *te
 	thirdPartyModels := []string{
 		"minimax/minimax-m2.7",
 		"moonshot/kimi-k2.6",
-		"qwen/qwen3.7-plus",
+		"z-ai/glm-5.2",
 		"deepseek/deepseek-v4-flash",
 	}
 	for _, model := range thirdPartyModels {

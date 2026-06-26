@@ -74,14 +74,14 @@ var openCodeStreamingConfig = streamingAgentConfig{
 	BuildCmd: func(escapedPromptPath string) string {
 		return fmt.Sprintf(
 			"opencode run --format json --dangerously-skip-permissions --agent build --model \"${OPENCODE_MODEL:-%s}\" --dir \"$PWD\" \"$(cat '%s')\"",
-			models.OpenCodeModelGPT54Mini,
+			models.OpenCodeModelGLM52,
 			escapedPromptPath,
 		)
 	},
 	BuildResumeCmd: func(escapedPromptPath, escapedResumeSessionID string) string {
 		return fmt.Sprintf(
 			"opencode run --format json --dangerously-skip-permissions --agent build --model \"${OPENCODE_MODEL:-%s}\" --session '%s' --dir \"$PWD\" \"$(cat '%s')\"",
-			models.OpenCodeModelGPT54Mini,
+			models.OpenCodeModelGLM52,
 			escapedResumeSessionID,
 			escapedPromptPath,
 		)

@@ -4,9 +4,16 @@
 
 ## Implementation Status
 
-Implemented as a first-class `opencode` coding agent with explicit OpenCode-scoped API-key credentials, sandbox installation via `opencode-ai`, non-interactive `opencode run --format json` execution, explicit `--session` resume, curated cost-first model metadata, and frontend settings/session picker surfaces.
+Implemented as a first-class `opencode` coding agent with explicit OpenCode-scoped API-key credentials, sandbox installation via `opencode-ai`, non-interactive `opencode run --format json` execution, explicit `--session` resume, curated cost-first model metadata, and frontend settings/session picker surfaces. The default OpenCode model is GLM 5.2.
 
-OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`); OpenRouter remains the flexible multi-provider escape hatch.
+OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`). OpenRouter-backed curated model choices use OpenCode's `openrouter/<upstream-model>` model IDs; the custom model field remains the escape hatch for uncurated OpenRouter slugs.
+
+Open-source model choices distinguish between audited OpenRouter routes and native OpenCode routes:
+
+- OpenRouter open-source model choices must have audited US inference-provider routes in `openCodeOpenRouterModelConfigs`. The generated per-model `options.provider` block sets `only` and `order` to audited provider slugs, disables fallbacks beyond that allowlist, denies provider data collection, and requires parameter support. Prefer two or three high-quality audited providers per model where OpenRouter exposes them; document any single-provider exception in code.
+- Every curated native `opencode/*` model that remains in the picker has a curated `openrouter/*` counterpart with audited US-provider routing. Qwen Plus/Max options are excluded from the curated OpenCode picker because the matching OpenRouter endpoints only exposed Alibaba routes during the audit.
+- Native OpenCode/Zen/Go routes are provided by OpenCode, but OpenCode does not expose the same per-provider location controls that OpenRouter exposes. Setup copy should state that distinction instead of implying native OpenCode routes have the same provider-location guarantee.
+- The audit source of truth is OpenRouter's endpoint list plus provider-company location checks. Generated config must not add unaudited OpenRouter provider slugs without updating this audit.
 
 ## Context
 
@@ -94,29 +101,40 @@ Changes:
     - `openai/gpt-5.3-codex-spark`
     - `anthropic/claude-haiku-4-5`
     - `opencode/gemini-3.5-flash`
+    - `openrouter/google/gemini-3.5-flash`
     - `google/gemini-3-flash`
     - `opencode/minimax-m2.7`
+    - `openrouter/minimax/minimax-m2.7`
     - `opencode/minimax-m2.5`
-    - `opencode/qwen3.7-plus`
-    - `opencode/qwen3.6-plus`
+    - `openrouter/minimax/minimax-m2.5`
     - `opencode/deepseek-v4-flash`
+    - `openrouter/deepseek/deepseek-v4-flash`
     - `opencode/deepseek-v4-pro`
+    - `openrouter/deepseek/deepseek-v4-pro`
     - `opencode/glm-5.2`
+    - `openrouter/z-ai/glm-5.2`
     - `opencode/glm-5.1`
+    - `openrouter/z-ai/glm-5.1`
     - `opencode/kimi-k2.5`
+    - `openrouter/moonshotai/kimi-k2.5`
   - **Balanced models**
     - `openai/gpt-5.4`
     - `anthropic/claude-sonnet-4-6`
     - `opencode/gemini-3.1-pro`
-    - `opencode/qwen3.7-max`
+    - `openrouter/google/gemini-3.1-pro-preview`
     - `opencode/kimi-k2.6`
+    - `openrouter/moonshotai/kimi-k2.6`
   - **Premium models**
     - `opencode/gpt-5.2`
+    - `openrouter/openai/gpt-5.2`
     - `opencode/gpt-5.5`
+    - `openrouter/openai/gpt-5.5`
     - `opencode/gpt-5.5-pro`
+    - `openrouter/openai/gpt-5.5-pro`
     - `anthropic/claude-opus-4-8`
     - `anthropic/claude-opus-4-7`
     - `opencode/claude-fable-5`
+    - `openrouter/anthropic/claude-fable-5`
 - Avoid baking a large static catalog into v1. Start with the curated cost-tiered list above plus a custom `provider/model` override, then refresh the curated list as part of normal model maintenance.
 - Model maintenance note (2026-06-24): OpenCode Zen lists `gpt-5.2-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `gpt-5-codex`, `claude-sonnet-4`, `glm-5`, `minimax-m2.1`, `glm-4.7`, `glm-4.6`, `gemini-3-pro`, `kimi-k2-thinking`, `kimi-k2`, `claude-3-5-haiku`, and `qwen3-coder-480b` as deprecated. Keep those out of the curated picker unless there is a deliberate compatibility reason to re-add them.
 - Add `OPENCODE_MODEL` as the model env var returned by `ModelEnvVarForAgentType`.

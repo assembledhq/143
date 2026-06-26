@@ -1206,27 +1206,40 @@ func (e *AgentEnv) updateRuntimeCredentialBindingModel(orgID uuid.UUID, userID *
 	e.recentPicks[key] = rec
 }
 
+type openCodeProviderConfig struct {
+	Options map[string]any                 `json:"options"`
+	Models  map[string]openCodeModelConfig `json:"models,omitempty"`
+}
+
+type openCodeModelConfig struct {
+	Options map[string]any `json:"options,omitempty"`
+}
+
+type openCodeRuntimeConfig struct {
+	Schema           string                            `json:"$schema"`
+	Permission       string                            `json:"permission"`
+	Model            string                            `json:"model,omitempty"`
+	EnabledProviders []string                          `json:"enabled_providers,omitempty"`
+	Provider         map[string]openCodeProviderConfig `json:"provider,omitempty"`
+}
+
 func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
-	type openCodeProviderConfig struct {
-		Options map[string]string `json:"options"`
-	}
-	type openCodeRuntimeConfig struct {
-		Schema     string                            `json:"$schema"`
-		Permission string                            `json:"permission"`
-		Model      string                            `json:"model,omitempty"`
-		Provider   map[string]openCodeProviderConfig `json:"provider,omitempty"`
-	}
 	providerID, apiKeyEnv := openCodeProviderConfigIDAndKey(cfg.NormalizedBackingProvider())
-	options := map[string]string{"apiKey": "{env:" + apiKeyEnv + "}"}
+	options := map[string]any{"apiKey": "{env:" + apiKeyEnv + "}"}
 	if cfg.BaseURL != "" {
 		options["baseURL"] = cfg.BaseURL
 	}
+	providerConfig := openCodeProviderConfig{Options: options}
+	if cfg.NormalizedBackingProvider() == models.ProviderOpenRouter {
+		providerConfig.Models = openCodeOpenRouterModelConfigs(cfg.Model)
+	}
 	payload := openCodeRuntimeConfig{
-		Schema:     "https://opencode.ai/config.json",
-		Permission: "allow",
-		Model:      cfg.Model,
+		Schema:           "https://opencode.ai/config.json",
+		Permission:       "allow",
+		Model:            cfg.Model,
+		EnabledProviders: []string{providerID},
 		Provider: map[string]openCodeProviderConfig{
-			providerID: {Options: options},
+			providerID: providerConfig,
 		},
 	}
 	data, err := json.Marshal(payload)
@@ -1234,6 +1247,62 @@ func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
 		return `{"permission":"allow"}`
 	}
 	return string(data)
+}
+
+// Audited against OpenRouter endpoint lists and provider-company locations on
+// 2026-06-26. Keys use OpenCode's "~upstream/provider-model" custom model key
+// format for model IDs that contain slashes. Keep
+// docs/design/implemented/95-opencode-agent-adapter.md in sync when changing
+// this map.
+var auditedUSOpenRouterModelProviders = map[string][]string{
+	"~anthropic/claude-fable-5":      {"anthropic", "amazon-bedrock/us", "azure"},
+	"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
+	"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
+	"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
+	"~google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
+	"~minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
+	"~minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
+	"~moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
+	"~moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
+	"~openai/gpt-5.2":                {"openai", "azure"},
+	"~openai/gpt-5.5":                {"openai", "azure"},
+	// OpenRouter currently exposes only OpenAI for GPT 5.5 Pro.
+	"~openai/gpt-5.5-pro": {"openai"},
+	"~z-ai/glm-5.1":       {"deepinfra", "baseten", "together"},
+	"~z-ai/glm-5.2":       {"deepinfra", "together", "fireworks"},
+}
+
+func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig {
+	modelKey, ok := openCodeOpenRouterModelKey(model)
+	if !ok {
+		return nil
+	}
+	providers := auditedUSOpenRouterModelProviders[modelKey]
+	if len(providers) == 0 {
+		return nil
+	}
+	return map[string]openCodeModelConfig{
+		modelKey: {
+			Options: map[string]any{
+				"provider": map[string]any{
+					"only":               providers,
+					"order":              providers,
+					"allow_fallbacks":    false,
+					"data_collection":    "deny",
+					"require_parameters": true,
+				},
+			},
+		},
+	}
+}
+
+func openCodeOpenRouterModelKey(model string) (string, bool) {
+	const prefix = "openrouter/"
+	upstreamModel, ok := strings.CutPrefix(model, prefix)
+	if !ok || !strings.Contains(upstreamModel, "/") {
+		return "", false
+	}
+	return "~" + upstreamModel, true
 }
 
 func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {

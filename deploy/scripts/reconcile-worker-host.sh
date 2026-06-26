@@ -218,20 +218,20 @@ clear_sandbox_dns_endpoints() {
   disconnect_endpoint_for_ip "$STATIC_EGRESS_NETWORK" "$STATIC_EGRESS_DNS_IP"
 }
 
-# Per-turn sandbox run containers (143-worker-run-*) should be removed when a
-# coding turn ends; leftovers accumulate stale libnetwork endpoints on the
-# sandbox bridge and feed the leaked-endpoint failure handled above. Sweep only
-# NON-running containers so in-flight coding turns are never touched.
+# docker compose run helper containers (143-worker-run-*) should be short-lived
+# deploy-control processes. Old drain monitors can keep creating them while this
+# sidecar is down; because they inherit the worker service networks, one can
+# take sandbox-dns's pinned IP before Docker starts the sidecar. Remove them
+# before reconciliation retries. User sandbox containers are created through the
+# Docker API and carry the 143 sandbox labels instead of the compose project.
 sweep_stopped_worker_run_containers() {
   local stale
   stale="$(docker ps -a \
     --filter 'name=143-worker-run-' \
-    --filter 'status=exited' \
-    --filter 'status=created' \
-    --filter 'status=dead' \
-    --format '{{.ID}}' 2>/dev/null || true)"
+    --format '{{.ID}} {{.Label "com.docker.compose.project"}} {{.Label "com.docker.compose.service"}}' 2>/dev/null \
+    | awk '$2 == "143" && $3 == "worker" {print $1}' || true)"
   if [ -n "$stale" ]; then
-    echo "Removing stale (non-running) worker-run sandbox containers..." >&2
+    echo "Removing worker deploy-control helper containers..." >&2
     printf '%s\n' "$stale" | xargs -r docker rm -f >/dev/null 2>&1 || true
   fi
 }
@@ -270,12 +270,18 @@ ensure_static_egress_dns() {
         docker compose -f "$compose_file" build sandbox-dns
       fi
 
-      if docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns \
-        && wait_for_sandbox_dns_pinned_ips "${SANDBOX_DNS_ROUTINE_WAIT_SECONDS:-30}"; then
-        warn_if_sandbox_dns_image_drift
-        echo "sandbox-dns verified on pinned IPs without recreation."
-        exit 0
-      fi
+      for attempt in 1 2 3; do
+        sweep_stopped_worker_run_containers
+        if docker compose -f "$compose_file" up -d --no-deps --no-recreate sandbox-dns \
+          && wait_for_sandbox_dns_pinned_ips "${SANDBOX_DNS_ROUTINE_WAIT_SECONDS:-30}"; then
+          warn_if_sandbox_dns_image_drift
+          echo "sandbox-dns verified on pinned IPs without recreation."
+          exit 0
+        fi
+        if [ "$attempt" != "3" ]; then
+          sleep 1
+        fi
+      done
 
       echo "ERROR: routine worker reconciliation could not verify healthy sandbox-dns without recreating it." >&2
       echo "  Routine deploys do not recreate sandbox-dns because recreating the pinned-IP sidecar can race active sandboxes." >&2
