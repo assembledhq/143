@@ -131,6 +131,31 @@ const hasUnpushedChangesColumn = `EXISTS (
 		  )
 	) AS has_unpushed_changes`
 
+const sessionPMPlanIDColumn = `(SELECT spm.pm_plan_id
+		FROM session_pm_context spm
+		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
+		LIMIT 1) AS pm_plan_id`
+
+const sessionPMApproachColumn = `(SELECT spm.pm_approach
+		FROM session_pm_context spm
+		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
+		LIMIT 1) AS pm_approach`
+
+const sessionPMReasoningColumn = `(SELECT spm.pm_reasoning
+		FROM session_pm_context spm
+		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
+		LIMIT 1) AS pm_reasoning`
+
+const sessionProjectTaskIDColumn = `(SELECT spm.project_task_id
+		FROM session_pm_context spm
+		WHERE spm.org_id = sessions.org_id AND spm.session_id = sessions.id
+		LIMIT 1) AS project_task_id`
+
+const sessionAutomationRunIDColumn = `(SELECT sal.automation_run_id
+		FROM session_automation_links sal
+		WHERE sal.org_id = sessions.org_id AND sal.session_id = sessions.id
+		LIMIT 1) AS automation_run_id`
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
@@ -139,14 +164,14 @@ const sessionSelectColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, diff,
-	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
@@ -176,14 +201,14 @@ const sessionListColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
-	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
@@ -199,14 +224,14 @@ const sessionAPIDetailColumns = `id,
 	container_id, worker_node_id, turn_holding_container, started_at, completed_at, token_usage,
 	failure_explanation, failure_category, failure_next_steps, failure_retry_advised,
 	parent_session_id, revision_context, error, result_summary, NULL::text AS diff,
-	pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
+	` + sessionPMPlanIDColumn + `, title, ` + sessionPMApproachColumn + `, ` + sessionPMReasoningColumn + `, ` + sessionProjectTaskIDColumn + `,
 	model_override, reasoning_effort, triggered_by_user_id, agent_session_id, current_turn, last_activity_at,
 	sandbox_state, workspace_generation, snapshot_key, pending_snapshot_key, pending_snapshot_set_at, runtime_soft_deadline_at, runtime_hard_deadline_at,
 	runtime_last_progress_at, runtime_last_progress_type, runtime_last_progress_strength,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, automation_run_id, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
 	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
@@ -349,7 +374,13 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 		args["search"] = "%" + escaped + "%"
 	}
 	if filters.AdHocOnly {
-		query += ` AND pm_plan_id IS NULL`
+		query += ` AND NOT EXISTS (
+			SELECT 1
+			FROM session_pm_context spm
+			WHERE spm.org_id = sessions.org_id
+			  AND spm.session_id = sessions.id
+			  AND spm.pm_plan_id IS NOT NULL
+		)`
 	}
 	if filters.CreatedAfter != nil {
 		query += ` AND created_at >= @created_after`
@@ -746,21 +777,47 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
 	}
 	query := `
+		WITH inserted AS (
 		INSERT INTO sessions (
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
-			parent_session_id, revision_context, pm_plan_id, title, pm_approach, pm_reasoning, project_task_id,
-			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest, automation_run_id,
+			parent_session_id, revision_context, title,
+			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest,
 			origin, interaction_mode, validation_policy,
 			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state, capability_snapshot
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
-			@parent_session_id, @revision_context, @pm_plan_id, @title, @pm_approach, @pm_reasoning, @project_task_id,
-			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest, @automation_run_id,
+			@parent_session_id, @revision_context, @title,
+			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest,
 			@origin, @interaction_mode, @validation_policy,
 			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state, @capability_snapshot
 		)
-		RETURNING id, created_at, last_activity_at`
+		RETURNING id, org_id, created_at, last_activity_at
+	), inserted_pm_context AS (
+		INSERT INTO session_pm_context (
+			session_id, org_id, pm_plan_id, pm_approach, pm_reasoning, project_task_id
+		)
+		SELECT
+			id, org_id, @pm_plan_id, @pm_approach, @pm_reasoning, @project_task_id
+		FROM inserted
+		WHERE @pm_plan_id::uuid IS NOT NULL
+		   OR @pm_approach::text IS NOT NULL
+		   OR @pm_reasoning::text IS NOT NULL
+		   OR @project_task_id::uuid IS NOT NULL
+		RETURNING session_id
+	), inserted_automation_link AS (
+		INSERT INTO session_automation_links (
+			session_id, org_id, automation_run_id
+		)
+		SELECT id, org_id, @automation_run_id
+		FROM inserted
+		WHERE @automation_run_id::uuid IS NOT NULL
+		RETURNING session_id
+	)
+	SELECT inserted.id, inserted.created_at, inserted.last_activity_at
+	FROM inserted
+	LEFT JOIN inserted_pm_context ON true
+	LEFT JOIN inserted_automation_link ON true`
 
 	args := pgx.NamedArgs{
 		"org_id":                     run.OrgID,
@@ -1373,7 +1430,19 @@ func (s *SessionStore) UpdateInputManifest(ctx context.Context, orgID, sessionID
 // cost (one UPDATE per plan creation) is negligible versus the coupling risk
 // of a future caller silently skipping the MRU bump.
 func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID uuid.UUID) error {
-	query := `UPDATE sessions SET pm_plan_id = @pm_plan_id, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
+	query := `
+		WITH bumped AS (
+			UPDATE sessions
+			SET last_activity_at = now()
+			WHERE id = @id AND org_id = @org_id
+			RETURNING id, org_id
+		)
+		INSERT INTO session_pm_context (session_id, org_id, pm_plan_id)
+		SELECT id, org_id, @pm_plan_id
+		FROM bumped
+		ON CONFLICT (session_id) DO UPDATE
+		SET pm_plan_id = EXCLUDED.pm_plan_id,
+		    updated_at = now()`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":         runID,
 		"org_id":     orgID,

@@ -130,17 +130,23 @@ CREATE UNIQUE INDEX idx_automation_runs_idempotency
 Sessions link to runs (not directly to automations):
 
 ```sql
-ALTER TABLE sessions ADD COLUMN automation_run_id UUID REFERENCES automation_runs(id);
-CREATE INDEX idx_sessions_automation_run ON sessions (automation_run_id)
-    WHERE automation_run_id IS NOT NULL;
+CREATE TABLE session_automation_links (
+    session_id        UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    org_id            UUID NOT NULL REFERENCES organizations(id),
+    automation_run_id UUID NOT NULL REFERENCES automation_runs(id),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_session_automation_links_run
+    ON session_automation_links (org_id, automation_run_id, created_at DESC);
 ```
 
 When an automation fires, the scheduler creates a run, then creates a normal session linked to that run. This means:
 
 - **Run history** = `SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY triggered_at DESC`
-- **Sessions per run** = `SELECT * FROM sessions WHERE automation_run_id = ?`
+- **Sessions per run** = join `session_automation_links` to `sessions` by `(org_id, session_id)` and filter by `automation_run_id`
 - **All existing session infrastructure works:** container orchestration, diff tracking, token usage, failure handling, result summaries, PR detection.
-- **Sessions page filters them out:** The main `/sessions` page adds `WHERE automation_run_id IS NULL` so automation-spawned sessions don't clutter the user's manual work. (Or: show them with a subtle "automation" badge and let the user toggle visibility.)
+- **Sessions page can separate them:** list queries derive automation ownership from `session_automation_links` instead of widening the core `sessions` row.
 - **Automation detail page shows runs:** `/automations/:id` queries `automation_runs` and displays them as the run timeline.
 - **Manual "Run now"** creates a run with `triggered_by = 'manual'` + `triggered_by_user_id` set, so it shows up in the automation's history.
 - **Config snapshots** ensure you can always see what goal/config produced a given run, even if the automation has been edited since.
@@ -154,12 +160,10 @@ The migration is split into four stages to reduce blast radius. Each stage is a 
 **Stage 1 — Add new tables (backward compatible, no downtime):**
 
 ```sql
--- Migration 001: Create automations + automation_runs tables, add FK to sessions
+-- Migration 001: Create automations + automation_runs tables, plus a session link table
 CREATE TABLE automations ( ... );   -- full DDL from §4.1
 CREATE TABLE automation_runs ( ... ); -- full DDL from §4.2
-ALTER TABLE sessions ADD COLUMN automation_run_id UUID REFERENCES automation_runs(id);
-CREATE INDEX idx_sessions_automation_run ON sessions (automation_run_id)
-    WHERE automation_run_id IS NOT NULL;
+CREATE TABLE session_automation_links ( ... );
 ```
 
 **Stage 2 — Backfill automations from existing scheduled projects:**
@@ -240,8 +244,9 @@ type AutomationRun struct {
     UpdatedAt         time.Time  `db:"updated_at"            json:"updated_at"`
 }
 
-// Session gets one new field:
-//   AutomationRunID *uuid.UUID `db:"automation_run_id" json:"automation_run_id,omitempty"`
+// The Session API still exposes AutomationRunID for compatibility.
+// Persistence lives in session_automation_links, and session store reads
+// hydrate the field from that link table.
 ```
 
 ## 5. API
@@ -320,7 +325,7 @@ For each returned row:
 1. **Insert an `automation_runs` row** with `scheduled_time` set to the `next_run_at` value that was claimed. The unique index on `(automation_id, scheduled_time)` guarantees idempotency — if a duplicate fires (crash-restart, clock skew), the insert fails and the scheduler skips it.
 2. **Snapshot the automation's current goal and config** into `goal_snapshot` / `config_snapshot` on the run.
 3. **Check `max_concurrent`:** count in-flight runs (`status IN ('pending', 'running')`) for this automation. If `>= max_concurrent`, mark the run as `status = 'skipped'` and skip session creation.
-4. **Create a session** with `automation_run_id` set (reuses the existing session creation path).
+4. **Create a session** and write a `session_automation_links` row to associate it with the run.
 5. **Enqueue the session** for execution (same as manual session dispatch).
 
 The `SELECT ... FOR UPDATE SKIP LOCKED` pattern ensures that even with multiple scheduler replicas, each due automation is claimed by exactly one replica. No advisory locks needed.
@@ -588,7 +593,7 @@ On `/automations/new`, the UI shows a small featured subset for fast starts. A d
 
 ### Phase 1: Data model + API + migration (Stages 1-2) ✅ Completed 2026-04-16
 
-1. ~~Create `automations` table + `automation_runs` table + add `automation_run_id` FK to sessions (Migration Stage 1).~~
+1. ~~Create `automations` table + `automation_runs` table + session/run linking (Migration Stage 1).~~
 2. ~~Backfill existing `schedule_enabled=true` projects to automations (Migration Stage 2).~~
 3. ~~Implement CRUD API endpoints with cursor-based pagination.~~
 4. ~~Implement bulk pause/resume/delete endpoint.~~

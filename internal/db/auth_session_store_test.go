@@ -176,7 +176,7 @@ func TestSessionStore_ListByOrg(t *testing.T) {
 			name:    "returns only ad-hoc runs when AdHocOnly is true",
 			filters: SessionFilters{AdHocOnly: true},
 			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND pm_plan_id IS NULL").
+				mock.ExpectQuery("SELECT .+ FROM sessions WHERE org_id .+ AND NOT EXISTS .+ session_pm_context").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionColumns).
