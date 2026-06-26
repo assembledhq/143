@@ -10796,6 +10796,19 @@ func userFacingPRError(err error) string {
 	}
 }
 
+func prPushErrorCode(err error) models.PRPushErrorCode {
+	switch {
+	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+		return models.PRPushErrorCodeBranchDiverged
+	case errors.Is(err, ghservice.ErrPushRejected):
+		return models.PRPushErrorCodePushRejected
+	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
+		return models.PRPushErrorCodeSandboxAuthUnavailable
+	default:
+		return models.PRPushErrorCodeGeneric
+	}
+}
+
 // push_pr_changes handler pushes any uncommitted/unpushed sandbox changes up
 // to an existing PR's branch. Mirrors newOpenPRHandler but operates on a
 // session that already has a PR row — drives pr_push_state through pushing ->
@@ -10886,7 +10899,7 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				Str("session_id", runID.String()).
 				Msg("push_pr_changes failed")
 			msg := userFacingPRError(pushErr)
-			if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateFailed, msg); stateErr != nil {
+			if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
 			}
 			if shouldDeadLetterPRError(pushErr) {
