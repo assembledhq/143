@@ -9,6 +9,7 @@ import {
   apiKeyHelp,
   detectOpenCodeKeyPreset,
   OPENCODE_BACKING_PROVIDER_OPTIONS,
+  OPENCODE_US_INFERENCE_HELP_TEXT,
   openCodeAgentDefaults,
   openCodeCredentialLabel,
   openCodeDefaultModelForBackingProvider,
@@ -704,6 +705,7 @@ export default function AccountPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <p className="text-xs text-muted-foreground">{OPENCODE_US_INFERENCE_HELP_TEXT}</p>
                   {openCodeKeyDetection && apiKey.trim() ? (
                     <p className="text-xs text-muted-foreground">
                       {openCodeBackingProviderTouched

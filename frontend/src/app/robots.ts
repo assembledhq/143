@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { getSiteOrigin } from "@/lib/site-url";
 
 // Crawl policy for 143.dev. The public marketing + docs pages are crawlable by
 // any bot; the authenticated app and backend API are disallowed.
@@ -8,7 +9,8 @@ import type { MetadataRoute } from "next";
 // the Cloudflare edge. Keep the two in sync: a path that is Disallow-ed here
 // should also stay blocked at the edge, and a marketing path opened at the edge
 // should remain crawlable here.
-export default function robots(): MetadataRoute.Robots {
+export default async function robots(): Promise<MetadataRoute.Robots> {
+  const origin = await getSiteOrigin();
   return {
     rules: [
       {
@@ -36,5 +38,6 @@ export default function robots(): MetadataRoute.Robots {
         ],
       },
     ],
+    sitemap: `${origin}/sitemap.xml`,
   };
 }

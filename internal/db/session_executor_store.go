@@ -21,7 +21,7 @@ func NewSessionExecutorStore(db DBTX) *SessionExecutorStore {
 }
 
 const sessionExecutorColumns = `id, org_id, session_id, thread_id, job_id, job_type,
-	host_node_id, owner_id, lock_token, status, image, build_sha, heartbeat_at,
+	host_node_id, owner_id, lock_token, status, container_id, image, build_sha, heartbeat_at,
 	lease_expires_at, runtime_deadline_at, drain_intent, drain_requested_at,
 	drain_deadline_at, started_at, completed_at, exit_code, last_error, created_at, updated_at`
 
@@ -37,7 +37,7 @@ func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, o
 		WHERE se.org_id = $1
 		  AND se.session_id = $2
 		  AND se.job_id = $3
-		  AND se.status IN ('starting', 'running', 'draining')
+		  AND se.status = 'starting'
 		  AND j.org_id = se.org_id
 		  AND j.id = se.job_id
 		  AND j.status = 'running'
@@ -46,6 +46,21 @@ func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, o
 		return 0, fmt.Errorf("clear pre-handoff session executor reservation: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+func (s *SessionExecutorStore) RecordContainerIDWithLease(ctx context.Context, orgID, executorID, lockToken uuid.UUID, containerID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `
+		UPDATE session_executors
+		SET container_id = $4,
+			updated_at = now()
+		WHERE org_id = $1
+		  AND id = $2
+		  AND lock_token = $3
+		  AND status = 'starting'`, orgID, executorID, lockToken, containerID)
+	if err != nil {
+		return false, fmt.Errorf("record session executor container id: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UUID, params models.CreateSessionExecutorParams) (uuid.UUID, error) {
@@ -123,6 +138,7 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 	var executor models.SessionExecutor
 	var threadID pgtype.UUID
 	var status string
+	var containerID pgtype.Text
 	var heartbeatAt pgtype.Timestamptz
 	var leaseExpiresAt pgtype.Timestamptz
 	var runtimeDeadlineAt pgtype.Timestamptz
@@ -143,6 +159,7 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 		&executor.OwnerID,
 		&executor.LockToken,
 		&status,
+		&containerID,
 		&executor.Image,
 		&executor.BuildSHA,
 		&heartbeatAt,
@@ -165,6 +182,9 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 		executor.ThreadID = &id
 	}
 	executor.Status = models.SessionExecutorStatus(status)
+	if containerID.Valid {
+		executor.ContainerID = &containerID.String
+	}
 	if heartbeatAt.Valid {
 		executor.HeartbeatAt = &heartbeatAt.Time
 	}
@@ -272,9 +292,6 @@ func (s *SessionExecutorStore) MarkHumanInputCheckpointByJob(ctx context.Context
 			drain_requested_at = COALESCE(drain_requested_at, now()),
 			updated_at = now()
 		FROM sessions sess
-		LEFT JOIN session_threads th
-		  ON th.org_id = se.org_id
-		 AND th.id = se.thread_id
 		WHERE se.org_id = $1
 		  AND se.job_id = $2
 		  AND se.lock_token = $3
@@ -284,7 +301,13 @@ func (s *SessionExecutorStore) MarkHumanInputCheckpointByJob(ctx context.Context
 		  AND se.drain_intent IN ('none', 'planned_rollout')
 		  AND (
 			sess.status = 'awaiting_input'
-			OR th.status = 'awaiting_input'
+			OR EXISTS (
+				SELECT 1
+				FROM session_threads th
+				WHERE th.org_id = se.org_id
+				  AND th.id = se.thread_id
+				  AND th.status = 'awaiting_input'
+			)
 		  )`, orgID, jobID, lockToken)
 	if err != nil {
 		return false, fmt.Errorf("mark human input checkpoint executor: %w", err)

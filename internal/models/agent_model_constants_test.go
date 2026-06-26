@@ -49,35 +49,78 @@ func TestOpenCodeModelConstants(t *testing.T) {
 
 	require.Equal(t,
 		[]string{
+			OpenCodeModelGLM52,
+			OpenCodeModelOpenRouterGLM52,
 			OpenCodeModelGPT54Mini,
 			OpenCodeModelGPT53CodexSpark,
 			OpenCodeModelClaudeHaiku45,
 			OpenCodeModelGemini35Flash,
+			OpenCodeModelOpenRouterGemini35Flash,
 			OpenCodeModelGemini3Flash,
 			OpenCodeModelMiniMaxM27,
+			OpenCodeModelOpenRouterMiniMaxM27,
 			OpenCodeModelMiniMaxM25,
-			OpenCodeModelQwen37Plus,
-			OpenCodeModelQwen36Plus,
+			OpenCodeModelOpenRouterMiniMaxM25,
 			OpenCodeModelDeepSeekV4Flash,
+			OpenCodeModelOpenRouterDeepSeekV4Flash,
 			OpenCodeModelDeepSeekV4Pro,
-			OpenCodeModelGLM52,
+			OpenCodeModelOpenRouterDeepSeekV4Pro,
 			OpenCodeModelGLM51,
+			OpenCodeModelOpenRouterGLM51,
 			OpenCodeModelKimiK25,
+			OpenCodeModelOpenRouterKimiK25,
 			OpenCodeModelGPT54,
 			OpenCodeModelClaudeSonnet46,
 			OpenCodeModelGemini31Pro,
-			OpenCodeModelQwen37Max,
+			OpenCodeModelOpenRouterGemini31Pro,
 			OpenCodeModelKimiK26,
+			OpenCodeModelOpenRouterKimiK26,
 			OpenCodeModelGPT52,
+			OpenCodeModelOpenRouterGPT52,
 			OpenCodeModelGPT55,
+			OpenCodeModelOpenRouterGPT55,
 			OpenCodeModelGPT55Pro,
+			OpenCodeModelOpenRouterGPT55Pro,
 			OpenCodeModelClaudeOpus48,
 			OpenCodeModelClaudeOpus47,
 			OpenCodeModelClaudeFable5,
+			OpenCodeModelOpenRouterClaudeFable5,
 		},
 		AvailableOpenCodeModels,
-		"AvailableOpenCodeModels should track current Zen models and omit deprecated options",
+		"AvailableOpenCodeModels should track current Zen models and include audited OpenRouter counterparts",
 	)
+}
+
+func TestOpenCodeModelConstants_OpenRouterCounterpartsForNativeOpenCodeModels(t *testing.T) {
+	t.Parallel()
+
+	counterparts := map[string]string{
+		OpenCodeModelGemini35Flash:   OpenCodeModelOpenRouterGemini35Flash,
+		OpenCodeModelMiniMaxM27:      OpenCodeModelOpenRouterMiniMaxM27,
+		OpenCodeModelMiniMaxM25:      OpenCodeModelOpenRouterMiniMaxM25,
+		OpenCodeModelDeepSeekV4Flash: OpenCodeModelOpenRouterDeepSeekV4Flash,
+		OpenCodeModelDeepSeekV4Pro:   OpenCodeModelOpenRouterDeepSeekV4Pro,
+		OpenCodeModelGLM52:           OpenCodeModelOpenRouterGLM52,
+		OpenCodeModelGLM51:           OpenCodeModelOpenRouterGLM51,
+		OpenCodeModelKimiK25:         OpenCodeModelOpenRouterKimiK25,
+		OpenCodeModelGemini31Pro:     OpenCodeModelOpenRouterGemini31Pro,
+		OpenCodeModelKimiK26:         OpenCodeModelOpenRouterKimiK26,
+		OpenCodeModelGPT52:           OpenCodeModelOpenRouterGPT52,
+		OpenCodeModelGPT55:           OpenCodeModelOpenRouterGPT55,
+		OpenCodeModelGPT55Pro:        OpenCodeModelOpenRouterGPT55Pro,
+		OpenCodeModelClaudeFable5:    OpenCodeModelOpenRouterClaudeFable5,
+	}
+
+	for nativeModel, openRouterModel := range counterparts {
+		nativeModel := nativeModel
+		openRouterModel := openRouterModel
+		t.Run(nativeModel, func(t *testing.T) {
+			t.Parallel()
+
+			require.Contains(t, AvailableOpenCodeModels, nativeModel, "native OpenCode model should remain curated")
+			require.Contains(t, AvailableOpenCodeModels, openRouterModel, "native OpenCode model should have a curated audited OpenRouter counterpart")
+		})
+	}
 }
 
 func TestCodexRuntimeModel(t *testing.T) {
@@ -176,7 +219,7 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
 		{name: "valid pi model", agentType: AgentTypePi, model: PiModelClaudeSonnet46},
 		{name: "valid opencode curated model", agentType: AgentTypeOpenCode, model: OpenCodeModelGPT54Mini},
-		{name: "opencode accepts non-curated provider model", agentType: AgentTypeOpenCode, model: "openrouter/qwen/qwen3.7-plus"},
+		{name: "opencode accepts non-curated provider model", agentType: AgentTypeOpenCode, model: "openrouter/meta-llama/llama-3.3-70b-instruct"},
 		{name: "pi accepts non-curated model", agentType: AgentTypePi, model: "xai/grok-code-fast"},
 		{name: "invalid codex model", agentType: AgentTypeCodex, model: "bad", wantErr: true},
 		{name: "invalid claude model", agentType: AgentTypeClaudeCode, model: "bad", wantErr: true},

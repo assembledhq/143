@@ -8,7 +8,7 @@ This guide covers how to add preview support to a repo. For the underlying archi
 
 ## Dogfood preview
 
-143 ships its own `.143/config.json`, `.143/preview-start.sh`, and `.143/seed.sql` so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
+143 ships its own `.143/config.json`, `.143/preview-start.sh`, and `.143/seed/` fragments so a reviewer can spin up 143 inside 143 to click through the UI. This is the environment exposed at `143.dev`.
 
 **How to launch it locally:**
 
@@ -29,7 +29,7 @@ Additional seeded users use the same password:
 | `preview-builder@143.dev` | `builder` |
 | `preview-viewer@143.dev` | `viewer` |
 
-The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed.sql`). If you override those env vars, regenerate the bcrypt hash in `seed.sql` in lockstep or the banner will point at credentials that don't log in.
+The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed/10_identity.sql`). If you override those env vars, regenerate the bcrypt hash in the seed in lockstep or the banner will point at credentials that don't log in.
 
 **What you can and cannot do in the dogfood:**
 
@@ -41,7 +41,7 @@ The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was starte
 | View the seeded PR preview panel and its linked PR | **Comment on a PR / retry CI / merge** (all route through the GitHub API) |
 | Navigate projects, sessions list, activity feed | **Start Preview** from a new session (needs a live sandbox) |
 
-The UI is populated by fixed rows in `.143/seed.sql`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
+The UI is populated by fixed rows in `.143/seed/`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
 
 Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables the login-page credential banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
 
@@ -200,7 +200,7 @@ Use `preview.install` when a preview needs dependencies before services can boot
 
 143 computes a cache key from the install config, lockfile contents, and sandbox runtime. If the platform-owned marker under `.143/cache/preview-install/` exists and every `verify_paths` entry exists, install is skipped. Otherwise 143 removes only `clean_paths`, runs `command`, and writes the marker only after the command succeeds.
 
-Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and sandbox image, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
+Declaring `verify_paths` also unlocks the cold-start fast path: when the marker is absent but a dependency artifact cache hit matches the exact install command, lockfile contents, and platform sandbox cache ABI, 143 restores the cached artifacts and — if every `verify_paths` entry exists afterwards — writes the marker and skips `command` entirely. Without `verify_paths`, cold starts always run `command`.
 
 Because the cache key contains no commit, install output is reused across commits whenever the install config and lockfiles are unchanged. `preview.install.command` must therefore produce output that depends only on those inputs — dependency installation, not application builds. A build step inside install that reads source files would be skipped at a newer commit and serve stale artifacts; keep source-dependent builds in the service `command`, where they run on every start.
 

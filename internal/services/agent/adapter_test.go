@@ -44,6 +44,7 @@ func TestSlugForRepo(t *testing.T) {
 //nolint:paralleltest // uses t.Setenv
 func TestDefaultSandboxConfig_UsesEnvironmentOverrides(t *testing.T) {
 	t.Setenv("SANDBOX_IMAGE", "ghcr.io/example/custom:latest")
+	t.Setenv("SANDBOX_CACHE_ABI", "custom-cache-abi")
 	t.Setenv("SANDBOX_CPU_LIMIT", "3.5")
 	t.Setenv("SANDBOX_MEMORY_LIMIT_MB", "6144")
 	t.Setenv("SANDBOX_DISK_LIMIT_GB", "24")
@@ -51,9 +52,19 @@ func TestDefaultSandboxConfig_UsesEnvironmentOverrides(t *testing.T) {
 	cfg := DefaultSandboxConfig()
 
 	require.Equal(t, "ghcr.io/example/custom:latest", cfg.Image, "DefaultSandboxConfig should use SANDBOX_IMAGE when provided")
+	require.Equal(t, "custom-cache-abi", cfg.CacheABI, "DefaultSandboxConfig should use SANDBOX_CACHE_ABI when provided")
 	require.Equal(t, 3.5, cfg.CPULimit, "DefaultSandboxConfig should use SANDBOX_CPU_LIMIT when provided")
 	require.Equal(t, 6144, cfg.MemoryLimitMB, "DefaultSandboxConfig should use SANDBOX_MEMORY_LIMIT_MB when provided")
 	require.Equal(t, 24, cfg.DiskLimitGB, "DefaultSandboxConfig should use SANDBOX_DISK_LIMIT_GB when provided")
+}
+
+//nolint:paralleltest // uses t.Setenv
+func TestDefaultSandboxConfig_DefaultCacheABI(t *testing.T) {
+	t.Setenv("SANDBOX_CACHE_ABI", "")
+
+	cfg := DefaultSandboxConfig()
+
+	require.Equal(t, defaultSandboxCacheABI, cfg.CacheABI, "DefaultSandboxConfig should use the stable default cache ABI")
 }
 
 //nolint:paralleltest // uses t.Setenv

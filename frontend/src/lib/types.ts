@@ -3206,7 +3206,7 @@ export type AutomationGitHubEvent =
   | "github.pull_request_review.submitted"
   | "github.pull_request_review_comment.created";
 
-export type AutomationEventProvider = "pagerduty";
+export type AutomationEventProvider = "pagerduty" | "linear";
 export type PagerDutyEventType =
   | "incident.triggered"
   | "incident.acknowledged"
@@ -3218,6 +3218,8 @@ export type PagerDutyEventType =
   | "incident.priority_updated"
   | "incident.annotated"
   | "incident.status_update_published";
+export type LinearEventType = "issue.created" | "issue.updated";
+export type AutomationEventType = PagerDutyEventType | LinearEventType;
 
 export interface PagerDutyEventTriggerFilter {
   service_ids?: string[];
@@ -3231,11 +3233,28 @@ export interface PagerDutyEventTriggerFilter {
   cooldown_minutes?: number;
 }
 
-export interface AutomationEventTrigger {
+export interface LinearEventTriggerFilter {
+  team_keys?: string[];
+  team_ids?: string[];
+  labels?: string[];
+  tags?: string[];
+  issue_types?: string[];
+  state_types?: string[];
+  state_names?: string[];
+  priorities?: number[];
+  title_contains?: string;
+  cooldown_minutes?: number;
+}
+
+export type AutomationEventTriggerFilter =
+  | PagerDutyEventTriggerFilter
+  | LinearEventTriggerFilter;
+
+export interface PagerDutyAutomationEventTrigger {
   id: string;
   org_id: string;
   automation_id: string;
-  provider: AutomationEventProvider;
+  provider: "pagerduty";
   event_types: PagerDutyEventType[];
   filter: PagerDutyEventTriggerFilter;
   repository_id?: string;
@@ -3244,13 +3263,42 @@ export interface AutomationEventTrigger {
   updated_at: string;
 }
 
-export interface AutomationEventTriggerInput {
-  provider: AutomationEventProvider;
+export interface LinearAutomationEventTrigger {
+  id: string;
+  org_id: string;
+  automation_id: string;
+  provider: "linear";
+  event_types: LinearEventType[];
+  filter: LinearEventTriggerFilter;
+  repository_id?: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AutomationEventTrigger =
+  | PagerDutyAutomationEventTrigger
+  | LinearAutomationEventTrigger;
+
+export interface PagerDutyAutomationEventTriggerInput {
+  provider: "pagerduty";
   event_types: PagerDutyEventType[];
   filter?: PagerDutyEventTriggerFilter;
   repository_id?: string;
   enabled?: boolean;
 }
+
+export interface LinearAutomationEventTriggerInput {
+  provider: "linear";
+  event_types: LinearEventType[];
+  filter?: LinearEventTriggerFilter;
+  repository_id?: string;
+  enabled?: boolean;
+}
+
+export type AutomationEventTriggerInput =
+  | PagerDutyAutomationEventTriggerInput
+  | LinearAutomationEventTriggerInput;
 
 export interface AutomationGitHubEventFilters {
   base_branches?: string[];

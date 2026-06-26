@@ -960,6 +960,7 @@ func TestDockerProvider_Create(t *testing.T) {
 		require.Equal(t, "docker", sb.Provider, "sandbox provider should be 'docker'")
 		require.Equal(t, "/workspace", sb.WorkDir, "sandbox workdir should be '/workspace'")
 		require.Equal(t, "runsc", sb.Metadata["runtime"], "sandbox metadata should include runtime")
+		require.Equal(t, agent.DefaultSandboxConfig().CacheABI, sb.Metadata[agent.SandboxMetadataCacheABI], "sandbox metadata should include the cache ABI")
 	})
 
 	t.Run("labels managed sandbox containers with tracing metadata", func(t *testing.T) {
