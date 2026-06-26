@@ -70,3 +70,19 @@ func TestCodeReviewInlineComments(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	policy.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
+	job := runCodeReviewPayload{PolicyVersion: 7, HeadSHA: "abc123"}
+
+	decision, body := buildUnavailableCodeReviewOutcome(policy, job)
+
+	require.Equal(t, models.CodeReviewDecisionNeedsHumanReview, decision.Decision, "unavailable live reviewer evidence should require human review")
+	require.False(t, decision.Acceptable, "unavailable live reviewer evidence should not be acceptable risk")
+	require.Contains(t, decision.RiskReasons, "Automated reviewer agents are not configured for this worker.", "decision should explain missing live reviewers")
+	require.Contains(t, body, "Policy version: 7", "final body should include captured policy version")
+	require.Contains(t, body, "Reviewed head: abc123", "final body should include reviewed head")
+}

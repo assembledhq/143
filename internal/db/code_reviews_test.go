@@ -33,8 +33,8 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
 
@@ -59,7 +59,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
 		}))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
@@ -68,6 +68,37 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 	require.Equal(t, "default", resolved.Source, "missing policy should use built-in defaults")
 	require.Nil(t, resolved.Policy, "default policy should not pretend to have a DB record")
 	require.Equal(t, models.DefaultCodeReviewPolicyConfig(), resolved.Config, "default resolved config should match built-in policy")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	policyID := uuid.New()
+	userID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.FinalReviewTemplate = "final review template"
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("WHERE org_id = @org_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
+
+	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
+
+	require.NoError(t, err, "GetPolicyByID should load captured policy version")
+	require.Equal(t, policyID, record.ID, "GetPolicyByID should return requested policy")
+	require.Equal(t, config.FinalReviewTemplate, record.FinalReviewTemplate, "GetPolicyByID should scan final review template")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -80,6 +111,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
+	config.FinalReviewTemplate = "custom final review template"
 	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
@@ -97,12 +129,12 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, &userID, now))
 	mock.ExpectCommit()
 
 	record, err := NewCodeReviewStore(mock).SavePolicy(context.Background(), orgID, &repoID, config, &userID)
@@ -110,6 +142,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, err, "SavePolicy should insert a new active version")
 	require.Equal(t, 4, record.Version, "SavePolicy should increment from the current scope max version")
 	require.Equal(t, policyID, record.ID, "SavePolicy should return inserted policy")
+	require.Equal(t, config.FinalReviewTemplate, record.Config().FinalReviewTemplate, "SavePolicy should preserve final review template")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -227,6 +260,59 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 	require.Equal(t, models.CodeReviewSessionStatusCompleted, metadata.Status, "CompleteReview should mark review complete")
 	require.Equal(t, &reviewURL, metadata.GitHubReviewURL, "CompleteReview should scan GitHub review URL")
 	require.Equal(t, &body, metadata.FinalReviewBody, "CompleteReview should scan final review body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+	decision := models.CodeReviewDecisionCommentOnly
+	status := models.CodeReviewSessionStatusCompleted
+	acceptable := false
+	title := "Code review for acme/repo#42"
+	repoName := "acme/repo"
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("m.decision = @decision").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+			"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title", "repository_name", "github_repo",
+			"github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+		}).AddRow(
+			metadataID, orgID, sessionID, repoID, prID, policyID,
+			"base", "head", models.CodeReviewTriggerSourceAppReviewer, status, &decision, &acceptable, false,
+			nil, "key", nil, nil, nil, nil, nil, &now, now, &title, &repoName, "acme/repo",
+			42, "https://github.com/acme/repo/pull/42", "Fix auth bug", "devin",
+		))
+
+	reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
+		RepositoryID: &repoID,
+		Decision:     &decision,
+		Status:       &status,
+		Acceptable:   &acceptable,
+		Search:       "auth",
+		Limit:        25,
+	})
+
+	require.NoError(t, err, "ListReviews should return filtered code reviews")
+	require.Len(t, reviews, 1, "ListReviews should scan matching rows")
+	require.Equal(t, "Fix auth bug", reviews[0].PullRequestTitle, "ListReviews should return pull request metadata")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

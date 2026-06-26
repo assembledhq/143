@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -37,7 +38,41 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	reviews, err := h.store.ListReviews(r.Context(), orgID, repositoryID, limit)
+	filters := db.CodeReviewListFilters{
+		RepositoryID: repositoryID,
+		Search:       strings.TrimSpace(r.URL.Query().Get("search")),
+		Limit:        limit,
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("decision")); raw != "" {
+		decision := models.CodeReviewDecision(raw)
+		if err := decision.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_DECISION", "invalid decision")
+			return
+		}
+		filters.Decision = &decision
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("status")); raw != "" {
+		status := models.CodeReviewSessionStatus(raw)
+		if err := status.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_STATUS", "invalid status")
+			return
+		}
+		filters.Status = &status
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("risk")); raw != "" {
+		switch raw {
+		case "acceptable":
+			acceptable := true
+			filters.Acceptable = &acceptable
+		case "needs_review":
+			acceptable := false
+			filters.Acceptable = &acceptable
+		default:
+			writeError(w, r, http.StatusBadRequest, "INVALID_RISK", "risk must be acceptable or needs_review")
+			return
+		}
+	}
+	reviews, err := h.store.ListReviews(r.Context(), orgID, filters)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEWS_LOAD_FAILED", "failed to load code reviews", err)
 		return

@@ -96,6 +96,24 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPolicyRecordConfigPreservesFinalReviewTemplate(t *testing.T) {
+	t.Parallel()
+
+	record := CodeReviewPolicyRecord{
+		ApprovalMode:        CodeReviewApprovalModeCommentOnly,
+		Enabled:             true,
+		DescriptionPolicy:   DefaultCodeReviewPolicyConfig().DescriptionPolicy,
+		RiskPolicy:          DefaultCodeReviewPolicyConfig().RiskPolicy,
+		AgentRoster:         DefaultCodeReviewPolicyConfig().AgentRoster,
+		InlineCommentLimit:  4,
+		FinalReviewTemplate: "custom final review template",
+	}
+
+	config := record.Config()
+
+	require.Equal(t, "custom final review template", config.FinalReviewTemplate, "policy records should round-trip final review templates")
+}
+
 func TestCodeReviewPolicyTemplates(t *testing.T) {
 	t.Parallel()
 
@@ -213,6 +231,60 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			actual := EvaluateCodeReviewRisk(config, tt.input)
 
 			require.Equal(t, tt.expected, actual, "risk evaluator should enforce deterministic approval prerequisites")
+		})
+	}
+}
+
+func TestEvaluateCodeReviewDecision(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		policy   CodeReviewPolicyConfig
+		risk     CodeReviewRiskEvaluation
+		expected CodeReviewDecisionEvaluation
+	}{
+		{
+			name: "approves acceptable risk when policy allows approval",
+			policy: func() CodeReviewPolicyConfig {
+				c := DefaultCodeReviewPolicyConfig()
+				c.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
+				return c
+			}(),
+			risk: CodeReviewRiskEvaluation{Acceptable: true},
+			expected: CodeReviewDecisionEvaluation{
+				Decision:   CodeReviewDecisionApproved,
+				Acceptable: true,
+			},
+		},
+		{
+			name:   "comments on acceptable risk when policy is comment only",
+			policy: DefaultCodeReviewPolicyConfig(),
+			risk:   CodeReviewRiskEvaluation{Acceptable: true},
+			expected: CodeReviewDecisionEvaluation{
+				Decision:   CodeReviewDecisionCommentOnly,
+				Acceptable: true,
+			},
+		},
+		{
+			name:   "requires human review when risk is not acceptable",
+			policy: DefaultCodeReviewPolicyConfig(),
+			risk:   CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{"required GitHub checks are not passing"}},
+			expected: CodeReviewDecisionEvaluation{
+				Decision:    CodeReviewDecisionNeedsHumanReview,
+				Acceptable:  false,
+				RiskReasons: []string{"required GitHub checks are not passing"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := EvaluateCodeReviewDecision(tt.policy, tt.risk)
+
+			require.Equal(t, tt.expected, actual, "decision evaluator should map policy and risk to final review decision")
 		})
 	}
 }

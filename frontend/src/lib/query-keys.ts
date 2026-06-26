@@ -43,7 +43,7 @@ export const queryKeys = {
   },
   codeReviews: {
     all: ["code-reviews"] as const,
-    list: (repositoryId?: string | null) => ["code-reviews", "list", repositoryId ?? null] as const,
+    list: (params?: unknown) => ["code-reviews", "list", params ?? null] as const,
     policy: (repositoryId?: string | null) => ["code-reviews", "policy", repositoryId ?? null] as const,
     templates: ["code-reviews", "templates"] as const,
     evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,

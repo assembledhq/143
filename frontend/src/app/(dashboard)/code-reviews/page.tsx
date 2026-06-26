@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ClipboardCheck, ExternalLink, Settings2, BarChart3, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
@@ -28,11 +29,21 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import type { CodeReviewApprovalMode, CodeReviewListItem, CodeReviewPolicyConfig } from "@/lib/types";
+import type {
+  CodeReviewApprovalMode,
+  CodeReviewDecision,
+  CodeReviewListItem,
+  CodeReviewPolicyConfig,
+  CodeReviewSessionStatus,
+} from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
+const ALL_DECISIONS = "all";
+const ALL_RISKS = "all";
+const ALL_STATUSES = "all";
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -73,15 +84,30 @@ function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
+  const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
+  const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
+  const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
+  const [search, setSearch] = useState("");
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
+  const reviewFilters = useMemo(
+    () => ({
+      repository_id: repositoryId,
+      decision: decisionFilter === ALL_DECISIONS ? undefined : (decisionFilter as CodeReviewDecision),
+      risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
+      status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
+      search: search.trim() || undefined,
+      limit: 100,
+    }),
+    [decisionFilter, repositoryId, riskFilter, search, statusFilter],
+  );
 
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
   const reviewsQuery = useQuery({
-    queryKey: queryKeys.codeReviews.list(repositoryId ?? null),
-    queryFn: () => api.codeReviews.list({ repository_id: repositoryId, limit: 100 }),
+    queryKey: queryKeys.codeReviews.list(reviewFilters),
+    queryFn: () => api.codeReviews.list(reviewFilters),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
@@ -135,21 +161,45 @@ export default function CodeReviewsPage() {
           }
         />
 
-        <div className="flex w-full flex-col gap-2 sm:w-72">
-          <Label className="text-xs text-muted-foreground">Repository</Label>
-          <Select value={repositoryFilter} onValueChange={setRepositoryFilter}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
-              {repositories.map((repo) => (
-                <SelectItem key={repo.id} value={repo.id}>
-                  {repo.full_name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">
+          <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+            <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+            {repositories.map((repo) => (
+              <SelectItem key={repo.id} value={repo.id}>
+                {repo.full_name}
+              </SelectItem>
+            ))}
+          </FilterSelect>
+          <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
+            <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
+            <SelectItem value="approved">Approved</SelectItem>
+            <SelectItem value="comment_only">Comment only</SelectItem>
+            <SelectItem value="needs_human_review">Needs human</SelectItem>
+            <SelectItem value="blocked">Blocked</SelectItem>
+          </FilterSelect>
+          <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+            <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+            <SelectItem value="acceptable">Acceptable</SelectItem>
+            <SelectItem value="needs_review">Needs review</SelectItem>
+          </FilterSelect>
+          <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+            <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
+            <SelectItem value="queued">Queued</SelectItem>
+            <SelectItem value="running">Running</SelectItem>
+            <SelectItem value="completed">Completed</SelectItem>
+            <SelectItem value="failed">Failed</SelectItem>
+            <SelectItem value="stale">Stale</SelectItem>
+            <SelectItem value="cancelled">Cancelled</SelectItem>
+          </FilterSelect>
+          <div className="flex flex-col gap-2">
+            <Label className="text-xs text-muted-foreground">Search</Label>
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="PR, repo, or title"
+              aria-label="Search code reviews"
+            />
+          </div>
         </div>
 
         <Tabs defaultValue="reviews" className="space-y-4">
@@ -224,6 +274,13 @@ export default function CodeReviewsPage() {
                                   <ExternalLink className="h-4 w-4" />
                                 </Link>
                               </Button>
+                              {review.github_review_url ? (
+                                <Button variant="ghost" size="icon-sm" asChild aria-label="Open final review">
+                                  <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+                                    <ClipboardCheck className="h-4 w-4" />
+                                  </Link>
+                                </Button>
+                              ) : null}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -400,14 +457,135 @@ export default function CodeReviewsPage() {
                 </div>
 
                 <div className="grid gap-3 lg:grid-cols-2">
-                  <PolicyList
-                    title="Description requirements"
-                    items={draftPolicy?.description_policy.requirements.map((item) => item.title) ?? []}
+                  <ListTextArea
+                    label="Sensitive paths"
+                    value={draftPolicy?.risk_policy.sensitive_paths ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, sensitive_paths: items } },
+                      })
+                    }
                   />
-                  <PolicyList
-                    title="Excluded categories"
-                    items={draftPolicy?.risk_policy.exclude_categories ?? []}
+                  <ListTextArea
+                    label="Excluded categories"
+                    value={draftPolicy?.risk_policy.exclude_categories ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, exclude_categories: items } },
+                      })
+                    }
                   />
+                  <ListTextArea
+                    label="Required checks"
+                    value={draftPolicy?.risk_policy.required_checks ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, required_checks: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Eligible authors"
+                    value={draftPolicy?.risk_policy.eligible_authors ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, risk_policy: { ...draftPolicy.risk_policy, eligible_authors: items } },
+                      })
+                    }
+                  />
+                  <ListTextArea
+                    label="Reviewer agents"
+                    value={draftPolicy?.agent_roster.reviewers ?? []}
+                    disabled={!draftPolicy}
+                    onChange={(items) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, reviewers: items } },
+                      })
+                    }
+                  />
+                  <div className="space-y-2">
+                    <Label className="text-xs text-muted-foreground">Orchestrator</Label>
+                    <Input
+                      value={draftPolicy?.agent_roster.orchestrator ?? ""}
+                      disabled={!draftPolicy}
+                      onChange={(event) =>
+                        draftPolicy &&
+                        setDraftOverride({
+                          key: policyKey,
+                          config: { ...draftPolicy, agent_roster: { ...draftPolicy.agent_roster, orchestrator: event.target.value } },
+                        })
+                      }
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <Label className="text-xs text-muted-foreground">Final review template</Label>
+                  <Textarea
+                    value={draftPolicy?.final_review_template ?? ""}
+                    disabled={!draftPolicy}
+                    rows={4}
+                    onChange={(event) =>
+                      draftPolicy &&
+                      setDraftOverride({
+                        key: policyKey,
+                        config: { ...draftPolicy, final_review_template: event.target.value },
+                      })
+                    }
+                  />
+                </div>
+
+                <div className="space-y-3">
+                  <div className="text-sm font-medium text-foreground">Description requirements</div>
+                  <div className="grid gap-3 lg:grid-cols-3">
+                    {draftPolicy?.description_policy.requirements.map((requirement, index) => (
+                      <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
+                        <Input
+                          value={requirement.title}
+                          disabled={!draftPolicy}
+                          aria-label={`${requirement.key} title`}
+                          onChange={(event) => {
+                            if (!draftPolicy) return;
+                            const requirements = [...draftPolicy.description_policy.requirements];
+                            requirements[index] = { ...requirement, title: event.target.value };
+                            setDraftOverride({
+                              key: policyKey,
+                              config: { ...draftPolicy, description_policy: { requirements } },
+                            });
+                          }}
+                        />
+                        <Textarea
+                          value={requirement.prompt}
+                          disabled={!draftPolicy}
+                          rows={4}
+                          aria-label={`${requirement.key} prompt`}
+                          onChange={(event) => {
+                            if (!draftPolicy) return;
+                            const requirements = [...draftPolicy.description_policy.requirements];
+                            requirements[index] = { ...requirement, prompt: event.target.value };
+                            setDraftOverride({
+                              key: policyKey,
+                              config: { ...draftPolicy, description_policy: { requirements } },
+                            });
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="flex justify-end">
@@ -433,6 +611,30 @@ export default function CodeReviewsPage() {
         </Tabs>
       </div>
     </main>
+  );
+}
+
+function FilterSelect({
+  label,
+  value,
+  onValueChange,
+  children,
+}: {
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-2">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Select value={value} onValueChange={onValueChange}>
+        <SelectTrigger>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>{children}</SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -499,21 +701,28 @@ function PolicyToggle({
 	);
 }
 
-function PolicyList({ title, items }: { title: string; items: string[] }) {
+function ListTextArea({
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: string[];
+  disabled?: boolean;
+  onChange: (items: string[]) => void;
+}) {
   return (
-    <div className="rounded-md border border-border p-4">
-      <div className="text-sm font-medium text-foreground">{title}</div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {items.length === 0 ? (
-          <span className="text-xs text-muted-foreground">None configured</span>
-        ) : (
-          items.map((item) => (
-            <Badge key={item} variant="secondary">
-              {item}
-            </Badge>
-          ))
-        )}
-      </div>
+    <div className="space-y-2">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      <Textarea
+        value={value.join("\n")}
+        disabled={disabled}
+        rows={4}
+        onChange={(event) =>
+          onChange(event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))
+        }
+      />
     </div>
   );
 }

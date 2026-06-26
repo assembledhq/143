@@ -161,6 +161,9 @@ export interface CodeReviewListItem {
   review_output_key: string;
   prompt_artifact_key?: string;
   github_review_id?: number;
+  github_review_url?: string;
+  final_review_body?: string;
+  failure_reason?: string;
   completed_at?: string;
   created_at: string;
   session_title?: string;

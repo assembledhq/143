@@ -16,18 +16,20 @@ The goal is not to replace meaningful human review. It is to move basic acceptab
 Implemented foundation:
 
 - versioned insert-only code review policies with org defaults and repository overrides
+- lossless policy persistence for final review templates
 - code review session metadata, agent result, and finding tables tied to normal `sessions`
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
-- conservative `run_code_review` worker handler that records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
+- conservative `run_code_review` worker handler that loads the captured policy version, records an orchestrator result, submits a GitHub comment-only review when the worker has GitHub credentials, and stores the GitHub review id/url
 - `/api/v1/code-reviews`, `/api/v1/code-reviews/templates`, `/api/v1/code-reviews/{id}/evidence`, and `/api/v1/code-review-policies` API surface
-- top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, enablement, approval mode, threshold, prerequisite, timeout, and cost controls
+- top-level `Code reviews` dashboard surface with Reviews, Configurations, Insights, repository/decision/risk/status/search filtering, enablement, approval mode, threshold, prerequisite, timeout, cost, path/check/author/agent, prompt, and final-template controls
 
 Still pending:
 
 - live multi-agent worker orchestration that fans out reviewer tabs and runs native `/review`
+- approval submission backed by live reviewer/orchestrator evidence
 - inline-comment retry/update and stale requested-reviewer cleanup
 - full prompt artifact storage and recovery for rendered approval prompts
 

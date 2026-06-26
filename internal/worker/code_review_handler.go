@@ -40,16 +40,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if _, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID); err != nil {
 			return fmt.Errorf("mark code review running: %w", err)
 		}
-		reason := "Automated reviewer agents and GitHub review submission are not configured for this worker."
-		body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
-			Decision:      models.CodeReviewDecisionCommentOnly,
-			Acceptable:    false,
-			RiskReasons:   []string{reason},
-			PolicyVersion: job.PolicyVersion,
-			HeadSHA:       job.HeadSHA,
-			Summary:       "143 recorded the review request and withheld automated approval.",
-		})
-		raw := "code review orchestration completed in conservative comment-only mode"
+		policy, err := stores.CodeReviews.GetPolicyByID(ctx, job.OrgID, job.PolicyID)
+		if err != nil {
+			return fmt.Errorf("load captured code review policy: %w", err)
+		}
+		decision, body := buildUnavailableCodeReviewOutcome(policy.Config(), job)
+		raw := "code review orchestration completed in conservative human-review mode"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
@@ -67,8 +63,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if _, err := stores.CodeReviews.CompleteReview(ctx, job.OrgID, db.CompleteCodeReviewParams{
 			SessionID:       job.SessionID,
-			Decision:        models.CodeReviewDecisionCommentOnly,
-			Acceptable:      false,
+			Decision:        decision.Decision,
+			Acceptable:      decision.Acceptable,
 			GitHubReviewID:  submission.GitHubReviewID,
 			GitHubReviewURL: submission.GitHubReviewURL,
 			FinalReviewBody: body,
@@ -85,6 +81,21 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		event.Msg("completed conservative code review")
 		return nil
 	}
+}
+
+func buildUnavailableCodeReviewOutcome(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload) (models.CodeReviewDecisionEvaluation, string) {
+	reason := "Automated reviewer agents are not configured for this worker."
+	risk := models.CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{reason}}
+	decision := models.EvaluateCodeReviewDecision(policy, risk)
+	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
+		Decision:      decision.Decision,
+		Acceptable:    decision.Acceptable,
+		RiskReasons:   decision.RiskReasons,
+		PolicyVersion: job.PolicyVersion,
+		HeadSHA:       job.HeadSHA,
+		Summary:       "143 recorded the review request and withheld automated approval.",
+	})
+	return decision, body
 }
 
 type codeReviewSubmission struct {

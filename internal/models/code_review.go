@@ -330,29 +330,31 @@ func (c CodeReviewPolicyConfig) Validate() error {
 }
 
 type CodeReviewPolicyRecord struct {
-	ID                 uuid.UUID                   `db:"id" json:"id"`
-	OrgID              uuid.UUID                   `db:"org_id" json:"org_id"`
-	RepositoryID       *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
-	Active             bool                        `db:"active" json:"active"`
-	Version            int                         `db:"version" json:"version"`
-	Enabled            bool                        `db:"enabled" json:"enabled"`
-	ApprovalMode       CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
-	DescriptionPolicy  CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
-	RiskPolicy         CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
-	AgentRoster        CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
-	InlineCommentLimit int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	CreatedByUserID    *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
-	CreatedAt          time.Time                   `db:"created_at" json:"created_at"`
+	ID                  uuid.UUID                   `db:"id" json:"id"`
+	OrgID               uuid.UUID                   `db:"org_id" json:"org_id"`
+	RepositoryID        *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
+	Active              bool                        `db:"active" json:"active"`
+	Version             int                         `db:"version" json:"version"`
+	Enabled             bool                        `db:"enabled" json:"enabled"`
+	ApprovalMode        CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
+	DescriptionPolicy   CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
+	RiskPolicy          CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
+	AgentRoster         CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
+	InlineCommentLimit  int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
+	FinalReviewTemplate string                      `db:"final_review_template" json:"final_review_template,omitempty"`
+	CreatedByUserID     *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt           time.Time                   `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
-		ApprovalMode:       r.ApprovalMode,
-		Enabled:            r.Enabled,
-		DescriptionPolicy:  r.DescriptionPolicy,
-		RiskPolicy:         r.RiskPolicy,
-		AgentRoster:        r.AgentRoster,
-		InlineCommentLimit: r.InlineCommentLimit,
+		ApprovalMode:        r.ApprovalMode,
+		Enabled:             r.Enabled,
+		DescriptionPolicy:   r.DescriptionPolicy,
+		RiskPolicy:          r.RiskPolicy,
+		AgentRoster:         r.AgentRoster,
+		InlineCommentLimit:  r.InlineCommentLimit,
+		FinalReviewTemplate: r.FinalReviewTemplate,
 	}
 }
 
@@ -493,6 +495,26 @@ type CodeReviewRiskInput struct {
 type CodeReviewRiskEvaluation struct {
 	Acceptable bool     `json:"acceptable"`
 	Reasons    []string `json:"reasons"`
+}
+
+type CodeReviewDecisionEvaluation struct {
+	Decision    CodeReviewDecision `json:"decision"`
+	Acceptable  bool               `json:"acceptable"`
+	RiskReasons []string           `json:"risk_reasons,omitempty"`
+}
+
+func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRiskEvaluation) CodeReviewDecisionEvaluation {
+	if !risk.Acceptable {
+		return CodeReviewDecisionEvaluation{
+			Decision:    CodeReviewDecisionNeedsHumanReview,
+			Acceptable:  false,
+			RiskReasons: append([]string(nil), risk.Reasons...),
+		}
+	}
+	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
+		return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionApproved, Acceptable: true}
+	}
+	return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionCommentOnly, Acceptable: true}
 }
 
 func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) CodeReviewRiskEvaluation {
