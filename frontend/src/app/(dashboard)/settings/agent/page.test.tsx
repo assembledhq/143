@@ -213,7 +213,8 @@ describe("Agent settings page", () => {
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
 	    expect(within(dialog).getByText("Note: we recommend using OpenRouter routes, which are pinned to US based inference providers. Native OpenCode routes are not provider-pinned.")).toBeInTheDocument();
-	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    expect(within(dialog).getByRole("button", { name: "Advanced OpenCode model" })).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });
 
@@ -252,6 +253,9 @@ describe("Agent settings page", () => {
 	      target: { value: "sk-or-opencode" },
 	    });
 	    expect(await within(dialog).findByText("Detected OpenRouter key from the sk-or prefix.")).toBeInTheDocument();
+	    expect(within(dialog).queryByLabelText("Custom model override")).not.toBeInTheDocument();
+	    await user.click(within(dialog).getByRole("button", { name: "Advanced OpenCode model" }));
+	    expect(within(dialog).getByRole("button", { name: "What custom OpenCode model override does" })).toBeInTheDocument();
 	    fireEvent.change(within(dialog).getByLabelText("Custom model override"), {
 	      target: { value: "xai/grok-code-fast" },
 	    });
