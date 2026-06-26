@@ -473,14 +473,6 @@ type reviewContextGraphQLPage struct {
 	ReviewsMore         bool
 }
 
-func parseReviewContextGraphQL(body []byte, botLogins []string) (ReviewContext, error) {
-	page, err := parseReviewContextGraphQLPage(body, botLogins)
-	if err != nil {
-		return ReviewContext{}, err
-	}
-	return page.Context, nil
-}
-
 func parseReviewContextGraphQLPage(body []byte, botLogins []string) (reviewContextGraphQLPage, error) {
 	var decoded struct {
 		Errors []struct {
