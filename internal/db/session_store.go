@@ -156,6 +156,76 @@ const sessionAutomationRunIDColumn = `(SELECT sal.automation_run_id
 		WHERE sal.org_id = sessions.org_id AND sal.session_id = sessions.id
 		LIMIT 1) AS automation_run_id`
 
+const sessionPRCreationStateColumn = `COALESCE((SELECT sps.pr_creation_state
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1), 'idle') AS pr_creation_state`
+
+const sessionPRCreationErrorColumn = `(SELECT sps.pr_creation_error
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1) AS pr_creation_error`
+
+const sessionPRPushStateColumn = `COALESCE((SELECT sps.pr_push_state
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1), 'idle') AS pr_push_state`
+
+const sessionPRPushErrorColumn = `(SELECT sps.pr_push_error
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1) AS pr_push_error`
+
+const sessionBranchCreationStateColumn = `COALESCE((SELECT sps.branch_creation_state
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1), 'idle') AS branch_creation_state`
+
+const sessionBranchCreationErrorColumn = `(SELECT sps.branch_creation_error
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1) AS branch_creation_error`
+
+const sessionBranchURLColumn = `(SELECT sps.branch_url
+		FROM session_publish_state sps
+		WHERE sps.org_id = sessions.org_id AND sps.session_id = sessions.id
+		LIMIT 1) AS branch_url`
+
+const sessionLinearPrivateColumn = `COALESCE((SELECT slc.linear_private
+		FROM session_linear_context slc
+		WHERE slc.org_id = sessions.org_id AND slc.session_id = sessions.id
+		LIMIT 1), false) AS linear_private`
+
+const sessionLinearStateSyncDisabledColumn = `COALESCE((SELECT slc.linear_state_sync_disabled
+		FROM session_linear_context slc
+		WHERE slc.org_id = sessions.org_id AND slc.session_id = sessions.id
+		LIMIT 1), false) AS linear_state_sync_disabled`
+
+const sessionLinearIdentifierHintColumn = `(SELECT slc.linear_identifier_hint
+		FROM session_linear_context slc
+		WHERE slc.org_id = sessions.org_id AND slc.session_id = sessions.id
+		LIMIT 1) AS linear_identifier_hint`
+
+const sessionLinearPrepareStateColumn = `COALESCE((SELECT slc.linear_prepare_state
+		FROM session_linear_context slc
+		WHERE slc.org_id = sessions.org_id AND slc.session_id = sessions.id
+		LIMIT 1), 'none') AS linear_prepare_state`
+
+const sessionCapabilitySnapshotColumn = `COALESCE((SELECT sem.capability_snapshot
+		FROM session_execution_metadata sem
+		WHERE sem.org_id = sessions.org_id AND sem.session_id = sessions.id
+		LIMIT 1), '[]'::jsonb) AS capability_snapshot`
+
+const sessionGitIdentitySourceColumn = `(SELECT sem.git_identity_source
+		FROM session_execution_metadata sem
+		WHERE sem.org_id = sessions.org_id AND sem.session_id = sessions.id
+		LIMIT 1) AS git_identity_source`
+
+const sessionGitIdentityUserIDColumn = `(SELECT sem.git_identity_user_id
+		FROM session_execution_metadata sem
+		WHERE sem.org_id = sessions.org_id AND sem.session_id = sessions.id
+		LIMIT 1) AS git_identity_user_id`
+
 // sessionSelectColumns is used for single-session queries where we want all fields.
 const sessionSelectColumns = `id,
 	` + sessionPrimaryIssueIDColumn + `,
@@ -171,10 +241,10 @@ const sessionSelectColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
-	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
+	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
 
 const (
 	sessionDiffMaxChars        = 2 * 1024 * 1024
@@ -208,10 +278,10 @@ const sessionListColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
-	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
+	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
 
 // sessionAPIDetailColumns is used by the session-detail HTTP endpoint. It keeps
 // the same metadata as a full session fetch, but leaves the large diff payloads
@@ -231,10 +301,10 @@ const sessionAPIDetailColumns = `id,
 	runtime_extension_count, runtime_extension_seconds, runtime_stop_reason, runtime_graceful_stop_at,
 	checkpointed_at, checkpoint_kind, checkpoint_capability, checkpoint_size_bytes, checkpoint_error,
 	recovery_state, recovery_queued_at, recovery_started_at, recovery_attempt_count,
-	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, pr_creation_state, pr_creation_error, pr_push_state, pr_push_error, branch_creation_state, branch_creation_error, branch_url, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
+	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
-	linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state,
-	deleted_at, capability_snapshot, git_identity_source, git_identity_user_id, created_at`
+	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -773,8 +843,21 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 	if run.LinearPrepareState == "" {
 		run.LinearPrepareState = models.LinearPrepareStateNone
 	}
+	if run.PRCreationState == "" {
+		run.PRCreationState = models.PRCreationStateIdle
+	}
+	if run.PRPushState == "" {
+		run.PRPushState = models.PRPushStateIdle
+	}
+	if run.BranchCreationState == "" {
+		run.BranchCreationState = models.BranchCreationStateIdle
+	}
 	if run.CapabilitySnapshot == nil {
 		run.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
+	}
+	capabilitySnapshot, err := json.Marshal(run.CapabilitySnapshot)
+	if err != nil {
+		return fmt.Errorf("marshal session capability snapshot: %w", err)
 	}
 	query := `
 		WITH inserted AS (
@@ -782,15 +865,13 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 			org_id, agent_type, status, autonomy_level, token_mode, complexity_tier,
 			parent_session_id, revision_context, title,
 			model_override, reasoning_effort, triggered_by_user_id, target_branch, base_commit_sha, repository_id, input_manifest,
-			origin, interaction_mode, validation_policy,
-			linear_private, linear_state_sync_disabled, linear_identifier_hint, linear_prepare_state, capability_snapshot
+			origin, interaction_mode, validation_policy
 		)
 		VALUES (
 			@org_id, @agent_type, @status, @autonomy_level, @token_mode, @complexity_tier,
 			@parent_session_id, @revision_context, @title,
 			@model_override, @reasoning_effort, @triggered_by_user_id, @target_branch, @base_commit_sha, @repository_id, @input_manifest,
-			@origin, @interaction_mode, @validation_policy,
-			@linear_private, @linear_state_sync_disabled, @linear_identifier_hint, @linear_prepare_state, @capability_snapshot
+			@origin, @interaction_mode, @validation_policy
 		)
 		RETURNING id, org_id, created_at, last_activity_at
 	), inserted_pm_context AS (
@@ -813,11 +894,59 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		FROM inserted
 		WHERE @automation_run_id::uuid IS NOT NULL
 		RETURNING session_id
+	), inserted_linear_context AS (
+		INSERT INTO session_linear_context (
+			session_id, org_id, linear_private, linear_state_sync_disabled,
+			linear_identifier_hint, linear_prepare_state
+		)
+		SELECT
+			id, org_id, @linear_private, @linear_state_sync_disabled,
+			@linear_identifier_hint, @linear_prepare_state
+		FROM inserted
+		WHERE @linear_private::bool IS TRUE
+		   OR @linear_state_sync_disabled::bool IS TRUE
+		   OR @linear_identifier_hint::text IS NOT NULL
+		   OR @linear_prepare_state::text <> 'none'
+		RETURNING session_id
+	), inserted_publish_state AS (
+		INSERT INTO session_publish_state (
+			session_id, org_id,
+			pr_creation_state, pr_creation_error,
+			pr_push_state, pr_push_error,
+			branch_creation_state, branch_creation_error, branch_url
+		)
+		SELECT
+			id, org_id,
+			@pr_creation_state, @pr_creation_error,
+			@pr_push_state, @pr_push_error,
+			@branch_creation_state, @branch_creation_error, @branch_url
+		FROM inserted
+		WHERE @pr_creation_state::text <> 'idle'
+		   OR @pr_creation_error::text IS NOT NULL
+		   OR @pr_push_state::text <> 'idle'
+		   OR @pr_push_error::text IS NOT NULL
+		   OR @branch_creation_state::text <> 'idle'
+		   OR @branch_creation_error::text IS NOT NULL
+		   OR @branch_url::text IS NOT NULL
+		RETURNING session_id
+	), inserted_execution_metadata AS (
+		INSERT INTO session_execution_metadata (
+			session_id, org_id, capability_snapshot, git_identity_source, git_identity_user_id
+		)
+		SELECT id, org_id, @capability_snapshot::jsonb, @git_identity_source, @git_identity_user_id
+		FROM inserted
+		WHERE @capability_snapshot::jsonb <> '[]'::jsonb
+		   OR @git_identity_source::text IS NOT NULL
+		   OR @git_identity_user_id::uuid IS NOT NULL
+		RETURNING session_id
 	)
 	SELECT inserted.id, inserted.created_at, inserted.last_activity_at
 	FROM inserted
 	LEFT JOIN inserted_pm_context ON true
-	LEFT JOIN inserted_automation_link ON true`
+	LEFT JOIN inserted_automation_link ON true
+	LEFT JOIN inserted_linear_context ON true
+	LEFT JOIN inserted_publish_state ON true
+	LEFT JOIN inserted_execution_metadata ON true`
 
 	args := pgx.NamedArgs{
 		"org_id":                     run.OrgID,
@@ -848,7 +977,16 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 		"linear_state_sync_disabled": run.LinearStateSyncDisabled,
 		"linear_identifier_hint":     run.LinearIdentifierHint,
 		"linear_prepare_state":       run.LinearPrepareState,
-		"capability_snapshot":        run.CapabilitySnapshot,
+		"pr_creation_state":          run.PRCreationState,
+		"pr_creation_error":          run.PRCreationError,
+		"pr_push_state":              run.PRPushState,
+		"pr_push_error":              run.PRPushError,
+		"branch_creation_state":      run.BranchCreationState,
+		"branch_creation_error":      run.BranchCreationError,
+		"branch_url":                 run.BranchURL,
+		"capability_snapshot":        string(capabilitySnapshot),
+		"git_identity_source":        run.GitIdentitySource,
+		"git_identity_user_id":       run.GitIdentityUserID,
 	}
 
 	row := q.QueryRow(ctx, query, args)
@@ -908,9 +1046,17 @@ func createSessionRows(ctx context.Context, q DBTX, run *models.Session) error {
 // on a worker, confusing the sidebar.
 func (s *SessionStore) SetLinearPrepareState(ctx context.Context, orgID, sessionID uuid.UUID, state models.LinearPrepareState) error {
 	tag, err := s.db.Exec(ctx, `
-		UPDATE sessions
-		SET linear_prepare_state = @state
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		)
+		INSERT INTO session_linear_context (session_id, org_id, linear_prepare_state)
+		SELECT id, org_id, @state
+		FROM target
+		ON CONFLICT (session_id) DO UPDATE
+		SET linear_prepare_state = EXCLUDED.linear_prepare_state,
+		    updated_at = now()`,
 		pgx.NamedArgs{
 			"id":     sessionID,
 			"org_id": orgID,
@@ -936,12 +1082,18 @@ func (s *SessionStore) SetLinearPrepareState(ctx context.Context, orgID, session
 // no-op is intentional and not an error.
 func (s *SessionStore) SetLinearPrepareStateIfNotReady(ctx context.Context, orgID, sessionID uuid.UUID, state models.LinearPrepareState) error {
 	_, err := s.db.Exec(ctx, `
-		UPDATE sessions
-		SET linear_prepare_state = @state
-		WHERE id = @id
-		  AND org_id = @org_id
-		  AND deleted_at IS NULL
-		  AND linear_prepare_state <> @ready`,
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		)
+		INSERT INTO session_linear_context (session_id, org_id, linear_prepare_state)
+		SELECT id, org_id, @state
+		FROM target
+		ON CONFLICT (session_id) DO UPDATE
+		SET linear_prepare_state = EXCLUDED.linear_prepare_state,
+		    updated_at = now()
+		WHERE session_linear_context.linear_prepare_state <> @ready`,
 		pgx.NamedArgs{
 			"id":     sessionID,
 			"org_id": orgID,
@@ -960,9 +1112,17 @@ func (s *SessionStore) SetLinearPrepareStateIfNotReady(ctx context.Context, orgI
 // prefixes independently of the PR title.
 func (s *SessionStore) SetLinearIdentifierHint(ctx context.Context, orgID, sessionID uuid.UUID, identifier string) error {
 	tag, err := s.db.Exec(ctx, `
-		UPDATE sessions
-		SET linear_identifier_hint = NULLIF(@identifier, '')
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`,
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		)
+		INSERT INTO session_linear_context (session_id, org_id, linear_identifier_hint)
+		SELECT id, org_id, NULLIF(@identifier, '')
+		FROM target
+		ON CONFLICT (session_id) DO UPDATE
+		SET linear_identifier_hint = EXCLUDED.linear_identifier_hint,
+		    updated_at = now()`,
 		pgx.NamedArgs{
 			"id":         sessionID,
 			"org_id":     orgID,
@@ -1932,6 +2092,7 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 	// here. Falling back to the previously persisted diff is strictly better
 	// than clobbering the Changes tab with a blank value.
 	query := `
+		WITH updated_session AS (
 		UPDATE sessions
 		SET status = 'idle',
 		    -- Multiple sibling tabs can complete from the same in-memory
@@ -1943,15 +2104,6 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    agent_session_id = @agent_session_id, snapshot_key = @snapshot_key,
 		    sandbox_state = 'snapshotted',
 		    workspace_generation = workspace_generation + 1,
-		    pr_creation_state = 'idle', pr_creation_error = NULL,
-		    -- Only reset pr_push_state when no push is currently in flight.
-		    -- A concurrent turn-complete from the orchestrator must never
-		    -- silently overwrite an active push (the handler's in-flight 409
-		    -- guard relies on this column being authoritative).
-		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_state ELSE 'idle' END,
-		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN pr_push_error ELSE NULL END,
-		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_state ELSE 'idle' END,
-		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN branch_creation_error ELSE NULL END,
 		    token_usage = @token_usage,
 		    model_used = COALESCE(@model_used, model_used),
 		    result_summary = @result_summary,
@@ -1966,6 +2118,27 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
 		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `
 		WHERE id = @id AND org_id = @org_id`
+
+	query += `
+		RETURNING id, org_id
+	), reset_publish_state AS (
+		UPDATE session_publish_state sps
+		SET pr_creation_state = 'idle',
+		    pr_creation_error = NULL,
+		    -- Only reset pr_push_state when no push is currently in flight.
+		    -- A concurrent turn-complete from the orchestrator must never
+		    -- silently overwrite an active push (the handler's in-flight 409
+		    -- guard relies on this column being authoritative).
+		    pr_push_state = CASE WHEN sps.pr_push_state IN ('queued', 'pushing') THEN sps.pr_push_state ELSE 'idle' END,
+		    pr_push_error = CASE WHEN sps.pr_push_state IN ('queued', 'pushing') THEN sps.pr_push_error ELSE NULL END,
+		    branch_creation_state = CASE WHEN sps.branch_creation_state IN ('queued', 'pushing') THEN sps.branch_creation_state ELSE 'idle' END,
+		    branch_creation_error = CASE WHEN sps.branch_creation_state IN ('queued', 'pushing') THEN sps.branch_creation_error ELSE NULL END,
+		    updated_at = now()
+		FROM updated_session us
+		WHERE sps.session_id = us.id AND sps.org_id = us.org_id
+		RETURNING sps.session_id
+	)
+	SELECT 1 FROM updated_session LEFT JOIN reset_publish_state ON true`
 
 	_, err := db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                sessionID,
@@ -2115,10 +2288,20 @@ func (s *SessionStore) UpdateBaseCommitSHA(ctx context.Context, orgID, sessionID
 // a no-op write.
 func (s *SessionStore) SetGitIdentity(ctx context.Context, orgID, sessionID uuid.UUID, source string, userID *uuid.UUID) error {
 	query := `
-		UPDATE sessions
-		SET git_identity_source = @source,
-		    git_identity_user_id = @user_id
-		WHERE id = @id AND org_id = @org_id`
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		)
+		INSERT INTO session_execution_metadata (
+			session_id, org_id, git_identity_source, git_identity_user_id
+		)
+		SELECT id, org_id, @source, @user_id
+		FROM target
+		ON CONFLICT (session_id) DO UPDATE
+		SET git_identity_source = EXCLUDED.git_identity_source,
+		    git_identity_user_id = EXCLUDED.git_identity_user_id,
+		    updated_at = now()`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":      sessionID,
 		"org_id":  orgID,
@@ -2275,11 +2458,28 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	// RETURNING + publishStatus replaces a prior frontend 2s poll on
 	// /sessions/{id}/pr that existed solely to observe this column's
 	// transitions. Detail page now relies on the session status SSE.
-	query := `UPDATE sessions
-		SET pr_creation_state = @state, pr_creation_error = @err
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_creation_state <> 'succeeded'
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, pr_creation_state, pr_creation_error
+			)
+			SELECT id, org_id, @state, @err
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET pr_creation_state = EXCLUDED.pr_creation_state,
+			    pr_creation_error = EXCLUDED.pr_creation_error,
+			    updated_at = now()
+			WHERE session_publish_state.pr_creation_state <> 'succeeded'
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -2309,11 +2509,28 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 // non-terminal state. It rejects concurrent submitters and sessions that have
 // already created a PR.
 func (s *SessionStore) TryMarkPRCreationQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
-	query := `UPDATE sessions
-		SET pr_creation_state = 'queued', pr_creation_error = NULL
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_creation_state NOT IN ('queued', 'pushing', 'succeeded')
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, pr_creation_state, pr_creation_error
+			)
+			SELECT id, org_id, 'queued', NULL
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET pr_creation_state = 'queued',
+			    pr_creation_error = NULL,
+			    updated_at = now()
+			WHERE session_publish_state.pr_creation_state NOT IN ('queued', 'pushing', 'succeeded')
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -2349,11 +2566,28 @@ func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID
 	// surfaces immediately on the session status SSE — the detail-page
 	// Push button used to wait for the worker's first state transition
 	// (or a 1s polling fallback) to reflect the user's click.
-	query := `UPDATE sessions
-		SET pr_push_state = 'queued', pr_push_error = NULL
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND pr_push_state NOT IN ('queued', 'pushing')
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, pr_push_state, pr_push_error
+			)
+			SELECT id, org_id, 'queued', NULL
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET pr_push_state = 'queued',
+			    pr_push_error = NULL,
+			    updated_at = now()
+			WHERE session_publish_state.pr_push_state NOT IN ('queued', 'pushing')
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -2395,10 +2629,27 @@ func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID u
 	}
 	// RETURNING + publishStatus so the detail-page Push button reflects
 	// transitions on the existing session status SSE without a separate poll.
-	query := `UPDATE sessions
-		SET pr_push_state = @state, pr_push_error = @err
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, pr_push_state, pr_push_error
+			)
+			SELECT id, org_id, @state, @err
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET pr_push_state = EXCLUDED.pr_push_state,
+			    pr_push_error = EXCLUDED.pr_push_error,
+			    updated_at = now()
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -2422,11 +2673,28 @@ func (s *SessionStore) UpdatePRPushState(ctx context.Context, orgID, sessionID u
 
 // TryMarkBranchCreationQueued atomically starts a branch-only publish.
 func (s *SessionStore) TryMarkBranchCreationQueued(ctx context.Context, orgID, sessionID uuid.UUID) (bool, error) {
-	query := `UPDATE sessions
-		SET branch_creation_state = 'queued', branch_creation_error = NULL
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND branch_creation_state NOT IN ('queued', 'pushing')
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, branch_creation_state, branch_creation_error
+			)
+			SELECT id, org_id, 'queued', NULL
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET branch_creation_state = 'queued',
+			    branch_creation_error = NULL,
+			    updated_at = now()
+			WHERE session_publish_state.branch_creation_state NOT IN ('queued', 'pushing')
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
@@ -2456,12 +2724,31 @@ func (s *SessionStore) UpdateBranchCreationState(ctx context.Context, orgID, ses
 	if state == models.BranchCreationStateFailed && errMsg != "" {
 		errArg = errMsg
 	}
-	query := `UPDATE sessions
-		SET branch_creation_state = @state,
-		    branch_creation_error = @err,
-		    branch_url = CASE WHEN @branch_url::text IS NULL THEN branch_url ELSE @branch_url::text END
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH target AS (
+			SELECT id, org_id
+			FROM sessions
+			WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
+		), upserted AS (
+			INSERT INTO session_publish_state (
+				session_id, org_id, branch_creation_state, branch_creation_error, branch_url
+			)
+			SELECT id, org_id, @state, @err, @branch_url
+			FROM target
+			ON CONFLICT (session_id) DO UPDATE
+			SET branch_creation_state = EXCLUDED.branch_creation_state,
+			    branch_creation_error = EXCLUDED.branch_creation_error,
+			    branch_url = CASE
+			        WHEN EXCLUDED.branch_url IS NULL THEN session_publish_state.branch_url
+			        ELSE EXCLUDED.branch_url
+			    END,
+			    updated_at = now()
+			RETURNING session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM upserted)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":         sessionID,
 		"org_id":     orgID,
@@ -2521,13 +2808,16 @@ func (s *SessionStore) ListStuckPublishActionSessions(ctx context.Context, orgID
 	}
 	query := `
 		SELECT s.id
-		FROM sessions s
+		FROM session_publish_state sps
+		JOIN sessions s
+		  ON s.id = sps.session_id
+		 AND s.org_id = sps.org_id
 		WHERE s.org_id = @org_id
 		  AND s.deleted_at IS NULL
 		  AND (
-		    s.pr_creation_state IN ('queued', 'pushing')
-		    OR s.pr_push_state IN ('queued', 'pushing')
-		    OR s.branch_creation_state IN ('queued', 'pushing')
+		    sps.pr_creation_state IN ('queued', 'pushing')
+		    OR sps.pr_push_state IN ('queued', 'pushing')
+		    OR sps.branch_creation_state IN ('queued', 'pushing')
 		  )
 		  AND NOT EXISTS (
 		    SELECT 1 FROM jobs j
@@ -2584,20 +2874,33 @@ func (s *SessionStore) ListStuckPublishActionSessions(ctx context.Context, orgID
 // and a no-op (returns false) when nothing is in flight. On a real transition
 // it publishes the session status SSE so connected clients converge.
 func (s *SessionStore) FailInFlightPublishActions(ctx context.Context, orgID, sessionID uuid.UUID, errMsg string) (bool, error) {
-	query := `UPDATE sessions
-		SET pr_creation_state = CASE WHEN pr_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE pr_creation_state END,
-		    pr_creation_error = CASE WHEN pr_creation_state IN ('queued', 'pushing') THEN @err ELSE pr_creation_error END,
-		    pr_push_state = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN 'failed' ELSE pr_push_state END,
-		    pr_push_error = CASE WHEN pr_push_state IN ('queued', 'pushing') THEN @err ELSE pr_push_error END,
-		    branch_creation_state = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE branch_creation_state END,
-		    branch_creation_error = CASE WHEN branch_creation_state IN ('queued', 'pushing') THEN @err ELSE branch_creation_error END
-		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL
-		  AND (
-		    pr_creation_state IN ('queued', 'pushing')
-		    OR pr_push_state IN ('queued', 'pushing')
-		    OR branch_creation_state IN ('queued', 'pushing')
-		  )
-		RETURNING ` + sessionSelectColumns
+	query := `
+		WITH updated AS (
+			UPDATE session_publish_state sps
+			SET pr_creation_state = CASE WHEN sps.pr_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE sps.pr_creation_state END,
+			    pr_creation_error = CASE WHEN sps.pr_creation_state IN ('queued', 'pushing') THEN @err ELSE sps.pr_creation_error END,
+			    pr_push_state = CASE WHEN sps.pr_push_state IN ('queued', 'pushing') THEN 'failed' ELSE sps.pr_push_state END,
+			    pr_push_error = CASE WHEN sps.pr_push_state IN ('queued', 'pushing') THEN @err ELSE sps.pr_push_error END,
+			    branch_creation_state = CASE WHEN sps.branch_creation_state IN ('queued', 'pushing') THEN 'failed' ELSE sps.branch_creation_state END,
+			    branch_creation_error = CASE WHEN sps.branch_creation_state IN ('queued', 'pushing') THEN @err ELSE sps.branch_creation_error END,
+			    updated_at = now()
+			FROM sessions
+			WHERE sps.session_id = @id
+			  AND sps.org_id = @org_id
+			  AND sessions.id = sps.session_id
+			  AND sessions.org_id = sps.org_id
+			  AND sessions.deleted_at IS NULL
+			  AND (
+			    sps.pr_creation_state IN ('queued', 'pushing')
+			    OR sps.pr_push_state IN ('queued', 'pushing')
+			    OR sps.branch_creation_state IN ('queued', 'pushing')
+			  )
+			RETURNING sps.session_id
+		)
+		SELECT ` + sessionSelectColumns + `
+		FROM sessions
+		WHERE id IN (SELECT session_id FROM updated)
+		  AND org_id = @org_id`
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,

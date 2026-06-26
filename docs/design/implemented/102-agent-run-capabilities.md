@@ -11,8 +11,9 @@ Implemented pieces:
 
 - `agent_capability_policies` and `agent_capability_policy_grants` use the
   insert-only settings pattern for org defaults and automation overrides.
-- `sessions.capability_snapshot` and `automation_runs.capability_snapshot`
-  store the run-time grants used by an agent run.
+- `session_execution_metadata.capability_snapshot` and
+  `automation_runs.capability_snapshot` store the run-time grants used by an
+  agent run.
 - The Go model layer defines typed string enums for capability IDs, access
   levels, risks, scopes, policy types, and grant sources.
 - `internal/services/agentcapabilities` owns the v1 catalog, grant validation,

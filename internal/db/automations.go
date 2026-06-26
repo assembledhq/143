@@ -909,12 +909,16 @@ const listByAutomationFromClause = `FROM automation_runs ar
 	LEFT JOIN LATERAL (
 		SELECT sessions.id, sessions.title, sessions.status, sessions.diff_stats,
 			sessions.failure_explanation, sessions.failure_category, sessions.failure_next_steps,
-			sessions.failure_retry_advised, sessions.pr_creation_state
+			sessions.failure_retry_advised,
+			COALESCE(sps.pr_creation_state, 'idle') AS pr_creation_state
 		FROM session_automation_links sal
 		JOIN sessions
 		  ON sessions.org_id = sal.org_id
 		 AND sessions.id = sal.session_id
 		 AND sessions.deleted_at IS NULL
+		LEFT JOIN session_publish_state sps
+		  ON sps.org_id = sessions.org_id
+		 AND sps.session_id = sessions.id
 		WHERE sal.automation_run_id = ar.id AND sal.org_id = ar.org_id
 		ORDER BY sessions.created_at DESC
 		LIMIT 1

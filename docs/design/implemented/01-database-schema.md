@@ -1,6 +1,6 @@
 # Design: Database Schema
 
-> **Status:** Implemented | **Last reviewed:** 2026-03-25
+> **Status:** Implemented | **Last reviewed:** 2026-06-26
 
 This document defines the PostgreSQL schema for 143.dev. All entities flow through the pipeline: ingestion -> prioritization -> agent run -> validation -> PR -> deploy -> observation.
 
@@ -305,6 +305,65 @@ Links sessions to automation runs without storing automation ownership on the co
 **Indexes:**
 - `(org_id, session_id)` — tenant-scoped point lookup
 - `(org_id, automation_run_id, created_at DESC)` — sessions per automation run
+
+### `session_linear_context`
+
+Linear-specific session metadata. These fields are hydrated into session API responses, but they are stored outside the core `sessions` row because they are integration routing state, not core execution lifecycle.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| linear_private | boolean | Suppresses Linear attachment/comment writes for the session |
+| linear_state_sync_disabled | boolean | Disables bidirectional Linear state sync for the session |
+| linear_identifier_hint | text | Primary Linear identifier for branch naming |
+| linear_prepare_state | text | `none`, `pending`, `ready`, `failed` |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — tenant-scoped point lookup
+- `(org_id, linear_identifier_hint)` where `linear_identifier_hint IS NOT NULL` — linked-session lookup by Linear issue key
+
+### `session_publish_state`
+
+Per-session publish workflow state for PR creation, follow-up PR pushes, and branch-only publishes. The session API hydrates these values onto the session model while keeping publish button state out of the core execution row.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| pr_creation_state | text | `idle`, `queued`, `pushing`, `succeeded`, `failed` |
+| pr_creation_error | text | User-facing PR creation failure |
+| pr_push_state | text | `idle`, `queued`, `pushing`, `succeeded`, `failed` |
+| pr_push_error | text | User-facing PR push failure |
+| branch_creation_state | text | `idle`, `queued`, `pushing`, `succeeded`, `failed` |
+| branch_creation_error | text | User-facing branch creation failure |
+| branch_url | text | Created branch URL, nullable |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — tenant-scoped point lookup
+- `(org_id, updated_at)` where any publish state is `queued` or `pushing` — stuck publish action sweeps
+
+### `session_execution_metadata`
+
+Execution metadata that is needed by runtime integrations but does not belong on the core session lifecycle row.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| capability_snapshot | jsonb | Capability grants active for the session; always a JSON array |
+| git_identity_source | text | `user` or `app`, nullable |
+| git_identity_user_id | uuid | User identity used for Git operations, nullable |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — tenant-scoped point lookup
+- `(org_id, git_identity_user_id)` where `git_identity_user_id IS NOT NULL` — audit/debug lookup by user identity
 
 ### `agent_run_logs`
 
