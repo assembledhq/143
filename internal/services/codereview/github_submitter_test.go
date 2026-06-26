@@ -60,6 +60,37 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	require.Len(t, comments, 1, "one inline comment should be submitted")
 }
 
+func TestGitHubSubmitter_ListPullRequestFiles(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`[
+			{"filename":"internal/api/router.go","additions":10,"deletions":2,"status":"modified"},
+			{"filename":"go.mod","additions":1,"deletions":0,"status":"modified"}
+		]`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	files, err := submitter.ListPullRequestFiles(context.Background(), PullRequestFilesRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.NoError(t, err, "ListPullRequestFiles should load changed files from GitHub")
+	require.Equal(t, "/repos/acme/repo/pulls/42/files?per_page=100", gotPath, "ListPullRequestFiles should call the GitHub files endpoint")
+	require.Equal(t, []PullRequestFile{
+		{Filename: "internal/api/router.go", Additions: 10, Deletions: 2, Status: "modified"},
+		{Filename: "go.mod", Additions: 1, Deletions: 0, Status: "modified"},
+	}, files, "ListPullRequestFiles should decode file stats")
+}
+
 func TestGitHubSubmitter_SubmitReviewRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 

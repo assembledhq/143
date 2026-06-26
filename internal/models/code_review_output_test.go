@@ -25,6 +25,32 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 	require.Contains(t, body, "- required GitHub checks are not passing", "body should include withholding reasons")
 }
 
+func TestBuildCodeReviewFinalReviewBodyUsesTemplate(t *testing.T) {
+	t.Parallel()
+
+	body := BuildCodeReviewFinalReviewBody(CodeReviewFinalReviewInput{
+		Decision:      CodeReviewDecisionApproved,
+		Acceptable:    true,
+		PolicyVersion: 8,
+		HeadSHA:       "abc123",
+		Summary:       "Evidence is clean.",
+		Template:      "{{ .Decision }}|{{ .Risk }}|v{{ .PolicyVersion }}|{{ .HeadSHA }}|{{ .Summary }}",
+	})
+
+	require.Equal(t, "approved|acceptable|v8|abc123|Evidence is clean.", body, "final review renderer should honor policy templates")
+}
+
+func TestBuildCodeReviewFinalReviewBodyFallsBackForInvalidTemplate(t *testing.T) {
+	t.Parallel()
+
+	body := BuildCodeReviewFinalReviewBody(CodeReviewFinalReviewInput{
+		Decision: CodeReviewDecisionApproved,
+		Template: "{{",
+	})
+
+	require.Contains(t, body, "143 Code Reviewer approved this PR", "invalid final review templates should fall back to the built-in body")
+}
+
 func TestSelectCodeReviewInlineFindings(t *testing.T) {
 	t.Parallel()
 

@@ -78,6 +78,19 @@ type SubmitReviewResult struct {
 	URL string
 }
 
+type PullRequestFilesRequest struct {
+	InstallationID int64
+	Repository     string
+	PullNumber     int
+}
+
+type PullRequestFile struct {
+	Filename  string `json:"filename"`
+	Additions int    `json:"additions"`
+	Deletions int    `json:"deletions"`
+	Status    string `json:"status"`
+}
+
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	if s == nil || s.tokens == nil {
 		return SubmitReviewResult{}, fmt.Errorf("github submitter is not configured")
@@ -156,6 +169,61 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	return SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}, nil
 }
 
+func (s *GitHubSubmitter) ListPullRequestFiles(ctx context.Context, req PullRequestFilesRequest) ([]PullRequestFile, error) {
+	if s == nil || s.tokens == nil {
+		return nil, fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return nil, fmt.Errorf("repository must be owner/name")
+	}
+	if req.PullNumber <= 0 {
+		return nil, fmt.Errorf("pull number is required")
+	}
+	if req.InstallationID <= 0 {
+		return nil, fmt.Errorf("installation id is required")
+	}
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return nil, fmt.Errorf("get installation token: %w", err)
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d/files?per_page=100", url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
+	files := make([]PullRequestFile, 0)
+	for path != "" {
+		page, nextPath, err := s.getPullRequestFilesPage(ctx, token, path)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, page...)
+		path = nextPath
+	}
+	return files, nil
+}
+
+func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, path string) ([]PullRequestFile, string, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, s.baseURL+path, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("create pull request files request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return nil, "", fmt.Errorf("list GitHub pull request files: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errorBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, "", fmt.Errorf("list GitHub pull request files returned %d: %s", resp.StatusCode, strings.TrimSpace(string(errorBody)))
+	}
+	var files []PullRequestFile
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		return nil, "", fmt.Errorf("decode GitHub pull request files: %w", err)
+	}
+	return files, parseNextGitHubPath(resp.Header.Get("Link")), nil
+}
+
 func githubReviewEvent(decision SubmitReviewDecision) string {
 	if decision == SubmitReviewDecisionApproved {
 		return "APPROVE"
@@ -170,4 +238,28 @@ func (d SubmitReviewDecision) validate() error {
 	default:
 		return fmt.Errorf("invalid submit review decision: %q", d)
 	}
+}
+
+func parseNextGitHubPath(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		sections := strings.Split(part, ";")
+		if len(sections) < 2 || !strings.Contains(sections[1], `rel="next"`) {
+			continue
+		}
+		raw := strings.Trim(strings.TrimSpace(sections[0]), "<>")
+		if raw == "" {
+			continue
+		}
+		parsed, err := url.Parse(raw)
+		if err == nil && parsed.Path != "" {
+			if parsed.RawQuery != "" {
+				return parsed.Path + "?" + parsed.RawQuery
+			}
+			return parsed.Path
+		}
+		if strings.HasPrefix(raw, "/") {
+			return raw
+		}
+	}
+	return ""
 }

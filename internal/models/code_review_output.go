@@ -1,8 +1,10 @@
 package models
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
+	"text/template"
 )
 
 type CodeReviewFinalReviewInput struct {
@@ -13,9 +15,55 @@ type CodeReviewFinalReviewInput struct {
 	PolicyVersion int
 	HeadSHA       string
 	Summary       string
+	Template      string
 }
 
 func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
+	if strings.TrimSpace(input.Template) != "" {
+		if rendered, ok := renderCodeReviewFinalReviewTemplate(input); ok {
+			return rendered
+		}
+	}
+	return buildDefaultCodeReviewFinalReviewBody(input)
+}
+
+type codeReviewFinalReviewTemplateData struct {
+	Decision      string
+	Risk          string
+	Acceptable    bool
+	RiskReasons   []string
+	SessionURL    string
+	PolicyVersion int
+	HeadSHA       string
+	Summary       string
+}
+
+func renderCodeReviewFinalReviewTemplate(input CodeReviewFinalReviewInput) (string, bool) {
+	tmpl, err := template.New("code_review_final_review").Parse(input.Template)
+	if err != nil {
+		return "", false
+	}
+	risk := "needs human review"
+	if input.Acceptable {
+		risk = "acceptable"
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, codeReviewFinalReviewTemplateData{
+		Decision:      string(input.Decision),
+		Risk:          risk,
+		Acceptable:    input.Acceptable,
+		RiskReasons:   append([]string(nil), input.RiskReasons...),
+		SessionURL:    input.SessionURL,
+		PolicyVersion: input.PolicyVersion,
+		HeadSHA:       input.HeadSHA,
+		Summary:       input.Summary,
+	}); err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(buf.String()), true
+}
+
+func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 	var b strings.Builder
 	if input.Decision == CodeReviewDecisionApproved {
 		b.WriteString("143 Code Reviewer approved this PR\n\n")
