@@ -1244,6 +1244,88 @@ func (s *PreviewStore) CreateNextPreviewRuntime(ctx context.Context, orgID, prev
 	return runtime, nil
 }
 
+// ResetStartingBranchPreviewForRetry clears transient startup state for a
+// standalone branch preview without terminally failing the reservation. It is
+// used when the worker loses the sandbox mid-start and the durable job will be
+// requeued to launch a fresh sandbox.
+func (s *PreviewStore) ResetStartingBranchPreviewForRetry(ctx context.Context, orgID, previewID uuid.UUID, reason string, unavailableReason models.PreviewUnavailableReason) error {
+	if err := unavailableReason.Validate(); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin branch preview retry reset: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
+		UPDATE preview_instances
+			SET preview_handle = '',
+				port = 0,
+				error = '',
+				current_phase = 'reserved',
+				unavailable_reason = '',
+				recycle_config = NULL,
+				recycle_sandbox = NULL,
+				updated_at = now()
+		WHERE id = @preview_id
+		  AND org_id = @org_id
+		  AND preview_target_id IS NOT NULL
+		  AND status = 'starting'`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	)
+	if err != nil {
+		return fmt.Errorf("reset branch preview reservation: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("branch preview reservation not found or no longer starting")
+	}
+
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf(`UPDATE preview_runtimes
+		 SET status = 'lost',
+			error = @reason,
+			unavailable_reason = @unavailable_reason,
+			stopped_at = COALESCE(stopped_at, now()),
+			updated_at = now()
+		 WHERE preview_instance_id = @preview_id
+		   AND org_id = @org_id
+		   AND status IN %s`, activeRuntimeStatusFilter),
+		pgx.NamedArgs{
+			"org_id":             orgID,
+			"preview_id":         previewID,
+			"reason":             reason,
+			"unavailable_reason": unavailableReason,
+		},
+	); err != nil {
+		return fmt.Errorf("mark branch preview runtime lost for retry: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM preview_services
+		WHERE preview_instance_id = @preview_id
+		  AND preview_instance_id IN (
+			SELECT id FROM preview_instances WHERE id = @preview_id AND org_id = @org_id
+		  )`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	); err != nil {
+		return fmt.Errorf("clear branch preview services for retry: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM preview_infrastructure
+		WHERE preview_instance_id = @preview_id
+		  AND preview_instance_id IN (
+			SELECT id FROM preview_instances WHERE id = @preview_id AND org_id = @org_id
+		  )`,
+		pgx.NamedArgs{"org_id": orgID, "preview_id": previewID},
+	); err != nil {
+		return fmt.Errorf("clear branch preview infrastructure for retry: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit branch preview retry reset: %w", err)
+	}
+	return nil
+}
+
 func newStartingPreviewRuntime(orgID, previewID uuid.UUID, epoch int, workerNodeID, endpointURL string) *models.PreviewRuntime {
 	now := time.Now().UTC()
 	return &models.PreviewRuntime{
@@ -3670,6 +3752,17 @@ func (s *PreviewStore) DeleteDependencyCache(ctx context.Context, orgID, id uuid
 	)
 	if err != nil {
 		return fmt.Errorf("delete dependency cache: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) DeleteDependencyCacheIfBlobKey(ctx context.Context, orgID, id uuid.UUID, blobKey string) error {
+	_, err := s.db.Exec(ctx,
+		`DELETE FROM preview_dependency_cache WHERE id = @id AND org_id = @org_id AND blob_key = @blob_key`,
+		pgx.NamedArgs{"id": id, "org_id": orgID, "blob_key": blobKey},
+	)
+	if err != nil {
+		return fmt.Errorf("delete dependency cache by blob key: %w", err)
 	}
 	return nil
 }

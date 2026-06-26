@@ -58,6 +58,7 @@ CREATE TABLE session_publish_state (
     pr_creation_error      TEXT,
     pr_push_state          TEXT NOT NULL DEFAULT 'idle',
     pr_push_error          TEXT,
+    pr_push_error_code     TEXT,
     branch_creation_state  TEXT NOT NULL DEFAULT 'idle',
     branch_creation_error  TEXT,
     branch_url             TEXT,
@@ -67,6 +68,13 @@ CREATE TABLE session_publish_state (
         CHECK (pr_creation_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed')),
     CONSTRAINT chk_session_publish_state_pr_push_state
         CHECK (pr_push_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed')),
+    CONSTRAINT chk_session_publish_state_pr_push_error_code
+        CHECK (pr_push_error_code IS NULL OR pr_push_error_code IN (
+            'branch_diverged',
+            'push_rejected',
+            'sandbox_auth_unavailable',
+            'generic'
+        )),
     CONSTRAINT chk_session_publish_state_branch_creation_state
         CHECK (branch_creation_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed'))
 );
@@ -83,14 +91,14 @@ CREATE INDEX idx_session_publish_state_in_flight
 INSERT INTO session_publish_state (
     session_id, org_id,
     pr_creation_state, pr_creation_error,
-    pr_push_state, pr_push_error,
+    pr_push_state, pr_push_error, pr_push_error_code,
     branch_creation_state, branch_creation_error, branch_url,
     created_at, updated_at
 )
 SELECT
     id, org_id,
     pr_creation_state, pr_creation_error,
-    pr_push_state, pr_push_error,
+    pr_push_state, pr_push_error, pr_push_error_code,
     branch_creation_state, branch_creation_error, branch_url,
     created_at, created_at
 FROM sessions
@@ -98,6 +106,7 @@ WHERE pr_creation_state <> 'idle'
    OR pr_creation_error IS NOT NULL
    OR pr_push_state <> 'idle'
    OR pr_push_error IS NOT NULL
+   OR pr_push_error_code IS NOT NULL
    OR branch_creation_state <> 'idle'
    OR branch_creation_error IS NOT NULL
    OR branch_url IS NOT NULL;
@@ -142,6 +151,7 @@ ALTER TABLE sessions
     DROP CONSTRAINT IF EXISTS chk_sessions_linear_prepare_state,
     DROP CONSTRAINT IF EXISTS chk_sessions_pr_creation_state,
     DROP CONSTRAINT IF EXISTS chk_sessions_pr_push_state,
+    DROP CONSTRAINT IF EXISTS chk_sessions_pr_push_error_code,
     DROP CONSTRAINT IF EXISTS chk_sessions_branch_creation_state,
     DROP CONSTRAINT IF EXISTS chk_sessions_capability_snapshot_array;
 
@@ -154,6 +164,7 @@ ALTER TABLE sessions
     DROP COLUMN IF EXISTS pr_creation_error,
     DROP COLUMN IF EXISTS pr_push_state,
     DROP COLUMN IF EXISTS pr_push_error,
+    DROP COLUMN IF EXISTS pr_push_error_code,
     DROP COLUMN IF EXISTS branch_creation_state,
     DROP COLUMN IF EXISTS branch_creation_error,
     DROP COLUMN IF EXISTS branch_url,

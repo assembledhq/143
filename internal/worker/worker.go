@@ -269,6 +269,12 @@ func (w *Worker) poll(ctx context.Context) {
 
 	var retryable *RetryableError
 	if errors.As(err, &retryable) {
+		if retryable.ConsumeAttempt && job.Attempts >= job.MaxAttempts {
+			w.logger.Error().Err(err).Str("job_id", job.ID.String()).Msg("retryable job exhausted attempts, dead-lettering")
+			w.deadLetterJob(ctx, job.ID, *job.LockToken, err.Error())
+			w.runDeadLetterHooks(handlerCtx, err)
+			return
+		}
 		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).

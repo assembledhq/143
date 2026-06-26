@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -19,7 +20,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    ReviewRequestedInput
-		setup    func(*policyStub, *metadataStub)
+		setup    func(*policyStub, *metadataStub, *triggerStub)
 		expected func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub)
 	}{
 		{
@@ -62,9 +63,48 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			},
 		},
 		{
+			name: "creates session from configured GitHub team trigger",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.RequestedLogin = ""
+				in.RequestedTeam = "143-code-reviewer"
+			}),
+			setup: func(_ *policyStub, _ *metadataStub, triggers *triggerStub) {
+				triggers.setting = models.CodeReviewGitHubTriggerSetting{
+					OrgID:        triggers.orgID,
+					RepositoryID: triggers.repositoryID,
+					TeamSlug:     "143-code-reviewer",
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "configured team reviewer request should start a review")
+				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, result.TriggerSource, "team trigger should be recorded as team_reviewer")
+				require.Equal(t, "143-code-reviewer", jobs.payload.RequestedTeamSlug, "worker payload should remember requested team for cleanup")
+				require.Equal(t, 1, sessions.createCalls, "configured team reviewer request should create a session")
+			},
+		},
+		{
+			name: "ignores unrelated GitHub team trigger",
+			input: newReviewRequestedInput(func(in *ReviewRequestedInput) {
+				in.RequestedLogin = ""
+				in.RequestedTeam = "other-team"
+			}),
+			setup: func(_ *policyStub, _ *metadataStub, triggers *triggerStub) {
+				triggers.setting = models.CodeReviewGitHubTriggerSetting{
+					OrgID:        triggers.orgID,
+					RepositoryID: triggers.repositoryID,
+					TeamSlug:     "143-code-reviewer",
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "unrelated team reviewer request should not be processed")
+				require.Equal(t, "reviewer_not_configured", result.IgnoredReason, "ignored result should explain team mismatch")
+				require.Equal(t, 0, sessions.createCalls, "unrelated team reviewer request should not create a session")
+			},
+		},
+		{
 			name:  "reuses running review for same head and policy",
 			input: newReviewRequestedInput(nil),
-			setup: func(p *policyStub, m *metadataStub) {
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
 				m.running = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New()}
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
@@ -78,7 +118,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 		{
 			name:  "reuses terminal review for same output key",
 			input: newReviewRequestedInput(nil),
-			setup: func(p *policyStub, m *metadataStub) {
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
 				m.byOutputKey = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
@@ -93,7 +133,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 		{
 			name:  "does not enqueue when metadata creation races with same output key",
 			input: newReviewRequestedInput(nil),
-			setup: func(p *policyStub, m *metadataStub) {
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
 				m.createResult = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusQueued}
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
@@ -108,7 +148,7 @@ func TestService_HandleReviewRequested(t *testing.T) {
 		{
 			name:  "honors disabled policy",
 			input: newReviewRequestedInput(nil),
-			setup: func(p *policyStub, m *metadataStub) {
+			setup: func(p *policyStub, _ *metadataStub, _ *triggerStub) {
 				cfg := models.DefaultCodeReviewPolicyConfig()
 				cfg.Enabled = false
 				p.resolved.Config = cfg
@@ -128,12 +168,14 @@ func TestService_HandleReviewRequested(t *testing.T) {
 
 			policies := newPolicyStub()
 			metadata := &metadataStub{runningErr: pgx.ErrNoRows}
+			triggers := &triggerStub{orgID: tt.input.OrgID, repositoryID: tt.input.RepositoryID, err: pgx.ErrNoRows}
 			if tt.setup != nil {
-				tt.setup(policies, metadata)
+				tt.setup(policies, metadata, triggers)
 			}
 			sessions := &sessionStub{}
 			jobs := &jobStub{jobID: uuid.New()}
 			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{AppReviewerLogins: []string{"143-code-reviewer"}})
+			svc.SetGitHubTriggerStore(triggers)
 
 			result, err := svc.HandleReviewRequested(context.Background(), tt.input)
 
@@ -141,6 +183,33 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			tt.expected(t, result, policies, metadata, sessions, jobs)
 		})
 	}
+}
+
+type triggerStub struct {
+	orgID        uuid.UUID
+	repositoryID uuid.UUID
+	setting      models.CodeReviewGitHubTriggerSetting
+	err          error
+}
+
+func (s *triggerStub) GetActiveGitHubTrigger(_ context.Context, orgID, repositoryID uuid.UUID) (models.CodeReviewGitHubTriggerSetting, error) {
+	if s.setting.ID != uuid.Nil || s.setting.TeamSlug != "" {
+		s.orgID = orgID
+		s.repositoryID = repositoryID
+		return s.setting, nil
+	}
+	if s.err != nil {
+		return models.CodeReviewGitHubTriggerSetting{}, s.err
+	}
+	return models.CodeReviewGitHubTriggerSetting{}, pgx.ErrNoRows
+}
+
+func (s *triggerStub) SaveGitHubTrigger(context.Context, uuid.UUID, db.SaveCodeReviewGitHubTriggerParams) (models.CodeReviewGitHubTriggerSetting, error) {
+	return models.CodeReviewGitHubTriggerSetting{}, nil
+}
+
+func (s *triggerStub) DeactivateGitHubTrigger(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID) error {
+	return nil
 }
 
 func newReviewRequestedInput(mutator func(*ReviewRequestedInput)) ReviewRequestedInput {

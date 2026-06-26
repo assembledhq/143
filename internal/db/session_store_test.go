@@ -35,7 +35,7 @@ var sessionTestColumns = []string{
 	"runtime_extension_count", "runtime_extension_seconds", "runtime_stop_reason", "runtime_graceful_stop_at",
 	"checkpointed_at", "checkpoint_kind", "checkpoint_capability", "checkpoint_size_bytes", "checkpoint_error",
 	"recovery_state", "recovery_queued_at", "recovery_started_at", "recovery_attempt_count",
-	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
+	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
 	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
@@ -65,6 +65,32 @@ func sqlFragmentPattern(fragment string) string {
 		fields[i] = regexp.QuoteMeta(fields[i])
 	}
 	return strings.Join(fields, `\s+`)
+}
+
+func TestSessionStore_GetByIDScansPRPushErrorCode(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	now := time.Now()
+	row := newAgentSessionRow(sessionID, issueID, orgID, now)
+	setSessionTestColumnValue(row, "pr_push_error_code", string(models.PRPushErrorCodeBranchDiverged))
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	session, err := store.GetByID(context.Background(), orgID, sessionID)
+
+	require.NoError(t, err, "GetByID should scan a typed PR push error code")
+	require.Equal(t, models.PRPushErrorCodeBranchDiverged, session.PRPushErrorCode, "GetByID should expose the scanned PR push error code")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func claimForResumeQueryPattern() string {
@@ -128,6 +154,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		(*string)(nil), // pr_creation_error
 		"idle",         // pr_push_state
 		(*string)(nil), // pr_push_error
+		(*string)(nil), // pr_push_error_code
 		"idle",         // branch_creation_state
 		(*string)(nil), // branch_creation_error
 		(*string)(nil), // branch_url
@@ -476,6 +503,84 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 	}
 }
 
+func TestSessionStore_UpdatePRPushStateWithCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		state     models.PRPushState
+		errMsg    string
+		errCode   models.PRPushErrorCode
+		wantArgs  []any
+		expectErr bool
+	}{
+		{
+			name:    "failed state stores error message and code",
+			state:   models.PRPushStateFailed,
+			errMsg:  "branch diverged",
+			errCode: models.PRPushErrorCodeBranchDiverged,
+			wantArgs: []any{
+				pgxmock.AnyArg(),
+				pgxmock.AnyArg(),
+				string(models.PRPushStateFailed),
+				"branch diverged",
+				string(models.PRPushErrorCodeBranchDiverged),
+			},
+		},
+		{
+			name:  "queued state clears stale error message and code",
+			state: models.PRPushStateQueued,
+			wantArgs: []any{
+				pgxmock.AnyArg(),
+				pgxmock.AnyArg(),
+				string(models.PRPushStateQueued),
+				nil,
+				nil,
+			},
+		},
+		{
+			name:      "invalid error code returns validation error",
+			state:     models.PRPushStateFailed,
+			errMsg:    "bad code",
+			errCode:   models.PRPushErrorCode("bogus"),
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			store := NewSessionStore(mock)
+			store.SetLogger(zerolog.Nop())
+			store.SetStreams(nil)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			now := time.Now()
+
+			if !tt.expectErr {
+				mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
+					WithArgs(tt.wantArgs...).
+					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
+			}
+
+			err = store.UpdatePRPushStateWithCode(context.Background(), orgID, sessionID, tt.state, tt.errMsg, tt.errCode)
+			if tt.expectErr {
+				require.Error(t, err, "UpdatePRPushStateWithCode should reject invalid enum values")
+				require.Contains(t, err.Error(), "invalid PRPushErrorCode", "UpdatePRPushStateWithCode should surface enum validation failures")
+				return
+			}
+
+			require.NoError(t, err, "UpdatePRPushStateWithCode should persist valid state transitions")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestSessionStore_UpdatePRCreationState_PublishesSessionStatus(t *testing.T) {
 	t.Parallel()
 
@@ -581,7 +686,7 @@ func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
 
 			// CAS update should pass exactly two args (id, org_id) and
 			// guard with a NOT IN ('queued','pushing') predicate.
-			expect := mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*session_publish_state\\.pr_push_state NOT IN[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
+			expect := mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*session_publish_state\\.pr_push_state NOT IN[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg())
 			if tt.returnRow {
 				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))

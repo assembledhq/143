@@ -1962,13 +1962,13 @@ func currentPreviewLaunch(summary models.PreviewCurrentSummary) models.PreviewLa
 	}
 	switch {
 	case summary.Status == models.PreviewStatusReady && summary.Freshness == models.PreviewCurrentFreshnessOutdated:
-		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start", SecondaryLabel: "Open stale"}
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionStart, PrimaryLabel: "Start latest preview", SecondaryLabel: "Open stale"}
 	case summary.Status == models.PreviewStatusReady:
-		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionOpen, PrimaryLabel: "Open", SecondaryLabel: "Restart"}
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionOpen, PrimaryLabel: "Open", SecondaryLabel: "Restart runtime"}
 	case summary.Status == models.PreviewStatusStarting:
 		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionCancel, PrimaryLabel: "Cancel"}
 	case summary.Resumable:
-		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionResume, PrimaryLabel: "Resume", SecondaryLabel: "Restart"}
+		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionResume, PrimaryLabel: "Resume", SecondaryLabel: "Restart runtime"}
 	case summary.Status == models.PreviewStatusFailed && summary.Freshness == models.PreviewCurrentFreshnessCurrent:
 		return models.PreviewLaunchRecommendation{Action: models.PreviewLaunchActionRetry, PrimaryLabel: "Retry", SecondaryLabel: "Start"}
 	case summary.Status == models.PreviewStatusFailed:
@@ -2175,6 +2175,7 @@ func (h *BranchPreviewHandler) enrichPreviewPolicyConfigReadiness(ctx context.Co
 		policy.PreviewConfigured = false
 		policy.PreviewReady = false
 		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		policy.PreviewReadinessMissingDetails = previewConfigErrorDetails(err)
 		return
 	}
 	policy.PreviewConfigured = true
@@ -2190,18 +2191,71 @@ func (h *BranchPreviewHandler) enrichPreviewPolicyConfigReadiness(ctx context.Co
 	if err != nil {
 		policy.PreviewReady = false
 		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		policy.PreviewReadinessMissingDetails = previewConfigErrorDetails(err)
 		return
 	}
 	detection := preview.DetectReadiness(cfg)
-	if detection.Readiness != models.PreviewReadinessReady {
+	switch detection.Readiness {
+	case models.PreviewReadinessReady:
+		// Config is structurally valid and self-contained.
+	case models.PreviewReadinessAdminSetupRequired:
+		// The config parses fine; it just needs credentials, secrets, or
+		// network destinations wired up before a preview can run.
+		policy.PreviewReady = false
+		policy.PreviewReadinessMissingReason = "Finish preview setup before enabling GitHub PR links"
+		policy.PreviewReadinessMissingDetails = previewAdminSetupDetails(detection)
+		return
+	default:
 		policy.PreviewReady = false
 		policy.PreviewReadinessMissingReason = "Fix .143/config.json first"
+		policy.PreviewReadinessMissingDetails = detection.ValidationErrors
 		return
 	}
 	if !policy.PreviewSuccessRecorded {
 		policy.PreviewReady = false
 		policy.PreviewReadinessMissingReason = "Run a successful test preview before enabling GitHub PR links"
 	}
+}
+
+// previewConfigErrorDetails turns a parse/inspect error into a short, trimmed
+// detail list for the settings page. Returns nil when there is nothing useful
+// to show so the UI falls back to the headline reason alone.
+func previewConfigErrorDetails(err error) []string {
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		return nil
+	}
+	return []string{msg}
+}
+
+// previewAdminSetupDetails describes the credentials, secret bundles, and
+// network destinations a config declares that still need admin setup before a
+// preview can run.
+func previewAdminSetupDetails(detection models.PreviewDetectionResult) []string {
+	var details []string
+	for _, cred := range detection.MissingCredentials {
+		if name := strings.TrimSpace(cred.CredentialSet); name != "" {
+			details = append(details, fmt.Sprintf("Credential set %q needs admin setup", name))
+		} else {
+			details = append(details, "Credentials need admin setup")
+		}
+	}
+	for _, bundle := range detection.MissingSecretBundles {
+		if name := strings.TrimSpace(bundle.Bundle); name != "" {
+			details = append(details, fmt.Sprintf("Secret bundle %q needs admin setup", name))
+		} else {
+			details = append(details, "A secret bundle needs admin setup")
+		}
+	}
+	for _, dest := range detection.MissingDestinations {
+		if dest = strings.TrimSpace(dest); dest != "" {
+			details = append(details, fmt.Sprintf("Network destination %q needs admin approval", dest))
+		}
+	}
+	return details
 }
 
 func githubPermissionWrites(value string) bool {
@@ -3084,7 +3138,7 @@ func derivePRPreviewLaunch(resp branchPreviewResponse, opts prPreviewLaunchOptio
 			Reason:           models.PreviewLaunchReasonStale,
 			AutoOpen:         false,
 			RepresentsLatest: false,
-			PrimaryLabel:     "Restart",
+			PrimaryLabel:     "Start latest preview",
 			SecondaryLabel:   "Open stale preview",
 			StalePreviewURL:  resp.PreviewURL,
 			Message:          stalePreviewMessage(resp.CommitSHA, latest),

@@ -406,7 +406,7 @@ func TestDerivePRPreviewLaunch(t *testing.T) {
 				Reason:           models.PreviewLaunchReasonStale,
 				AutoOpen:         false,
 				RepresentsLatest: false,
-				PrimaryLabel:     "Restart",
+				PrimaryLabel:     "Start latest preview",
 				SecondaryLabel:   "Open stale preview",
 				StalePreviewURL:  &staleURL,
 				Message:          "This preview is for abc123; the pull request is now at def456.",
@@ -3271,4 +3271,42 @@ func TestEnrichPreviewPolicyConfigReadiness_SetsNotConfiguredOnMissingFile(t *te
 	require.False(t, policy.PreviewConfigured, "404 on config file should mark the repository as not configured")
 	require.False(t, policy.PreviewReady, "404 on config file should mark the repository as not ready")
 	require.Equal(t, "Add .143/config.json first", policy.PreviewReadinessMissingReason)
+}
+
+func TestPreviewConfigErrorDetails(t *testing.T) {
+	t.Parallel()
+
+	require.Nil(t, previewConfigErrorDetails(nil), "a nil error yields no details")
+	require.Nil(t, previewConfigErrorDetails(fmt.Errorf("   ")), "a blank error message yields no details")
+	require.Equal(t,
+		[]string{"unexpected end of JSON input"},
+		previewConfigErrorDetails(fmt.Errorf("  unexpected end of JSON input  ")),
+		"a real error is trimmed into a single detail line",
+	)
+}
+
+func TestPreviewAdminSetupDetails(t *testing.T) {
+	t.Parallel()
+
+	require.Empty(t, previewAdminSetupDetails(models.PreviewDetectionResult{}),
+		"a detection with nothing missing yields no details")
+
+	details := previewAdminSetupDetails(models.PreviewDetectionResult{
+		MissingCredentials: []models.MissingCredential{
+			{CredentialSet: "prod-db"},
+			{CredentialSet: "  "},
+		},
+		MissingSecretBundles: []models.MissingSecretBundle{
+			{Bundle: "stripe"},
+			{Bundle: ""},
+		},
+		MissingDestinations: []string{"api.example.com", "   "},
+	})
+	require.Equal(t, []string{
+		`Credential set "prod-db" needs admin setup`,
+		"Credentials need admin setup",
+		`Secret bundle "stripe" needs admin setup`,
+		"A secret bundle needs admin setup",
+		`Network destination "api.example.com" needs admin approval`,
+	}, details, "named items are quoted, blank names fall back, and blank destinations are skipped")
 }

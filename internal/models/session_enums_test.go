@@ -130,6 +130,82 @@ func TestBranchCreationState_Validate(t *testing.T) {
 	}
 }
 
+func TestPRPushErrorCode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		value     PRPushErrorCode
+		expectErr bool
+	}{
+		{name: "branch diverged", value: PRPushErrorCodeBranchDiverged},
+		{name: "push rejected", value: PRPushErrorCodePushRejected},
+		{name: "sandbox auth unavailable", value: PRPushErrorCodeSandboxAuthUnavailable},
+		{name: "generic", value: PRPushErrorCodeGeneric},
+		{name: "invalid", value: PRPushErrorCode("bogus"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.value.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unknown PR push error codes")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known PR push error codes")
+		})
+	}
+}
+
+func TestPRPushErrorCode_ScanAndValue(t *testing.T) {
+	t.Parallel()
+
+	pushRejected := "push_rejected"
+	generic := PRPushErrorCodeGeneric
+	tests := []struct {
+		name      string
+		src       any
+		expected  PRPushErrorCode
+		expectErr bool
+	}{
+		{name: "string source", src: "branch_diverged", expected: PRPushErrorCodeBranchDiverged},
+		{name: "string pointer source", src: &pushRejected, expected: PRPushErrorCodePushRejected},
+		{name: "byte source", src: []byte("push_rejected"), expected: PRPushErrorCodePushRejected},
+		{name: "typed source", src: PRPushErrorCodeGeneric, expected: PRPushErrorCodeGeneric},
+		{name: "typed pointer source", src: &generic, expected: PRPushErrorCodeGeneric},
+		{name: "nil source clears value", src: nil, expected: ""},
+		{name: "nil string pointer source clears value", src: (*string)(nil), expected: ""},
+		{name: "invalid source rejects", src: "bogus", expectErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var code PRPushErrorCode
+			err := code.Scan(tt.src)
+			if tt.expectErr {
+				require.Error(t, err, "Scan should reject invalid PR push error code sources")
+				return
+			}
+			require.NoError(t, err, "Scan should accept valid PR push error code sources")
+			require.Equal(t, tt.expected, code, "Scan should store the expected PR push error code")
+		})
+	}
+
+	value, err := PRPushErrorCodeBranchDiverged.Value()
+	require.NoError(t, err, "Value should accept valid PR push error codes")
+	require.Equal(t, string(PRPushErrorCodeBranchDiverged), value, "Value should return the string representation for storage")
+
+	value, err = PRPushErrorCode("").Value()
+	require.NoError(t, err, "Value should accept an empty PR push error code")
+	require.Nil(t, value, "Value should store empty PR push error code as NULL")
+}
+
 func TestSessionInteractionMode_Validate(t *testing.T) {
 	t.Parallel()
 
@@ -253,7 +329,7 @@ func TestLinearPrepareState_Validate(t *testing.T) {
 func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000229_session_metadata_side_tables.up.sql"
+	const migrationFile = "000231_session_metadata_side_tables.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "migration file %s should be readable", migrationFile)

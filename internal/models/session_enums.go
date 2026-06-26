@@ -1,6 +1,9 @@
 package models
 
-import "fmt"
+import (
+	"database/sql/driver"
+	"fmt"
+)
 
 // SessionStatus captures the lifecycle of an agent run.
 type SessionStatus string
@@ -193,7 +196,7 @@ const (
 // AllLinearPrepareStates is the canonical, ordered list of valid
 // LinearPrepareState values. Validate() and the
 // chk_session_linear_context_prepare_state CHECK constraint in
-// migrations/000229_session_metadata_side_tables.up.sql both consume this
+// migrations/000231_session_metadata_side_tables.up.sql both consume this
 // vocabulary; TestLinearPrepareStateMigrationVocabularyMatchesGoEnum parses
 // the migration and pins the two together so a value added in one place
 // without the other breaks the build instead of the database.
@@ -286,6 +289,73 @@ func (s PRPushState) Validate() error {
 	default:
 		return fmt.Errorf("invalid PRPushState: %q", s)
 	}
+}
+
+// PRPushErrorCode is the stable machine-readable cause for a failed
+// "Push changes" action. The user-facing message remains separate.
+type PRPushErrorCode string
+
+const (
+	PRPushErrorCodeBranchDiverged         PRPushErrorCode = "branch_diverged"
+	PRPushErrorCodePushRejected           PRPushErrorCode = "push_rejected"
+	PRPushErrorCodeSandboxAuthUnavailable PRPushErrorCode = "sandbox_auth_unavailable"
+	PRPushErrorCodeGeneric                PRPushErrorCode = "generic"
+)
+
+func (c PRPushErrorCode) Validate() error {
+	switch c {
+	case PRPushErrorCodeBranchDiverged,
+		PRPushErrorCodePushRejected,
+		PRPushErrorCodeSandboxAuthUnavailable,
+		PRPushErrorCodeGeneric:
+		return nil
+	default:
+		return fmt.Errorf("invalid PRPushErrorCode: %q", c)
+	}
+}
+
+func (c *PRPushErrorCode) Scan(src any) error {
+	if c == nil {
+		return fmt.Errorf("scan PRPushErrorCode: nil receiver")
+	}
+	if src == nil {
+		*c = ""
+		return nil
+	}
+
+	switch v := src.(type) {
+	case string:
+		*c = PRPushErrorCode(v)
+	case *string:
+		if v == nil {
+			*c = ""
+			return nil
+		}
+		*c = PRPushErrorCode(*v)
+	case []byte:
+		*c = PRPushErrorCode(string(v))
+	case PRPushErrorCode:
+		*c = v
+	case *PRPushErrorCode:
+		if v == nil {
+			*c = ""
+			return nil
+		}
+		*c = *v
+	default:
+		return fmt.Errorf("scan PRPushErrorCode: unsupported source type %T", src)
+	}
+	return c.Validate()
+}
+
+func (c PRPushErrorCode) Value() (driver.Value, error) {
+	if c == "" {
+		return nil, nil
+	}
+	if err := c.Validate(); err != nil {
+		return nil, err
+	}
+	return string(c), nil
 }
 
 // BranchCreationState tracks the branch-only publish action. It mirrors the

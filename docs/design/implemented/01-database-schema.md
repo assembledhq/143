@@ -337,6 +337,7 @@ Per-session publish workflow state for PR creation, follow-up PR pushes, and bra
 | pr_creation_error | text | User-facing PR creation failure |
 | pr_push_state | text | `idle`, `queued`, `pushing`, `succeeded`, `failed` |
 | pr_push_error | text | User-facing PR push failure |
+| pr_push_error_code | text | Machine-readable PR push failure cause |
 | branch_creation_state | text | `idle`, `queued`, `pushing`, `succeeded`, `failed` |
 | branch_creation_error | text | User-facing branch creation failure |
 | branch_url | text | Created branch URL, nullable |

@@ -7,6 +7,7 @@ ALTER TABLE sessions
     ADD COLUMN IF NOT EXISTS pr_creation_error TEXT,
     ADD COLUMN IF NOT EXISTS pr_push_state TEXT NOT NULL DEFAULT 'idle',
     ADD COLUMN IF NOT EXISTS pr_push_error TEXT,
+    ADD COLUMN IF NOT EXISTS pr_push_error_code TEXT,
     ADD COLUMN IF NOT EXISTS branch_creation_state TEXT NOT NULL DEFAULT 'idle',
     ADD COLUMN IF NOT EXISTS branch_creation_error TEXT,
     ADD COLUMN IF NOT EXISTS branch_url TEXT,
@@ -28,6 +29,7 @@ SET pr_creation_state = sps.pr_creation_state,
     pr_creation_error = sps.pr_creation_error,
     pr_push_state = sps.pr_push_state,
     pr_push_error = sps.pr_push_error,
+    pr_push_error_code = sps.pr_push_error_code,
     branch_creation_state = sps.branch_creation_state,
     branch_creation_error = sps.branch_creation_error,
     branch_url = sps.branch_url
@@ -50,6 +52,13 @@ ALTER TABLE sessions
         CHECK (pr_creation_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed')) NOT VALID,
     ADD CONSTRAINT chk_sessions_pr_push_state
         CHECK (pr_push_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed')) NOT VALID,
+    ADD CONSTRAINT chk_sessions_pr_push_error_code
+        CHECK (pr_push_error_code IS NULL OR pr_push_error_code IN (
+            'branch_diverged',
+            'push_rejected',
+            'sandbox_auth_unavailable',
+            'generic'
+        )) NOT VALID,
     ADD CONSTRAINT chk_sessions_branch_creation_state
         CHECK (branch_creation_state IN ('idle', 'queued', 'pushing', 'succeeded', 'failed')) NOT VALID,
     ADD CONSTRAINT chk_sessions_capability_snapshot_array
@@ -58,6 +67,7 @@ ALTER TABLE sessions
 ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_linear_prepare_state;
 ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_pr_creation_state;
 ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_pr_push_state;
+ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_pr_push_error_code;
 ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_branch_creation_state;
 ALTER TABLE sessions VALIDATE CONSTRAINT chk_sessions_capability_snapshot_array;
 
