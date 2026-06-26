@@ -14,6 +14,7 @@ import {
   ExternalLink,
   HelpCircle,
   KeyRound,
+  Loader2,
   MonitorPlay,
   Pencil,
   Plus,
@@ -535,10 +536,8 @@ function RepoPreviewCard({
   testPreviewPending: boolean;
 }) {
   const missingPermissions =
-    (policy.github_pr_comment_enabled &&
-      !policy.github_pr_comment_permission_ok) ||
-    (policy.github_commit_status_enabled &&
-      !policy.github_commit_status_permission_ok);
+    !policy.github_pr_comment_permission_ok ||
+    !policy.github_commit_status_permission_ok;
   const showTestPreview =
     policy.preview_configured &&
     (!policy.preview_success_recorded ||
@@ -550,7 +549,7 @@ function RepoPreviewCard({
     ? policy.preview_readiness_missing_reason ||
       "Run a successful test preview before enabling GitHub PR links"
     : missingPermissions
-      ? "GitHub App permissions are missing for one or more selected surfaces"
+      ? "GitHub App permissions are missing for PR comments or commit statuses"
       : "";
   const canEnable = policy.preview_ready && !missingPermissions;
   const configNames = policy.preview_config_names ?? [];
@@ -698,7 +697,11 @@ function RepoPreviewCard({
               checked={policy.pr_preview_surfaces_enabled}
               disabled={!canEnable && !policy.pr_preview_surfaces_enabled}
               onCheckedChange={(checked) =>
-                onUpdatePolicy({ pr_preview_surfaces_enabled: checked })
+                onUpdatePolicy({
+                  pr_preview_surfaces_enabled: checked,
+                  github_pr_comment_enabled: true,
+                  github_commit_status_enabled: true,
+                })
               }
             />
             <span className="text-xs text-muted-foreground">
@@ -708,43 +711,10 @@ function RepoPreviewCard({
             </span>
           </div>
           <p className="text-xs text-muted-foreground">
-            When enabled, 143 publishes preview URLs to GitHub PR comments or
-            commit statuses. Auto-build can still create previews internally
+            When enabled, 143 publishes preview URLs to both GitHub PR comments
+            and commit statuses. Auto-build can still create previews internally
             when publishing is off.
           </p>
-          <div className="space-y-1.5">
-            <span className="block text-xs text-muted-foreground">Surfaces</span>
-            <div className="flex flex-wrap gap-3">
-              <div className="flex items-center gap-2 text-xs">
-                <Switch
-                  aria-label={`Enable PR comment preview link for ${policy.repository_full_name}`}
-                  checked={policy.github_pr_comment_enabled}
-                  disabled={
-                    !policy.pr_preview_surfaces_enabled ||
-                    !policy.github_pr_comment_permission_ok
-                  }
-                  onCheckedChange={(checked) =>
-                    onUpdatePolicy({ github_pr_comment_enabled: checked })
-                  }
-                />
-                Comment
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <Switch
-                  aria-label={`Enable commit status preview link for ${policy.repository_full_name}`}
-                  checked={policy.github_commit_status_enabled}
-                  disabled={
-                    !policy.pr_preview_surfaces_enabled ||
-                    !policy.github_commit_status_permission_ok
-                  }
-                  onCheckedChange={(checked) =>
-                    onUpdatePolicy({ github_commit_status_enabled: checked })
-                  }
-                />
-                Status
-              </div>
-            </div>
-          </div>
           {showTestPreview ? (
             <Button
               type="button"
@@ -753,8 +723,12 @@ function RepoPreviewCard({
               disabled={testPreviewDisabled}
               onClick={() => onTestPreview(selectedPreviewConfig || undefined)}
             >
-              <MonitorPlay className="mr-2 h-4 w-4" />
-              Test preview
+              {testPreviewPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <MonitorPlay className="mr-2 h-4 w-4" />
+              )}
+              {testPreviewPending ? "Testing preview" : "Test preview"}
             </Button>
           ) : null}
         </div>

@@ -639,6 +639,10 @@ type RepositoryPreviewPolicyPatch struct {
 
 // UpsertRepositoryPreviewPolicy stores preview policy for one repository.
 func (s *PreviewStore) UpsertRepositoryPreviewPolicy(ctx context.Context, orgID, repositoryID, userID uuid.UUID, patch RepositoryPreviewPolicyPatch) (*models.RepositoryPreviewPolicy, error) {
+	allGitHubSurfacesEnabled := true
+	patch.GitHubPRCommentEnabled = &allGitHubSurfacesEnabled
+	patch.GitHubCommitStatusEnabled = &allGitHubSurfacesEnabled
+
 	if patch.AutoMode != nil {
 		if err := patch.AutoMode.Validate(); err != nil {
 			return nil, err
