@@ -6489,6 +6489,36 @@ func TestStartBranchPreviewHandler_PreviewCapacityRetriesTargetsAvailableWorker(
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestStartBranchPreviewHandler_StartupInterruptedRetriesWithFreshWorkerSelection(t *testing.T) {
+	t.Parallel()
+
+	logger := zerolog.Nop()
+	starter := &mockPreviewStarter{err: fmt.Errorf("launch preview: %w", previewsvc.ErrPreviewStartupInterrupted)}
+	handler := newStartBranchPreviewHandler(nil, &Services{PreviewStarter: starter}, logger)
+
+	payload := previewsvc.StartBranchPreviewJobPayload{
+		OrgID:           uuid.New(),
+		UserID:          uuid.New(),
+		PreviewID:       uuid.New(),
+		PreviewTargetID: uuid.New(),
+		RepositoryID:    uuid.New(),
+		Branch:          "feature/previews",
+		CommitSHA:       "0123456789abcdef0123456789abcdef01234567",
+	}
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err, "start_branch_preview payload should marshal")
+
+	err = handler(context.Background(), models.JobTypeStartBranchPreview, raw)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "branch preview startup interruptions should retry instead of dead-lettering")
+	require.True(t, retryable.ConsumeAttempt, "startup interruption retries should consume attempts so they remain bounded")
+	require.True(t, retryable.BypassMaxRetryDuration, "startup interruption retries should bypass the generic retry window")
+	require.True(t, retryable.ClearTargetNodeID, "startup interruption retries should clear stale worker affinity")
+	require.NotNil(t, retryable.RetryAfter, "startup interruption retry should use a short fixed delay")
+	require.Equal(t, previewStartupInterruptedRetryDelay, *retryable.RetryAfter, "startup interruption retry should use the configured delay")
+}
+
 func TestStartPreviewHandler_PreviewCapacityRetries(t *testing.T) {
 	t.Parallel()
 
