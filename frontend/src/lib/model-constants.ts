@@ -87,6 +87,7 @@ export const OPENCODE_MODEL_QWEN_3_6_PLUS = "opencode/qwen3.6-plus";
 export const OPENCODE_MODEL_DEEPSEEK_V4_FLASH = "opencode/deepseek-v4-flash";
 export const OPENCODE_MODEL_DEEPSEEK_V4_PRO = "opencode/deepseek-v4-pro";
 export const OPENCODE_MODEL_GLM_5_2 = "opencode/glm-5.2";
+export const OPENCODE_MODEL_OPENROUTER_GLM_5_2 = "openrouter/z-ai/glm-5.2";
 export const OPENCODE_MODEL_GLM_5_1 = "opencode/glm-5.1";
 export const OPENCODE_MODEL_KIMI_K2_5 = "opencode/kimi-k2.5";
 export const OPENCODE_MODEL_GPT_5_4 = "openai/gpt-5.4";
@@ -102,6 +103,8 @@ export const OPENCODE_MODEL_CLAUDE_OPUS_47 = "anthropic/claude-opus-4-7";
 export const OPENCODE_MODEL_CLAUDE_FABLE_5 = "opencode/claude-fable-5";
 
 export const AVAILABLE_OPENCODE_MODELS = [
+  OPENCODE_MODEL_GLM_5_2,
+  OPENCODE_MODEL_OPENROUTER_GLM_5_2,
   OPENCODE_MODEL_GPT_5_4_MINI,
   OPENCODE_MODEL_GPT_5_3_CODEX_SPARK,
   OPENCODE_MODEL_CLAUDE_HAIKU_45,
@@ -113,7 +116,6 @@ export const AVAILABLE_OPENCODE_MODELS = [
   OPENCODE_MODEL_QWEN_3_6_PLUS,
   OPENCODE_MODEL_DEEPSEEK_V4_FLASH,
   OPENCODE_MODEL_DEEPSEEK_V4_PRO,
-  OPENCODE_MODEL_GLM_5_2,
   OPENCODE_MODEL_GLM_5_1,
   OPENCODE_MODEL_KIMI_K2_5,
   OPENCODE_MODEL_GPT_5_4,

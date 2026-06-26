@@ -49,6 +49,8 @@ func TestOpenCodeModelConstants(t *testing.T) {
 
 	require.Equal(t,
 		[]string{
+			OpenCodeModelGLM52,
+			OpenCodeModelOpenRouterGLM52,
 			OpenCodeModelGPT54Mini,
 			OpenCodeModelGPT53CodexSpark,
 			OpenCodeModelClaudeHaiku45,
@@ -60,7 +62,6 @@ func TestOpenCodeModelConstants(t *testing.T) {
 			OpenCodeModelQwen36Plus,
 			OpenCodeModelDeepSeekV4Flash,
 			OpenCodeModelDeepSeekV4Pro,
-			OpenCodeModelGLM52,
 			OpenCodeModelGLM51,
 			OpenCodeModelKimiK25,
 			OpenCodeModelGPT54,

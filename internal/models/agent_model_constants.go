@@ -107,6 +107,7 @@ const (
 	OpenCodeModelDeepSeekV4Flash = "opencode/deepseek-v4-flash"
 	OpenCodeModelDeepSeekV4Pro   = "opencode/deepseek-v4-pro"
 	OpenCodeModelGLM52           = "opencode/glm-5.2"
+	OpenCodeModelOpenRouterGLM52 = "openrouter/z-ai/glm-5.2"
 	OpenCodeModelGLM51           = "opencode/glm-5.1"
 	OpenCodeModelKimiK25         = "opencode/kimi-k2.5"
 	OpenCodeModelGPT54           = "openai/gpt-5.4"
@@ -123,6 +124,8 @@ const (
 )
 
 var AvailableOpenCodeModels = []string{
+	OpenCodeModelGLM52,
+	OpenCodeModelOpenRouterGLM52,
 	OpenCodeModelGPT54Mini,
 	OpenCodeModelGPT53CodexSpark,
 	OpenCodeModelClaudeHaiku45,
@@ -134,7 +137,6 @@ var AvailableOpenCodeModels = []string{
 	OpenCodeModelQwen36Plus,
 	OpenCodeModelDeepSeekV4Flash,
 	OpenCodeModelDeepSeekV4Pro,
-	OpenCodeModelGLM52,
 	OpenCodeModelGLM51,
 	OpenCodeModelKimiK25,
 	OpenCodeModelGPT54,

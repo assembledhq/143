@@ -212,6 +212,7 @@ describe("Agent settings page", () => {
 	    expect(within(dialog).queryByText("Auth type")).not.toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("OpenCode provider")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Default model")).toBeInTheDocument();
+	    expect(within(dialog).getByText("Open-source models use only audited US-based OpenCode or OpenRouter inference provider routes.")).toBeInTheDocument();
 	    expect(within(dialog).getByLabelText("Custom model override")).toBeInTheDocument();
 	    expect(within(dialog).getByPlaceholderText("OpenCode or provider key")).toBeInTheDocument();
 	  });
@@ -246,6 +247,7 @@ describe("Agent settings page", () => {
 	    await user.click(screen.getByRole("button", { name: "Add auth" }));
 	    const dialog = await screen.findByRole("dialog");
 	    await user.click(screen.getByLabelText("OpenCode"));
+	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("opencode/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },
 	    });
@@ -263,7 +265,7 @@ describe("Agent settings page", () => {
 	        api_key: "sk-or-opencode",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
 	        },
 	      });
@@ -314,7 +316,7 @@ describe("Agent settings page", () => {
 	        api_key: "sk-or-v1-opencode",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	        },
 	      });
 	    });

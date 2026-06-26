@@ -49,8 +49,10 @@ describe("model constants", () => {
     ]);
   });
 
-  it("includes OpenCode models with cheaper models first", () => {
+  it("includes OpenCode models with GLM 5.2 first", () => {
     expect(AVAILABLE_OPENCODE_MODELS).toEqual([
+      "opencode/glm-5.2",
+      "openrouter/z-ai/glm-5.2",
       "openai/gpt-5.4-mini",
       "openai/gpt-5.3-codex-spark",
       "anthropic/claude-haiku-4-5",
@@ -62,7 +64,6 @@ describe("model constants", () => {
       "opencode/qwen3.6-plus",
       "opencode/deepseek-v4-flash",
       "opencode/deepseek-v4-pro",
-      "opencode/glm-5.2",
       "opencode/glm-5.1",
       "opencode/kimi-k2.5",
       "openai/gpt-5.4",

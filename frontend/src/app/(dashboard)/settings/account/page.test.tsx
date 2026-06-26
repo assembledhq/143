@@ -289,6 +289,8 @@ describe("Account settings page", () => {
 	    await user.click(screen.getAllByRole("button", { name: "Add auth" })[0]);
 	    const dialog = await screen.findByRole("dialog");
 	    fireEvent.click(await within(dialog).findByLabelText("OpenCode"));
+	    expect(within(dialog).getByText("Open-source models use only audited US-based OpenCode or OpenRouter inference provider routes.")).toBeInTheDocument();
+	    expect(within(dialog).getByRole("combobox", { name: "Default model" })).toHaveTextContent("opencode/glm-5.2");
 	    fireEvent.change(within(dialog).getByPlaceholderText("OpenCode or provider key"), {
 	      target: { value: "sk-or-opencode" },
 	    });
@@ -307,7 +309,7 @@ describe("Account settings page", () => {
 	        api_key: "sk-or-opencode",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	          OPENCODE_MODEL_CUSTOM: "xai/grok-code-fast",
 	        },
 	      });
@@ -361,7 +363,7 @@ describe("Account settings page", () => {
 	        api_key: "sk-or-v1-personal",
 	        api_type: "openrouter",
 	        agent_defaults: {
-	          OPENCODE_MODEL: "openai/gpt-5.4-mini",
+	          OPENCODE_MODEL: "openrouter/z-ai/glm-5.2",
 	        },
 	      });
 	    });

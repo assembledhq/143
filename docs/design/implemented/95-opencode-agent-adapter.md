@@ -4,9 +4,15 @@
 
 ## Implementation Status
 
-Implemented as a first-class `opencode` coding agent with explicit OpenCode-scoped API-key credentials, sandbox installation via `opencode-ai`, non-interactive `opencode run --format json` execution, explicit `--session` resume, curated cost-first model metadata, and frontend settings/session picker surfaces.
+Implemented as a first-class `opencode` coding agent with explicit OpenCode-scoped API-key credentials, sandbox installation via `opencode-ai`, non-interactive `opencode run --format json` execution, explicit `--session` resume, curated cost-first model metadata, and frontend settings/session picker surfaces. The default OpenCode model is GLM 5.2.
 
-OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`); OpenRouter remains the flexible multi-provider escape hatch.
+OpenCode credentials are stored under `ProviderOpenCode` with an optional `backing_provider`. Runtime env injection maps that explicit OpenCode row to the provider-specific env var OpenCode expects; Codex, Claude Code, OpenCode, and OpenRouter rows are not reused implicitly. Direct backing providers are validated against the selected model prefix (`openai/*`, `anthropic/*`, `google/*`, or `opencode/*`). OpenRouter-backed curated model choices use OpenCode's `openrouter/<upstream-model>` model IDs; the custom model field remains the escape hatch for uncurated OpenRouter slugs.
+
+Open-source model choices are limited to audited US-based inference-provider routes:
+
+- Native OpenCode GLM 5.2 uses `opencode/glm-5.2`, backed by OpenCode/Anomaly's US-governed hosted service.
+- OpenRouter GLM 5.2 uses `openrouter/z-ai/glm-5.2` with a generated per-model `options.provider` block that sets `only` and `order` to `deepinfra`, `fireworks`, `cloudflare`, and `together`, disables fallbacks, denies provider data collection, and requires parameter support.
+- The audit source of truth is OpenRouter's GLM 5.2 endpoint list plus provider-company location checks. OpenCode's generated config must not add unaudited OpenRouter provider slugs without updating this audit.
 
 ## Context
 
@@ -102,6 +108,7 @@ Changes:
     - `opencode/deepseek-v4-flash`
     - `opencode/deepseek-v4-pro`
     - `opencode/glm-5.2`
+    - `openrouter/z-ai/glm-5.2`
     - `opencode/glm-5.1`
     - `opencode/kimi-k2.5`
   - **Balanced models**

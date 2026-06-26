@@ -641,6 +641,32 @@ func TestOpenCodeRuntimeConfigContent_ReferencesSelectedProviderEnv(t *testing.T
 	}
 }
 
+func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders(t *testing.T) {
+	t.Parallel()
+
+	var config map[string]any
+	cfg := models.OpenCodeConfig{
+		APIKey:          "or-key",
+		BackingProvider: models.ProviderOpenRouter,
+		Model:           models.OpenCodeModelOpenRouterGLM52,
+	}
+	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
+	require.Equal(t, []any{"openrouter"}, config["enabled_providers"], "OpenCode should only enable the selected OpenRouter provider")
+
+	providers := config["provider"].(map[string]any)
+	openRouterProvider := providers["openrouter"].(map[string]any)
+	modelsConfig := openRouterProvider["models"].(map[string]any)
+	glmConfig := modelsConfig["~z-ai/glm-5.2"].(map[string]any)
+	options := glmConfig["options"].(map[string]any)
+	providerRouting := options["provider"].(map[string]any)
+
+	require.Equal(t, []any{"deepinfra", "fireworks", "cloudflare", "together"}, providerRouting["only"], "OpenRouter GLM should only route to audited US-based inference providers")
+	require.Equal(t, []any{"deepinfra", "fireworks", "cloudflare", "together"}, providerRouting["order"], "OpenRouter GLM should prefer the audited US-based inference providers in deterministic order")
+	require.Equal(t, false, providerRouting["allow_fallbacks"], "OpenRouter GLM should not fall back to unaudited providers")
+	require.Equal(t, "deny", providerRouting["data_collection"], "OpenRouter GLM should deny providers that may collect data")
+	require.Equal(t, true, providerRouting["require_parameters"], "OpenRouter GLM should require full parameter support")
+}
+
 func TestAgentEnvFetchIntegrationCredentialsUsesBatchLookup(t *testing.T) {
 	t.Parallel()
 
