@@ -313,7 +313,6 @@ type CodeReviewRiskPolicy struct {
 type CodeReviewAgentRoster struct {
 	Reviewers             []AgentType `json:"reviewers"`
 	Orchestrator          AgentType   `json:"orchestrator"`
-	ReviewDepth           string      `json:"review_depth"`
 	DisagreementBlocks    bool        `json:"disagreement_blocks"`
 	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
 	TimeoutSeconds        int         `json:"timeout_seconds"`
@@ -390,7 +389,6 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
 			Orchestrator:          AgentTypeOpenCode,
-			ReviewDepth:           "standard",
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,

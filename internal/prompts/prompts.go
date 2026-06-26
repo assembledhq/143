@@ -300,7 +300,6 @@ type CodeReviewReviewerPromptData struct {
 	BaseSHA                 string
 	HeadSHA                 string
 	PolicyVersion           int
-	ReviewDepth             string
 	ApprovalMode            any
 	InlineCommentLimit      int
 	RequiredReviewerQuorum  int
@@ -355,7 +354,6 @@ type CodeReviewOrchestratorPromptData struct {
 	BaseSHA                string
 	HeadSHA                string
 	PolicyVersion          int
-	ReviewDepth            string
 	ApprovalMode           any
 	RequiredReviewerQuorum int
 	InlineCommentLimit     int

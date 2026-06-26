@@ -11,7 +11,6 @@ PR:
 
 Policy:
 - Policy version: {{.PolicyVersion}}
-- Review depth: {{.ReviewDepth}}
 - Approval mode: {{.ApprovalMode}}
 - Required reviewer quorum: {{.RequiredReviewerQuorum}}
 - Inline comment cap: {{.InlineCommentLimit}}
