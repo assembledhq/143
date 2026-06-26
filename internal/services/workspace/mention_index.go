@@ -19,20 +19,65 @@ const (
 )
 
 var mentionIndexIgnoredDirNames = map[string]struct{}{
-	".git":         {},
-	".next":        {},
-	".nuxt":        {},
-	".pnpm-store":  {},
-	".turbo":       {},
-	".venv":        {},
-	"__pycache__":  {},
-	"build":        {},
-	"coverage":     {},
-	"dist":         {},
-	"node_modules": {},
-	"target":       {},
-	"vendor":       {},
-	"venv":         {},
+	".angular":      {},
+	".cache":        {},
+	".dart_tool":    {},
+	".git":          {},
+	".gradle":       {},
+	".idea":         {},
+	".mypy_cache":   {},
+	".next":         {},
+	".nox":          {},
+	".nuxt":         {},
+	".parcel-cache": {},
+	".pnpm-store":   {},
+	".pytest_cache": {},
+	".ruff_cache":   {},
+	".svelte-kit":   {},
+	".tox":          {},
+	".turbo":        {},
+	".venv":         {},
+	".yarn":         {},
+	"__pycache__":   {},
+	"build":         {},
+	"coverage":      {},
+	"dist":          {},
+	"htmlcov":       {},
+	"node_modules":  {},
+	"obj":           {},
+	"target":        {},
+	"vendor":        {},
+	"venv":          {},
+}
+
+var mentionIndexIgnoredFileNames = map[string]struct{}{
+	".coverage":       {},
+	".DS_Store":       {},
+	".ds_store":       {},
+	".eslintcache":    {},
+	".stylelintcache": {},
+	"desktop.ini":     {},
+	"Thumbs.db":       {},
+	"thumbs.db":       {},
+}
+
+var mentionIndexIgnoredFileSuffixes = []string{
+	".a",
+	".class",
+	".dll",
+	".dylib",
+	".ear",
+	".exe",
+	".jar",
+	".o",
+	".obj",
+	".prof",
+	".pyc",
+	".pyo",
+	".so",
+	".test",
+	".tsbuildinfo",
+	".war",
 }
 
 type MentionIndexEntry struct {
@@ -186,8 +231,22 @@ func mentionIndexIgnoredDirNameList() []string {
 }
 
 func mentionIndexShouldIgnorePath(cleanPath string) bool {
-	for _, part := range strings.Split(cleanPath, "/") {
+	parts := strings.Split(cleanPath, "/")
+	for _, part := range parts {
 		if _, ok := mentionIndexIgnoredDirNames[part]; ok {
+			return true
+		}
+	}
+	base := parts[len(parts)-1]
+	baseLower := strings.ToLower(base)
+	if _, ok := mentionIndexIgnoredFileNames[base]; ok {
+		return true
+	}
+	if _, ok := mentionIndexIgnoredFileNames[baseLower]; ok {
+		return true
+	}
+	for _, suffix := range mentionIndexIgnoredFileSuffixes {
+		if strings.HasSuffix(baseLower, suffix) {
 			return true
 		}
 	}
