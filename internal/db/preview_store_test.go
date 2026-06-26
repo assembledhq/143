@@ -4478,6 +4478,35 @@ func TestPreviewStore_DeleteExpiredDependencyCacheLocations(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+// TestPreviewStore_DeleteDependencyCacheIfBlobKeyGuardsOnBlobKey locks in the
+// compare-and-delete guard behind the preview build-cache checksum race fix: the
+// delete must be scoped to blob_key (not just id+org) and must tolerate matching
+// zero rows. A restore runs against a snapshot of the cache row, so if a
+// concurrent save has already repointed that row at a fresh, valid blob, the
+// stale restore's cleanup must NOT remove the new entry — otherwise every
+// following preview is forced into a cold rebuild. Existing restore tests assert
+// the call with AnyArg, so a regression to a blind delete-by-id would slip past
+// them; this pins the blob_key predicate and the no-op-on-zero-rows contract.
+func TestPreviewStore_DeleteDependencyCacheIfBlobKeyGuardsOnBlobKey(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	id := uuid.New()
+	orgID := uuid.New()
+	blobKey := "deps/build_artifact/abcd/0f1e2d3c.tar.gz"
+
+	mock.ExpectExec(`DELETE FROM preview_dependency_cache WHERE id = @id AND org_id = @org_id AND blob_key = @blob_key`).
+		WithArgs(id, orgID, blobKey).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+
+	err = NewPreviewStore(mock).DeleteDependencyCacheIfBlobKey(context.Background(), orgID, id, blobKey)
+	require.NoError(t, err, "guarded delete that matches no rows (entry superseded by a concurrent save) must be a graceful no-op")
+	require.NoError(t, mock.ExpectationsWereMet(), "guarded delete must scope on blob_key so a stale restore cannot wipe a freshly published entry")
+}
+
 func TestPreviewStore_RepositoryPreviewReadyExcludesLatestBrokenAttempt(t *testing.T) {
 	t.Parallel()
 
