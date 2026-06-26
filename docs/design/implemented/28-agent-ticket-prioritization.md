@@ -904,7 +904,7 @@ w.Register("pm_analyze", newPMAnalyzeHandler(stores, services, logger))
 
 #### Agent Run Model (`internal/models/models.go`)
 
-Add PM-linkage fields to `AgentRun`:
+Add PM-linkage fields to `AgentRun`/`Session` responses. These fields are still part of the API model, but the current database implementation hydrates them from `session_pm_context` rather than storing them directly on `sessions`.
 
 ```go
 type AgentRun struct {
@@ -947,13 +947,17 @@ The `product_context_snapshot` column captures the `ProductContext` that was act
 
 See the "Decision Log: Institutional Memory" section below for the full table definition and usage. The migration creates both `pm_plans` and `pm_decision_log` together.
 
-#### Alter Table: `agent_runs`
+#### Session PM Context
 
 ```sql
-ALTER TABLE agent_runs
-    ADD COLUMN pm_plan_id  UUID REFERENCES pm_plans(id),
-    ADD COLUMN pm_approach TEXT,
-    ADD COLUMN pm_reasoning TEXT;
+CREATE TABLE session_pm_context (
+    session_id      UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    org_id          UUID NOT NULL REFERENCES organizations(id),
+    pm_plan_id      UUID REFERENCES pm_plans(id),
+    pm_approach     TEXT,
+    pm_reasoning    TEXT,
+    project_task_id UUID REFERENCES project_tasks(id)
+);
 ```
 
 ### 7. API Endpoints

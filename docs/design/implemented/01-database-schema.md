@@ -271,6 +271,41 @@ Each attempt to fix an issue via a coding agent.
 **Constraints:**
 - `parent_run_id` is a self-referential FK: `FOREIGN KEY (parent_run_id) REFERENCES agent_runs(id)`. This prevents orphaned revision runs and enforces referential integrity for the revision chain.
 
+### `session_pm_context`
+
+PM and project execution context for a coding session. These fields are hydrated into session API responses, but they are stored outside the core `sessions` row so PM/project metadata does not widen the execution-state table.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| pm_plan_id | uuid | FK -> pm_plans, nullable |
+| pm_approach | text | PM or automation prompt seed/guidance |
+| pm_reasoning | text | PM reasoning shown in context UI |
+| project_task_id | uuid | FK -> project_tasks, nullable |
+| created_at | timestamptz | |
+| updated_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — tenant-scoped point lookup
+- `(org_id, pm_plan_id)` where `pm_plan_id IS NOT NULL` — PM plan sessions
+- `(org_id, project_task_id)` where `project_task_id IS NOT NULL` — project task sessions
+
+### `session_automation_links`
+
+Links sessions to automation runs without storing automation ownership on the core `sessions` table. One automation run may link to multiple sessions.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| session_id | uuid | PK, FK -> sessions ON DELETE CASCADE |
+| org_id | uuid | FK -> organizations |
+| automation_run_id | uuid | FK -> automation_runs |
+| created_at | timestamptz | |
+
+**Indexes:**
+- `(org_id, session_id)` — tenant-scoped point lookup
+- `(org_id, automation_run_id, created_at DESC)` — sessions per automation run
+
 ### `agent_run_logs`
 
 Streaming logs from an agent run for real-time UI display.
