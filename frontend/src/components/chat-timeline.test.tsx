@@ -100,6 +100,23 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("Assistant replied")).toBeInTheDocument();
   });
 
+  it("labels system-authored repair prompts", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 1,
+          content: "Please fix these tests and push changes to the pull request branch.",
+          role: "user",
+          source: "system_auto_repair",
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByText("143 auto-repair")).toBeInTheDocument();
+    expect(screen.getByText("Please fix these tests and push changes to the pull request branch.")).toBeInTheDocument();
+  });
+
   it("anchors grouped hidden logs by the first hidden transcript entry", () => {
     const entries: TimelineEntry[] = [
       {

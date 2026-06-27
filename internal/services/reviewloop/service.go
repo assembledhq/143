@@ -2,6 +2,7 @@ package reviewloop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,8 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
@@ -51,6 +54,14 @@ type Runtime interface {
 	SendMessage(ctx context.Context, input threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error)
 }
 
+type OrgStore interface {
+	GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error)
+}
+
+type UserSettingsStore interface {
+	GetByIDGlobalWithSettings(ctx context.Context, userID uuid.UUID) (models.UserWithSettings, error)
+}
+
 type RuntimeAdapter struct {
 	Sessions interface {
 		GetByID(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
@@ -74,8 +85,12 @@ func (a RuntimeAdapter) SendMessage(ctx context.Context, input threadsvc.SendMes
 }
 
 type Service struct {
-	store   Store
-	runtime Runtime
+	store     Store
+	runtime   Runtime
+	orgs      OrgStore
+	users     UserSettingsStore
+	txStarter db.TxStarter
+	jobs      *db.JobStore
 }
 
 type Option func(*Service)
@@ -86,6 +101,15 @@ func NewService(store Store, runtime Runtime, opts ...Option) *Service {
 		opt(s)
 	}
 	return s
+}
+
+func WithAutoReadinessDependencies(orgs OrgStore, users UserSettingsStore, txStarter db.TxStarter, jobs *db.JobStore) Option {
+	return func(s *Service) {
+		s.orgs = orgs
+		s.users = users
+		s.txStarter = txStarter
+		s.jobs = jobs
+	}
 }
 
 type StartReviewLoopRequest struct {
@@ -226,10 +250,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 			if loop.AutomationRunID != nil {
 				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
 			}
-			if err := s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary); err != nil {
-				return err
-			}
-			return nil
+			return s.markPassCleanAndMaybeEnqueueReadiness(ctx, orgID, loop, pass, decision, summary)
 		}
 		msg, err := s.sendPlain(ctx, loop, prompts.ReviewLoopDecisionPrompt(), nil, withContinuationDedupeKey(reviewLoopContinuationDedupeKey(loop.ID, pass.ID, "decision")))
 		if err != nil {
@@ -244,10 +265,7 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 			if loop.AutomationRunID != nil {
 				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
 			}
-			if err := s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary); err != nil {
-				return err
-			}
-			return nil
+			return s.markPassCleanAndMaybeEnqueueReadiness(ctx, orgID, loop, pass, decision, summary)
 		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
 			return s.startLegacyFixPass(ctx, orgID, loop, pass, decision)
 		case summary == "":
@@ -263,6 +281,85 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		return s.completeFixAndStartNextReview(ctx, orgID, loop, pass, summary)
 	default:
 		return nil
+	}
+}
+
+func (s *Service) markPassCleanAndMaybeEnqueueReadiness(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision, summary string) error {
+	session, err := s.runtime.GetSession(ctx, orgID, loop.SessionID)
+	if err != nil {
+		return err
+	}
+	enabled, err := s.autoReadinessEnabled(ctx, orgID, models.ReviewLoopStatusClean, session.TriggeredByUserID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return s.store.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary)
+	}
+	if s.txStarter == nil || s.jobs == nil {
+		return fmt.Errorf("auto-readiness after review loop requires transaction and job stores")
+	}
+	tx, err := s.txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin review loop auto-readiness tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txReviewLoops := db.NewSessionReviewLoopStore(tx)
+	if err := txReviewLoops.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary); err != nil {
+		return err
+	}
+	_, jobID, err := prreadinesssvc.EnqueueRunInTx(ctx, tx, prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: nil,
+	})
+	if err != nil {
+		return fmt.Errorf("enqueue PR readiness after review loop: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit review loop auto-readiness tx: %w", err)
+	}
+	if jobID != uuid.Nil {
+		s.jobs.Notify(context.WithoutCancel(ctx), jobID)
+	}
+	return nil
+}
+
+func (s *Service) autoReadinessEnabled(ctx context.Context, orgID uuid.UUID, terminalStatus models.ReviewLoopStatus, triggeredByUserID *uuid.UUID) (bool, error) {
+	if s.orgs == nil {
+		return false, nil
+	}
+	org, err := s.orgs.GetByID(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("load org settings for review-loop auto-readiness: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(json.RawMessage(org.Settings))
+	if err != nil {
+		return false, fmt.Errorf("parse org settings for review-loop auto-readiness: %w", err)
+	}
+	followThrough := settings.SessionAutomation.AutomaticFollowThrough
+	orgDefault := false
+	for _, status := range followThrough.EffectiveReadinessAfterReviewLoopStates() {
+		if status == terminalStatus {
+			orgDefault = followThrough.ReadinessAfterReviewLoop
+			break
+		}
+	}
+	if triggeredByUserID == nil || *triggeredByUserID == uuid.Nil || s.users == nil {
+		return orgDefault, nil
+	}
+	user, err := s.users.GetByIDGlobalWithSettings(ctx, *triggeredByUserID)
+	if err != nil || user.Settings.AutomaticPRFollowThrough == nil {
+		return orgDefault, nil
+	}
+	switch user.Settings.AutomaticPRFollowThrough.ReadinessAfterReviewLoop {
+	case models.AutomaticFollowThroughPreferenceOn:
+		return true, nil
+	case models.AutomaticFollowThroughPreferenceOff:
+		return false, nil
+	default:
+		return orgDefault, nil
 	}
 }
 

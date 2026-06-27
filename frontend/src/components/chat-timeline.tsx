@@ -473,6 +473,7 @@ const ReferenceTags = memo(function ReferenceTags({ references }: { references: 
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage }) {
   // Strip plan mode prefix from user messages for display.
   const isPlanModeUser = msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX);
+  const isSystemAutoRepair = msg.role === "user" && msg.source === "system_auto_repair";
   const displayContent = isPlanModeUser
     ? msg.content.slice(PLAN_MODE_PREFIX.length)
     : msg.content;
@@ -485,6 +486,12 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
               <span className="text-xs font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
+            </div>
+          )}
+          {isSystemAutoRepair && (
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <PenLine className="h-3 w-3 text-white/80" />
+              <span className="text-xs font-medium text-white/80 uppercase tracking-wide">143 auto-repair</span>
             </div>
           )}
           {displayContent && <p className="whitespace-pre-wrap break-words">{displayContent}</p>}
