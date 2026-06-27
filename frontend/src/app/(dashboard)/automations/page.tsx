@@ -5,6 +5,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
+import {
+  removeAutomationFromListCaches,
+  upsertAutomationInListCaches,
+} from "@/lib/automation-list-cache";
+import { queryKeys } from "@/lib/query-keys";
 import { formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
 import {
@@ -394,12 +399,20 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
   });
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
   });
 
   // deleteInFlight closes the same render-tick race that runNowInFlight does on
@@ -409,7 +422,13 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
   const deleteInFlight = useRef(false);
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: () => {
+      removeAutomationFromListCaches(queryClient, automation.id);
+      queryClient.removeQueries({
+        queryKey: queryKeys.automations.detail(automation.id),
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
     onSettled: () => {
       deleteInFlight.current = false;
     },
@@ -522,7 +541,7 @@ export default function AutomationsPage() {
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
   const { data, isLoading } = useQuery({
-    queryKey: ["automations"],
+    queryKey: queryKeys.automations.all,
     queryFn: () => api.automations.list(),
     refetchInterval: 10000,
   });

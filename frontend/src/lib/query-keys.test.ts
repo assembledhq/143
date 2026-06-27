@@ -91,6 +91,16 @@ describe("queryKeys", () => {
     });
   });
 
+  describe("automations", () => {
+    it("all returns static key", () => {
+      expect(queryKeys.automations.all).toEqual(["automations"]);
+    });
+
+    it("detail includes automation id", () => {
+      expect(queryKeys.automations.detail("automation-1")).toEqual(["automation", "automation-1"]);
+    });
+  });
+
   describe("evals", () => {
     it("tasks returns key with optional params", () => {
       expect(queryKeys.evals.tasks()).toEqual(["evals", "tasks", undefined]);
