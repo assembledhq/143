@@ -51,6 +51,8 @@ const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
 const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
+var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
+
 // prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
 // for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
 // non-consuming retries, so without this deadline a review loop that never
@@ -9170,7 +9172,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 		if input.PostSuccessAction == continuePostSuccessActionPushPRChanges {
-			queued, enqueueErr := enqueuePRPushChangesJob(ctx, stores, logger, orgID, sessionID, input.PostSuccessAuthorMode)
+			queued, enqueueErr := enqueuePRPushChangesJobAfterContinue(ctx, stores, logger, orgID, sessionID, input.PostSuccessAuthorMode)
 			if enqueueErr != nil {
 				logger.Warn().
 					Err(enqueueErr).

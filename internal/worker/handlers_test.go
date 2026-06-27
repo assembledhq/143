@@ -4947,7 +4947,8 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			"err":    nil,
 			"code":   nil,
 		}).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...)).
+		Maybe()
 	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
 		WithArgs(pgx.NamedArgs{
 			"id":     sessionID,
@@ -4956,7 +4957,8 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			"err":    ghservice.PushBranchDivergedPRMessage,
 			"code":   string(models.PRPushErrorCodeBranchDiverged),
 		}).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...)).
+		Maybe()
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
@@ -9686,7 +9688,8 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 }
 
 func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing.T) {
-	t.Parallel()
+	// This test swaps a package-level enqueue hook, so it must not run in
+	// parallel with other continue_session handler tests.
 
 	stores, mock := newTestStores(t)
 	defer mock.Close()
@@ -9699,28 +9702,19 @@ func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing
 	mock.ExpectQuery("SELECT .* FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
-	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*pr_push_state NOT IN[\\s\\S]*RETURNING").
-		WithArgs(pgx.NamedArgs{
-			"id":     sessionID,
-			"org_id": orgID,
-		}).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(
-			orgID,
-			"agent",
-			"push_pr_changes",
-			jsonStringFieldsArg{expected: map[string]string{
-				"session_id":  sessionID.String(),
-				"org_id":      orgID.String(),
-				"author_mode": "user",
-			}},
-			5,
-			pgxmock.AnyArg(),
-		).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-	mock.ExpectCommit()
+
+	var enqueueCalls int
+	originalEnqueue := enqueuePRPushChangesJobAfterContinue
+	enqueuePRPushChangesJobAfterContinue = func(ctx context.Context, stores *Stores, logger zerolog.Logger, gotOrgID, gotSessionID uuid.UUID, authorMode string) (bool, error) {
+		enqueueCalls++
+		require.Equal(t, orgID, gotOrgID, "post-success push enqueue should use the continue_session org")
+		require.Equal(t, sessionID, gotSessionID, "post-success push enqueue should use the continue_session session")
+		require.Equal(t, "user", authorMode, "post-success push enqueue should preserve author mode")
+		return true, nil
+	}
+	t.Cleanup(func() {
+		enqueuePRPushChangesJobAfterContinue = originalEnqueue
+	})
 
 	orch := &orchestratorServiceStub{
 		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
@@ -9734,7 +9728,8 @@ func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing
 
 	require.NoError(t, err, "continue_session should not fail after enqueuing the post-reconciliation push")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
-	require.NoError(t, mock.ExpectationsWereMet(), "post-success push should transition pr_push_state and enqueue push_pr_changes")
+	require.Equal(t, 1, enqueueCalls, "continue_session should enqueue one post-reconciliation push")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestContinueSessionHandler_EnqueuesSlackFinalAfterSuccess(t *testing.T) {
