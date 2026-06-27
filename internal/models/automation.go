@@ -365,6 +365,11 @@ func AutomationIconValueOrDefault(v string) string {
 // change introduces a non-marshalable type, the HTTP handler surfaces a 500
 // instead of panicking inside chi middleware.
 func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
+	var previousRunAt *string
+	if a.LastRunAt != nil {
+		formatted := a.LastRunAt.UTC().Format(time.RFC3339)
+		previousRunAt = &formatted
+	}
 	data, err := json.Marshal(map[string]any{
 		"agent_type":          a.AgentType,
 		"model_override":      a.ModelOverride,
@@ -373,6 +378,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"identity_scope":      a.IdentityScope.OrDefault(),
 		"pre_pr_review_loops": a.PrePRReviewLoops,
 		"base_branch":         a.BaseBranch,
+		"previous_run_at":     previousRunAt,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal automation config snapshot: %w", err)

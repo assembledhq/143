@@ -64,4 +64,27 @@ describe("automation template catalog", () => {
     expect(template?.tags).toContain("database");
     expect(template?.defaultUnit).toBe("weeks");
   });
+
+  it("includes an evidence-backed design consistency automation template", () => {
+    const template = getAutomationTemplate("design-consistency");
+
+    expect(template?.name).toBe("Design consistency review");
+    expect(template?.category).toBe("design");
+    expect(template?.goal).toContain("since the last automation run");
+    expect(template?.goal).toContain("previous run timestamp provided in the automation run context");
+    expect(template?.goal).toContain("main base branch");
+    expect(template?.goal).toContain("Scope strictly to frontend UI code");
+    expect(template?.goal).toContain("existing components, tokens, or local patterns");
+    expect(template?.goal).toContain("Only create or propose PRs for findings with concrete, actionable evidence");
+    expect(template?.goal).toContain("Treat PRs as the main output");
+    expect(template?.goal).toContain("one or more focused PRs");
+    expect(template?.goal).toContain("In each PR description");
+    expect(template?.goal).toContain("Do not produce a table-first report when a PR is warranted");
+    expect(template?.goal).toContain("rollback or alternative approach");
+    expect(template?.goal).toContain("no-op result");
+    expect(template?.goal).toContain("Do not claim repository-specific design rules");
+    expect(template?.outcomes).toContain("Evidence-backed UI consistency findings");
+    expect(template?.tags).toContain("frontend");
+    expect(template?.defaultUnit).toBe("days");
+  });
 });

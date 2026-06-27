@@ -6,6 +6,7 @@ import {
   FileText,
   FlaskConical,
   Gauge,
+  Palette,
   Shield,
   TestTube2,
   Waypoints,
@@ -17,7 +18,8 @@ export type AutomationTemplateCategoryID =
   | "security"
   | "maintenance"
   | "planning"
-  | "documentation";
+  | "documentation"
+  | "design";
 
 export interface AutomationTemplateCategory {
   id: AutomationTemplateCategoryID;
@@ -64,6 +66,11 @@ export const automationTemplateCategories: AutomationTemplateCategory[] = [
     id: "documentation",
     name: "Documentation",
     description: "Prompts that keep specs, runbooks, and docs aligned with how the code actually works.",
+  },
+  {
+    id: "design",
+    name: "Design",
+    description: "UI consistency sweeps that keep frontend changes aligned with the product design system.",
   },
 ];
 
@@ -248,6 +255,44 @@ Verification
     tags: ["cleanup", "deletion", "simplification"],
     defaultInterval: 2,
     defaultUnit: "weeks",
+  },
+  {
+    id: "design-consistency",
+    name: "Design consistency review",
+    icon: Palette,
+    category: "design",
+    summary: "Review recent frontend changes for concrete UI inconsistencies and propose focused standardization PRs only when evidence is strong.",
+    goal: `What to do
+- Review frontend and UI-facing changes merged or pushed to the repository's main base branch since the last automation run. Use the previous run timestamp provided in the automation run context as the review window start; if no previous run exists, state the fallback window you used.
+- Scope strictly to frontend UI code, styles, assets, design-system usage, pages, layouts, and view components. Do not inspect backend, unrelated packages, or cross-tenant logic except to understand a UI contract that changed.
+- If the repository has design docs, component guidelines, Storybook, shared UI components, or local frontend instructions, use those as the source of truth. If no clear system exists, infer conservatively from repeated code patterns under likely frontend paths and state the assumptions.
+- For each potential inconsistency, capture the changed file, relevant commit or PR reference when available, affected UI area, and the exact design principle or existing pattern it appears to violate: alignment, typography, spacing, color tokens, component behavior, accessibility, theming, responsive behavior, or interaction states.
+- Strongly prefer consistency fixes using existing components, tokens, or local patterns. If a suitable design-system component or shared app component exists but was not used, propose a focused refactor to that component or pattern.
+- Propose a new reusable UI component only when no suitable existing component or pattern fits and the use case is likely to recur. Explain why the existing components cannot handle it without awkward or misleading APIs.
+- Only create or propose PRs for findings with concrete, actionable evidence: specific code locations plus a clear refactor path or component API and structure proposal. Skip taste-only, speculative, or unsupported design opinions.
+
+Output requirements
+- Treat PRs as the main output when actionable inconsistencies exist. Create or propose one or more focused PRs when separate UI areas or standardization paths should be reviewed independently; keep each PR small enough to review safely.
+- In each PR description, include the review window, base branch used, impacted UI area, evidence with file paths and line ranges or sections, commit or PR reference when available, the deviation from the repo's standard UI principles, recommended action type, verification steps, rollback or alternative approach, and why that PR's diff is intentionally minimal.
+- Include severity (low, medium, or high) in the PR description only to help reviewers triage the change. Do not produce a table-first report when a PR is warranted.
+- If no actionable inconsistencies are found, produce a no-op result. Include high-level counts for the scanned file set by directory or UI area and explain why no changes were recommended.
+- Mark unsupported assumptions clearly. Do not claim repository-specific design rules unless they are backed by docs, shared components, lint rules, existing code patterns, or other repository evidence.
+
+Verification
+- Validate proposed fixes with the repository's available frontend checks when practical: targeted tests for changed components or pages, lint for touched files, typecheck or build only when the scope justifies it, and Storybook or screenshot tooling if the repo has it.
+- Confirm responsive behavior, keyboard/focus behavior, accessible names for icon-only controls, disabled and loading states, theme support, and basic contrast for each UI pattern that changes.
+- Keep proposed PRs minimal and focused on UI consistency or standardization. Do not bundle unrelated refactors, product behavior changes, backend changes, or broad visual redesigns.
+- Prefer existing design-system components, semantic tokens, shared helpers, and nearby page patterns over new abstractions. When a new component is justified, include the smallest stable API and note where it should live.
+- If evidence is insufficient to safely propose a PR, document the observation as a non-actionable note or omit it from findings rather than creating churn.`,
+    outcomes: [
+      "Evidence-backed UI consistency findings",
+      "Focused PR proposals for standardizing recent frontend changes",
+      "Clear no-op reports when recent changes already match the design system",
+    ],
+    tags: ["design", "frontend", "ui"],
+    defaultInterval: 1,
+    defaultUnit: "days",
+    featured: true,
   },
   {
     id: "backlog-triage",

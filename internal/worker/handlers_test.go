@@ -7180,6 +7180,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	sessionID := uuid.New()
 	jobID := uuid.New()
 	now := time.Now()
+	previousRunAt := time.Date(2026, 6, 26, 9, 30, 0, 0, time.UTC)
 	agentType := "codex"
 	reasoningEffort := models.ReasoningEffortXHigh
 	repoID := uuid.New()
@@ -7196,7 +7197,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
-			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"previous_run_at":"2026-06-26T09:30:00Z"}`),
 			models.AutomationRunStatusPending, nil, nil, nil, now, now,
 		))
 
@@ -7226,7 +7227,8 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 	// pm_approach must carry the run's goal_snapshot; without that,
 	// promptSeedForSession synthesizes an empty "Session task" seed and the
 	// agent silently ignores everything the user wrote in the automation goal.
-	expectedGoal := "goal"
+	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
+		now.UTC().Format(time.RFC3339), previousRunAt.Format(time.RFC3339))
 	expectedReasoning := models.ReasoningEffortXHigh
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[10] = &expectedReasoning
@@ -7303,7 +7305,8 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	expectedGoal := "goal"
+	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: none",
+		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[14] = &overrideRepoID
 	createSessionArgs[20] = &expectedGoal
@@ -7571,7 +7574,8 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	expectedGoal := "goal"
+	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: none",
+		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = &creatorID
 	createSessionArgs[20] = &expectedGoal
@@ -7643,7 +7647,8 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	expectedGoal := "goal"
+	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: none",
+		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = (*uuid.UUID)(nil)
 	createSessionArgs[20] = &expectedGoal
@@ -7721,7 +7726,8 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	expectedGoal := "goal"
+	expectedGoal := fmt.Sprintf("goal\n\nAutomation run context\n- Current automation run triggered at: %s\n- Previous automation run: none",
+		now.UTC().Format(time.RFC3339))
 	createSessionArgs := workerAnyArgs(39)
 	createSessionArgs[11] = &creatorID
 	createSessionArgs[20] = &expectedGoal
