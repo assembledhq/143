@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
 import type { Automation, AutomationGoalImprovement } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -505,7 +506,7 @@ export function AutomationGoalImprovementControl({
                     )}
                   </div>
                   <p className="truncate text-xs text-muted-foreground">
-                    {new Date(item.created_at).toLocaleString()}
+                    {formatDateTime(item.created_at)}
                   </p>
                 </div>
               </Button>

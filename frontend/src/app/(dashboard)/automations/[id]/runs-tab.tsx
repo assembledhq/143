@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/collapsible";
 import { api } from "@/lib/api";
 import type { AutomationRun } from "@/lib/types";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 
 import { QuietRunRow, RunCard } from "./run-card";
 import { groupRuns, type RunGroup } from "./run-grouping";
@@ -172,7 +172,7 @@ function QuietGroup({ group, open, onOpenChange, navigateTo }: QuietGroupProps) 
           "group flex w-full items-center justify-between gap-3 rounded-xl px-4 py-3 text-xs text-muted-foreground transition-colors",
           "hover:bg-muted/25 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         )}
-        title={`${group.runs.length} runs from ${new Date(oldest.triggered_at).toLocaleString()} to ${new Date(newest.triggered_at).toLocaleString()}`}
+        title={`${group.runs.length} runs from ${formatDateTime(oldest.triggered_at)} to ${formatDateTime(newest.triggered_at)}`}
       >
         <span className="flex items-center gap-2">
           <ChevronRight

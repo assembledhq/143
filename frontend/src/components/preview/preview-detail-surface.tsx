@@ -37,7 +37,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ACTIVE_PREVIEW_STATUSES, formatPreviewStatus, type PreviewStatus } from "@/lib/preview-types";
 import type { BranchPreviewResponse } from "@/lib/types";
-import { cn, safeExternalUrl } from "@/lib/utils";
+import { cn, formatDateTime, safeExternalUrl } from "@/lib/utils";
 
 type PreviewStepTone = "complete" | "active" | "failed" | "pending";
 
@@ -671,14 +671,4 @@ function formatStepName(name: string) {
     .split(" ")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
-}
-
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
 }
