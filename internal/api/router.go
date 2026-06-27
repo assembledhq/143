@@ -351,6 +351,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	prReadinessStore := db.NewPRReadinessStore(pool)
 	prReadinessRunner := prreadinesssvc.NewService(prReadinessStore, jobStore)
 	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
+	codeReviewStore.SetStreams(codeReviewStreams)
+	codeReviewStore.SetLogger(logger)
 	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{
 		AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
 		AliasLogins:       cfg.CodeReviewAliasLogins,
@@ -469,6 +472,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetMembershipStore(membershipStore)
 	pullRequestHandler.SetStreams(prHealthStreams)
 	pullRequestHandler.SetMembershipStore(membershipStore)
+	codeReviewHandler.SetStreams(codeReviewStreams)
+	codeReviewHandler.SetMembershipStore(membershipStore)
 	if prService != nil {
 		sessionHandler.SetPRTitleSyncer(prService)
 	}
@@ -1176,6 +1181,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
+				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/templates", codeReviewHandler.Templates)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)

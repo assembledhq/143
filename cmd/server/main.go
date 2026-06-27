@@ -188,6 +188,13 @@ func main() {
 	// publishEvalBatchSignal helper skips publish.
 	evalBatchStreams := cache.NewEvalBatchStreams(redisClient, logger)
 	evalBootstrapStreams := cache.NewEvalBootstrapStreams(redisClient, logger)
+	// Org-scoped code review pub/sub fanout. The worker publishes lifecycle
+	// changes here as it runs reviews; the API subscribes for the live code
+	// reviews list. nil-safe when redisClient is nil (publish becomes a no-op).
+	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
+	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStore.SetStreams(codeReviewStreams)
+	codeReviewStore.SetLogger(logger)
 
 	// Create codex auth service (shared between router and orchestrator).
 	var cryptoSvc *crypto.Service
@@ -487,7 +494,7 @@ func main() {
 			AutomationRuns:      automationRunStore,
 			ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 			PRReadiness:         db.NewPRReadinessStore(pool),
-			CodeReviews:         db.NewCodeReviewStore(pool),
+			CodeReviews:         codeReviewStore,
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,

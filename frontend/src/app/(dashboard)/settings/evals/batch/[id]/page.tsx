@@ -8,7 +8,8 @@ import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
 import { buildEvalBatchStreamURL, SSE_EVENT } from "@/lib/sse";
-import { shouldSubscribeToEvalBatchStream, useEvalSSE } from "@/lib/use-eval-sse";
+import { shouldSubscribeToEvalBatchStream } from "@/lib/eval-streams";
+import { useResourceSSE } from "@/lib/use-resource-sse";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
@@ -23,7 +24,7 @@ import { evalRunStatusConfig } from "@/lib/types";
 // blip on the publish side, subscription disconnect that re-establishes
 // after the missed event) without doing anything close to the prior 5s
 // load on Postgres. When SSE itself is unavailable (Redis down) we drop
-// back to the original 5s cadence — see streamHealthy from useEvalSSE.
+// back to the original 5s cadence — see streamHealthy from useResourceSSE.
 const SSE_BACKSTOP_POLL_MS = 30_000;
 const SSE_DOWN_POLL_MS = 5_000;
 
@@ -48,7 +49,7 @@ export default function BatchDetailPage() {
   const onBatchEvent = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: queryKeys.evals.batch(batchId) });
   }, [queryClient, batchId]);
-  const { healthy: streamHealthy } = useEvalSSE({
+  const { healthy: streamHealthy } = useResourceSSE({
     url: sseURL,
     event: SSE_EVENT.EVAL_BATCH_UPDATED,
     onEvent: onBatchEvent,
