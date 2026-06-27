@@ -42,6 +42,7 @@ import (
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
@@ -10836,6 +10837,77 @@ func prPushErrorCode(err error) models.PRPushErrorCode {
 	}
 }
 
+func shouldAutoReconcilePRPushError(err error) bool {
+	return errors.Is(err, ghservice.ErrPushBranchDiverged) || errors.Is(err, ghservice.ErrPushRejected)
+}
+
+func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, run models.Session, pushErr error) error {
+	if stores == nil || stores.Sessions == nil || stores.SessionThreads == nil || stores.SessionMessages == nil || stores.Jobs == nil {
+		return errors.New("PR push reconciliation stores unavailable")
+	}
+
+	threadID, err := primaryThreadIDForSession(ctx, stores, run)
+	if err != nil {
+		return fmt.Errorf("resolve primary thread for PR push reconciliation: %w", err)
+	}
+
+	var repo, headRef string
+	if stores.PullRequests != nil {
+		pr, prErr := stores.PullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+		if prErr != nil {
+			if !errors.Is(prErr, pgx.ErrNoRows) {
+				logger.Warn().Err(prErr).
+					Str("session_id", run.ID.String()).
+					Msg("failed to load PR context for push reconciliation prompt")
+			}
+		} else {
+			repo = pr.GitHubRepo
+			if pr.HeadRef != nil {
+				headRef = *pr.HeadRef
+			}
+		}
+	}
+
+	revision := run.WorkspaceRevision
+	if revision == 0 {
+		revision = int64(run.CurrentTurn)
+	}
+	clientMessageID := fmt.Sprintf("push-reconcile:%s:%d", run.ID, revision)
+	dedupeKey := fmt.Sprintf("continue_session_push_reconcile:%s:%d", run.ID, revision)
+	threadService := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	_, err = threadService.SendMessage(ctx, threadsvc.SendMessageInput{
+		SessionID:                     run.ID,
+		OrgID:                         run.OrgID,
+		ThreadID:                      threadID,
+		ClientMessageID:               clientMessageID,
+		Message:                       prPushReconciliationMessage(repo, headRef, pushErr),
+		MessageSource:                 models.SessionMessageSourceAgentTool,
+		ContinuationDedupeKeyOverride: &dedupeKey,
+	})
+	if err != nil {
+		return fmt.Errorf("send PR push reconciliation message: %w", err)
+	}
+	return nil
+}
+
+func prPushReconciliationMessage(repo, headRef string, pushErr error) string {
+	reason := "the existing PR branch changed on GitHub before this session could push"
+	if errors.Is(pushErr, ghservice.ErrPushRejected) {
+		reason = "GitHub rejected the push after the remote PR branch changed during the attempt"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Push changes failed: %s.", reason)
+	if strings.TrimSpace(repo) != "" {
+		fmt.Fprintf(&b, " Repository: %s.", strings.TrimSpace(repo))
+	}
+	if strings.TrimSpace(headRef) != "" {
+		fmt.Fprintf(&b, " PR branch: %s.", strings.TrimSpace(headRef))
+	}
+	b.WriteString(" Preserve the current session changes, fetch the latest PR branch from origin, reapply the still-needed session changes without dropping remote commits, and push the result to the existing PR branch with a normal fast-forward git push. Do not force-push or open a new PR. If conflicts require a product decision or the push is rejected again, stop and explain what changed.")
+	return b.String()
+}
+
 // push_pr_changes handler pushes any uncommitted/unpushed sandbox changes up
 // to an existing PR's branch. Mirrors newOpenPRHandler but operates on a
 // session that already has a PR row — drives pr_push_state through pushing ->
@@ -10928,6 +11000,18 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			msg := userFacingPRError(pushErr)
 			if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+			}
+			if shouldAutoReconcilePRPushError(pushErr) {
+				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr); reconcileErr != nil {
+					logger.Warn().Err(reconcileErr).
+						Str("session_id", runID.String()).
+						Msg("failed to enqueue PR push reconciliation")
+				} else {
+					logger.Info().
+						Str("session_id", runID.String()).
+						Msg("queued PR push reconciliation after failed push")
+					return &FatalError{Err: pushErr}
+				}
 			}
 			if shouldDeadLetterPRError(pushErr) {
 				return &FatalError{Err: pushErr}

@@ -19,7 +19,7 @@ export function hasRepairableFailedChecks(health: RepairableFailedChecksInput | 
 export function continueFromPRBranchMessage(headRef?: string | null): string {
   const branch = headRef?.trim();
   const branchClause = branch ? ` (${branch})` : "";
-  return `The PR branch has changes that are not in this session checkpoint. Fetch and reconcile the latest PR branch${branchClause} into this session, preserve the current PR branch changes, reapply any still-needed local changes, and stop for review. Do not push changes yet.`;
+  return `The PR branch has changes that are not in this session checkpoint. Fetch the latest PR branch${branchClause} from origin, preserve every remote commit, reapply any still-needed local changes on top of it, and push the reconciled result back to the same PR branch with a normal fast-forward git push. Do not force-push or open a new PR. If conflicts require a product decision or the push is rejected again, stop and explain what changed.`;
 }
 
 export type LifecycleActionState = {

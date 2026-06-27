@@ -2515,6 +2515,26 @@ var workerSessionThreadColumns = []string{
 	"execution_mode", "filesystem_mode",
 }
 
+var workerPullRequestColumns = []string{
+	"id", "session_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+	"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+}
+
+func workerPullRequestRow(prID, sessionID, orgID uuid.UUID, repo, headRef string, now time.Time) []any {
+	return []any{
+		prID, &sessionID, orgID, 42, "https://github.com/acme/repo/pull/42", repo,
+		"PR title", nil, models.PullRequestStatusOpen, models.PullRequestReviewStatusPending, models.GitIdentitySourceApp, models.PullRequestCIStatusPending, nil, &headRef, nil,
+		models.PullRequestMergeStateUnknown, false, 0, false, nil,
+		int64(0), models.PullRequestMergeWhenReadyStateOff, nil, nil,
+		"", nil, "",
+		nil, nil, now, now,
+	}
+}
+
 var workerProjectTaskColumns = []string{
 	"id", "project_id", "org_id", "title", "description", "approach", "reasoning",
 	"sort_order", "depends_on", "batch_number", "status", "complexity", "confidence",
@@ -2535,6 +2555,17 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 		"", nil, "", "", []byte("[]"),
 		models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite,
 	}
+}
+
+func workerSessionRowWithStatus(row []any, status models.SessionStatus) []any {
+	updated := append([]any(nil), row...)
+	for i, col := range workerSessionColumns {
+		if col == "status" {
+			updated[i] = status
+			return updated
+		}
+	}
+	return updated
 }
 
 func workerProjectTaskRow(taskID, projectID, orgID uuid.UUID, status models.ProjectTaskStatus, now time.Time) []any {
@@ -4882,6 +4913,113 @@ func TestPushPRChangesHandler_BranchDivergedPersistsErrorCode(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+	stores.SessionMessages = db.NewSessionMessageStore(mock)
+	stores.PullRequests = db.NewPullRequestStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-push-pr-branch-diverged-reconcile"
+	headRef := "codex/reconcile-push"
+	repo := "acme/repo"
+	completedRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	runningRow := workerSessionRowWithStatus(completedRow, models.SessionStatusRunning)
+	completedThreadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusCompleted)
+	runningThreadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)
+	var capturedMessage string
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(prPushStateArg{state: models.PRPushStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+		WithArgs(
+			prPushStateArg{state: models.PRPushStateFailed},
+			ghservice.PushBranchDivergedPRMessage,
+			prPushErrorCodeArg{code: models.PRPushErrorCodeBranchDiverged},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
+	mock.ExpectQuery("SELECT .* FROM pull_requests").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
+		WithArgs(workerAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns))
+	mock.ExpectQuery(`(?s)SELECT\s+COALESCE`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows([]string{"target_status", "sibling_active"}).AddRow(string(models.ThreadStatusCompleted), 0))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
+	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
+		WithArgs(workerAnyArgs(5)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(runningThreadRow...))
+	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = 'idle'.*RETURNING`).
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = ANY\(@statuses\).*RETURNING`).
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runningRow...))
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(
+			sessionID,
+			orgID,
+			uuidPtrEqualsArg{expected: threadID},
+			pgxmock.AnyArg(),
+			2,
+			models.MessageRoleUser,
+			capturingStringArg{dest: &capturedMessage},
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			models.SessionMessageSourceAgentTool,
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1001), now))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	services := &Services{
+		PR: &stubPRService{
+			pushChangesToPRFn: func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrPushBranchDiverged
+			},
+		},
+	}
+
+	handler := newPushPRChangesHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "push_pr_changes", payload)
+
+	var fatalErr *FatalError
+	require.ErrorAs(t, err, &fatalErr, "branch-diverged push failures should dead-letter after queuing reconciliation")
+	require.ErrorIs(t, fatalErr, ghservice.ErrPushBranchDiverged, "branch-diverged push failure should preserve the terminal cause")
+	require.Contains(t, capturedMessage, "Repository: "+repo, "reconciliation prompt should include the PR repository")
+	require.Contains(t, capturedMessage, "PR branch: "+headRef, "reconciliation prompt should include the PR branch")
+	require.Contains(t, capturedMessage, "normal fast-forward git push", "reconciliation prompt should ask the agent to complete the push")
+	require.NotContains(t, capturedMessage, "Do not push changes yet", "automatic reconciliation should not use the manual review-only fallback prompt")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
 	t.Parallel()
 
@@ -5783,6 +5921,44 @@ func TestPRPushErrorCode(t *testing.T) {
 			require.Equal(t, tt.want, prPushErrorCode(tt.err), "prPushErrorCode should classify push failures for UI state")
 		})
 	}
+}
+
+func TestShouldAutoReconcilePRPushError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "branch diverged starts reconciliation", err: ghservice.ErrPushBranchDiverged, want: true},
+		{name: "wrapped push rejected starts reconciliation", err: fmt.Errorf("push: %w", ghservice.ErrPushRejected), want: true},
+		{name: "sandbox auth unavailable does not start reconciliation", err: ghservice.ErrSandboxAuthUnavailable, want: false},
+		{name: "generic error does not start reconciliation", err: errors.New("boom"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, shouldAutoReconcilePRPushError(tt.err), "shouldAutoReconcilePRPushError should only classify remote-branch push conflicts")
+		})
+	}
+}
+
+func TestPRPushReconciliationMessage(t *testing.T) {
+	t.Parallel()
+
+	msg := prPushReconciliationMessage("acme/repo", "codex/reconcile", ghservice.ErrPushRejected)
+
+	require.Contains(t, msg, "Push changes failed: GitHub rejected the push after the remote PR branch changed during the attempt.", "reconciliation prompt should explain push rejection succinctly")
+	require.NotContains(t, msg, "because GitHub rejected the push because", "reconciliation prompt should avoid repeated causal phrasing")
+	require.Contains(t, msg, "Repository: acme/repo", "reconciliation prompt should include repository context")
+	require.Contains(t, msg, "PR branch: codex/reconcile", "reconciliation prompt should include branch context")
+	require.Contains(t, msg, "Preserve the current session changes", "reconciliation prompt should tell the agent to preserve local work before fetching")
+	require.Contains(t, msg, "normal fast-forward git push", "reconciliation prompt should tell the agent to finish by pushing safely")
+	require.Contains(t, msg, "Do not force-push or open a new PR", "reconciliation prompt should preserve the existing PR branch")
+	require.NotContains(t, msg, "Do not push changes yet", "reconciliation prompt should not use the manual review-only fallback wording")
 }
 
 func TestShouldDeadLetterPRError(t *testing.T) {
