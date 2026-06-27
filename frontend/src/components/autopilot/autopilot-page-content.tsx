@@ -29,7 +29,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { AutopilotQueueRow, AutopilotRunState } from "@/lib/types";
-import { safeExternalUrl } from "@/lib/utils";
+import { formatDateTime, safeExternalUrl } from "@/lib/utils";
 
 const ALL_VALUE = "all";
 
@@ -746,7 +746,5 @@ function metricBadgeVariant(label: string): "default" | "secondary" | "outline" 
 }
 
 function formatShortTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "recently";
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
+  return formatDateTime(value, { fallback: "recently" });
 }

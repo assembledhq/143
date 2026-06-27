@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutomationsPage from "./page";
+import { formatDateTime } from "@/lib/utils";
 
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
@@ -154,11 +155,18 @@ describe("AutomationsPage", () => {
     expect(screen.getByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")).toHaveTextContent("🧪");
 
     const schedule = screen.getByText(/Every 2 weeks at/);
-    expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");
+    expect(schedule).toHaveClass("truncate");
+
+    // Computed via the same helper so the assertion is independent of the host
+    // timezone (the fixture's next_run_at is a UTC instant).
+    expect(
+      screen.getByText(`Next: ${formatDateTime("2026-05-01T09:15:00Z")}`),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/9:15:00/)).not.toBeInTheDocument();
 
     const detailRow = screen.getByText(/Last run:/).parentElement;
     expect(detailRow).not.toBeNull();
-    expect(detailRow).toHaveClass("flex", "flex-col", "gap-1", "sm:flex-row", "sm:flex-wrap");
+    expect(detailRow).toHaveClass("flex", "flex-col", "gap-1", "text-xs", "leading-5", "sm:flex-row", "sm:flex-wrap");
 
     const menuButton = screen.getByRole("button", {
       name: "More options for Weekly release hardening sweep for mobile checkout reliability",

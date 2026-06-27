@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   capitalizeWords,
   fileNameFromURL,
+  formatDateTime,
   formatTimeAgo,
   isImageURL,
   safeExternalUrl,
@@ -79,6 +80,48 @@ describe("formatTimeAgo", () => {
     expect(formatTimeAgo(null)).toBe("—");
     expect(formatTimeAgo("")).toBe("—");
     expect(formatTimeAgo("not-a-date")).toBe("—");
+  });
+});
+
+describe("formatDateTime", () => {
+  it("formats absolute date times without seconds", () => {
+    expect(formatDateTime("2026-01-15T10:30:45")).toBe("Jan 15, 10:30 AM");
+  });
+
+  it("returns a fallback for missing or invalid inputs", () => {
+    expect(formatDateTime(undefined)).toBe("—");
+    expect(formatDateTime(null)).toBe("—");
+    expect(formatDateTime("")).toBe("—");
+    expect(formatDateTime("not-a-date", { fallback: "Unknown" })).toBe("Unknown");
+  });
+
+  it("includes year and seconds when requested", () => {
+    expect(formatDateTime("2024-01-15T10:30:45", { year: true, seconds: true })).toBe(
+      "Jan 15, 2024, 10:30:45 AM",
+    );
+  });
+
+  it("includes weekday and a timezone label when requested", () => {
+    // No trailing "Z" → parsed as local time, so the wall-clock fields below
+    // are stable regardless of the host timezone (Jan 15, 2024 is a Monday).
+    const withZone = formatDateTime("2024-01-15T10:30:45", {
+      weekday: true,
+      year: true,
+      seconds: true,
+      timeZoneName: true,
+    });
+    expect(withZone).toContain("Mon");
+    expect(withZone).toContain("2024");
+    expect(withZone).toContain("10:30:45");
+
+    // The timezone label appends extra text rather than asserting a specific
+    // zone, which would be host-dependent.
+    const withoutZone = formatDateTime("2024-01-15T10:30:45", {
+      weekday: true,
+      year: true,
+      seconds: true,
+    });
+    expect(withZone.length).toBeGreaterThan(withoutZone.length);
   });
 });
 

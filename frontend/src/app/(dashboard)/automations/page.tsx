@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { formatTimeAgo } from "@/lib/utils";
+import { formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
 import {
   automationTemplateCategories,
@@ -261,6 +261,7 @@ function AutomationsWorkspace({
 
 function AutomationCard({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
+  const schedule = formatAutomationSchedule(automation);
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automation.id),
@@ -301,29 +302,31 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
   return (
     <div className="border-b border-border/60 bg-background transition-colors last:border-b-0 hover:bg-muted/30">
       <div className="flex items-start gap-3 p-4 sm:gap-4">
-        <Link href={`/automations/${automation.id}`} className="flex-1 min-w-0">
-          <div className="flex items-start gap-2.5">
+        <Link href={`/automations/${automation.id}`} className="min-w-0 flex-1">
+          <div className="flex items-start gap-3">
             <span
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/80 bg-card text-lg leading-none shadow-sm"
               aria-label={`Automation icon for ${automation.name}`}
             >
               {automation.icon_value || "⚙️"}
             </span>
-            <div className="min-w-0 flex-1 space-y-2">
-              <div className="space-y-1 sm:flex sm:items-start sm:justify-between sm:gap-3 sm:space-y-0">
+            <div className="min-w-0 flex-1 space-y-2.5">
+              <div className="space-y-1.5">
                 <h3 className="break-words text-sm font-medium leading-5 text-foreground">
                   {automation.name}
                 </h3>
-                <span className="block break-words text-xs leading-5 text-muted-foreground sm:max-w-[18rem] sm:text-right">
-                  {formatAutomationSchedule(automation)}
+                <span className="inline-flex max-w-full items-center rounded-md bg-muted/45 px-2 py-0.5 text-xs leading-5 text-muted-foreground">
+                  <span className="truncate">{schedule}</span>
                 </span>
               </div>
-              <div className="flex flex-col gap-1 text-xs text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3 sm:gap-y-1">
+              <div className="flex flex-col gap-1 text-xs leading-5 text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3 sm:gap-y-1">
                 {automation.last_run_at && (
                   <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
                 )}
                 {automation.next_run_at && automation.enabled && (
-                  <span>Next: {new Date(automation.next_run_at).toLocaleString()}</span>
+                  <span title={formatDateTime(automation.next_run_at, { year: true, seconds: true })}>
+                    Next: {formatDateTime(automation.next_run_at)}
+                  </span>
                 )}
                 {!automation.enabled && automation.paused_at && (
                   <span>Paused {formatTimeAgo(automation.paused_at)}</span>

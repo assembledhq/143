@@ -35,9 +35,9 @@ describe("formatTimestamp", () => {
     expect(formatTimestamp("")).toBe("-");
   });
   it("formats a valid date string", () => {
-    const result = formatTimestamp("2024-01-15T10:30:00Z");
-    expect(result).toBeTruthy();
-    expect(result).not.toBe("-");
+    const result = formatTimestamp("2024-01-15T10:30:00");
+    expect(result).toBe("Jan 15, 10:30 AM");
+    expect(result).not.toContain(":00");
   });
 });
 
