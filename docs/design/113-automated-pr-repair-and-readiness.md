@@ -43,9 +43,9 @@ Defaults are off for existing and new orgs until internal rollout proves this is
 
 ## Implementation Status
 
-Phase 1 is implemented: the org and user settings contracts exist, validation covers the new enum/settings shapes, frontend types mirror the backend, the Organization settings page has a compact **Session automation** section, and Account settings has personal inherit/on/off controls that display the current organization default. No backend automation behavior is wired yet.
+Phases 1-2 are implemented: the org and user settings contracts exist, validation covers the new enum/settings shapes, frontend types mirror the backend, the Organization settings page has a compact **Session automation** section, Account settings has personal inherit/on/off controls that display the current organization default, and PR readiness enqueueing now lives in a reusable backend service without changing runtime behavior.
 
-Phases 2-8 remain planned. The next implementation chunk should extract the PR readiness enqueue logic into a reusable service without changing runtime behavior.
+Phases 3-8 remain planned. The next implementation chunk should add clean-loop auto-readiness behind the existing session automation policy, reusing the extracted readiness service.
 
 ## Principles and Boundaries
 
