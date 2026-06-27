@@ -44,13 +44,38 @@ import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
 import { useAuth } from "@/hooks/use-auth";
 import { useOrgSettingsAutosave } from "@/hooks/use-org-settings-autosave";
-import type { Organization, OrgSettings, PRReadinessCustomCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, Repository, SingleResponse } from "@/lib/types";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import type { AutomaticFollowThroughOrgSettings, Organization, OrgSettings, PRReadinessCustomCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, Repository, SingleResponse } from "@/lib/types";
 
 const PR_AUTHORSHIP_OPTIONS = [
   { value: "user_preferred", label: "User preferred", description: "Use the user's GitHub token when available, fall back to the 143 app" },
   { value: "app_only", label: "App only", description: "Always create PRs as the 143 GitHub App" },
   { value: "user_required", label: "User required", description: "Require users to connect GitHub before creating PRs" },
 ] as const;
+
+type RepairAutomationKey = "resolve_conflicts_when_idle" | "fix_tests_when_idle";
+
+const REPAIR_AUTOMATION_COPY: Record<RepairAutomationKey, { title: string; description: string; confirm: string }> = {
+  resolve_conflicts_when_idle: {
+    title: "Resolve conflicts when idle",
+    description: "Start the existing conflict repair flow when an idle session has an open PR with merge conflicts.",
+    confirm: "143 will be allowed to commit and push conflict-resolution work to the linked PR branch when this policy is active.",
+  },
+  fix_tests_when_idle: {
+    title: "Fix failing tests when idle",
+    description: "Start the existing test-repair flow when an idle session has an open PR with failing checks.",
+    confirm: "143 will be allowed to commit and push test-repair work to the linked PR branch when this policy is active.",
+  },
+};
 
 const ORG_READINESS_SCOPE = "__org__";
 const READINESS_CHECKS = [
@@ -308,6 +333,20 @@ function ReadinessCheckInfo({ checkKey }: { checkKey: (typeof READINESS_CHECKS)[
   );
 }
 
+function sessionAutomationPatch(
+  current: AutomaticFollowThroughOrgSettings,
+  patch: Partial<AutomaticFollowThroughOrgSettings>,
+): Partial<OrgSettings> {
+  return {
+    session_automation: {
+      automatic_follow_through: {
+        ...current,
+        ...patch,
+      },
+    },
+  };
+}
+
 function PRAuthorshipSettings() {
   const queryClient = useQueryClient();
   const [readinessScope, setReadinessScope] = useState(ORG_READINESS_SCOPE);
@@ -346,6 +385,8 @@ function PRAuthorshipSettings() {
   const currentAuthorship = settings.pr_authorship ?? "user_preferred";
   const currentDraftDefault = settings.pr_draft_default ?? false;
   const currentAutoArchive = settings.auto_archive_on_pr_close ?? true;
+  const automaticFollowThrough = settings.session_automation?.automatic_follow_through ?? {};
+  const [repairEnableCandidate, setRepairEnableCandidate] = useState<RepairAutomationKey | null>(null);
 
   const accountConnected = githubAccountStatus?.connected ?? false;
   const accountNeedsReconnect = githubAccountStatus?.needs_reconnect ?? false;
@@ -440,12 +481,100 @@ function PRAuthorshipSettings() {
       },
     });
   };
+  const saveAutomaticFollowThrough = (patch: Partial<AutomaticFollowThroughOrgSettings>) => {
+    save({ settings: sessionAutomationPatch(automaticFollowThrough, patch) });
+  };
+  const setRepairAutomation = (key: RepairAutomationKey, enabled: boolean) => {
+    if (enabled && !automaticFollowThrough[key]) {
+      setRepairEnableCandidate(key);
+      return;
+    }
+    saveAutomaticFollowThrough({ [key]: enabled });
+  };
+  const confirmRepairAutomation = () => {
+    if (!repairEnableCandidate) return;
+    saveAutomaticFollowThrough({ [repairEnableCandidate]: true });
+    setRepairEnableCandidate(null);
+  };
 
   return (
+    <>
+    <section className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-medium text-foreground">Session automation</h2>
+        <AutosaveIndicator status={status} />
+      </div>
+      <Card>
+        <CardContent className="space-y-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1">
+              <Label htmlFor="readiness-after-review-loop">Readiness after clean review loop</Label>
+              <p className="text-xs text-muted-foreground">
+                Queue PR readiness after a review loop completes cleanly. This is read-only and does not change the branch.
+              </p>
+            </div>
+            <Switch
+              id="readiness-after-review-loop"
+              checked={automaticFollowThrough.readiness_after_review_loop ?? false}
+              onCheckedChange={(checked) => saveAutomaticFollowThrough({
+                readiness_after_review_loop: checked,
+                readiness_after_review_loop_states: checked
+                  ? (automaticFollowThrough.readiness_after_review_loop_states?.length
+                      ? automaticFollowThrough.readiness_after_review_loop_states
+                      : ["clean"])
+                  : automaticFollowThrough.readiness_after_review_loop_states,
+              })}
+              aria-label="Run readiness after clean review loop"
+            />
+          </div>
+          <div className="space-y-4 border-t border-border pt-4">
+            <div className="space-y-1">
+              <h3 className="text-xs font-medium text-foreground">Branch-writing repair</h3>
+              <p className="text-xs text-muted-foreground">
+                These policies use the same repair actions as the manual buttons and are off until later automation phases consume them.
+              </p>
+            </div>
+            {Object.entries(REPAIR_AUTOMATION_COPY).map(([key, copy]) => {
+              const repairKey = key as RepairAutomationKey;
+              return (
+                <div key={repairKey} className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <Label htmlFor={`session-automation-${repairKey}`}>{copy.title}</Label>
+                    <p className="text-xs text-muted-foreground">{copy.description}</p>
+                  </div>
+                  <Switch
+                    id={`session-automation-${repairKey}`}
+                    checked={automaticFollowThrough[repairKey] ?? false}
+                    onCheckedChange={(checked) => setRepairAutomation(repairKey, checked)}
+                    aria-label={copy.title}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+      <AlertDialog open={repairEnableCandidate !== null} onOpenChange={(open) => {
+        if (!open) setRepairEnableCandidate(null);
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable automatic branch repair?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {repairEnableCandidate ? REPAIR_AUTOMATION_COPY[repairEnableCandidate].confirm : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmRepairAutomation}>Enable</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
+
     <section className="space-y-3">
       <div className="flex items-center justify-between">
         <h2 className="text-xs font-medium text-foreground">Pull requests</h2>
-        <AutosaveIndicator status={status} />
       </div>
       <Card>
         <CardContent className="space-y-4">
@@ -912,6 +1041,7 @@ function PRAuthorshipSettings() {
         </CardContent>
       </Card>
     </section>
+    </>
   );
 }
 
