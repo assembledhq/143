@@ -393,6 +393,58 @@ describe("SessionDetailContent performance", () => {
     expect(diffRequestCount).toBe(1);
   });
 
+  it("does not refetch the diff when active detail polling only changes collection time", async () => {
+    const { SessionDetailContent } = await import("./session-detail-content");
+    let sessionRequestCount = 0;
+    let diffRequestCount = 0;
+
+    server.use(
+      http.get("/api/v1/sessions/:id", () => {
+        sessionRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            primary_issue_id: undefined,
+            status: "running",
+            sandbox_state: "running",
+            diff: undefined,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            latest_diff_snapshot_id: "snapshot-1",
+            diff_collected_at: `2026-02-17T07:05:0${Math.min(sessionRequestCount, 9)}Z`,
+          },
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get("/api/v1/sessions/:id/timeline", () => {
+        return HttpResponse.json({ data: [], meta: {} } satisfies ListResponse<SessionTimelineEntry>);
+      }),
+      http.get("/api/v1/sessions/:id/diff", () => {
+        diffRequestCount += 1;
+        return HttpResponse.json({
+          data: {
+            session_id: "session-abcdef12-3456-7890",
+            diff: reviewPerfDiff,
+            diff_stats: { added: 2, removed: 2, files_changed: 2 },
+            diff_history: [],
+            diff_truncated: false,
+            diff_history_truncated: false,
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(
+      <SessionDetailContent id="session-abcdef12-3456-7890" />,
+      { searchParams: { review: "active" } },
+    );
+
+    await screen.findByTestId("review-diff-view-mock");
+    await waitFor(() => {
+      expect(sessionRequestCount).toBeGreaterThanOrEqual(2);
+    });
+
+    expect(diffRequestCount).toBe(1);
+  });
+
   it("does not load the hidden transcript before direct review links render the diff", async () => {
     const { SessionDetailContent } = await import("./session-detail-content");
     let timelineRequestCount = 0;
