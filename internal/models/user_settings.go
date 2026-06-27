@@ -11,10 +11,54 @@ import (
 
 // UserSettings is the strongly-typed representation of users.settings JSONB.
 type UserSettings struct {
-	CodingAgentModelDefault      string                        `json:"coding_agent_model_default,omitempty"`
-	CodingAgentReasoningDefaults map[AgentType]ReasoningEffort `json:"coding_agent_reasoning_defaults,omitempty"`
-	DiffViewerFullScreen         bool                          `json:"diff_viewer_full_screen,omitempty"`
-	ManualSessionPlanesHidden    bool                          `json:"manual_session_planes_hidden,omitempty"`
+	CodingAgentModelDefault      string                            `json:"coding_agent_model_default,omitempty"`
+	CodingAgentReasoningDefaults map[AgentType]ReasoningEffort     `json:"coding_agent_reasoning_defaults,omitempty"`
+	DiffViewerFullScreen         bool                              `json:"diff_viewer_full_screen,omitempty"`
+	ManualSessionPlanesHidden    bool                              `json:"manual_session_planes_hidden,omitempty"`
+	AutomaticPRFollowThrough     *AutomaticPRFollowThroughSettings `json:"automatic_pr_follow_through,omitempty"`
+}
+
+// AutomaticFollowThroughPreference is a per-user override for automatic
+// PR/readiness follow-through behavior.
+type AutomaticFollowThroughPreference string
+
+const (
+	AutomaticFollowThroughPreferenceInherit AutomaticFollowThroughPreference = "inherit"
+	AutomaticFollowThroughPreferenceOn      AutomaticFollowThroughPreference = "on"
+	AutomaticFollowThroughPreferenceOff     AutomaticFollowThroughPreference = "off"
+)
+
+// Validate returns an error if the preference is not a recognized value.
+func (p AutomaticFollowThroughPreference) Validate() error {
+	switch p {
+	case "", AutomaticFollowThroughPreferenceInherit, AutomaticFollowThroughPreferenceOn, AutomaticFollowThroughPreferenceOff:
+		return nil
+	default:
+		return fmt.Errorf("invalid automatic follow-through preference: %q", p)
+	}
+}
+
+// AutomaticPRFollowThroughSettings stores personal inherit/on/off choices for
+// automatic PR/readiness follow-through.
+type AutomaticPRFollowThroughSettings struct {
+	ReadinessAfterReviewLoop AutomaticFollowThroughPreference `json:"readiness_after_review_loop,omitempty"`
+	ResolveConflictsWhenIdle AutomaticFollowThroughPreference `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle         AutomaticFollowThroughPreference `json:"fix_tests_when_idle,omitempty"`
+}
+
+// Validate returns an error when any automatic follow-through preference is
+// invalid.
+func (s AutomaticPRFollowThroughSettings) Validate() error {
+	if err := s.ReadinessAfterReviewLoop.Validate(); err != nil {
+		return fmt.Errorf("automatic_pr_follow_through.readiness_after_review_loop: %w", err)
+	}
+	if err := s.ResolveConflictsWhenIdle.Validate(); err != nil {
+		return fmt.Errorf("automatic_pr_follow_through.resolve_conflicts_when_idle: %w", err)
+	}
+	if err := s.FixTestsWhenIdle.Validate(); err != nil {
+		return fmt.Errorf("automatic_pr_follow_through.fix_tests_when_idle: %w", err)
+	}
+	return nil
 }
 
 // ParseUserSettings deserializes the JSONB settings column into UserSettings.
@@ -139,6 +183,11 @@ func (s UserSettings) Validate() error {
 		}
 		if !agentType.SupportsReasoningEffortLevel(effort) {
 			return fmt.Errorf("coding_agent_reasoning_defaults.%s: reasoning effort %q is not supported", agentType, effort)
+		}
+	}
+	if s.AutomaticPRFollowThrough != nil {
+		if err := s.AutomaticPRFollowThrough.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -1,10 +1,8 @@
 # Design: Automated PR Repair and Readiness Follow-Through
 
-> **Status:** Future
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-27
 >
-> **Last reviewed:** 2026-06-26
->
-> **Depends on:** [implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md), [implemented/78-review-agent-loops.md](../implemented/78-review-agent-loops.md), [implemented/107-pr-readiness-checks.md](../implemented/107-pr-readiness-checks.md), [implemented/88-shared-sandbox-thread-runtimes.md](../implemented/88-shared-sandbox-thread-runtimes.md)
+> **Depends on:** [implemented/61-pr-state-sync-and-repair-actions.md](implemented/61-pr-state-sync-and-repair-actions.md), [implemented/78-review-agent-loops.md](implemented/78-review-agent-loops.md), [implemented/107-pr-readiness-checks.md](implemented/107-pr-readiness-checks.md), [implemented/88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md)
 
 ## Summary
 
@@ -42,6 +40,12 @@ Add policy-controlled backend follow-through for two cases:
 Auto-readiness ships first because it is read-only and already supports platform-triggered runs. Auto-repair ships later because it writes to the user's PR branch and requires a durable system-actor model.
 
 Defaults are off for existing and new orgs until internal rollout proves this is reliable.
+
+## Implementation Status
+
+Phase 1 is implemented: the org and user settings contracts exist, validation covers the new enum/settings shapes, frontend types mirror the backend, the Organization settings page has a compact **Session automation** section, and Account settings has personal inherit/on/off controls that display the current organization default. No backend automation behavior is wired yet.
+
+Phases 2-8 remain planned. The next implementation chunk should extract the PR readiness enqueue logic into a reusable service without changing runtime behavior.
 
 ## Principles and Boundaries
 
@@ -363,11 +367,11 @@ Worker hooks:
 
 ### Implementation Phases
 
-1. **Settings types and UI shell:** add org/user settings types, validation tests, frontend types, Organization -> Session automation section, and Account personal controls. No automation behavior yet.
-2. **Readiness runner extraction:** move readiness enqueue logic into a reusable service with no behavior change; update handler tests.
-3. **Auto-readiness after clean review loop:** wire terminal clean loop -> readiness enqueue behind effective policy; add worker/service tests and quiet readiness UI reason.
-4. **System-authored session messages:** add `system_auto_repair` source support, transcript labeling, and tests proving no real user attribution is required.
-5. **Repair attempt accounting:** add migration/store/model fields and tests for per-head/action automatic attempt caps.
-6. **Auto-repair coordinator:** implement eligibility, cheap short-circuits, head-SHA consistency, action ordering, and service tests. Keep policy default off.
-7. **Session completion hook and UI states:** invoke coordinator after successful continuation, expose active/attempted/exhausted states in PR health UI, and hide duplicate manual buttons while automation is running.
-8. **Internal rollout:** enable for selected internal repos/orgs, measure duplicate rate, disable rate, failed-loop recurrence, and repair regret before customer opt-in.
+1. **Implemented - Settings types and UI shell:** added org/user settings types, validation tests, frontend types, Organization -> Session automation section, and Account personal controls. No automation behavior yet.
+2. **Planned - Readiness runner extraction:** move readiness enqueue logic into a reusable service with no behavior change; update handler tests.
+3. **Planned - Auto-readiness after clean review loop:** wire terminal clean loop -> readiness enqueue behind effective policy; add worker/service tests and quiet readiness UI reason.
+4. **Planned - System-authored session messages:** add `system_auto_repair` source support, transcript labeling, and tests proving no real user attribution is required.
+5. **Planned - Repair attempt accounting:** add migration/store/model fields and tests for per-head/action automatic attempt caps.
+6. **Planned - Auto-repair coordinator:** implement eligibility, cheap short-circuits, head-SHA consistency, action ordering, and service tests. Keep policy default off.
+7. **Planned - Session completion hook and UI states:** invoke coordinator after successful continuation, expose active/attempted/exhausted states in PR health UI, and hide duplicate manual buttons while automation is running.
+8. **Planned - Internal rollout:** enable for selected internal repos/orgs, measure duplicate rate, disable rate, failed-loop recurrence, and repair regret before customer opt-in.
