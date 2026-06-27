@@ -76,6 +76,21 @@ export const codingAgents = [
   },
 ];
 
+export const agentChoiceHighlights = [
+  {
+    title: "Use the best agent for the job",
+    body: "Run top-tier tools like Claude Code and Codex when the task needs maximum capability.",
+  },
+  {
+    title: "Keep routine work economical",
+    body: "Route lighter jobs through OpenCode and open-source models when cost matters more than peak reasoning.",
+  },
+  {
+    title: "Stack subscriptions before metered spend",
+    body: "Layer personal, team, and bundled coding-agent subscriptions so available seats are used before extra usage piles up.",
+  },
+];
+
 export const integrations = [
   {
     name: "GitHub",

@@ -2,7 +2,11 @@
 
 import Image from "next/image";
 import { Card, CardContent } from "@/components/ui/card";
-import { codingAgents, integrations } from "./landing-copy";
+import {
+  agentChoiceHighlights,
+  codingAgents,
+  integrations,
+} from "./landing-copy";
 import { landingTypography as type } from "./landing-typography";
 
 interface IntegrationsSectionProps {
@@ -85,6 +89,34 @@ export default function IntegrationsSection({
         </div>
 
         <div className="mt-14">{renderGrid(codingAgents)}</div>
+
+        <div
+          className={`mt-8 grid gap-3 rounded-lg border p-3 md:grid-cols-3 ${
+            isDark
+              ? "border-white/10 bg-white/[0.03]"
+              : "border-slate-200 bg-white/60"
+          }`}
+        >
+          {agentChoiceHighlights.map((highlight) => (
+            <Card
+              key={highlight.title}
+              className={isDark ? "bg-[#0d0d15]" : "bg-white/80"}
+            >
+              <CardContent className="p-5">
+                <h3
+                  className={`${type.cardTitle} ${
+                    isDark ? "text-white/85" : "text-slate-900"
+                  }`}
+                >
+                  {highlight.title}
+                </h3>
+                <p className={`mt-4 ${type.body} ${body}`}>
+                  {highlight.body}
+                </p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
 
         <div className="mt-24 grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
           <p className={`${type.eyebrow} ${label}`}>08 Integrations</p>
