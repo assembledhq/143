@@ -4995,7 +4995,19 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(int64(1001), now))
 	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(workerAnyArgs(6)...).
+		WithArgs(
+			orgID,
+			"agent",
+			"continue_session",
+			jsonStringFieldsArg{expected: map[string]string{
+				"session_id":          sessionID.String(),
+				"thread_id":           threadID.String(),
+				"org_id":              orgID.String(),
+				"post_success_action": continuePostSuccessActionPushPRChanges,
+			}},
+			5,
+			pgxmock.AnyArg(),
+		).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 
 	services := &Services{
@@ -5015,7 +5027,9 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	require.ErrorIs(t, fatalErr, ghservice.ErrPushBranchDiverged, "branch-diverged push failure should preserve the terminal cause")
 	require.Contains(t, capturedMessage, "Repository: "+repo, "reconciliation prompt should include the PR repository")
 	require.Contains(t, capturedMessage, "PR branch: "+headRef, "reconciliation prompt should include the PR branch")
-	require.Contains(t, capturedMessage, "normal fast-forward git push", "reconciliation prompt should ask the agent to complete the push")
+	require.Contains(t, capturedMessage, "platform will automatically run Push changes again", "reconciliation prompt should leave the final push to the platform")
+	require.Contains(t, capturedMessage, "Do not run git push", "reconciliation prompt should prevent bypassing PR push bookkeeping")
+	require.NotContains(t, capturedMessage, "normal fast-forward git push", "reconciliation prompt should not ask the agent to push directly")
 	require.NotContains(t, capturedMessage, "Do not push changes yet", "automatic reconciliation should not use the manual review-only fallback prompt")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
@@ -5956,8 +5970,10 @@ func TestPRPushReconciliationMessage(t *testing.T) {
 	require.Contains(t, msg, "Repository: acme/repo", "reconciliation prompt should include repository context")
 	require.Contains(t, msg, "PR branch: codex/reconcile", "reconciliation prompt should include branch context")
 	require.Contains(t, msg, "Preserve the current session changes", "reconciliation prompt should tell the agent to preserve local work before fetching")
-	require.Contains(t, msg, "normal fast-forward git push", "reconciliation prompt should tell the agent to finish by pushing safely")
-	require.Contains(t, msg, "Do not force-push or open a new PR", "reconciliation prompt should preserve the existing PR branch")
+	require.Contains(t, msg, "platform will automatically run Push changes again", "reconciliation prompt should leave the final push to the platform")
+	require.Contains(t, msg, "Do not run git push", "reconciliation prompt should prevent bypassing PR push bookkeeping")
+	require.NotContains(t, msg, "normal fast-forward git push", "reconciliation prompt should not ask the agent to push directly")
+	require.Contains(t, msg, "force-push, or open a new PR", "reconciliation prompt should preserve the existing PR branch")
 	require.NotContains(t, msg, "Do not push changes yet", "reconciliation prompt should not use the manual review-only fallback wording")
 }
 
@@ -9661,6 +9677,55 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 	require.NoError(t, err, "continue_session should succeed when the orchestrator returns success")
 	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	row := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'").
+		WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			orgID,
+			"agent",
+			"push_pr_changes",
+			jsonStringFieldsArg{expected: map[string]string{
+				"session_id":  sessionID.String(),
+				"org_id":      orgID.String(),
+				"author_mode": "user",
+			}},
+			5,
+			pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return nil
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","post_success_action":"` + continuePostSuccessActionPushPRChanges + `","post_success_author_mode":"user"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+
+	require.NoError(t, err, "continue_session should not fail after enqueuing the post-reconciliation push")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should invoke the orchestrator once")
+	require.NoError(t, mock.ExpectationsWereMet(), "post-success push should transition pr_push_state and enqueue push_pr_changes")
 }
 
 func TestContinueSessionHandler_EnqueuesSlackFinalAfterSuccess(t *testing.T) {

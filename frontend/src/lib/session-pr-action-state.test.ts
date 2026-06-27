@@ -214,7 +214,7 @@ describe("session PR action state", () => {
 
   it("builds the branch reconciliation follow-up prompt with the PR head branch", () => {
     expect(continueFromPRBranchMessage("feature/pr-head"), "continuation prompt should include the active PR head branch").toBe(
-      "The PR branch has changes that are not in this session checkpoint. Fetch the latest PR branch (feature/pr-head) from origin, preserve every remote commit, reapply any still-needed local changes on top of it, and push the reconciled result back to the same PR branch with a normal fast-forward git push. Do not force-push or open a new PR. If conflicts require a product decision or the push is rejected again, stop and explain what changed.",
+      "The PR branch has changes that are not in this session checkpoint. Fetch the latest PR branch (feature/pr-head) from origin, preserve every remote commit, reapply any still-needed local changes on top of it, and stop once the session tree contains the reconciled result. Do not run git push, force-push, or open a new PR; use Push changes again afterward so PR bookkeeping stays in sync. If conflicts require a product decision, stop and explain what changed.",
     );
   });
 

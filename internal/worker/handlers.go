@@ -49,6 +49,7 @@ const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const continuePostSuccessActionPushPRChanges = "push_pr_changes"
 
 // prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
 // for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
@@ -8750,21 +8751,26 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID           string `json:"session_id"`
-			OrgID               string `json:"org_id"`
-			ThreadID            string `json:"thread_id"`
-			PullRequestID       string `json:"pull_request_id"`
-			RepairRunID         string `json:"repair_run_id"`
-			CommandType         string `json:"command_type"`
-			HealthVersion       int64  `json:"health_version"`
-			HeadSHA             string `json:"head_sha"`
-			WorkspaceMode       string `json:"workspace_mode"`
-			PullRequestNumber   int    `json:"pull_request_number"`
-			HumanInputRequestID string `json:"human_input_request_id"`
-			QueuedMessageID     string `json:"queued_message_id"`
+			SessionID             string `json:"session_id"`
+			OrgID                 string `json:"org_id"`
+			ThreadID              string `json:"thread_id"`
+			PullRequestID         string `json:"pull_request_id"`
+			RepairRunID           string `json:"repair_run_id"`
+			CommandType           string `json:"command_type"`
+			HealthVersion         int64  `json:"health_version"`
+			HeadSHA               string `json:"head_sha"`
+			WorkspaceMode         string `json:"workspace_mode"`
+			PullRequestNumber     int    `json:"pull_request_number"`
+			HumanInputRequestID   string `json:"human_input_request_id"`
+			QueuedMessageID       string `json:"queued_message_id"`
+			PostSuccessAction     string `json:"post_success_action"`
+			PostSuccessAuthorMode string `json:"post_success_author_mode"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
+		}
+		if input.PostSuccessAction != "" && input.PostSuccessAction != continuePostSuccessActionPushPRChanges {
+			return fmt.Errorf("unsupported continue_session post_success_action: %s", input.PostSuccessAction)
 		}
 
 		orgID, err := parseOrgID(input.OrgID, ctx)
@@ -9161,6 +9167,19 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
 					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
 					Msg("failed to complete pull request repair run after continue_session")
+			}
+		}
+		if input.PostSuccessAction == continuePostSuccessActionPushPRChanges {
+			queued, enqueueErr := enqueuePRPushChangesJob(ctx, stores, logger, orgID, sessionID, input.PostSuccessAuthorMode)
+			if enqueueErr != nil {
+				logger.Warn().
+					Err(enqueueErr).
+					Str("session_id", sessionID.String()).
+					Msg("failed to enqueue push_pr_changes after reconciliation turn")
+			} else if !queued {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Msg("skipping post-reconciliation push because a PR push is already in flight")
 			}
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, sessionID)
@@ -10841,7 +10860,46 @@ func shouldAutoReconcilePRPushError(err error) bool {
 	return errors.Is(err, ghservice.ErrPushBranchDiverged) || errors.Is(err, ghservice.ErrPushRejected)
 }
 
-func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, run models.Session, pushErr error) error {
+func enqueuePRPushChangesJob(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, authorMode string) (bool, error) {
+	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+		return false, errors.New("PR push queue stores unavailable")
+	}
+	tx, err := stores.Sessions.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin PR push queue transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txSessions := db.NewSessionStore(tx)
+	txSessions.SetLogger(logger)
+	queued, err := txSessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("mark PR push queued: %w", err)
+	}
+	if !queued {
+		return false, nil
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != "" {
+		payload["author_mode"] = authorMode
+	}
+	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
+	jobID, err := stores.Jobs.EnqueueInTx(ctx, tx, orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey)
+	if err != nil {
+		return false, fmt.Errorf("enqueue push_pr_changes: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit PR push queue transaction: %w", err)
+	}
+	stores.Jobs.Notify(context.WithoutCancel(ctx), jobID)
+	return true, nil
+}
+
+func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, run models.Session, pushErr error, authorMode string) error {
 	if stores == nil || stores.Sessions == nil || stores.SessionThreads == nil || stores.SessionMessages == nil || stores.Jobs == nil {
 		return errors.New("PR push reconciliation stores unavailable")
 	}
@@ -10882,6 +10940,8 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 		ClientMessageID:               clientMessageID,
 		Message:                       prPushReconciliationMessage(repo, headRef, pushErr),
 		MessageSource:                 models.SessionMessageSourceAgentTool,
+		PostSuccessAction:             continuePostSuccessActionPushPRChanges,
+		PostSuccessAuthorMode:         authorMode,
 		ContinuationDedupeKeyOverride: &dedupeKey,
 	})
 	if err != nil {
@@ -10904,7 +10964,7 @@ func prPushReconciliationMessage(repo, headRef string, pushErr error) string {
 	if strings.TrimSpace(headRef) != "" {
 		fmt.Fprintf(&b, " PR branch: %s.", strings.TrimSpace(headRef))
 	}
-	b.WriteString(" Preserve the current session changes, fetch the latest PR branch from origin, reapply the still-needed session changes without dropping remote commits, and push the result to the existing PR branch with a normal fast-forward git push. Do not force-push or open a new PR. If conflicts require a product decision or the push is rejected again, stop and explain what changed.")
+	b.WriteString(" Preserve the current session changes, fetch the latest PR branch from origin, reapply the still-needed session changes without dropping remote commits, and stop once the session tree contains the reconciled result. Do not run git push, force-push, or open a new PR; the platform will automatically run Push changes again after this turn so PR bookkeeping stays in sync. If conflicts require a product decision, stop and explain what changed.")
 	return b.String()
 }
 
@@ -11002,7 +11062,7 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
 			}
 			if shouldAutoReconcilePRPushError(pushErr) {
-				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr); reconcileErr != nil {
+				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr, input.AuthorMode); reconcileErr != nil {
 					logger.Warn().Err(reconcileErr).
 						Str("session_id", runID.String()).
 						Msg("failed to enqueue PR push reconciliation")

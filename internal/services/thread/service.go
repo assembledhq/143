@@ -237,6 +237,8 @@ type SendMessageInput struct {
 	MessageSource           models.SessionMessageSource
 	PlanMode                bool
 	ResolveReviewCommentIDs []uuid.UUID
+	PostSuccessAction       string
+	PostSuccessAuthorMode   string
 	// ContinuationDedupeKeyOverride is for system-generated follow-up turns
 	// created while the current same-thread worker job is still marked running.
 	// User sends should leave it nil so rapid-fire messages keep normal thread
@@ -861,6 +863,12 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
+	}
+	if input.PostSuccessAction != "" {
+		payload["post_success_action"] = input.PostSuccessAction
+	}
+	if input.PostSuccessAuthorMode != "" {
+		payload["post_success_author_mode"] = input.PostSuccessAuthorMode
 	}
 	if answeredHumanInput != nil {
 		payload["human_input_request_id"] = answeredHumanInput.ID.String()
