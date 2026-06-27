@@ -196,7 +196,7 @@ const (
 // AllLinearPrepareStates is the canonical, ordered list of valid
 // LinearPrepareState values. Validate() and the
 // chk_session_linear_context_prepare_state CHECK constraint in
-// migrations/000231_session_metadata_side_tables.up.sql both consume this
+// migrations/000232_session_metadata_side_tables.up.sql both consume this
 // vocabulary; TestLinearPrepareStateMigrationVocabularyMatchesGoEnum parses
 // the migration and pins the two together so a value added in one place
 // without the other breaks the build instead of the database.

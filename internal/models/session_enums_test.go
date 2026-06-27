@@ -329,7 +329,7 @@ func TestLinearPrepareState_Validate(t *testing.T) {
 func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000231_session_metadata_side_tables.up.sql"
+	const migrationFile = "000232_session_metadata_side_tables.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "migration file %s should be readable", migrationFile)
