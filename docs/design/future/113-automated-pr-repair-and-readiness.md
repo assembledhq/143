@@ -268,3 +268,106 @@ Frontend:
 - exhausted auto-repair returns a manual action with clear copy
 - readiness card shows auto-start reason quietly
 - settings separate read-only readiness from branch-writing repair actions
+
+## Engineering Specification
+
+### API Surface
+
+Use existing settings endpoints. Do not add new public settings endpoints in v1.
+
+- `GET /api/v1/settings` returns organization settings with `settings.session_automation.automatic_follow_through`.
+- `PATCH /api/v1/settings` updates the organization default through the existing RFC 7386 merge-patch settings flow. Admin-only, same as other organization settings.
+- `GET /api/v1/auth/me` returns user settings with `settings.automatic_pr_follow_through`.
+- `PATCH /api/v1/auth/me/settings` updates personal inherit/on/off choices through the existing user settings merge-patch endpoint.
+- Existing manual action endpoints remain unchanged: `POST /api/v1/pull-requests/{id}/repair/fix-tests`, `POST /api/v1/pull-requests/{id}/repair/resolve-conflicts`, and `POST /api/v1/sessions/{id}/pr-readiness-runs`.
+
+Optional later API, only if the UI needs server-derived copy: `GET /api/v1/settings/session-automation/effective` returning the resolved org default plus current user's preference. V1 can compute display state client-side from `/settings` and `/auth/me`.
+
+### JSON and Type Changes
+
+Backend `internal/models`:
+
+- Add `SessionAutomationSettings` to `OrgSettings`:
+  - `SessionAutomation SessionAutomationSettings json:"session_automation,omitempty"`
+- Add `SessionAutomationSettings`:
+  - `AutomaticFollowThrough AutomaticFollowThroughOrgSettings json:"automatic_follow_through,omitempty"`
+- Add `AutomaticFollowThroughOrgSettings`:
+  - `ReadinessAfterReviewLoop bool json:"readiness_after_review_loop,omitempty"`
+  - `ReadinessAfterReviewLoopStates []ReviewLoopStatus json:"readiness_after_review_loop_states,omitempty"`
+  - `ResolveConflictsWhenIdle bool json:"resolve_conflicts_when_idle,omitempty"`
+  - `FixTestsWhenIdle bool json:"fix_tests_when_idle,omitempty"`
+- Add `AutomaticFollowThroughPreference` typed string: `inherit`, `on`, `off`, with `Validate()`.
+- Add `AutomaticPRFollowThroughUserSettings` to `UserSettings`:
+  - `AutomaticPRFollowThrough AutomaticPRFollowThroughUserSettings json:"automatic_pr_follow_through,omitempty"`
+- Add `AutomaticPRFollowThroughUserSettings`:
+  - `ReadinessAfterReviewLoop AutomaticFollowThroughPreference json:"readiness_after_review_loop,omitempty"`
+  - `ResolveConflictsWhenIdle AutomaticFollowThroughPreference json:"resolve_conflicts_when_idle,omitempty"`
+  - `FixTestsWhenIdle AutomaticFollowThroughPreference json:"fix_tests_when_idle,omitempty"`
+
+Frontend `frontend/src/lib/types.ts` mirrors those shapes in `OrgSettings`, `UserSettings`, and `UserSettingsUpdateRequest`.
+
+Effective resolution:
+
+```text
+effective = user preference if on/off, otherwise organization default
+```
+
+For background session-idle evaluation, resolve the user preference from `sessions.triggered_by_user_id`. If absent or unreadable, use the organization default. User overrides never bypass RBAC, repository access, branch protection, attempt caps, or system-actor requirements.
+
+### Database / Schema
+
+No migration is needed for organization or user settings because both live in existing JSONB settings documents.
+
+Add one migration for automatic repair accounting:
+
+```sql
+ALTER TABLE pull_request_repair_runs
+  ADD COLUMN auto_attempt boolean NOT NULL DEFAULT false,
+  ADD COLUMN trigger_reason text NOT NULL DEFAULT '',
+  ADD COLUMN triggered_by_source text NOT NULL DEFAULT 'manual',
+  ADD COLUMN triggered_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL;
+
+CREATE INDEX idx_pull_request_repair_runs_auto_attempts
+  ON pull_request_repair_runs (org_id, pull_request_id, head_sha, action_type)
+  WHERE auto_attempt = true;
+```
+
+Extend `models.PullRequestRepairRun` and `PullRequestStore.CreateRepairRun` to read/write these fields. The v1 cap is enforced by querying existing `auto_attempt = true` rows for the same `(org_id, pull_request_id, head_sha, action_type)`.
+
+For system-authored repair prompts, do not overload a real user ID. Extend `SessionMessageSource` with `system_auto_repair` and allow `SessionMessage.UserID == nil` for that source while keeping `role = user` so the agent receives the repair prompt as user-directed instruction. Update transcript rendering to label it as 143/system authored.
+
+### Services and Workers
+
+Add `PRReadinessRunner` service by extracting `SessionHandler.enqueuePRReadinessRun`. It owns readiness run creation, dedupe, job enqueue, revision/snapshot stamping, and nullable attribution.
+
+Add `PRAutoRepairCoordinator`:
+
+```go
+MaybeStart(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*AutoRepairDecision, error)
+```
+
+Coordinator order:
+
+1. Load session and linked PR.
+2. Resolve org setting plus session owner's user preference.
+3. Short-circuit disabled/no-PR/budget-exhausted/not-idle cases before PR health reads.
+4. Read head-consistent PR health.
+5. Choose `resolve_conflicts` before `fix_tests`.
+6. Call `StartPullRequestRepair` with system source metadata.
+7. Treat already-running/busy states as successful no-op decisions.
+
+Worker hooks:
+
+- After successful `continue_session` completion and repair-run completion bookkeeping, call `MaybeStart(..., "session_idle")`.
+- After review-loop terminal `clean`, call `PRReadinessRunner.EnqueueRun(..., "review_loop_clean")` atomically with loop terminal transition.
+
+### Implementation Phases
+
+1. **Settings types and UI shell:** add org/user settings types, validation tests, frontend types, Organization -> Session automation section, and Account personal controls. No automation behavior yet.
+2. **Readiness runner extraction:** move readiness enqueue logic into a reusable service with no behavior change; update handler tests.
+3. **Auto-readiness after clean review loop:** wire terminal clean loop -> readiness enqueue behind effective policy; add worker/service tests and quiet readiness UI reason.
+4. **System-authored session messages:** add `system_auto_repair` source support, transcript labeling, and tests proving no real user attribution is required.
+5. **Repair attempt accounting:** add migration/store/model fields and tests for per-head/action automatic attempt caps.
+6. **Auto-repair coordinator:** implement eligibility, cheap short-circuits, head-SHA consistency, action ordering, and service tests. Keep policy default off.
+7. **Session completion hook and UI states:** invoke coordinator after successful continuation, expose active/attempted/exhausted states in PR health UI, and hide duplicate manual buttons while automation is running.
+8. **Internal rollout:** enable for selected internal repos/orgs, measure duplicate rate, disable rate, failed-loop recurrence, and repair regret before customer opt-in.
