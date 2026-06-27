@@ -27,7 +27,7 @@ import (
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
-	readinesssvc "github.com/assembledhq/143/internal/services/readiness"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -79,19 +79,21 @@ type SessionHandler struct {
 	messageStore       *db.SessionMessageStore
 	reviewLoopStore    *db.SessionReviewLoopStore
 	readinessStore     *db.PRReadinessStore
-	readinessRunner    *readinesssvc.Runner
 	reviewCommentStore *db.SessionReviewCommentStore
 	linkStore          *db.SessionIssueLinkStore
 	slackSessionLinks  *db.SlackSessionLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
-	threadInboxStore   *db.ThreadInboxStore
-	attributionStore   *db.SessionAttributionStore
-	sandboxHolders     *db.SessionSandboxHolderStore
-	viewStore          *db.SessionViewStore
-	memberships        sessionMembershipStore
-	prCredentials      githubStatusCredentialStore
-	prAuthChecker      interface {
+	readinessRunner    interface {
+		EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
+	}
+	threadInboxStore *db.ThreadInboxStore
+	attributionStore *db.SessionAttributionStore
+	sandboxHolders   *db.SessionSandboxHolderStore
+	viewStore        *db.SessionViewStore
+	memberships      sessionMembershipStore
+	prCredentials    githubStatusCredentialStore
+	prAuthChecker    interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
 	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
@@ -1985,9 +1987,12 @@ func (h *SessionHandler) SetReviewLoopStore(store *db.SessionReviewLoopStore) {
 
 func (h *SessionHandler) SetReadinessStore(store *db.PRReadinessStore) {
 	h.readinessStore = store
-	if store != nil && h.jobStore != nil {
-		h.readinessRunner = readinesssvc.NewRunner(store, h.jobStore)
-	}
+}
+
+func (h *SessionHandler) SetReadinessRunner(runner interface {
+	EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
+}) {
+	h.readinessRunner = runner
 }
 
 func (h *SessionHandler) GetReadiness(w http.ResponseWriter, r *http.Request) {
@@ -2094,7 +2099,7 @@ func (h *SessionHandler) UpsertReadinessContext(w http.ResponseWriter, r *http.R
 }
 
 func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil || h.readinessRunner == nil {
+	if h.readinessRunner == nil {
 		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
 		return
 	}
@@ -2116,7 +2121,11 @@ func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
 	if user := middleware.UserFromContext(r.Context()); user != nil {
 		triggeredByUserID = &user.ID
 	}
-	run, err := h.readinessRunner.EnqueueRun(r.Context(), orgID, session, triggeredByUserID)
+	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: triggeredByUserID,
+	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
 		return
@@ -2681,7 +2690,11 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 	if user := middleware.UserFromContext(r.Context()); user != nil {
 		userID = &user.ID
 	}
-	run, err := h.readinessRunner.EnqueueRun(r.Context(), orgID, session, userID)
+	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: userID,
+	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
 		return true

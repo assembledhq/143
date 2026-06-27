@@ -14,7 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
-	readinesssvc "github.com/assembledhq/143/internal/services/readiness"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
@@ -309,7 +309,11 @@ func (s *Service) markPassCleanAndMaybeEnqueueReadiness(ctx context.Context, org
 	if err := txReviewLoops.MarkPassClean(ctx, orgID, loop.ID, pass.ID, decision, summary); err != nil {
 		return err
 	}
-	_, jobID, err := readinesssvc.EnqueueRunInTx(ctx, tx, orgID, session, nil)
+	_, jobID, err := prreadinesssvc.EnqueueRunInTx(ctx, tx, prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: nil,
+	})
 	if err != nil {
 		return fmt.Errorf("enqueue PR readiness after review loop: %w", err)
 	}

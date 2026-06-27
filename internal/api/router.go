@@ -44,6 +44,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -348,6 +349,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	prReadinessStore := db.NewPRReadinessStore(pool)
+	prReadinessRunner := prreadinesssvc.NewService(prReadinessStore, jobStore)
 	codeReviewStore := db.NewCodeReviewStore(pool)
 	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{
 		AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
@@ -384,6 +386,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetReadinessStore(prReadinessStore)
+	sessionHandler.SetReadinessRunner(prReadinessRunner)
 	if prService != nil {
 		prService.SetReadinessStore(prReadinessStore)
 	}
