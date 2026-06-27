@@ -512,6 +512,41 @@ func TestPullRequestStore_CountAutoRepairAttemptsByHead(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all automatic attempt count expectations should be met")
 }
 
+func TestPullRequestStore_GetAutoRepairRunByThread(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	prID := uuid.New()
+	runID := uuid.New()
+	now := time.Now()
+	store := NewPullRequestStore(mock)
+
+	mock.ExpectQuery("SELECT .+ FROM pull_request_repair_runs").
+		WithArgs(pgx.NamedArgs{
+			"org_id":     orgID,
+			"session_id": sessionID,
+			"thread_id":  threadID,
+		}).
+		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).AddRow(
+			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(7),
+			models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, "session_idle", models.PullRequestRepairTriggeredBySourceSystemAutoRepair, nil,
+			false, nil, now, now, "head-auto", "base-auto",
+		))
+
+	run, err := store.GetAutoRepairRunByThread(context.Background(), orgID, sessionID, threadID)
+	require.NoError(t, err, "GetAutoRepairRunByThread should return the automatic repair run")
+	require.Equal(t, runID, run.ID, "GetAutoRepairRunByThread should decode the repair run ID")
+	require.Equal(t, models.PullRequestRepairActionTypeFixTests, run.ActionType, "GetAutoRepairRunByThread should decode the repair action")
+	require.True(t, run.AutoAttempt, "GetAutoRepairRunByThread should return an automatic attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "all automatic repair thread expectations should be met")
+}
+
 func TestPullRequestStore_beginTxRequiresTxStarter(t *testing.T) {
 	t.Parallel()
 

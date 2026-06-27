@@ -854,6 +854,73 @@ describe("PRHealthBanner", () => {
     expect(onOpenRepairSession).toHaveBeenCalledWith("session-current", "thread-repair");
   });
 
+  it("shows a stop action for an automatic repair and calls it with repair identity", async () => {
+    const onStopAutoRepair = vi.fn();
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+            auto_attempt: true,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId="thread-main"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onStopAutoRepair={onStopAutoRepair}
+      />,
+    );
+
+    expect(screen.getByText("Fixing tests automatically...")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop auto-repair for this PR" }));
+
+    expect(onStopAutoRepair).toHaveBeenCalledWith("session-current", "thread-repair");
+  });
+
+  it("does not show a stop action for a manual repair", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{
+          ...baseHealth,
+          can_fix_tests: true,
+          active_repairs: [{
+            action_type: "fix_tests",
+            session_id: "session-current",
+            thread_id: "thread-repair",
+            session_status: "running",
+            health_version: 2,
+            auto_attempt: false,
+          }],
+        }}
+        currentSessionId="session-current"
+        currentThreadId="thread-main"
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onStopAutoRepair={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Fix tests running")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stop auto-repair for this PR" })).toBeNull();
+  });
+
   it("does not show Open repair session when currentThreadId is null and repair is in the same session", () => {
     renderWithProviders(
       <PRHealthBanner

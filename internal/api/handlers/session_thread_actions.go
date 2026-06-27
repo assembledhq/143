@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/thread"
 )
@@ -29,6 +31,13 @@ func (h *SessionThreadHandler) CancelThread(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid thread ID")
 		return
 	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
 	t, err := h.svc.CancelThread(r.Context(), orgID, sessionID, threadID)
 	if err != nil {
 		switch {
@@ -40,6 +49,9 @@ func (h *SessionThreadHandler) CancelThread(w http.ResponseWriter, r *http.Reque
 			writeError(w, r, http.StatusInternalServerError, "CANCEL_FAILED", "failed to cancel thread", err)
 		}
 		return
+	}
+	if body.Reason == "auto_repair_stop" {
+		metrics.RecordPRAutoRepairStop(r.Context(), orgID.String(), "")
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionThread]{Data: t})
 }

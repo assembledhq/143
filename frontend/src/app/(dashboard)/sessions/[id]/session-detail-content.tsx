@@ -5440,6 +5440,35 @@ export function SessionDetailContent({ id }: { id: string }) {
   const handleCancelSession = useCallback(() => {
     cancelSession();
   }, [cancelSession]);
+  const stopAutoRepairMutation = useMutation({
+    mutationFn: async ({ sessionId, threadId }: { sessionId: string; threadId?: string }) => {
+      if (threadId) {
+        await api.sessions.cancelThread(sessionId, threadId, { reason: "auto_repair_stop" });
+        return;
+      }
+      await api.sessions.cancelSession(sessionId, { reason: "auto_repair_stop" });
+    },
+    onMutate: ({ sessionId }) => {
+      if (sessionId === id) {
+        setSessionStopRequest({ sessionId: id, requestedAt: new Date().toISOString() });
+        setSessionStopOutcome(null);
+      }
+    },
+    onSuccess: (_response, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+      if (pullRequestId) {
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      }
+      toast.info("Auto-repair stop requested");
+    },
+    onError: (error, { sessionId }) => {
+      if (sessionId === id) {
+        setSessionStopRequest(null);
+      }
+      toast.error(error instanceof ApiError ? error.message : "Failed to stop auto-repair");
+    },
+  });
   const handleComposerSend = useCallback(() => {
     queueSend();
   }, [queueSend]);
@@ -6397,6 +6426,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   }
                   router.push(`/sessions/${sessionId}`);
                 }}
+                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+                stopAutoRepairPending={stopAutoRepairMutation.isPending}
                 reviewAction={canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,

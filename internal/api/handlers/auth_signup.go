@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/assembledhq/143/internal/db"
@@ -57,7 +56,7 @@ func (h *AuthHandler) createSignupOrg(
 
 	org := &models.Organization{
 		Name:     orgName,
-		Settings: json.RawMessage(`{}`),
+		Settings: models.DefaultNewOrganizationSettings(),
 	}
 	if err := db.NewOrganizationStore(tx).Create(ctx, org); err != nil {
 		return "", fmt.Errorf("create organization: %w", err)

@@ -294,6 +294,14 @@ type OrgSettings struct {
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
 }
 
+// DefaultNewOrganizationSettings returns persisted settings for newly-created
+// organizations. Do not move these into ParseOrgSettings defaults unless the
+// value should also apply retroactively to existing organizations with absent
+// settings.
+func DefaultNewOrganizationSettings() json.RawMessage {
+	return json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`)
+}
+
 // SessionAutomationSettings controls organization-level session follow-through
 // defaults. V1 stores policy only; workers do not read it until later phases.
 type SessionAutomationSettings struct {

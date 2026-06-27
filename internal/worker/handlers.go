@@ -3683,6 +3683,10 @@ func slackNotificationDefaultTitle(kind models.SlackNotificationKind) string {
 		return "Preview stale"
 	case models.SlackNotificationHumanInputRequested:
 		return "143 needs your response"
+	case models.SlackNotificationPRAutoRepairAttention:
+		return "Automatic PR repair needs attention"
+	case models.SlackNotificationPRReadinessAttention:
+		return "PR readiness needs attention"
 	default:
 		return "143 notification"
 	}
@@ -3710,6 +3714,10 @@ func slackNotificationDefaultBody(kind models.SlackNotificationKind) string {
 		return "The session has newer workspace changes than the active preview."
 	case models.SlackNotificationHumanInputRequested:
 		return "The agent is waiting for a human response."
+	case models.SlackNotificationPRAutoRepairAttention:
+		return "143 could not complete automatic PR repair. Open the session or pull request to decide the next step."
+	case models.SlackNotificationPRReadinessAttention:
+		return "Automatic readiness checks found blockers. Open the session or pull request to decide the next step."
 	default:
 		return ""
 	}
@@ -3757,6 +3765,8 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
+			string(models.SlackNotificationPRAutoRepairAttention),
+			string(models.SlackNotificationPRReadinessAttention),
 		}
 	case models.SlackNotificationPresetBalanced:
 		return []string{
@@ -3766,6 +3776,8 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationPROpened),
 			string(models.SlackNotificationHumanInputRequested),
+			string(models.SlackNotificationPRAutoRepairAttention),
+			string(models.SlackNotificationPRReadinessAttention),
 		}
 	case models.SlackNotificationPresetVerbose:
 		return []string{"*"}
@@ -3897,6 +3909,59 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 			}
 		}
 	}
+}
+
+func notifyPRAutoRepairAttentionIfAutomatic(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, rawPullRequestID, action, reason string, autoAttempt bool) {
+	if !autoAttempt || rawPullRequestID == "" {
+		return
+	}
+	pullRequestID, err := uuid.Parse(rawPullRequestID)
+	if err != nil {
+		logger.Warn().Err(err).Str("pull_request_id", rawPullRequestID).Msg("invalid pull request ID for automatic PR repair notification")
+		return
+	}
+	notifyPRAutoRepairAttention(ctx, stores, logger, orgID, sessionID, &pullRequestID, action, reason)
+}
+
+func notifyPRAutoRepairAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, pullRequestID *uuid.UUID, action, reason string) {
+	body := "143 could not complete automatic PR repair. Open the session or pull request to decide the next step."
+	reason = strings.TrimSpace(reason)
+	if reason != "" {
+		body = "143 could not complete automatic PR repair: " + reason
+	}
+	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+		EventKind:     string(models.SlackNotificationPRAutoRepairAttention),
+		Title:         "Automatic PR repair needs attention",
+		Body:          body,
+		SessionID:     &sessionID,
+		PullRequestID: pullRequestID,
+	})
+}
+
+func notifyPRAutoReadinessAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, status models.PRReadinessRunStatus, summary string) {
+	var pullRequestID *uuid.UUID
+	if stores != nil && stores.PullRequests != nil {
+		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		if err == nil {
+			id := pr.ID
+			pullRequestID = &id
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load pull request for automatic PR readiness notification")
+		}
+	}
+	body := "Automatic readiness checks need attention."
+	if strings.TrimSpace(summary) != "" {
+		body = summary
+	} else if status == models.PRReadinessRunStatusFailed {
+		body = "Automatic readiness checks failed before producing a result."
+	}
+	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+		EventKind:     string(models.SlackNotificationPRReadinessAttention),
+		Title:         "PR readiness needs attention",
+		Body:          body,
+		SessionID:     &sessionID,
+		PullRequestID: pullRequestID,
+	})
 }
 
 func parseSlackNotificationSubscriptionConfig(raw json.RawMessage) slackNotificationSubscriptionConfig {
@@ -8790,6 +8855,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			HeadSHA             string `json:"head_sha"`
 			WorkspaceMode       string `json:"workspace_mode"`
 			PullRequestNumber   int    `json:"pull_request_number"`
+			AutoAttempt         bool   `json:"auto_attempt"`
 			HumanInputRequestID string `json:"human_input_request_id"`
 			QueuedMessageID     string `json:"queued_message_id"`
 		}
@@ -9018,6 +9084,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 						logger.Warn().Err(syncErr).Str("pull_request_id", input.PullRequestID).Msg("failed to sync pull request state after stale repair head")
 					}
 				}
+				notifyPRAutoRepairAttentionIfAutomatic(ctx, stores, logger, orgID, sessionID, input.PullRequestID, input.CommandType, "pull request head changed during automatic repair", input.AutoAttempt)
+				if input.AutoAttempt {
+					metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", input.CommandType, "stale_head")
+					metrics.RecordPRAutoRepairRegret(ctx, orgID.String(), "", input.CommandType, "head_changed_during_repair")
+				}
 				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrStaleSandboxIDCleared) {
@@ -9121,6 +9192,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					reviewCleanupCancel()
 				}
 			}
+			notifyPRAutoRepairAttentionIfAutomatic(ctx, stores, logger, orgID, sessionID, input.PullRequestID, input.CommandType, err.Error(), input.AutoAttempt)
+			if input.AutoAttempt {
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", input.CommandType, "failed")
+				// Automatic repair is best-effort: the named branches above already
+				// requeue the known-transient cases, so an unclassified failure here
+				// is deterministic against this snapshot continuation. Dead-letter
+				// instead of retrying so the attention notification and outcome metric
+				// fire once rather than once per max_attempts retry.
+				return &FatalError{Err: err}
+			}
 			return err
 		}
 
@@ -9192,6 +9273,9 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
 					Msg("failed to complete pull request repair run after continue_session")
 			}
+			if input.AutoAttempt {
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(continueOpts.PRRepair.CommandType), "completed")
+			}
 		}
 		if services.PR != nil {
 			if decision, autoRepairErr := services.PR.MaybeStartAutoRepair(ctx, orgID, sessionID, "session_idle"); autoRepairErr != nil {
@@ -9208,6 +9292,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					event = event.Str("pull_request_id", decision.PullRequestID.String())
 				}
 				event.Msg("started automatic pull request repair after continue_session")
+			} else if decision != nil && decision.Status == ghservice.AutoRepairDecisionBudgetExhausted && input.AutoAttempt {
+				// Only surface "out of budget" right after the automatic repair turn
+				// that consumed it. This block runs after every continue_session, so
+				// without the AutoAttempt gate every later user turn on the same head
+				// would re-notify and re-count the same exhaustion.
+				notifyPRAutoRepairAttention(ctx, stores, logger, orgID, sessionID, decision.PullRequestID, string(decision.Action), decision.Reason)
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(decision.Action), "budget_exhausted")
 			}
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, sessionID)
@@ -10357,6 +10448,10 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		if err := stores.PRReadiness.CompleteRunWithChecks(ctx, orgID, readinessID, completed, result.Checks); err != nil {
 			return err
+		}
+		if run.TriggeredByUserID == nil && (result.Status == models.PRReadinessRunStatusBlocked || result.Status == models.PRReadinessRunStatusFailed) {
+			notifyPRAutoReadinessAttention(ctx, stores, logger, orgID, sessionID, result.Status, result.Summary)
+			metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", "readiness", string(result.Status))
 		}
 		return nil
 	}
