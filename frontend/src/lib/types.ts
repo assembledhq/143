@@ -1681,7 +1681,7 @@ export interface SessionMessage {
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
-  source?: "agent_tool";
+  source?: "agent_tool" | "system_auto_repair";
   created_at: string;
 }
 

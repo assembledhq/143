@@ -1613,6 +1613,7 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
+		reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore),
 	)
 
 	logger.Info().
