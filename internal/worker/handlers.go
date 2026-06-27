@@ -570,6 +570,7 @@ type prCreator interface {
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
+	MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
@@ -9160,6 +9161,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
 					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
 					Msg("failed to complete pull request repair run after continue_session")
+			}
+		}
+		if services.PR != nil {
+			if decision, autoRepairErr := services.PR.MaybeStartAutoRepair(ctx, orgID, sessionID, "session_idle"); autoRepairErr != nil {
+				logger.Warn().
+					Err(autoRepairErr).
+					Str("session_id", sessionID.String()).
+					Msg("failed to evaluate automatic pull request repair after continue_session")
+			} else if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
+				event := logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("auto_repair_action", string(decision.Action)).
+					Str("head_sha", decision.HeadSHA)
+				if decision.PullRequestID != nil {
+					event = event.Str("pull_request_id", decision.PullRequestID.String())
+				}
+				event.Msg("started automatic pull request repair after continue_session")
 			}
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, sessionID)

@@ -1890,6 +1890,7 @@ export interface PullRequestActiveRepair {
   thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+  auto_attempt?: boolean;
 }
 
 export interface PullRequestRepairRequest {
@@ -1952,6 +1953,7 @@ export interface PullRequestHealthResponse {
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
   merge_when_ready: PullRequestMergeWhenReadyStatus;
+  auto_repair_exhausted_actions?: Array<"fix_tests" | "resolve_conflicts">;
 }
 
 export interface PullRequestRepairResponse {
