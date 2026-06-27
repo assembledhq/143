@@ -4954,7 +4954,7 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
-	mock.ExpectQuery("SELECT .* FROM pull_requests").
+	mock.ExpectQuery(`(?s)SELECT.*FROM pull_requests.*WHERE session_id.*org_id`).
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
@@ -5025,13 +5025,13 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	var fatalErr *FatalError
 	require.ErrorAs(t, err, &fatalErr, "branch-diverged push failures should dead-letter after queuing reconciliation")
 	require.ErrorIs(t, fatalErr, ghservice.ErrPushBranchDiverged, "branch-diverged push failure should preserve the terminal cause")
+	require.NoError(t, mock.ExpectationsWereMet(), "reconciliation should persist the agent prompt and enqueue the continuation job before prompt assertions")
 	require.Contains(t, capturedMessage, "Repository: "+repo, "reconciliation prompt should include the PR repository")
 	require.Contains(t, capturedMessage, "PR branch: "+headRef, "reconciliation prompt should include the PR branch")
 	require.Contains(t, capturedMessage, "platform will automatically run Push changes again", "reconciliation prompt should leave the final push to the platform")
 	require.Contains(t, capturedMessage, "Do not run git push", "reconciliation prompt should prevent bypassing PR push bookkeeping")
 	require.NotContains(t, capturedMessage, "normal fast-forward git push", "reconciliation prompt should not ask the agent to push directly")
 	require.NotContains(t, capturedMessage, "Do not push changes yet", "automatic reconciliation should not use the manual review-only fallback prompt")
-	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPushPRChangesHandler_TerminalErrorBecomesFatal(t *testing.T) {
@@ -9694,7 +9694,7 @@ func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'").
+	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*pr_push_state NOT IN[\\s\\S]*RETURNING").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
 	mock.ExpectQuery("INSERT INTO jobs").
