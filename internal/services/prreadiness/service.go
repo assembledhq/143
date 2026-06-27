@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -44,17 +45,26 @@ func (s *Service) EnqueueRun(ctx context.Context, req EnqueueRunRequest) (*model
 	if s == nil || s.store == nil || s.jobs == nil {
 		return nil, fmt.Errorf("PR readiness service is not configured")
 	}
+	run, _, err := enqueueRunOn(ctx, s.store, s.jobs.Enqueue, req)
+	return run, err
+}
+
+func EnqueueRunInTx(ctx context.Context, tx pgx.Tx, req EnqueueRunRequest) (*models.PRReadinessRun, uuid.UUID, error) {
+	return enqueueRunOn(ctx, db.NewPRReadinessStore(tx), db.NewJobStore(tx).Enqueue, req)
+}
+
+func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error), req EnqueueRunRequest) (*models.PRReadinessRun, uuid.UUID, error) {
 	sessionID := req.Session.ID
 	if req.OrgID == uuid.Nil || sessionID == uuid.Nil {
-		return nil, fmt.Errorf("org_id and session_id are required")
+		return nil, uuid.Nil, fmt.Errorf("org_id and session_id are required")
 	}
 
-	existing, err := s.store.GetLatestBySession(ctx, req.OrgID, sessionID)
+	existing, err := store.GetLatestBySession(ctx, req.OrgID, sessionID)
 	if err == nil && existing != nil && isQueuedOrRunning(existing.Status) {
-		return existing, nil
+		return existing, uuid.Nil, nil
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, err
+		return nil, uuid.Nil, err
 	}
 
 	run := &models.PRReadinessRun{
@@ -70,8 +80,8 @@ func (s *Service) EnqueueRun(ctx context.Context, req EnqueueRunRequest) (*model
 		snapshotKey := *req.Session.SnapshotKey
 		run.EvaluatedSnapshotKey = &snapshotKey
 	}
-	if err := s.store.CreateRun(ctx, run); err != nil {
-		return nil, err
+	if err := store.CreateRun(ctx, run); err != nil {
+		return nil, uuid.Nil, err
 	}
 
 	payload := map[string]string{
@@ -80,10 +90,11 @@ func (s *Service) EnqueueRun(ctx context.Context, req EnqueueRunRequest) (*model
 		"readiness_id": run.ID.String(),
 	}
 	dedupeKey := DedupeKey(sessionID)
-	if _, err := s.jobs.Enqueue(ctx, req.OrgID, runJobQueue, runJobType, payload, runJobPriority, &dedupeKey); err != nil {
-		return nil, err
+	jobID, err := enqueue(ctx, req.OrgID, runJobQueue, runJobType, payload, runJobPriority, &dedupeKey)
+	if err != nil {
+		return nil, uuid.Nil, err
 	}
-	return run, nil
+	return run, jobID, nil
 }
 
 func DedupeKey(sessionID uuid.UUID) string {
