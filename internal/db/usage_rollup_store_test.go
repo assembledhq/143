@@ -473,7 +473,7 @@ func TestRollupAllOrgs_NoActiveOrgs(t *testing.T) {
 	store := NewUsageRollupStore(mock)
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT DISTINCT org_id").
+	mock.ExpectQuery("FROM session_messages").
 		WithArgs(pgx.NamedArgs{"start": hour, "end": hour.Add(time.Hour)}).
 		WillReturnRows(pgxmock.NewRows([]string{"org_id"}))
 
@@ -491,7 +491,7 @@ func TestRollupAllOrgs_QueryError(t *testing.T) {
 	store := NewUsageRollupStore(mock)
 	hour := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
 
-	mock.ExpectQuery("SELECT DISTINCT org_id").
+	mock.ExpectQuery("FROM session_messages").
 		WithArgs(pgx.NamedArgs{"start": hour, "end": hour.Add(time.Hour)}).
 		WillReturnError(pgx.ErrTxClosed)
 
@@ -537,9 +537,9 @@ func TestRollupHour_NoEvents(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
 
-	// Second query: token usage — returns empty
+	// Second query: message token usage — returns empty
 	tokenCols := []string{"user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "capacity_key", "input_tokens", "output_tokens", "cost_usd"}
-	mock.ExpectQuery("SELECT").
+	mock.ExpectQuery("FROM session_messages sm").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols))
 
@@ -576,7 +576,7 @@ func TestRollupHour_UsesSessionModelOverrideColumn(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(eventCols))
 
 	tokenCols := []string{"user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "capacity_key", "input_tokens", "output_tokens", "cost_usd"}
-	mock.ExpectQuery("s\\.model_override").
+	mock.ExpectQuery("FROM session_messages sm").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols))
 
@@ -608,8 +608,8 @@ func TestRollupHour_TokenQueryError(t *testing.T) {
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg()}).
 		WillReturnRows(pgxmock.NewRows(eventCols))
 
-	// Second query: token usage — error
-	mock.ExpectQuery("SELECT").
+	// Second query: message token usage — error
+	mock.ExpectQuery("FROM session_messages sm").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnError(pgx.ErrTxClosed)
 
@@ -644,9 +644,9 @@ func TestRollupHour_UnattributedUser(t *testing.T) {
 			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
 		))
 
-	// Token row also unattributed — must not emit a per-user token upsert.
+	// Message token row also unattributed — must not emit a per-user token upsert.
 	tokenCols := []string{"user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "capacity_key", "input_tokens", "output_tokens", "cost_usd"}
-	mock.ExpectQuery("SELECT").
+	mock.ExpectQuery("FROM session_messages sm").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
 			uuid.Nil, "codex", nil, nil, nil, "2cpu_4096mb_10240diskmb", int64(1000), int64(500), 0.25,
@@ -696,9 +696,10 @@ func TestRollupHour_WithEvents(t *testing.T) {
 			hour, hour.Add(30*time.Minute), 30.0, 1800000.0,
 		))
 
-	// Second query: token usage — one row
+	// Second query: message token usage — one row. This row represents an
+	// ordinary turn on a session that may still be idle rather than completed.
 	tokenCols := []string{"user_id", "agent_type", "model_used", "reasoning_effort", "token_usage", "capacity_key", "input_tokens", "output_tokens", "cost_usd"}
-	mock.ExpectQuery("SELECT").
+	mock.ExpectQuery("FROM session_messages sm").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "hour": hour, "hour_start": hour, "hour_end": hour.Add(time.Hour), "now": pgxmock.AnyArg(), "unknown_capacity": usageUnknownCapacityKey}).
 		WillReturnRows(pgxmock.NewRows(tokenCols).AddRow(
 			userID, "codex", &modelUsed, nil, []byte(`{"native_usage":{"model":"gpt-5.4"}}`), "2cpu_4096mb_10240diskmb", int64(1000), int64(500), 0.25,

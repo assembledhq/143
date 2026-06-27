@@ -299,6 +299,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	model := "opus-4-7"
 	scope := "src/"
 	reasoning := ReasoningEffortXHigh
+	lastRunAt := time.Date(2026, 6, 27, 9, 30, 0, 0, time.FixedZone("test", -4*60*60))
 	a := Automation{
 		AgentType:        &agent,
 		ModelOverride:    &model,
@@ -307,21 +308,23 @@ func TestBuildConfigSnapshot(t *testing.T) {
 		IdentityScope:    AutomationIdentityScopePersonal,
 		PrePRReviewLoops: 2,
 		BaseBranch:       "main",
+		LastRunAt:        &lastRunAt,
 	}
 
 	raw, err := a.BuildConfigSnapshot()
-	require.NoError(t, err)
-	require.NotEmpty(t, raw)
+	require.NoError(t, err, "BuildConfigSnapshot should marshal automation config")
+	require.NotEmpty(t, raw, "config snapshot should not be empty")
 
 	var decoded map[string]any
-	require.NoError(t, json.Unmarshal(raw, &decoded))
-	require.Equal(t, "codex", decoded["agent_type"])
-	require.Equal(t, "opus-4-7", decoded["model_override"])
-	require.Equal(t, "xhigh", decoded["reasoning_effort"])
-	require.Equal(t, "src/", decoded["scope"])
-	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"])
+	require.NoError(t, json.Unmarshal(raw, &decoded), "config snapshot should be valid JSON")
+	require.Equal(t, "codex", decoded["agent_type"], "config snapshot should include agent type")
+	require.Equal(t, "opus-4-7", decoded["model_override"], "config snapshot should include model override")
+	require.Equal(t, "xhigh", decoded["reasoning_effort"], "config snapshot should include reasoning effort")
+	require.Equal(t, "src/", decoded["scope"], "config snapshot should include scope")
+	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"], "config snapshot should include identity scope")
 	require.Equal(t, float64(2), decoded["pre_pr_review_loops"], "config snapshot should include the pre-PR review pass count")
-	require.Equal(t, "main", decoded["base_branch"])
+	require.Equal(t, "main", decoded["base_branch"], "config snapshot should include base branch")
+	require.Equal(t, "2026-06-27T13:30:00Z", decoded["previous_run_at"], "config snapshot should include the previous automation run time in UTC")
 }
 
 func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
@@ -330,16 +333,17 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	a := Automation{BaseBranch: "develop"}
 
 	raw, err := a.BuildConfigSnapshot()
-	require.NoError(t, err)
+	require.NoError(t, err, "BuildConfigSnapshot should marshal automation config with nil optional fields")
 	var decoded map[string]any
-	require.NoError(t, json.Unmarshal(raw, &decoded))
-	require.Nil(t, decoded["agent_type"])
-	require.Nil(t, decoded["model_override"])
-	require.Nil(t, decoded["reasoning_effort"])
-	require.Nil(t, decoded["scope"])
-	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"])
+	require.NoError(t, json.Unmarshal(raw, &decoded), "config snapshot should be valid JSON")
+	require.Nil(t, decoded["agent_type"], "config snapshot should preserve nil agent type")
+	require.Nil(t, decoded["model_override"], "config snapshot should preserve nil model override")
+	require.Nil(t, decoded["reasoning_effort"], "config snapshot should preserve nil reasoning effort")
+	require.Nil(t, decoded["scope"], "config snapshot should preserve nil scope")
+	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"], "config snapshot should default identity scope")
 	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
-	require.Equal(t, "develop", decoded["base_branch"])
+	require.Equal(t, "develop", decoded["base_branch"], "config snapshot should include base branch")
+	require.Nil(t, decoded["previous_run_at"], "config snapshot should preserve missing previous automation run time")
 }
 
 func TestAutomationGitHubEventValidate(t *testing.T) {

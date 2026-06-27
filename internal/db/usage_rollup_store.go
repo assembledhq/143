@@ -262,18 +262,17 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 		return fmt.Errorf("iterate container events: %w", err)
 	}
 
-	// Query token usage from sessions that completed during this hour.
-	// Tokens are attributed to the completion hour (not creation hour) because
-	// token_usage is only populated when a session finishes. Using created_at
-	// would permanently miss tokens for sessions that start in one hour but
-	// complete after that hour has already been rolled up.
+	// Query token usage from assistant messages created during this hour.
+	// session_messages.token_usage is the per-turn source of truth; sessions can
+	// stay idle for long periods or never receive completed_at, so using
+	// sessions.token_usage would miss normal durable tab turns.
 	tokenRows, err := s.db.Query(ctx, `
 		SELECT
 			COALESCE(s.triggered_by_user_id, '00000000-0000-0000-0000-000000000000'::uuid) AS user_id,
 			s.agent_type,
 			s.model_override AS model_used,
 			s.reasoning_effort,
-			s.token_usage,
+			sm.token_usage,
 			COALESCE((
 				SELECT format('%scpu_%smb_%sdiskmb', round(e.cpu_limit)::int, e.memory_limit_mb, e.disk_limit_mb)
 				FROM container_usage_events e
@@ -287,14 +286,17 @@ func (s *UsageRollupStore) RollupHour(ctx context.Context, orgID uuid.UUID, hour
 				))) DESC
 				LIMIT 1
 			), @unknown_capacity) AS capacity_key,
-			COALESCE((s.token_usage->>'input_tokens')::bigint, 0) AS input_tokens,
-			COALESCE((s.token_usage->>'output_tokens')::bigint, 0) AS output_tokens,
-			`+usageTokenCostSQL("s")+` AS cost_usd
-		FROM sessions s
-		WHERE s.org_id = @org_id
-		  AND s.token_usage IS NOT NULL
-		  AND s.completed_at IS NOT NULL
-		  AND date_trunc('hour', s.completed_at) = @hour`,
+			COALESCE((sm.token_usage->>'input_tokens')::bigint, 0) AS input_tokens,
+			COALESCE((sm.token_usage->>'output_tokens')::bigint, 0) AS output_tokens,
+			`+usageTokenCostSQL("sm")+` AS cost_usd
+		FROM session_messages sm
+		JOIN sessions s
+		  ON s.id = sm.session_id
+		 AND s.org_id = sm.org_id
+		WHERE sm.org_id = @org_id
+		  AND sm.token_usage IS NOT NULL
+		  AND sm.created_at >= @hour
+		  AND sm.created_at < @hour_end`,
 		pgx.NamedArgs{
 			"org_id":           orgID,
 			"hour":             hour,
@@ -723,8 +725,8 @@ func (s *UsageRollupStore) GetActiveOrgIDs(ctx context.Context, start, end time.
 		SELECT DISTINCT org_id FROM container_usage_events
 		WHERE started_at < @end AND COALESCE(stopped_at, now()) > @start
 		UNION
-		SELECT DISTINCT org_id FROM sessions
-		WHERE token_usage IS NOT NULL AND completed_at >= @start AND completed_at < @end`,
+		SELECT DISTINCT org_id FROM session_messages
+		WHERE token_usage IS NOT NULL AND created_at >= @start AND created_at < @end`,
 		pgx.NamedArgs{"start": start, "end": end},
 	)
 	if err != nil {
@@ -1079,10 +1081,15 @@ func (s *UsageRollupStore) GetBreakdown(ctx context.Context, orgID uuid.UUID, st
 						  AND COALESCE(e.stopped_at, now()) > @start
 					)
 					OR (
-						s.token_usage IS NOT NULL
-						AND s.completed_at IS NOT NULL
-						AND s.completed_at >= @start
-						AND s.completed_at < @end
+						EXISTS (
+							SELECT 1
+							FROM session_messages sm
+							WHERE sm.org_id = s.org_id
+							  AND sm.session_id = s.id
+							  AND sm.token_usage IS NOT NULL
+							  AND sm.created_at >= @start
+							  AND sm.created_at < @end
+						)
 					)
 				  )
 				GROUP BY ` + sessionDimensionKeySQL(dimension, "s") + `
@@ -1298,9 +1305,15 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 			          AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
 			    )
 			    OR (
-			        s.token_usage IS NOT NULL
-			        AND s.completed_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
-			        AND s.completed_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+			        EXISTS (
+			            SELECT 1
+			            FROM session_messages sm
+			            WHERE sm.org_id = s.org_id
+			              AND sm.session_id = s.id
+			              AND sm.token_usage IS NOT NULL
+			              AND sm.created_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
+			              AND sm.created_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+			        )
 			    )
 			 )
 			WHERE 1=1`
@@ -1329,9 +1342,15 @@ func (s *UsageRollupStore) GetDailySessionCounts(ctx context.Context, orgID uuid
 						  AND COALESCE(e.stopped_at, now()) > GREATEST((days.local_day AT TIME ZONE @tz), @start)
 					)
 					OR (
-						s.token_usage IS NOT NULL
-						AND s.completed_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
-						AND s.completed_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+						EXISTS (
+							SELECT 1
+							FROM session_messages sm
+							WHERE sm.org_id = s.org_id
+							  AND sm.session_id = s.id
+							  AND sm.token_usage IS NOT NULL
+							  AND sm.created_at >= GREATEST((days.local_day AT TIME ZONE @tz), @start)
+							  AND sm.created_at < LEAST(((days.local_day + interval '1 day') AT TIME ZONE @tz), @end)
+						)
 					)
 				 )
 				WHERE 1=1`
