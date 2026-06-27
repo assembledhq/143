@@ -67,6 +67,23 @@ func (d CodeReviewDecision) Validate() error {
 	}
 }
 
+// CodeReviewUpdatedEvent is fanned out over the org-scoped code review SSE
+// stream whenever a review row is created or its status/decision changes. The
+// frontend treats it as a "the list moved, refetch" signal rather than reading
+// individual fields off it (Redis pub/sub is at-most-once and unordered, so the
+// canonical record is whatever the list endpoint returns on invalidation).
+type CodeReviewUpdatedEvent struct {
+	OrgID uuid.UUID `json:"org_id"`
+	// SessionID is nil for batch transitions that touch many rows at once
+	// (e.g. marking a PR's prior reviews stale on a new head), which have no
+	// single session. A pointer is required for omitempty to actually fire —
+	// uuid.UUID is a fixed-size array and never counts as "empty" to encoding/json.
+	SessionID *uuid.UUID              `json:"session_id,omitempty"`
+	Status    CodeReviewSessionStatus `json:"status,omitempty"`
+	Decision  *CodeReviewDecision     `json:"decision,omitempty"`
+	UpdatedAt time.Time               `json:"updated_at"`
+}
+
 type CodeReviewTriggerSource string
 
 const (

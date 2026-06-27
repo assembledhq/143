@@ -1,10 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, RefreshCw, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
+import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -33,6 +33,10 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { getActiveOrgId } from "@/lib/active-org";
+import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
+import { useResourceSSE } from "@/lib/use-resource-sse";
+import { pollMs } from "@/lib/poll-intervals";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -56,6 +60,8 @@ const ALL_DECISIONS = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
+// Coalesce a burst of SSE lifecycle events into a single list refetch.
+const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
@@ -134,9 +140,45 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.repositories.all,
     queryFn: () => api.repositories.list(),
   });
+  // The reviews list refreshes live via the org-scoped SSE stream below; the
+  // polling backstop only kicks in (faster) while the stream is unhealthy so a
+  // Redis hiccup still surfaces new reviews. Replaces the old manual Refresh
+  // button — mirrors the eval batch/bootstrap stream pattern.
+  //
+  // The URL is pinned to the org active at mount (empty deps) on purpose: the
+  // only org→org switch path (org-switcher) navigates away to /sessions and
+  // replaces the QueryClient (see providers.tsx), so this page never stays
+  // mounted across an org change — there's nothing to react to here.
+  const codeReviewStreamURL = useMemo(() => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
+    return buildCodeReviewStreamURL(apiBase, getActiveOrgId());
+  }, []);
+  // A single review lifecycle emits several events (queued → running →
+  // completed), and a batch-stale transition can fan out across the org — so
+  // coalesce bursts into one refetch per window rather than one per event.
+  const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onCodeReviewEvent = useCallback(() => {
+    if (invalidateTimerRef.current) return;
+    invalidateTimerRef.current = setTimeout(() => {
+      invalidateTimerRef.current = null;
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+    }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
+  }, [queryClient]);
+  useEffect(
+    () => () => {
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+    },
+    [],
+  );
+  const { healthy: codeReviewStreamHealthy } = useResourceSSE({
+    url: codeReviewStreamURL,
+    event: SSE_EVENT.CODE_REVIEW_UPDATED,
+    onEvent: onCodeReviewEvent,
+  });
   const reviewsQuery = useQuery({
     queryKey: queryKeys.codeReviews.list(reviewFilters),
     queryFn: () => api.codeReviews.list(reviewFilters),
+    refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
@@ -240,12 +282,6 @@ export default function CodeReviewsPage() {
         <PageHeader
           title="Code reviews"
           description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
-          action={
-            <Button variant="outline" size="sm" onClick={() => reviewsQuery.refetch()}>
-              <RefreshCw className="h-4 w-4" />
-              Refresh
-            </Button>
-          }
         />
 
         <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">

@@ -172,6 +172,12 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		sessionLogStore.SetStreams(sessionStreams)
 		sessionThreadStore.SetStreams(sessionStreams)
 	}
+	// Code review lifecycle fanout so reviews run by the executor refresh the
+	// live code reviews list. nil-safe when redisClient is unavailable.
+	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
+	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStore.SetStreams(codeReviewStreams)
+	codeReviewStore.SetLogger(logger)
 
 	containerUsageStore := db.NewContainerUsageStore(pool)
 	billingMetrics, err := metrics.NewBillingMetrics(containerUsageStore.CountActive)
@@ -300,6 +306,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		SessionThreads:      sessionThreadStore,
 		AutomationRuns:      automationRunStore,
 		PullRequests:        pullRequestStore,
+		CodeReviews:         codeReviewStore,
 	})
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
@@ -344,6 +351,7 @@ type sessionExecutorStoreDeps struct {
 	SessionThreads      *db.SessionThreadStore
 	AutomationRuns      *db.AutomationRunStore
 	PullRequests        *db.PullRequestStore
+	CodeReviews         *db.CodeReviewStore
 }
 
 func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
@@ -399,6 +407,9 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 	if deps.PullRequests == nil {
 		deps.PullRequests = db.NewPullRequestStore(pool)
 	}
+	if deps.CodeReviews == nil {
+		deps.CodeReviews = db.NewCodeReviewStore(pool)
+	}
 	return &worker.Stores{
 		Issues:              deps.Issues,
 		Sessions:            deps.Sessions,
@@ -431,7 +442,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		AutomationRuns:      deps.AutomationRuns,
 		ReviewLoops:         db.NewSessionReviewLoopStore(pool),
 		PRReadiness:         db.NewPRReadinessStore(pool),
-		CodeReviews:         db.NewCodeReviewStore(pool),
+		CodeReviews:         deps.CodeReviews,
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        deps.PullRequests,

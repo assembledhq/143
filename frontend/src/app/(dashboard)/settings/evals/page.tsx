@@ -43,7 +43,8 @@ import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstr
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 import { addSSEListener, SSE_EVENT, buildEvalBootstrapStreamURL, buildSessionLogsStreamURL } from "@/lib/sse";
-import { shouldSubscribeToEvalBootstrapStream, useEvalSSE } from "@/lib/use-eval-sse";
+import { shouldSubscribeToEvalBootstrapStream } from "@/lib/eval-streams";
+import { useResourceSSE } from "@/lib/use-resource-sse";
 import { getActiveOrgId } from "@/lib/active-org";
 
 type SourceFilter = "all" | EvalTaskSource | "archived";
@@ -148,7 +149,7 @@ export default function EvalsSettingsPage() {
     if (!effectiveBootstrapRunId) return;
     queryClient.invalidateQueries({ queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId) });
   }, [queryClient, effectiveBootstrapRunId]);
-  const { healthy: bootstrapStreamHealthy } = useEvalSSE({
+  const { healthy: bootstrapStreamHealthy } = useResourceSSE({
     url: bootstrapSSEURL,
     event: SSE_EVENT.EVAL_BOOTSTRAP_UPDATED,
     onEvent: onBootstrapEvent,
