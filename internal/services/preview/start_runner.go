@@ -129,7 +129,7 @@ type previewStartupCache interface {
 	FindBaseSnapshot(ctx context.Context, orgID, repoID uuid.UUID, baseKey, excludeCommitSHA string) (*CacheHit, error)
 	RestoreSnapshot(ctx context.Context, sb *agent.Sandbox, hit *CacheHit) error
 	ApplyPartialInvalidation(ctx context.Context, sb *agent.Sandbox, hit *CacheHit, gitDiff []byte) error
-	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error
+	CreateSnapshot(ctx context.Context, sb *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) error
 }
 
 // branchPreviewStartupCacheKeys carries the cache keys computed for one branch
@@ -145,7 +145,6 @@ type StartupSnapshotResult string
 const (
 	StartupSnapshotSaved              StartupSnapshotResult = "saved"
 	StartupSnapshotSkippedNoLockfiles StartupSnapshotResult = "skipped_no_lockfiles"
-	StartupSnapshotSkippedSecretFiles StartupSnapshotResult = "skipped_secret_files"
 	StartupSnapshotFailed             StartupSnapshotResult = "failed"
 	StartupSnapshotTooLarge           StartupSnapshotResult = "too_large"
 	StartupSnapshotDisabled           StartupSnapshotResult = "disabled"
@@ -1724,16 +1723,12 @@ func (r *StartRunner) maybeRestoreBranchPreviewStartupCache(ctx context.Context,
 	if r == nil || r.snapshotCache == nil || r.sandboxProvider == nil || sb == nil || cfg == nil || commitSHA == "" {
 		return branchPreviewStartupCacheKeys{}, nil
 	}
-	if previewConfigHasRuntimeSecretFiles(cfg) {
-		// Runtime secret files are written into the shared workspace during
-		// LaunchPreview. The startup cache snapshots that workspace after
-		// launch, so do not read or write cache entries for these configs:
-		// otherwise worker-local cache blobs could retain plaintext secrets.
-		r.logger.Debug().
-			Str("repository_id", repoID.String()).
-			Msg("branch preview startup cache skipped because config delivers preview secrets as files")
-		return branchPreviewStartupCacheKeys{}, nil
-	}
+	// Configs that deliver runtime secret files used to be excluded from the
+	// startup cache entirely. They are no longer: the secret-file destinations
+	// are excluded from the snapshot blob at create time (see
+	// previewSnapshotExcludePaths) and re-injected on every launch by the
+	// runtime_secret_files phase, which runs after restore — so a restored
+	// workspace never carries persisted plaintext secrets.
 	keys, err := r.computeBranchPreviewStartupCacheKeys(ctx, sb, cfg, commitSHA)
 	if err != nil {
 		r.logger.Warn().Err(err).
@@ -1879,20 +1874,13 @@ func (r *StartRunner) createBranchPreviewStartupCache(ctx context.Context, orgID
 		}
 		return result
 	}
-	if previewConfigHasRuntimeSecretFiles(cfg) {
-		// See maybeRestoreBranchPreviewStartupCache for why secret-file
-		// configs are excluded from the workspace snapshot cache.
-		r.logger.Debug().
-			Str("repository_id", repoID.String()).
-			Str("snapshot_key", keys.SnapshotKey).
-			Msg("branch preview startup cache creation skipped because config delivers preview secrets as files")
-		r.logBranchPreviewStartupSnapshotResult(repoID, keys.SnapshotKey, StartupSnapshotSkippedSecretFiles, 0, started, nil)
-		return StartupSnapshotSkippedSecretFiles
-	}
 	cacheCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	defer cancel()
 	metadata := SnapshotMetadata{OrgID: orgID, RepoID: repoID, BaseKey: keys.BaseKey, CommitSHA: keys.CommitSHA}
-	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata); err != nil {
+	// Keep runtime secret-file destinations and separately-restored build caches
+	// out of the worker-local blob (see previewSnapshotExcludePaths).
+	excludePaths := previewSnapshotExcludePaths(cfg)
+	if err := r.snapshotCache.CreateSnapshot(cacheCtx, sb, keys.SnapshotKey, metadata, excludePaths); err != nil {
 		result := startupSnapshotResultForCreateError(err)
 		r.logger.Warn().Err(err).
 			Str("repository_id", repoID.String()).
@@ -1987,19 +1975,58 @@ func branchPreviewStartupCacheLockfiles(cfg *models.PreviewConfig) []string {
 	return lockfiles
 }
 
-func previewConfigHasRuntimeSecretFiles(cfg *models.PreviewConfig) bool {
+// previewSnapshotExcludePaths returns the workspace-relative paths that must be
+// kept out of a startup snapshot blob:
+//
+//   - Runtime secret-file destinations. These hold plaintext app secrets, so
+//     they must never persist in a worker-local snapshot blob. They are
+//     re-injected on every launch by the runtime_secret_files phase (which runs
+//     after the snapshot is restored), so excluding them is lossless. Both the
+//     resolved cfg.RuntimeSecretFiles (populated by the secret resolver during
+//     LaunchPreview) and the repo-declared SecretBundleRefs file destinations
+//     are covered, so the set is complete whether or not resolution has run.
+//   - Workspace build-cache paths (preview.install.cache.build). These are
+//     persisted and restored by the dedicated build-cache mechanism
+//     (restorePreviewBuildCache, which runs right before the build phase), so
+//     duplicating them in the snapshot is wasted bytes — and for a large
+//     monorepo's Go/turbo caches that bloat can push the blob past the size cap
+//     and silently defeat the whole snapshot.
+//
+// Dependency caches (node_modules, .venv, …) are deliberately NOT excluded: the
+// snapshot's value is bundling installed deps and build outputs into one restore
+// so the install phase fully skips, which needs those trees present.
+func previewSnapshotExcludePaths(cfg *models.PreviewConfig) []string {
 	if cfg == nil {
-		return false
+		return nil
 	}
-	if len(cfg.RuntimeSecretFiles) > 0 {
-		return true
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(raw string) {
+		clean, err := cleanBranchPreviewStartupCachePath(raw)
+		if err != nil {
+			return
+		}
+		if _, ok := seen[clean]; ok {
+			return
+		}
+		seen[clean] = struct{}{}
+		paths = append(paths, clean)
+	}
+	for _, file := range cfg.RuntimeSecretFiles {
+		add(file.Path)
 	}
 	for _, ref := range SecretBundleRefs(cfg) {
-		if len(ref.Files) > 0 {
-			return true
+		for _, file := range ref.Files {
+			add(file)
 		}
 	}
-	return false
+	if buildCachePaths, ok := ResolvePreviewBuildCachePaths(cfg.Install); ok {
+		for _, p := range buildCachePaths {
+			add(p)
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 func cleanBranchPreviewStartupCachePath(raw string) (string, error) {
