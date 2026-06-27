@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_OPENCODE_BACKING_PROVIDER,
   detectOpenCodeKeyPreset,
+  ORG_PROVIDER_OPTIONS,
   openCodeModelsForBackingProvider,
   openCodeDefaultModelForBackingProvider,
+  PERSONAL_PROVIDER_OPTIONS,
 } from "./coding-auth-metadata";
 import {
   AVAILABLE_OPENCODE_MODELS,
@@ -13,6 +15,19 @@ import {
 } from "./model-constants";
 
 describe("OpenCode backing provider model helpers", () => {
+  it("orders OpenCode third in auth setup provider choices", () => {
+    expect(ORG_PROVIDER_OPTIONS.slice(0, 3).map((option) => option.key)).toEqual([
+      "codex",
+      "claude_code",
+      "opencode",
+    ]);
+    expect(PERSONAL_PROVIDER_OPTIONS.slice(0, 3).map((option) => option.key)).toEqual([
+      "openai",
+      "anthropic",
+      "opencode",
+    ]);
+  });
+
   it("defaults new OpenCode auths to OpenRouter", () => {
     expect(DEFAULT_OPENCODE_BACKING_PROVIDER).toBe("openrouter");
     expect(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER)).toBe(OPENCODE_MODEL_OPENROUTER_GLM_5_2);

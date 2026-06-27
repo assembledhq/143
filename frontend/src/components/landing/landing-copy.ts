@@ -17,7 +17,7 @@ export const platformLayers = [
     kicker: "Execution",
     title: "Cloud execution",
     heading: "Run agents from anywhere.",
-    body: "Start Codex, Claude Code, and other coding agents from web, mobile, Slack, Linear, or Sentry. Runs happen in cloud sandboxes your team can follow.",
+    body: "Start Codex, Claude Code, OpenCode, and other coding agents from web, mobile, Slack, Linear, or Sentry. Runs happen in cloud sandboxes your team can follow.",
     components: [
       "Codex, Claude Code, OpenCode, and more",
       "Cloud sandboxes with previews",
@@ -63,6 +63,10 @@ export const codingAgents = [
     logo: "/agents/claude_code.svg",
   },
   {
+    name: "OpenCode",
+    logo: "/agents/opencode.svg",
+  },
+  {
     name: "Amp",
     logo: "/agents/amp.svg",
   },
@@ -70,16 +74,12 @@ export const codingAgents = [
     name: "Pi",
     logo: "/agents/pi.svg",
   },
-  {
-    name: "OpenCode",
-    logo: "/agents/opencode.svg",
-  },
 ];
 
 export const agentChoiceHighlights = [
   {
     title: "Use the best agent for the job",
-    body: "Run top-tier tools like Claude Code and Codex when the task needs maximum capability.",
+    body: "Run top-tier tools like Codex, Claude Code, and OpenCode when the task needs maximum capability.",
   },
   {
     title: "Keep routine work economical",

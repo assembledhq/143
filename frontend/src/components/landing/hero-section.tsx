@@ -90,8 +90,8 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <p
             className={`max-w-2xl ${type.heroBody} ${isDark ? "text-white/52" : "text-slate-600"}`}
           >
-            Run Codex and Claude Code in an open-source cloud with shared
-            context, previews, review loops, and automations.
+            Run Codex, Claude Code, and OpenCode in an open-source cloud with
+            shared context, previews, review loops, and automations.
           </p>
 
           <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">
