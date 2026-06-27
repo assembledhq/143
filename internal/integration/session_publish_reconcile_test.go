@@ -47,9 +47,15 @@ func seedPublishActionJobWithLease(t *testing.T, pool *pgxpool.Pool, orgID, sess
 
 func setPublishColumn(t *testing.T, pool *pgxpool.Pool, sessionID uuid.UUID, column, state string) {
 	t.Helper()
+	// Publish state moved off sessions into session_publish_state (one row per
+	// session, created lazily). Upsert so a test can set a column before any
+	// publish action has materialized a row; org_id is derived from the session.
 	// #nosec G202 -- column is a test-controlled literal, not user input.
 	_, err := pool.Exec(context.Background(),
-		`UPDATE sessions SET `+column+` = $2 WHERE id = $1`, sessionID, state)
+		`INSERT INTO session_publish_state (session_id, org_id, `+column+`)
+		 SELECT s.id, s.org_id, $2 FROM sessions s WHERE s.id = $1
+		 ON CONFLICT (session_id) DO UPDATE SET `+column+` = EXCLUDED.`+column,
+		sessionID, state)
 	require.NoError(t, err)
 }
 
@@ -62,7 +68,7 @@ func publishColumn(t *testing.T, pool *pgxpool.Pool, sessionID uuid.UUID, column
 		"branch_creation_state": "branch_creation_error",
 	}[column]
 	err := pool.QueryRow(context.Background(),
-		`SELECT `+column+`, COALESCE(`+errCol+`, '') FROM sessions WHERE id = $1`, sessionID).
+		`SELECT `+column+`, COALESCE(`+errCol+`, '') FROM session_publish_state WHERE session_id = $1`, sessionID).
 		Scan(&state, &errMsg)
 	require.NoError(t, err)
 	return state, errMsg
