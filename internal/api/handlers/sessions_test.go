@@ -858,7 +858,7 @@ func retrySessionRow(sessionID, orgID uuid.UUID, status models.SessionStatus, sn
 func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(29)...).
+		WithArgs(sessionAnyArgs(39)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(sessionAnyArgs(6)...).
@@ -869,7 +869,7 @@ func expectManualSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now t
 func expectIssueSessionCreate(mock pgxmock.PgxPoolIface, runID uuid.UUID, now time.Time) {
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO sessions").
-		WithArgs(sessionAnyArgs(29)...).
+		WithArgs(sessionAnyArgs(39)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "last_activity_at"}).AddRow(runID, now, now))
 	mock.ExpectQuery("INSERT INTO session_threads").
 		WithArgs(sessionAnyArgs(6)...).
@@ -5000,7 +5000,7 @@ func TestSessionHandler_EndSession_EnqueuesOpenPR(t *testing.T) {
 			),
 		)
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 			snapshotKey:     "snapshots/test.tar",
@@ -5097,7 +5097,7 @@ func TestSessionHandler_EndSession_ManualEnqueuesOpenPR(t *testing.T) {
 		)
 	// Expect open_pr job instead of validate.
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 			snapshotKey:     "snapshots/test.tar",
@@ -7190,7 +7190,7 @@ func TestSessionHandler_CreatePR_Success(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -7275,7 +7275,7 @@ func TestSessionHandler_CreatePR_WithMergeWhenReadyIncludesIntentInJobPayload(t 
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -7474,7 +7474,7 @@ func TestSessionHandler_CreatePR_BuilderRequiresCleanReviewLoop(t *testing.T) {
 			}
 			if tt.expectEnqueue {
 				mock.ExpectBegin()
-				mock.ExpectQuery("UPDATE sessions").
+				mock.ExpectQuery("INSERT INTO session_publish_state").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -7678,7 +7678,7 @@ func TestSessionHandler_CreatePR_DedupeConflict(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),
@@ -8026,7 +8026,7 @@ func TestSessionHandler_CreatePR_AppAuthorModeBypassesAuthIntercept(t *testing.T
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 			snapshotKey:     snapshotKey,
@@ -8182,7 +8182,7 @@ func TestSessionHandler_CreatePR_UserPreferredWithoutGitHubAppUserAuthFallsBackT
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "Acme", json.RawMessage(`{"pr_authorship":"user_preferred"}`), now, now))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 			snapshotKey:     snapshotKey,
@@ -8563,7 +8563,7 @@ func TestSessionHandler_CreatePR_UpdateStateErrorRollsBackAndReturns500(t *testi
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionPullRequestColumns))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(errors.New("write failed"))
 	mock.ExpectRollback()
@@ -8995,7 +8995,7 @@ func TestSessionHandler_PushChangesToPR_Success(t *testing.T) {
 	// publishStatus replaced bare Exec so the SSE detail page sees the
 	// transition immediately; the test returns the post-CAS row (pr_push_state
 	// flipped to "queued") to mirror what Postgres would actually return.
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -9095,7 +9095,7 @@ func TestSessionHandler_PushChangesToPR_BuilderRequiresCleanReviewLoopForCurrent
 			}
 			if tt.expectEnqueue {
 				mock.ExpectBegin()
-				mock.ExpectQuery("UPDATE sessions").
+				mock.ExpectQuery("INSERT INTO session_publish_state").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 						snapshotKey: "snap-push-current",
@@ -9159,7 +9159,7 @@ func TestSessionHandler_PushChangesToPR_CASLosesRaceReturnsConflict(t *testing.T
 	// CAS UPDATE matches no rows because a concurrent winner already moved
 	// pr_push_state to 'queued'. RETURNING with empty rows triggers
 	// pgx.ErrNoRows in TryMarkPRPushQueued, which surfaces as (false, nil).
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionColumns))
 	mock.ExpectRollback()
@@ -9203,7 +9203,7 @@ func TestSessionHandler_PushChangesToPR_EnqueueFailureRollsBackQueuedState(t *te
 				AddRow(sessionPullRequestRow(prID, &sessionID, orgID, "owner/repo", now)...),
 		)
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{pushState: "queued"}))
 	mock.ExpectQuery("INSERT INTO jobs").
@@ -9248,7 +9248,7 @@ func TestSessionHandler_CreateBranch_QueuesActionAndJobInOneTransaction(t *testi
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
 			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{branchState: "queued"}))
 	mock.ExpectQuery("INSERT INTO jobs").

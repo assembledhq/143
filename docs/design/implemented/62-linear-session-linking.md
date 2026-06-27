@@ -289,7 +289,7 @@ The reviewer-facing phrasing remains the body of the title. The Linear identifie
 
 ### Branch naming hint
 
-The session-create handler writes a `linear_identifier_hint` into session metadata when the fast path resolves a primary Linear ref. The agent's branch-naming logic reads this hint to bias toward `<git_user>/<lower(identifier)>-<short-slug>`, which Linear's GitHub integration recognizes independently of the PR title.
+The session-create handler writes a `linear_identifier_hint` into `session_linear_context` when the fast path resolves a primary Linear ref. The agent's branch-naming logic reads this hint from hydrated session metadata to bias toward `<git_user>/<lower(identifier)>-<short-slug>`, which Linear's GitHub integration recognizes independently of the PR title.
 
 ## Bidirectional state sync
 

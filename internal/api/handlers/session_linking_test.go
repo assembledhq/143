@@ -221,7 +221,7 @@ func TestSessionHandler_EndSession_AddsIssueSnapshotIDToJobPayload(t *testing.T)
 				AddRow(snapshotID, orgID, sessionID, 2, []byte(`[]`), now),
 		)
 	mock.ExpectBegin()
-	mock.ExpectQuery("UPDATE sessions").
+	mock.ExpectQuery("INSERT INTO session_publish_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pushSessionRow(sessionID, issueID, orgID, now, pushSessionRowOpts{
 			snapshotKey:     "snapshots/test.tar",
