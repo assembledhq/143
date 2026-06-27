@@ -38,9 +38,9 @@ describe("landing copy", () => {
     expect(codingAgents.map((agent) => `${agent.name}:${agent.logo}`)).toEqual([
       "Codex:/agents/codex.svg",
       "Claude Code:/agents/claude_code.svg",
+      "OpenCode:/agents/opencode.svg",
       "Amp:/agents/amp.svg",
       "Pi:/agents/pi.svg",
-      "OpenCode:/agents/opencode.svg",
     ]);
   });
 
@@ -51,7 +51,7 @@ describe("landing copy", () => {
       "Stack subscriptions before metered spend",
     ]);
     expect(agentChoiceHighlights.map((highlight) => highlight.body)).toEqual([
-      "Run top-tier tools like Claude Code and Codex when the task needs maximum capability.",
+      "Run top-tier tools like Codex, Claude Code, and OpenCode when the task needs maximum capability.",
       "Route lighter jobs through OpenCode and open-source models when cost matters more than peak reasoning.",
       "Layer personal, team, and bundled coding-agent subscriptions so available seats are used before extra usage piles up.",
     ]);
