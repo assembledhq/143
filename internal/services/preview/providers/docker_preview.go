@@ -1656,6 +1656,113 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 	save()
 }
 
+// logBuildCacheKeyDiagnostics emits one structured record capturing every input
+// that feeds a build-artifact placement key, the resulting key, the exact bytes
+// hashed, and the lookup outcome.
+//
+// TEMPORARY INSTRUMENTATION (diagnosing build-cache misses across launches whose
+// config looks identical): emit it on two launches and diff the fields —
+// key_payload_json alone usually shows what moved; config_json and the dual
+// config_digest_* fields cover the case where the digest itself is the unstable
+// input (e.g. opts.ConfigDigest empty → recomputed from a per-launch state.config).
+// root is "workdir" or "home"; runtimeVersion is the matching slot constant;
+// outcome is one of disabled|key_failed|hit|miss|lookup_failed. Safe to delete
+// once the unstable input is identified.
+func (d *DockerPreviewProvider) logBuildCacheKeyDiagnostics(
+	state *previewState,
+	opts preview.StartPreviewOptions,
+	install *models.PreviewInstallConfig,
+	root string,
+	runtimeVersion string,
+	paths []string,
+	pathsEnabled bool,
+	configDigestUsed string,
+	computedKey string,
+	outcome string,
+	hitKey string,
+) {
+	var configName string
+	if state != nil && state.config != nil {
+		configName = state.config.Name
+	}
+	// Recompute the digest from state.config regardless of which source the key
+	// actually used, so we can tell whether opts.ConfigDigest was empty and the
+	// key fell back to a digest derived from a possibly per-launch state.config.
+	recomputedDigest, _ := preview.ComputePreviewConfigDigest(stateConfig(state))
+	digestSource := "opts.ConfigDigest"
+	if strings.TrimSpace(opts.ConfigDigest) == "" {
+		digestSource = "recomputed_from_state_config"
+	}
+
+	ev := d.logger.Info().
+		Str("diag", "build_cache_key").
+		Str("root", root).
+		Str("runtime_version", runtimeVersion).
+		Str("outcome", outcome).
+		Str("preview_handle", previewHandle(state)).
+		Str("org_id", opts.OrgID.String()).
+		Str("repo_id", opts.RepositoryID.String()).
+		Str("session_id", opts.SessionID.String()).
+		Str("config_name", configName).
+		Str("config_digest_used", configDigestUsed).
+		Str("config_digest_opts", opts.ConfigDigest).
+		Str("config_digest_recomputed", recomputedDigest).
+		Str("config_digest_source", digestSource).
+		Bool("paths_enabled", pathsEnabled).
+		Strs("resolved_paths", paths).
+		Str("computed_key", computedKey)
+	if hitKey != "" {
+		ev = ev.Str("hit_key", hitKey)
+	}
+
+	// Raw, pre-normalization install inputs so ordering/whitespace drift is visible.
+	if install != nil {
+		ev = ev.
+			Strs("install_command", install.Command).
+			Str("install_cwd", install.Cwd).
+			Strs("install_lockfiles", install.Lockfiles).
+			Strs("install_clean_paths", install.CleanPaths)
+		if install.Cache != nil && install.Cache.Build != nil {
+			if buildJSON, mErr := json.Marshal(install.Cache.Build); mErr == nil {
+				ev = ev.RawJSON("install_cache_build", buildJSON)
+			}
+		}
+	}
+
+	// The exact bytes that get SHA-256'd into the key — the primary diff target.
+	if dbgKey, payloadJSON, dErr := preview.PreviewBuildCacheKeyDebug(runtimeVersion, opts.OrgID, opts.RepositoryID, configName, configDigestUsed, install, paths); dErr == nil {
+		ev = ev.Str("key_payload_json", payloadJSON)
+		// Sanity check: the debug recompute must reproduce the production key.
+		if computedKey != "" && dbgKey != computedKey {
+			ev = ev.Str("key_payload_mismatch", dbgKey)
+		}
+	}
+
+	// Full committed preview config feeding config_digest_recomputed. Runtime
+	// secret env/files are json:"-" and excluded, so no secret values appear.
+	if state != nil && state.config != nil {
+		if cfgJSON, mErr := json.Marshal(state.config); mErr == nil {
+			ev = ev.RawJSON("config_json", cfgJSON)
+		}
+	}
+
+	ev.Msg("build cache key diagnostics")
+}
+
+func stateConfig(state *previewState) *models.PreviewConfig {
+	if state == nil {
+		return nil
+	}
+	return state.config
+}
+
+func previewHandle(state *previewState) string {
+	if state == nil {
+		return ""
+	}
+	return state.handle
+}
+
 // restorePreviewBuildCache restores the latest build-artifact blob (e.g.
 // Turborepo's local cache) into the sandbox workdir. It runs after the install
 // phase so install commands that wipe node_modules cannot delete the restored
@@ -1671,6 +1778,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	}
 	paths, enabled := preview.ResolvePreviewBuildCachePaths(install)
 	if !enabled {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, false, strings.TrimSpace(opts.ConfigDigest), "", "disabled", "")
 		notifyBuildCacheRestore(observer, "disabled", "", 0, nil)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
 		return
@@ -1683,6 +1791,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	}
 	cacheKey, err := preview.ComputePreviewBuildCacheKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
 	if err != nil {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, true, configDigest, "", "key_failed", "")
 		notifyBuildCacheRestore(observer, "key_failed", "", 0, err)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "key_failed", 0)
 		d.logger.Warn().Err(err).Msg("preview build cache key unavailable; continuing cold")
@@ -1696,6 +1805,18 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
 	notifyPhaseEnd(observer, "build_cache_lookup", findErr)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_lookup", time.Since(lookupStarted))
+	{
+		outcome := "hit"
+		hitKey := ""
+		if findErr != nil {
+			outcome = "lookup_failed"
+		} else if hit == nil {
+			outcome = "miss"
+		} else {
+			hitKey = cacheKey // FindPathCache matched this exact key
+		}
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, true, configDigest, cacheKey, outcome, hitKey)
+	}
 	if findErr != nil {
 		notifyBuildCacheRestore(observer, "restore_failed", cacheKey, 0, findErr)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(lookupStarted))
@@ -1742,6 +1863,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	}
 	paths, enabled := preview.ResolvePreviewBuildCacheHomePaths(install)
 	if !enabled {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, false, strings.TrimSpace(opts.ConfigDigest), "", "disabled", "")
 		return
 	}
 	configDigest := opts.ConfigDigest
@@ -1752,6 +1874,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	}
 	cacheKey, err := preview.ComputePreviewBuildCacheHomeKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
 	if err != nil {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, true, configDigest, "", "key_failed", "")
 		d.logger.Warn().Err(err).Msg("preview home build cache key unavailable; continuing cold")
 		return
 	}
@@ -1763,6 +1886,18 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
 	notifyPhaseEnd(observer, "build_cache_home_lookup", findErr)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_lookup", time.Since(lookupStarted))
+	{
+		outcome := "hit"
+		hitKey := ""
+		if findErr != nil {
+			outcome = "lookup_failed"
+		} else if hit == nil {
+			outcome = "miss"
+		} else {
+			hitKey = cacheKey // FindPathCache matched this exact key
+		}
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, true, configDigest, cacheKey, outcome, hitKey)
+	}
 	if findErr != nil {
 		d.logger.Warn().Err(findErr).Str("cache_key", cacheKey).Msg("preview home build cache lookup failed; continuing cold")
 		return
