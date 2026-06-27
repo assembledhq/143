@@ -1832,13 +1832,19 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		// Carry the run's GoalSnapshot into PMApproach so promptSeedForSession
-		// surfaces it as the synthesized issue's description. Without this the
-		// agent receives an empty "Session task" seed and silently ignores any
-		// conditions or invariants the user wrote in the automation goal.
-		var goalSeed *string
-		if strings.TrimSpace(run.GoalSnapshot) != "" {
-			g := run.GoalSnapshot
-			goalSeed = &g
+		// surfaces it as the synthesized issue's description. Append run
+		// metadata here because automation goals often scope themselves relative
+		// to the previous execution, and the agent cannot derive that timestamp
+		// reliably from the repo alone.
+		goalSeed, err := automationRunPromptSeed(run)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after automation prompt seed error")
+				return fmt.Errorf("mark run failed after automation prompt seed error: %w", updateErr)
+			}
+			return nil
 		}
 
 		session := &models.Session{
@@ -1853,7 +1859,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			TargetBranch:       targetBranch,
 			RepositoryID:       repositoryID,
 			AutomationRunID:    &runID,
-			PMApproach:         goalSeed,
+			PMApproach:         &goalSeed,
 			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
@@ -1929,6 +1935,30 @@ func automationRunRepositoryID(run models.AutomationRun, automation models.Autom
 		return nil, fmt.Errorf("invalid repository_id in automation trigger context: %w", err)
 	}
 	return &parsed, nil
+}
+
+func automationRunPromptSeed(run models.AutomationRun) (string, error) {
+	var snapshot struct {
+		PreviousRunAt *string `json:"previous_run_at"`
+	}
+	if len(run.ConfigSnapshot) > 0 {
+		if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
+			return "", fmt.Errorf("parse automation config snapshot for prompt context: %w", err)
+		}
+	}
+
+	previousRunAt := "none"
+	if snapshot.PreviousRunAt != nil && strings.TrimSpace(*snapshot.PreviousRunAt) != "" {
+		previousRunAt = strings.TrimSpace(*snapshot.PreviousRunAt)
+	}
+
+	context := fmt.Sprintf("Automation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
+		run.TriggeredAt.UTC().Format(time.RFC3339), previousRunAt)
+	goal := strings.TrimSpace(run.GoalSnapshot)
+	if goal == "" {
+		return context, nil
+	}
+	return goal + "\n\n" + context, nil
 }
 
 func automationExecutionUserID(automation models.Automation, identityScope models.AutomationIdentityScope) (*uuid.UUID, error) {
