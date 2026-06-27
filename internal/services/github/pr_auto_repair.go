@@ -103,14 +103,12 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 	}
 
 	resp, err := s.StartPullRequestRepair(ctx, orgID, pr.ID, uuid.Nil, StartPullRequestRepairOptions{
-		Action:          action,
-		ExpectedHeadSHA: health.HeadSHA,
-		Trigger: PullRequestRepairTrigger{
-			Source:        models.PullRequestRepairTriggerSourceSystem,
-			Reason:        reason,
-			AutoAttempt:   true,
-			MessageSource: models.SessionMessageSourceSystemAutoRepair,
-		},
+		Action:            action,
+		ExpectedHeadSHA:   health.HeadSHA,
+		SystemAuthored:    true,
+		AutoAttempt:       true,
+		TriggerReason:     reason,
+		TriggeredBySource: models.PullRequestRepairTriggeredBySourceSystemAutoRepair,
 	})
 	if err != nil {
 		switch {
@@ -194,7 +192,7 @@ func (s *PRService) autoRepairBudgetExhausted(ctx context.Context, orgID, pullRe
 	if headSHA == "" || action == "" {
 		return true, nil
 	}
-	count, err := s.pullRequests.CountAutoRepairRunsByHead(ctx, orgID, pullRequestID, action, headSHA)
+	count, err := s.pullRequests.CountAutoRepairAttemptsByHead(ctx, orgID, pullRequestID, headSHA, action)
 	if err != nil {
 		return false, err
 	}

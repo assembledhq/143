@@ -236,18 +236,18 @@ func TestPullRequestRepairActionTypeValidate(t *testing.T) {
 	}
 }
 
-func TestPullRequestRepairTriggerSourceValidate(t *testing.T) {
+func TestPullRequestRepairTriggeredBySourceValidate(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name      string
-		source    PullRequestRepairTriggerSource
+		source    PullRequestRepairTriggeredBySource
 		expectErr bool
 	}{
 		{name: "empty defaults to manual", source: ""},
-		{name: "manual", source: PullRequestRepairTriggerSourceManual},
-		{name: "system", source: PullRequestRepairTriggerSourceSystem},
-		{name: "invalid", source: PullRequestRepairTriggerSource("automation"), expectErr: true},
+		{name: "manual", source: PullRequestRepairTriggeredBySourceManual},
+		{name: "system", source: PullRequestRepairTriggeredBySourceSystemAutoRepair},
+		{name: "invalid", source: PullRequestRepairTriggeredBySource("automation"), expectErr: true},
 	}
 
 	for _, tt := range tests {

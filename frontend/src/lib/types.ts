@@ -1982,6 +1982,14 @@ export interface PullRequestUpdatedEvent {
   synced_at: string;
 }
 
+export interface CodeReviewUpdatedEvent {
+  org_id: string;
+  session_id?: string;
+  status?: CodeReviewSessionStatus;
+  decision?: CodeReviewDecision;
+  updated_at: string;
+}
+
 export interface SessionReviewComment {
   id: string;
   session_id: string;

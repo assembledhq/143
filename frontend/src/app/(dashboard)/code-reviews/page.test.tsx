@@ -1,8 +1,19 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import CodeReviewsPage from "./page";
+
+// jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
+// is a no-op in tests (the list refreshes via React Query as usual). Mirrors
+// the eval batch page test.
+vi.mock("@/lib/use-resource-sse", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/use-resource-sse")>("@/lib/use-resource-sse");
+  return {
+    ...actual,
+    useResourceSSE: () => ({ healthy: true }),
+  };
+});
 import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,

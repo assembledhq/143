@@ -26,8 +26,8 @@ var prHealthSnapshotColumns = []string{
 
 var prRepairRunColumns = []string{
 	"id", "org_id", "pull_request_id", "session_id", "thread_id", "action_type", "health_version",
-	"workspace_mode", "active", "obsoleted_by_version", "created_at", "updated_at", "head_sha", "base_sha",
-	"auto_attempt", "trigger_reason", "triggered_by_source", "triggered_by_user_id",
+	"workspace_mode", "auto_attempt", "trigger_reason", "triggered_by_source", "triggered_by_user_id",
+	"active", "obsoleted_by_version", "created_at", "updated_at", "head_sha", "base_sha",
 }
 
 func TestPullRequestStore_HealthQueries(t *testing.T) {
@@ -363,7 +363,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"health_version":  int64(5),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).AddRow(
-			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head-5", "base-5", false, "", models.PullRequestRepairTriggerSourceManual, nil,
+			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(5), models.PullRequestRepairWorkspaceModeSnapshotContinuation, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-5", "base-5",
 		))
 
 	run, err := store.GetActiveRepairRun(context.Background(), orgID, prID, models.PullRequestRepairActionTypeFixTests, 5)
@@ -380,7 +380,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"head_sha":        "head-5",
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).AddRow(
-			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(4), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head-5", "base-older", false, "", models.PullRequestRepairTriggerSourceManual, nil,
+			runID, orgID, prID, sessionID, &threadID, models.PullRequestRepairActionTypeFixTests, int64(4), models.PullRequestRepairWorkspaceModeSnapshotContinuation, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-5", "base-older",
 		))
 
 	run, err = store.GetActiveRepairRunByHead(context.Background(), orgID, prID, models.PullRequestRepairActionTypeFixTests, "head-5")
@@ -403,7 +403,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 			"base_sha":             "base-6",
 			"auto_attempt":         false,
 			"trigger_reason":       "",
-			"triggered_by_source":  models.PullRequestRepairTriggerSourceManual,
+			"triggered_by_source":  models.PullRequestRepairTriggeredBySourceManual,
 			"triggered_by_user_id": (*uuid.UUID)(nil),
 		}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(runID, now, now))
@@ -423,6 +423,7 @@ func TestPullRequestStore_UpdateHealthEnrichmentAndRepairRuns(t *testing.T) {
 	err = store.CreateRepairRun(context.Background(), createRun)
 	require.NoError(t, err, "CreateRepairRun should insert a repair run row")
 	require.Equal(t, runID, createRun.ID, "CreateRepairRun should populate the inserted ID")
+	require.Equal(t, models.PullRequestRepairTriggeredBySourceManual, createRun.TriggeredBySource, "CreateRepairRun should default manual repair attribution")
 
 	mock.ExpectExec("UPDATE pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "id": runID}).
@@ -456,8 +457,8 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 			"health_version":  int64(9),
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).
-			AddRow(uuid.New(), orgID, prID, sessionA, &threadA, models.PullRequestRepairActionTypeFixTests, int64(9), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head-9", "base-9", false, "", models.PullRequestRepairTriggerSourceManual, nil).
-			AddRow(uuid.New(), orgID, prID, sessionB, &threadB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now, "head-9", "base-9", true, "session_idle", models.PullRequestRepairTriggerSourceSystem, nil))
+			AddRow(uuid.New(), orgID, prID, sessionA, &threadA, models.PullRequestRepairActionTypeFixTests, int64(9), models.PullRequestRepairWorkspaceModeSnapshotContinuation, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-9", "base-9").
+			AddRow(uuid.New(), orgID, prID, sessionB, &threadB, models.PullRequestRepairActionTypeResolveConflicts, int64(9), models.PullRequestRepairWorkspaceModePRHeadReconstruction, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-9", "base-9"))
 
 	runs, err := store.ListActiveRepairRuns(context.Background(), orgID, prID, 9)
 	require.NoError(t, err, "ListActiveRepairRuns should return active repair runs for the current health version")
@@ -474,8 +475,8 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 			"head_sha":        "head-10",
 		}).
 		WillReturnRows(pgxmock.NewRows(prRepairRunColumns).
-			AddRow(uuid.New(), orgID, prID, sessionA, &threadA, models.PullRequestRepairActionTypeFixTests, int64(8), models.PullRequestRepairWorkspaceModeSnapshotContinuation, true, nil, now, now, "head-10", "base-8", false, "", models.PullRequestRepairTriggerSourceManual, nil).
-			AddRow(uuid.New(), orgID, prID, sessionB, &threadB, models.PullRequestRepairActionTypeResolveConflicts, int64(10), models.PullRequestRepairWorkspaceModePRHeadReconstruction, true, nil, now, now, "head-10", "base-10", true, "session_idle", models.PullRequestRepairTriggerSourceSystem, nil))
+			AddRow(uuid.New(), orgID, prID, sessionA, &threadA, models.PullRequestRepairActionTypeFixTests, int64(8), models.PullRequestRepairWorkspaceModeSnapshotContinuation, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-10", "base-8").
+			AddRow(uuid.New(), orgID, prID, sessionB, &threadB, models.PullRequestRepairActionTypeResolveConflicts, int64(10), models.PullRequestRepairWorkspaceModePRHeadReconstruction, false, "", models.PullRequestRepairTriggeredBySourceManual, (*uuid.UUID)(nil), true, nil, now, now, "head-10", "base-10"))
 
 	runs, err = store.ListActiveRepairRunsByHead(context.Background(), orgID, prID, "head-10")
 	require.NoError(t, err, "ListActiveRepairRunsByHead should return active repairs for the current PR head")
@@ -485,30 +486,30 @@ func TestPullRequestStore_ListActiveRepairRuns(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all active repair run expectations should be met")
 }
 
-func TestPullRequestStore_CountAutoRepairRunsByHead(t *testing.T) {
+func TestPullRequestStore_CountAutoRepairAttemptsByHead(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	store := NewPullRequestStore(mock)
 	orgID := uuid.New()
 	prID := uuid.New()
+	store := NewPullRequestStore(mock)
 
-	mock.ExpectQuery("SELECT count.+ FROM pull_request_repair_runs").
+	mock.ExpectQuery("SELECT count\\(\\*\\)").
 		WithArgs(pgx.NamedArgs{
 			"org_id":          orgID,
 			"pull_request_id": prID,
+			"head_sha":        "head-auto",
 			"action_type":     models.PullRequestRepairActionTypeFixTests,
-			"head_sha":        "head-sha",
 		}).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(2))
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 
-	count, err := store.CountAutoRepairRunsByHead(context.Background(), orgID, prID, models.PullRequestRepairActionTypeFixTests, "head-sha")
-	require.NoError(t, err, "CountAutoRepairRunsByHead should succeed")
-	require.Equal(t, 2, count, "CountAutoRepairRunsByHead should return the scanned count of automatic attempts")
-	require.NoError(t, mock.ExpectationsWereMet(), "all auto-repair count expectations should be met")
+	count, err := store.CountAutoRepairAttemptsByHead(context.Background(), orgID, prID, "head-auto", models.PullRequestRepairActionTypeFixTests)
+	require.NoError(t, err, "CountAutoRepairAttemptsByHead should query automatic attempts")
+	require.Equal(t, 1, count, "CountAutoRepairAttemptsByHead should return the persisted automatic attempt count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all automatic attempt count expectations should be met")
 }
 
 func TestPullRequestStore_beginTxRequiresTxStarter(t *testing.T) {

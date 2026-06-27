@@ -219,6 +219,33 @@ describe("FileDiffSection", () => {
     expect(screen.getByText(/added line 800\|old:null\|new:801/)).toBeInTheDocument();
   });
 
+  it("does not collapse expanded large diffs when the same diff is reparsed", async () => {
+    const user = userEvent.setup();
+    const lines = Array.from({ length: 901 }, (_, index) =>
+      makeLine("add", `added line ${index}`, null, index + 1)
+    );
+    const file = makeDiffFile({ hunks: [makeHunk(lines)] });
+    const { rerender } = render(<FileDiffSection file={file} viewMode="unified" />);
+
+    await user.click(screen.getByRole("button", { name: "Show more diff lines" }));
+    expect(screen.getByText(/added line 800\|old:null\|new:801/)).toBeInTheDocument();
+
+    rerender(
+      <FileDiffSection
+        file={{
+          ...file,
+          hunks: file.hunks.map((hunk) => ({
+            ...hunk,
+            lines: hunk.lines.map((line) => ({ ...line })),
+          })),
+        }}
+        viewMode="unified"
+      />
+    );
+
+    expect(screen.getByText(/added line 800\|old:null\|new:801/)).toBeInTheDocument();
+  });
+
   it("renders multiple hunks with context expanders between them", () => {
     const hunk1 = makeHunk(
       [
