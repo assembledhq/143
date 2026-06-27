@@ -191,6 +191,7 @@ func (sc *SnapshotCache) CreateSnapshot(
 	sb *agent.Sandbox,
 	snapshotKey string,
 	metadata SnapshotMetadata,
+	excludePaths []string,
 ) error {
 	log := sc.logger.With().
 		Str("snapshot_key", snapshotKey).
@@ -203,15 +204,18 @@ func (sc *SnapshotCache) CreateSnapshot(
 	// 1. Create the archive inside the sandbox.
 	//    Using shell tar is significantly faster than Go's archive/tar for
 	//    large node_modules trees (parallel I/O, kernel-level buffering).
-	//    Compression and the exclude list are shared with the session-checkpoint
-	//    path via the agent package; excludeGit=true because preview workspaces
-	//    rebuild .git from the clone.
+	//    Compression and the base exclude list are shared with the
+	//    session-checkpoint path via the agent package; excludeGit=true because
+	//    preview workspaces rebuild .git from the clone. excludePaths are the
+	//    caller's per-config additions (runtime secret-file destinations and
+	//    separately-restored build caches — see previewSnapshotExcludePaths).
 	tarCmd := fmt.Sprintf(
-		"tar -c %s -f %s -C %s %s -- .",
+		"tar -c %s -f %s -C %s %s%s -- .",
 		agent.SnapshotTarCompressFlag,
 		snapshotTmpFile,
 		shellQuote(sb.WorkDir),
 		agent.SnapshotTarExcludeFlags(true),
+		snapshotExtraExcludeFlags(excludePaths),
 	)
 
 	var stderr bytes.Buffer
@@ -722,6 +726,39 @@ func (sc *SnapshotCache) blobPath(snapshotKey string) (string, error) {
 // user-controlled paths into shell commands.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// snapshotExtraExcludeFlags renders additional `--exclude=` flags for the
+// snapshot tar, appended after the shared base flags. It returns a string that
+// is either empty or begins with a leading space, so it can be concatenated
+// directly onto agent.SnapshotTarExcludeFlags(...).
+//
+// The archive is created with `tar -c -C workdir -- .`, so members are stored
+// with a leading "./". Each path is emitted in both its bare ("foo/bar") and
+// "./"-rooted ("./foo/bar") forms so the exclude matches regardless of how the
+// tar implementation anchors patterns. Each flag is shell-quoted as a whole so
+// any glob metacharacters in the path reach tar literally instead of being
+// expanded by the surrounding `sh -c`.
+func snapshotExtraExcludeFlags(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range paths {
+		clean := strings.TrimSpace(p)
+		if clean == "" {
+			continue
+		}
+		clean = strings.TrimPrefix(clean, "./")
+		if clean == "" || clean == "." {
+			continue
+		}
+		b.WriteByte(' ')
+		b.WriteString(shellQuote("--exclude=" + clean))
+		b.WriteByte(' ')
+		b.WriteString(shellQuote("--exclude=./" + clean))
+	}
+	return b.String()
 }
 
 // totalSize sums the SizeBytes of all entries.
