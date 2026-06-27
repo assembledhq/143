@@ -52,6 +52,11 @@ import {
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
+import {
+  removeAutomationFromListCaches,
+  upsertAutomationInListCaches,
+} from "@/lib/automation-list-cache";
+import { queryKeys } from "@/lib/query-keys";
 import { agentTypeForModel } from "@/lib/agents";
 import {
   automationProductTriggerOptions,
@@ -312,10 +317,13 @@ function SettingsTab({
           showReasoningSelector && reasoningEffort ? reasoningEffort : "",
         base_branch: baseBranch.trim() || undefined,
       }),
-    onSuccess: () => {
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
       queryClient.invalidateQueries({
-        queryKey: ["automation", automation.id],
+        queryKey: queryKeys.automations.detail(res.data.id),
       });
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
     },
   });
   const capabilityMutation = useMutation({
@@ -366,8 +374,16 @@ function SettingsTab({
                 disabled={updateMutation.isPending}
                 onSavedApply={(updated) => {
                   setGoal(updated.goal);
+                  upsertAutomationInListCaches(queryClient, updated);
+                  queryClient.setQueryData(
+                    queryKeys.automations.detail(updated.id),
+                    { data: updated },
+                  );
                   queryClient.invalidateQueries({
-                    queryKey: ["automation", automation.id],
+                    queryKey: queryKeys.automations.detail(updated.id),
+                  });
+                  queryClient.invalidateQueries({
+                    queryKey: queryKeys.automations.all,
                   });
                 }}
               />
@@ -809,7 +825,7 @@ export default function AutomationDetailPage() {
   const [detailsOpen, setDetailsOpen] = useState(false);
 
   const { data, isLoading } = useQuery({
-    queryKey: ["automation", automationId],
+    queryKey: queryKeys.automations.detail(automationId),
     queryFn: () => api.automations.get(automationId),
     refetchInterval: 10000,
   });
@@ -825,14 +841,30 @@ export default function AutomationDetailPage() {
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automationId),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      return Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.automations.detail(res.data.id),
+        }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.automations.all }),
+      ]);
+    },
   });
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automationId),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["automation", automationId] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      return Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: queryKeys.automations.detail(res.data.id),
+        }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.automations.all }),
+      ]);
+    },
   });
 
   // runNowInFlight guards against rapid double-clicks that can slip through
@@ -859,7 +891,14 @@ export default function AutomationDetailPage() {
 
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automationId),
-    onSuccess: () => router.push("/automations"),
+    onSuccess: () => {
+      removeAutomationFromListCaches(queryClient, automationId);
+      queryClient.removeQueries({
+        queryKey: queryKeys.automations.detail(automationId),
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+      router.push("/automations");
+    },
   });
 
   const iconMutation = useMutation({
@@ -870,14 +909,13 @@ export default function AutomationDetailPage() {
       }),
     onMutate: async (iconValue: string) => {
       await queryClient.cancelQueries({
-        queryKey: ["automation", automationId],
+        queryKey: queryKeys.automations.detail(automationId),
       });
-      const previous = queryClient.getQueryData<typeof data>([
-        "automation",
-        automationId,
-      ]);
+      const previous = queryClient.getQueryData<typeof data>(
+        queryKeys.automations.detail(automationId),
+      );
       queryClient.setQueryData<typeof data>(
-        ["automation", automationId],
+        queryKeys.automations.detail(automationId),
         (current) => {
           if (!current?.data) return current;
           return {
@@ -895,16 +933,23 @@ export default function AutomationDetailPage() {
     onError: (_err, _iconValue, context) => {
       if (context?.previous) {
         queryClient.setQueryData(
-          ["automation", automationId],
+          queryKeys.automations.detail(automationId),
           context.previous,
         );
       }
     },
     onSuccess: (updated) => {
-      queryClient.setQueryData(["automation", automationId], updated);
+      upsertAutomationInListCaches(queryClient, updated.data);
+      queryClient.setQueryData(
+        queryKeys.automations.detail(automationId),
+        updated,
+      );
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["automation", automationId] });
+      queryClient.invalidateQueries({
+        queryKey: queryKeys.automations.detail(automationId),
+      });
     },
   });
 

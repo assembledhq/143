@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ChevronDown,
   Loader2,
@@ -84,6 +84,7 @@ import {
   saveAutomationDraft,
   type AutomationFormState,
 } from "@/lib/automation-draft";
+import { upsertAutomationInListCaches } from "@/lib/automation-list-cache";
 import type {
   AgentCapabilityDefinition,
   AutomationEventTriggerInput,
@@ -189,6 +190,7 @@ function formatWeeklyRunHint(
 
 export default function NewAutomationPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const { user, isLoading } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
@@ -593,6 +595,11 @@ export default function NewAutomationPage() {
         ...(capabilityOverride ? { capabilities: capabilityOverride } : {}),
       }),
     onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data, {
+        prependIfMissing: true,
+      });
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
       draftPersistenceDisabledRef.current = true;
       if (draftSaveTimerRef.current) {
         clearTimeout(draftSaveTimerRef.current);
