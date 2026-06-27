@@ -4940,16 +4940,22 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
 	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
-		WithArgs(prPushStateArg{state: models.PRPushStatePushing}, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"state":  string(models.PRPushStatePushing),
+			"err":    nil,
+			"code":   nil,
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
 	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
-		WithArgs(
-			prPushStateArg{state: models.PRPushStateFailed},
-			ghservice.PushBranchDivergedPRMessage,
-			prPushErrorCodeArg{code: models.PRPushErrorCodeBranchDiverged},
-			pgxmock.AnyArg(),
-			pgxmock.AnyArg(),
-		).
+		WithArgs(pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+			"state":  string(models.PRPushStateFailed),
+			"err":    ghservice.PushBranchDivergedPRMessage,
+			"code":   string(models.PRPushErrorCodeBranchDiverged),
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(workerAnyArgs(2)...).
@@ -9695,7 +9701,10 @@ func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*pr_push_state NOT IN[\\s\\S]*RETURNING").
-		WithArgs(workerAnyArgs(2)...).
+		WithArgs(pgx.NamedArgs{
+			"id":     sessionID,
+			"org_id": orgID,
+		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(row...))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(
