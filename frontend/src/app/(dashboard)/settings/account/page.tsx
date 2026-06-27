@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
+import { queryKeys } from "@/lib/query-keys";
 import {
   apiKeyHelp,
   DEFAULT_OPENCODE_BACKING_PROVIDER,
@@ -52,6 +53,10 @@ import type {
   CodingAuthStatus,
   CodingCredentialSummary,
   ListResponse,
+  Organization,
+  OrgSettings,
+  SingleResponse,
+  AutomaticFollowThroughPreference,
   UserSettingsUpdateRequest,
 } from "@/lib/types";
 
@@ -227,6 +232,32 @@ type PersonalAuthType = "subscription" | "api_key";
 // to the merge-patch settings endpoint (null clears an agent's entry).
 type ReasoningDefaults = ReturnType<typeof getCodingAgentReasoningDefaultsFromSettings>;
 type ReasoningDefaultsPatch = NonNullable<UserSettingsUpdateRequest["coding_agent_reasoning_defaults"]>;
+type PersonalAutomationKey = "readiness_after_review_loop" | "resolve_conflicts_when_idle" | "fix_tests_when_idle";
+
+const PERSONAL_AUTOMATION_OPTIONS: Array<{ value: AutomaticFollowThroughPreference; label: string }> = [
+  { value: "inherit", label: "Use organization default" },
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+];
+
+const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; description: string }> = {
+  readiness_after_review_loop: {
+    title: "Readiness after clean review loop",
+    description: "Run readiness automatically after your review loop completes cleanly.",
+  },
+  resolve_conflicts_when_idle: {
+    title: "Resolve conflicts when idle",
+    description: "Allow automatic conflict repair for your idle sessions when the org also permits it.",
+  },
+  fix_tests_when_idle: {
+    title: "Fix failing tests when idle",
+    description: "Allow automatic test repair for your idle sessions when the org also permits it.",
+  },
+};
+
+function automationDefaultLabel(value: boolean | undefined) {
+  return value ? "Org default: on" : "Org default: off";
+}
 
 export default function AccountPage() {
   const { user } = useAuth();
@@ -276,6 +307,10 @@ export default function AccountPage() {
     queryKey: ["coding-credentials", "org"],
     queryFn: () => api.codingCredentials.list("org"),
   });
+  const { data: settingsResponse } = useQuery<SingleResponse<Organization>>({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
 
   const personalRows = personalResp?.data ?? [];
   const orgRows = orgResp?.data ?? [];
@@ -283,6 +318,9 @@ export default function AccountPage() {
   const storedReasoningDefaults = getCodingAgentReasoningDefaultsFromSettings(user?.settings);
   const effectiveReasoningDefaults = pendingReasoningDefaults ?? storedReasoningDefaults;
   const effectiveDefaultModel = pendingDefaultModel ?? user?.settings?.coding_agent_model_default ?? "";
+  const orgSettings = (settingsResponse?.data?.settings ?? {}) as OrgSettings;
+  const orgAutomaticFollowThrough = orgSettings.session_automation?.automatic_follow_through ?? {};
+  const personalAutomaticFollowThrough = user?.settings?.automatic_pr_follow_through ?? {};
 
   const createMutation = useMutation({
     mutationFn: () =>
@@ -392,6 +430,18 @@ export default function AccountPage() {
       captureError(error, { feature: "personal-coding-agent-default-model-save" });
       setPendingDefaultModel(null);
       toast.error("Could not save coding agent defaults");
+    },
+  });
+  const updateAutomaticFollowThroughMutation = useMutation({
+    mutationFn: (patch: Partial<Record<PersonalAutomationKey, AutomaticFollowThroughPreference | null>>) =>
+      api.auth.updateSettings({ automatic_pr_follow_through: patch }),
+    onSuccess: (response) => {
+      queryClient.setQueryData(["auth", "me"], { data: response.data });
+      toast.success("Session automation preference saved");
+    },
+    onError: (error) => {
+      captureError(error, { feature: "personal-session-automation-save" });
+      toast.error("Could not save session automation preference");
     },
   });
 
@@ -534,6 +584,51 @@ export default function AccountPage() {
         </Card>
 
         <CLISessionsCard />
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Session automation</CardTitle>
+            <CardDescription>
+              Choose whether your sessions inherit organization follow-through defaults or use a personal override.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-5 pb-6">
+            {(Object.keys(PERSONAL_AUTOMATION_COPY) as PersonalAutomationKey[]).map((key) => {
+              const copy = PERSONAL_AUTOMATION_COPY[key];
+              const currentValue = personalAutomaticFollowThrough[key] ?? "inherit";
+              const orgDefault = key === "readiness_after_review_loop"
+                ? orgAutomaticFollowThrough.readiness_after_review_loop
+                : key === "resolve_conflicts_when_idle"
+                  ? orgAutomaticFollowThrough.resolve_conflicts_when_idle
+                  : orgAutomaticFollowThrough.fix_tests_when_idle;
+              return (
+                <div key={key} className="space-y-3 border-b border-border pb-5 last:border-b-0 last:pb-0">
+                  <div className="space-y-1">
+                    <Label>{copy.title}</Label>
+                    <p className="text-xs text-muted-foreground">{copy.description}</p>
+                    <p className="text-xs text-muted-foreground">{automationDefaultLabel(orgDefault)}</p>
+                  </div>
+                  <RadioGroup
+                    value={currentValue}
+                    onValueChange={(value) => updateAutomaticFollowThroughMutation.mutate({ [key]: value as AutomaticFollowThroughPreference })}
+                    className="grid gap-2 sm:grid-cols-3"
+                  >
+                    {PERSONAL_AUTOMATION_OPTIONS.map((option) => (
+                      <Label
+                        key={option.value}
+                        htmlFor={`personal-automation-${key}-${option.value}`}
+                        className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-3 py-2 text-xs font-normal"
+                      >
+                        <RadioGroupItem id={`personal-automation-${key}-${option.value}`} value={option.value} />
+                        {option.label}
+                      </Label>
+                    ))}
+                  </RadioGroup>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
 
         <Card>
           <CardHeader>
