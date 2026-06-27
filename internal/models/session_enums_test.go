@@ -322,14 +322,14 @@ func TestLinearPrepareState_Validate(t *testing.T) {
 }
 
 // TestLinearPrepareStateMigrationVocabularyMatchesGoEnum pins the
-// chk_sessions_linear_prepare_state CHECK constraint in the migration to
+// chk_session_linear_context_prepare_state CHECK constraint in the migration to
 // AllLinearPrepareStates. Adding a state in Go without updating the
 // migration would otherwise blow up at runtime with a constraint violation
 // and vice-versa; failing here flags the drift before merge.
 func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	t.Parallel()
 
-	const migrationFile = "000105_linear_session_linking.up.sql"
+	const migrationFile = "000232_session_metadata_side_tables.up.sql"
 	path := filepath.Join("..", "..", "migrations", migrationFile)
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err, "migration file %s should be readable", migrationFile)
@@ -337,10 +337,10 @@ func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	// Pull the literal value list out of the CHECK constraint. The pattern
 	// is anchored on the constraint name so unrelated CHECKs in the file
 	// can't accidentally match.
-	re := regexp.MustCompile(`(?s)CONSTRAINT\s+chk_sessions_linear_prepare_state\s*` +
+	re := regexp.MustCompile(`(?s)CONSTRAINT\s+chk_session_linear_context_prepare_state\s*` +
 		`CHECK\s*\(\s*linear_prepare_state\s+IN\s*\(([^)]*)\)\s*\)`)
 	match := re.FindStringSubmatch(string(contents))
-	require.Len(t, match, 2, "migration must declare chk_sessions_linear_prepare_state with an IN-list")
+	require.Len(t, match, 2, "migration must declare chk_session_linear_context_prepare_state with an IN-list")
 
 	migrationStates := parseLinearPrepareStateList(t, match[1])
 	goStates := make([]string, 0, len(AllLinearPrepareStates()))
@@ -350,7 +350,7 @@ func TestLinearPrepareStateMigrationVocabularyMatchesGoEnum(t *testing.T) {
 	sort.Strings(migrationStates)
 	sort.Strings(goStates)
 	require.Equal(t, goStates, migrationStates,
-		"chk_sessions_linear_prepare_state values must match AllLinearPrepareStates; "+
+		"chk_session_linear_context_prepare_state values must match AllLinearPrepareStates; "+
 			"add the missing value to whichever side is behind")
 }
 
