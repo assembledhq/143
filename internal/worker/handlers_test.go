@@ -4577,6 +4577,7 @@ type stubPRService struct {
 	reconcilePullRequestFn         func(context.Context, uuid.UUID, int) error
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	maybeStartAutoRepairFn         func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error)
 	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 	syncPRPreviewSurfacesFn        func(context.Context, ghservice.SyncPRPreviewSurfacesPayload) error
@@ -4629,6 +4630,13 @@ func (s *stubPRService) CompletePullRequestRepairRun(ctx context.Context, orgID,
 		return s.completePullRequestRepairRunFn(ctx, orgID, pullRequestID, repairRunID)
 	}
 	return nil
+}
+
+func (s *stubPRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+	if s.maybeStartAutoRepairFn != nil {
+		return s.maybeStartAutoRepairFn(ctx, orgID, sessionID, reason)
+	}
+	return nil, nil
 }
 
 func (s *stubPRService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
