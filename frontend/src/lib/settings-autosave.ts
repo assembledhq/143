@@ -14,6 +14,7 @@ const NESTED_OBJECT_KEYS: ReadonlySet<keyof OrgSettings> = new Set([
   "sandbox_network",
   "sandbox_lifecycle",
   "sandbox_resources",
+  "session_automation",
 ]);
 
 /**
@@ -62,7 +63,21 @@ function mergeSettings(
     const current = base?.[key];
     const incoming = patch[key];
     if (!isPlainObject(current) || !isPlainObject(incoming)) continue;
-    merged[key] = { ...current, ...incoming } as never;
+    merged[key] = mergePlainObjects(current, incoming) as never;
+  }
+  return merged;
+}
+
+function mergePlainObjects(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...base, ...patch };
+  for (const key of Object.keys(patch)) {
+    const current = base[key];
+    const incoming = patch[key];
+    if (!isPlainObject(current) || !isPlainObject(incoming)) continue;
+    merged[key] = mergePlainObjects(current, incoming);
   }
   return merged;
 }

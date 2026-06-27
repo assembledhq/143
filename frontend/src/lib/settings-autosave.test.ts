@@ -69,4 +69,40 @@ describe("settings autosave helpers", () => {
       },
     });
   });
+
+  it("recursively merges session automation patches", () => {
+    const actual = coalesceSettingsPatch(
+      {
+        settings: {
+          session_automation: {
+            automatic_follow_through: {
+              readiness_after_review_loop: true,
+              readiness_after_review_loop_states: ["clean"],
+            },
+          },
+        },
+      },
+      {
+        settings: {
+          session_automation: {
+            automatic_follow_through: {
+              fix_tests_when_idle: true,
+            },
+          },
+        },
+      },
+    );
+
+    expect(actual).toEqual({
+      settings: {
+        session_automation: {
+          automatic_follow_through: {
+            readiness_after_review_loop: true,
+            readiness_after_review_loop_states: ["clean"],
+            fix_tests_when_idle: true,
+          },
+        },
+      },
+    });
+  });
 });
