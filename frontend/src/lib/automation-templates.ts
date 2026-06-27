@@ -257,6 +257,41 @@ Verification
     defaultUnit: "weeks",
   },
   {
+    id: "code-cleanliness-refactor",
+    name: "Code cleanliness refactor",
+    icon: Wrench,
+    category: "maintenance",
+    summary: "Make small, behavior-preserving cleanup PRs that reduce duplication and clarify local code without taking on risky refactors.",
+    goal: `What to do
+- Inspect the repository for small, contained code-cleanliness opportunities where behavior should not change: duplicated code, duplicated implementations, confusing local branching, stale helper shapes, repetitive test fixtures, or simple extraction opportunities.
+- Prioritize cleanup that makes future changes safer: removing duplication, consolidating equivalent logic behind an existing local pattern, improving names only when they reduce real ambiguity, or adding a small helper function when it clearly removes repeated implementation detail.
+- Be conservative. Do not perform broad rewrites, cross-cutting architecture changes, dependency swaps, public API changes, data model changes, styling churn, or refactors that require guessing at intended behavior.
+- Before editing, identify the existing behavior and the tests or commands that can prove it. If coverage is missing for the behavior you need to preserve, add focused characterization tests first, then make the cleanup.
+- Keep each change independently reviewable. If you find unrelated cleanup candidates, split them into separate PRs or list them as follow-up candidates instead of bundling them.
+
+Output requirements
+- Open one or more focused PRs only for cleanup with a clear no-behavior-change argument and enough tests to protect the existing behavior. If no safe candidate exists, create no PR and explain why.
+- Each PR should describe the duplicated or confusing code removed, the behavior that is expected to remain unchanged, and the verification performed.
+- Keep diffs small and local to the affected module or workflow. Prefer one high-confidence cleanup over several loosely related edits.
+- Use existing helpers, conventions, and test patterns before introducing a new abstraction. Add a new helper only when it removes meaningful duplication without hiding important domain behavior.
+- Do not update internal design docs or public docs unless the cleanup unexpectedly changes a durable contract, which should usually disqualify it from this template.
+
+Verification
+- Add or update focused tests that would fail if the refactor changed existing behavior. Characterization tests are required when the behavior is not already covered.
+- Run the narrowest relevant test, lint, typecheck, or vet commands for the touched files or packages, then broaden only if the cleanup crosses package or shared-contract boundaries.
+- Review the final diff for accidental behavior changes: inputs, outputs, errors, ordering, persistence, auth/tenant scoping, API responses, UI text, accessibility semantics, logging, and side effects should remain equivalent.
+- Avoid cleanup when the safety case depends mostly on intuition. Leave risky, large, or ambiguous refactors as explicit follow-up notes instead of implementing them.`,
+    outcomes: [
+      "One or more small behavior-preserving cleanup PRs",
+      "Focused tests that protect the existing behavior",
+      "Clear notes on deferred larger refactors",
+    ],
+    tags: ["refactor", "cleanup", "tests"],
+    defaultInterval: 2,
+    defaultUnit: "weeks",
+    featured: true,
+  },
+  {
     id: "design-consistency",
     name: "Design consistency review",
     icon: Palette,
