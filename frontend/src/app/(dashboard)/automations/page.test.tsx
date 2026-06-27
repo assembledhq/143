@@ -28,7 +28,7 @@ describe("AutomationsPage", () => {
     expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /^New$/i })).toHaveAttribute("href", "/automations/new");
+    expect(screen.getByRole("link", { name: /^New automation$/i })).toHaveAttribute("href", "/automations/new");
     expect(screen.getByRole("tab", { name: "Popular" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
@@ -88,7 +88,7 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
   });
 
-  it("renders automation cards with mobile-friendly stacked details", async () => {
+  it("renders automations as a responsive management list", async () => {
     currentUserRole.value = "member";
     server.use(
       http.get("*/api/v1/automations", () => HttpResponse.json({
@@ -143,27 +143,113 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    const title = await screen.findByText("Weekly release hardening sweep for mobile checkout reliability");
-    expect(title).toHaveClass("break-words", "leading-5");
+    expect(await screen.findByRole("table", { name: "Automations" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Automation" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Status" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Schedule" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Next run" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Last run" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "All 2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Enabled 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Paused 1" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Search automations...")).toBeInTheDocument();
+
+    const titles = screen.getAllByText("Weekly release hardening sweep for mobile checkout reliability");
+    expect(titles.length).toBeGreaterThan(0);
+    expect(titles[0]).toHaveClass("text-sm", "font-medium");
     expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Use Find flaky tests/i })).toHaveAttribute(
       "href",
       "/automations/new?template=flaky-tests",
     );
-    expect(screen.getByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")).toHaveTextContent("🧪");
+    expect(screen.getAllByLabelText("Automation icon for Weekly release hardening sweep for mobile checkout reliability")[0]).toHaveTextContent("🧪");
+    expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Paused").length).toBeGreaterThan(0);
+    // The schedule label already carries the timezone, so it must not be
+    // duplicated as a standalone line.
+    expect(
+      screen.getAllByText(/Every 2 weeks at .*\(America\/Los_Angeles\)/).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("America/Los_Angeles")).not.toBeInTheDocument();
 
-    const schedule = screen.getByText(/Every 2 weeks at/);
-    expect(schedule).toHaveClass("block", "break-words", "leading-5", "sm:max-w-[18rem]", "sm:text-right");
-
-    const detailRow = screen.getByText(/Last run:/).parentElement;
-    expect(detailRow).not.toBeNull();
-    expect(detailRow).toHaveClass("flex", "flex-col", "gap-1", "sm:flex-row", "sm:flex-wrap");
-
-    const menuButton = screen.getByRole("button", {
+    const menuButtons = screen.getAllByRole("button", {
       name: "More options for Weekly release hardening sweep for mobile checkout reliability",
     });
-    expect(menuButton).toHaveClass("self-start", "shrink-0");
+    expect(menuButtons.length).toBeGreaterThan(0);
+    expect(menuButtons[0]).toHaveClass("shrink-0");
+  });
+
+  it("filters automations by status and search query", async () => {
+    currentUserRole.value = "member";
+    server.use(
+      http.get("*/api/v1/automations", () => HttpResponse.json({
+        data: [
+          {
+            id: "auto-enabled",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Design consistency",
+            goal: "Review product surfaces for design drift",
+            scope: "",
+            icon_type: "emoji",
+            icon_value: "🎨",
+            execution_mode: "async",
+            max_concurrent: 1,
+            base_branch: "main",
+            schedule_type: "interval",
+            interval_value: 1,
+            interval_unit: "days",
+            timezone: "America/Los_Angeles",
+            enabled: true,
+            priority: 50,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: "2026-04-01T00:00:00Z",
+          },
+          {
+            id: "auto-paused",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Dependency cleanup",
+            goal: "Clean stale dependencies",
+            scope: "",
+            icon_type: "emoji",
+            icon_value: "🧹",
+            execution_mode: "async",
+            max_concurrent: 1,
+            base_branch: "main",
+            schedule_type: "interval",
+            interval_value: 1,
+            interval_unit: "weeks",
+            timezone: "UTC",
+            enabled: false,
+            priority: 40,
+            created_at: "2026-04-01T00:00:00Z",
+            updated_at: "2026-04-01T00:00:00Z",
+          },
+        ],
+        meta: {},
+      })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AutomationsPage />);
+
+    expect(await screen.findAllByText("Design consistency")).toHaveLength(2);
+    expect(screen.getAllByText("Dependency cleanup")).toHaveLength(2);
+
+    await user.click(screen.getByRole("tab", { name: "Paused 1" }));
+    expect(screen.queryByText("Design consistency")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Dependency cleanup")).toHaveLength(2);
+
+    await user.click(screen.getByRole("tab", { name: "All 2" }));
+    await user.type(screen.getByPlaceholderText("Search automations..."), "design");
+    expect(screen.getAllByText("Design consistency")).toHaveLength(2);
+    expect(screen.queryByText("Dependency cleanup")).not.toBeInTheDocument();
+
+    await user.clear(screen.getByPlaceholderText("Search automations..."));
+    await user.type(screen.getByPlaceholderText("Search automations..."), "nomatch");
+    expect(screen.getByText("No automations match your search.")).toBeInTheDocument();
   });
 
   it("hides member-only create and mutation controls from builders", async () => {
@@ -196,7 +282,7 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    await screen.findByText("Weekly sweep");
+    expect(await screen.findAllByText("Weekly sweep")).toHaveLength(2);
     expect(screen.queryByRole("link", { name: /new/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /more options for weekly sweep/i })).not.toBeInTheDocument();
   });
