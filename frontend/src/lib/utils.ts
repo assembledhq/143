@@ -61,6 +61,34 @@ type FormatTimeAgoOptions = {
   nowMs?: number;
 };
 
+type FormatDateTimeOptions = {
+  fallback?: string;
+  year?: boolean;
+  seconds?: boolean;
+  weekday?: boolean;
+  timeZoneName?: boolean;
+};
+
+export function formatDateTime(
+  dateStr: string | null | undefined,
+  options?: FormatDateTimeOptions,
+): string {
+  const fallback = options?.fallback ?? "—";
+  if (!dateStr) return fallback;
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: options?.weekday ? "short" : undefined,
+    month: "short",
+    day: "numeric",
+    year: options?.year ? "numeric" : undefined,
+    hour: "numeric",
+    minute: "2-digit",
+    second: options?.seconds ? "2-digit" : undefined,
+    timeZoneName: options?.timeZoneName ? "short" : undefined,
+  }).format(date);
+}
+
 export function formatTimeAgo(
   dateStr: string | null | undefined,
   options?: FormatTimeAgoOptions,

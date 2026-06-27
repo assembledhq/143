@@ -21,7 +21,7 @@ import { looksLikeLinearRef } from "@/lib/linear-refs";
 import { PLAN_MODE_PREFIX } from "@/lib/timeline";
 import type { TimelineEntry } from "@/lib/timeline";
 import type { HumanInputAnswerBody, HumanInputRequest, SessionInputReference, SessionMessage, SessionLog } from "@/lib/types";
-import { isImageURL, fileNameFromURL } from "@/lib/utils";
+import { formatDateTime, isImageURL, fileNameFromURL } from "@/lib/utils";
 import { deriveToolDisplay, formatToolInput } from "@/lib/tool-label";
 import { ImageLightbox } from "@/components/image-lightbox";
 import { api } from "@/lib/api";
@@ -100,17 +100,12 @@ function formatTimestamp(dateStr: string): string {
 }
 
 function formatAbsoluteDateTime(dateStr: string): string {
-  const date = safeDate(dateStr);
-  if (!date) return "";
-  return date.toLocaleString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZoneName: "short",
+  return formatDateTime(dateStr, {
+    fallback: "",
+    weekday: true,
+    year: true,
+    seconds: true,
+    timeZoneName: true,
   });
 }
 

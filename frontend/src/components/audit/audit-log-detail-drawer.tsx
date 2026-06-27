@@ -10,6 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { formatAuditDetailValue } from "@/lib/audit-details";
 import type { AuditLog, User } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 import { getActorName, getActionLabel } from "./audit-log-entry";
 
 interface AuditLogDetailDrawerProps {
@@ -45,7 +46,7 @@ export function AuditLogDetailDrawer({ entry, onClose, members }: AuditLogDetail
               <Badge variant="outline" className="text-xs">{entry.resource_type}</Badge>
             </DetailRow>
             {entry.resource_id && <DetailRow label="Resource ID" value={entry.resource_id} mono />}
-            <DetailRow label="Time" value={new Date(entry.created_at).toLocaleString()} />
+            <DetailRow label="Time" value={formatDateTime(entry.created_at, { year: true, seconds: true })} />
           </div>
 
           {/* Details payload */}
