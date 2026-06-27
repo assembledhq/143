@@ -490,6 +490,18 @@ type PreviewConfig struct {
 	RuntimeSecretFiles []PreviewRuntimeSecretFile   `json:"-"`
 }
 
+// PrimaryServiceSupportsHMR reports whether the config's primary service
+// declares hot-module-reload support. Only the primary service matters because
+// it is the surface the browser loads; support-service reload behavior does not
+// affect what the user sees. Returns false when the primary service is absent.
+func (c PreviewConfig) PrimaryServiceSupportsHMR() bool {
+	svc, ok := c.Services[c.Primary]
+	if !ok {
+		return false
+	}
+	return svc.HMR
+}
+
 // PreviewResourceRequirements follows the Kubernetes resources shape for
 // preview-level resource requests and limits.
 type PreviewResourceRequirements struct {
@@ -652,6 +664,13 @@ type ServiceConfig struct {
 	Port    int               `json:"port"`
 	Env     map[string]string `json:"env,omitempty"`
 	Ready   ReadinessProbe    `json:"ready"`
+	// HMR declares that this service hot-reloads source edits in place (e.g. a
+	// Vite/Next/webpack dev server). When the primary service declares it, a
+	// source-only edit can be reflected by reloading the browser instead of
+	// restarting the service process. It is an opt-in repo assertion, not a
+	// runtime probe: a wrong declaration only costs one stale browser frame,
+	// which the next config-touching update recovers.
+	HMR bool `json:"hmr,omitempty"`
 }
 
 // InfrastructureConfig defines a platform-provided infrastructure service.
@@ -721,6 +740,19 @@ type ScreenshotOpts struct {
 	Delay     time.Duration `json:"delay"`
 }
 
+// PreviewArtifact is a user-readable artifact produced by preview tooling.
+// Artifact URLs are served through the normal upload pipeline, so existing
+// membership authorization and object storage backends apply.
+type PreviewArtifact struct {
+	ID          string    `json:"id"`
+	Kind        string    `json:"kind"`
+	ContentType string    `json:"content_type"`
+	URL         string    `json:"url"`
+	StorageKey  string    `json:"storage_key,omitempty"`
+	Bytes       int       `json:"bytes"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 // DefaultScreenshotOpts returns sensible defaults for screenshot capture.
 func DefaultScreenshotOpts() ScreenshotOpts {
 	return ScreenshotOpts{
@@ -738,6 +770,8 @@ type ScreenshotResult struct {
 	PageTitle     string           `json:"page_title"`
 	ConsoleErrors []ConsoleMessage `json:"console_errors,omitempty"`
 	URL           string           `json:"url"`
+	Viewport      ViewportSpec     `json:"viewport"`
+	Artifact      *PreviewArtifact `json:"artifact,omitempty"`
 	CapturedAt    time.Time        `json:"captured_at"`
 }
 
@@ -766,6 +800,7 @@ type InteractionStep struct {
 	Value      string        `json:"value"`      // text to type, URL to navigate to, option to select
 	WaitFor    string        `json:"wait_for"`   // CSS selector or "networkidle" or "load"
 	Timeout    time.Duration `json:"timeout"`    // max wait for this step, default 10s
+	TimeoutMS  int           `json:"timeout_ms"` // compatibility alias for agents that send milliseconds
 	Screenshot bool          `json:"screenshot"` // capture a screenshot after this step
 }
 
@@ -903,13 +938,14 @@ type DOMSnapshot struct {
 
 // PreviewStatusResponse is the API response for GET /sessions/{id}/preview.
 type PreviewStatusResponse struct {
-	Instance        *PreviewInstance        `json:"instance"`
-	Services        []PreviewService        `json:"services"`
-	Infrastructure  []PreviewInfrastructure `json:"infrastructure,omitempty"`
-	PreviewOrigin   string                  `json:"preview_origin,omitempty"`
-	Freshness       *PreviewFreshness       `json:"freshness,omitempty"`
-	StartupEstimate *PreviewStartupEstimate `json:"startup_estimate,omitempty"`
-	Prewarm         *PreviewPrewarmStatus   `json:"prewarm,omitempty"`
+	Instance              *PreviewInstance        `json:"instance"`
+	Services              []PreviewService        `json:"services"`
+	Infrastructure        []PreviewInfrastructure `json:"infrastructure,omitempty"`
+	PreviewOrigin         string                  `json:"preview_origin,omitempty"`
+	Freshness             *PreviewFreshness       `json:"freshness,omitempty"`
+	RecommendedUpdateMode PreviewUpdateMode       `json:"recommended_update_mode,omitempty"`
+	StartupEstimate       *PreviewStartupEstimate `json:"startup_estimate,omitempty"`
+	Prewarm               *PreviewPrewarmStatus   `json:"prewarm,omitempty"`
 }
 
 type PreviewPrewarmStatus struct {
@@ -938,6 +974,25 @@ type PreviewRestartReason struct {
 	Kind   PreviewRestartReasonKind `json:"kind"`
 	Path   string                   `json:"path,omitempty"`
 	Detail string                   `json:"detail,omitempty"`
+}
+
+type PreviewUpdateRequest struct {
+	Path          string            `json:"path,omitempty"`
+	Wait          bool              `json:"wait,omitempty"`
+	ForceMode     PreviewUpdateMode `json:"force_mode,omitempty"`
+	ReloadBrowser *bool             `json:"reload_browser,omitempty"`
+	Config        *PreviewConfig    `json:"config,omitempty"`
+}
+
+type PreviewUpdateResponse struct {
+	PreviewID  uuid.UUID           `json:"preview_id"`
+	SessionID  uuid.UUID           `json:"session_id"`
+	Mode       PreviewUpdateMode   `json:"mode"`
+	Action     PreviewUpdateAction `json:"action"`
+	Status     PreviewStatus       `json:"status"`
+	PreviewURL string              `json:"preview_url,omitempty"`
+	Freshness  *PreviewFreshness   `json:"freshness,omitempty"`
+	Message    string              `json:"message,omitempty"`
 }
 
 type PreviewStartupEstimate struct {

@@ -316,6 +316,19 @@ func TestDecodeWorkerResponses_ErrorVariants(t *testing.T) {
 		require.Equal(t, PreviewCapacityCode, reqErr.Code, "decodeWorkerResponse should preserve the worker error code")
 	})
 
+	t.Run("single response soft restart unsupported maps to sentinel", func(t *testing.T) {
+		t.Parallel()
+
+		resp := &http.Response{
+			StatusCode: http.StatusNotImplemented,
+			Body:       ioNopCloserString(fmt.Sprintf(`{"error":{"code":%q,"message":"unsupported"}}`, PreviewSoftRestartUnsupportedCode)),
+		}
+
+		_, err := decodeWorkerResponse[map[string]string](resp)
+		require.Error(t, err, "decodeWorkerResponse should surface structured worker errors")
+		require.ErrorIs(t, err, ErrSoftRestartUnsupported, "soft restart unsupported should round-trip as the fallback sentinel")
+	})
+
 	t.Run("single response plain worker error", func(t *testing.T) {
 		t.Parallel()
 

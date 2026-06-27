@@ -18,6 +18,62 @@ func TestDefaultScreenshotOpts(t *testing.T) {
 	require.Equal(t, time.Second, opts.Delay)
 }
 
+func TestPreviewConfigPrimaryServiceSupportsHMR(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  PreviewConfig
+		want bool
+	}{
+		{
+			name: "primary declares hmr",
+			cfg: PreviewConfig{
+				Primary:  "web",
+				Services: map[string]ServiceConfig{"web": {HMR: true}, "api": {HMR: false}},
+			},
+			want: true,
+		},
+		{
+			name: "primary does not declare hmr",
+			cfg: PreviewConfig{
+				Primary:  "web",
+				Services: map[string]ServiceConfig{"web": {HMR: false}},
+			},
+			want: false,
+		},
+		{
+			name: "only a support service declares hmr",
+			cfg: PreviewConfig{
+				Primary:  "web",
+				Services: map[string]ServiceConfig{"web": {HMR: false}, "api": {HMR: true}},
+			},
+			want: false,
+		},
+		{
+			name: "primary service missing",
+			cfg: PreviewConfig{
+				Primary:  "web",
+				Services: map[string]ServiceConfig{"api": {HMR: true}},
+			},
+			want: false,
+		},
+		{
+			name: "no services",
+			cfg:  PreviewConfig{Primary: "web"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, tt.cfg.PrimaryServiceSupportsHMR())
+		})
+	}
+}
+
 func TestDefaultViewports(t *testing.T) {
 	t.Parallel()
 

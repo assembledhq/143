@@ -111,6 +111,22 @@ Some changes need a restart because the process, dependency tree, or runtime con
 
 Refreshing a preview restarts the preview runtime with the latest workspace. Dependency, package-manager, and build caches are reused when their keys still match, so refreshes do not have to reinstall or rebuild everything from scratch.
 
+Agents can run the same workflow from the sandbox with `143-tools`:
+
+```bash
+143-tools preview create --session-id "$143_SESSION_ID" --wait
+143-tools preview screenshot --session-id "$143_SESSION_ID" --path / --inline-base64 false
+143-tools preview update --session-id "$143_SESSION_ID" --wait
+143-tools preview multi_viewport --session-id "$143_SESSION_ID" --path /
+143-tools preview console --session-id "$143_SESSION_ID" --level error
+```
+
+Screenshot and multi-viewport responses include an `artifact.url` served through the normal upload pipeline. Use `--inline-base64 false` when agents do not need the PNG bytes in stdout.
+
+Most browser diagnostics accept either `--session-id` or `--preview-id`. Use `--session-id` while editing an active session workspace; use `--preview-id` when inspecting a known branch preview.
+
+`preview update` chooses the fastest safe refresh path for the current preview. It may reload the browser, soft-restart app services in the existing sandbox, recycle the preview runtime, relaunch a cold preview, or report that the preview is already current.
+
 ## Multiple preview configs
 
 If a repository has more than one previewable app, use named configs:
