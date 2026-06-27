@@ -77,10 +77,10 @@ describe("AutomationsPage", () => {
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.queryByText("Security sweep")).not.toBeInTheDocument();
 
-    // A query with no matches shows the empty message
+    // A query with no matches shows the shared empty state.
     await user.clear(input);
     await user.type(input, "zzznomatch");
-    expect(screen.getByText("No templates match your search.")).toBeInTheDocument();
+    expect(screen.getByText("No templates found")).toBeInTheDocument();
     expect(screen.queryByText("Find flaky tests")).not.toBeInTheDocument();
 
     // Clearing restores the full list
