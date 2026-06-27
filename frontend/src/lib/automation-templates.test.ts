@@ -102,4 +102,30 @@ describe("automation template catalog", () => {
     expect(template?.tags).toContain("agents");
     expect(template?.defaultUnit).toBe("weeks");
   });
+
+  it("guides code-cleanliness automations toward guarded behavior-preserving refactors", () => {
+    const template = getAutomationTemplate("code-cleanliness-refactor");
+
+    expect(template?.name).toBe("Code cleanliness refactor");
+    expect(template?.summary).toContain("behavior-preserving cleanup PRs");
+    expect(template?.goal).toContain("behavior should not change");
+    expect(template?.goal).toContain("duplicated code");
+    expect(template?.goal).toContain("duplicated implementations");
+    expect(template?.goal).toContain("small helper function");
+    expect(template?.goal).toContain("Do not perform broad rewrites");
+    expect(template?.goal).toContain("add focused characterization tests first");
+    expect(template?.goal).toContain("Open one or more focused PRs");
+    expect(template?.goal).toContain("If no safe candidate exists, create no PR");
+    expect(template?.goal).toContain("Use existing helpers, conventions, and test patterns");
+    expect(template?.goal).toContain("Do not update internal design docs or public docs");
+    expect(template?.goal).toContain("Add or update focused tests");
+    expect(template?.goal).toContain("accidental behavior changes");
+    expect(template?.goal).toContain("tenant scoping");
+    expect(template?.goal).toContain("Avoid cleanup when the safety case depends mostly on intuition");
+    expect(template?.outcomes).toContain("One or more small behavior-preserving cleanup PRs");
+    expect(template?.outcomes).toContain("Focused tests that protect the existing behavior");
+    expect(template?.tags).toContain("refactor");
+    expect(template?.tags).toContain("tests");
+    expect(template?.defaultUnit).toBe("weeks");
+  });
 });
