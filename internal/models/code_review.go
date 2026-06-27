@@ -67,6 +67,19 @@ func (d CodeReviewDecision) Validate() error {
 	}
 }
 
+// CodeReviewUpdatedEvent is fanned out over the org-scoped code review SSE
+// stream whenever a review row is created or its status/decision changes. The
+// frontend treats it as a "the list moved, refetch" signal rather than reading
+// individual fields off it (Redis pub/sub is at-most-once and unordered, so the
+// canonical record is whatever the list endpoint returns on invalidation).
+type CodeReviewUpdatedEvent struct {
+	OrgID     uuid.UUID               `json:"org_id"`
+	SessionID uuid.UUID               `json:"session_id,omitempty"`
+	Status    CodeReviewSessionStatus `json:"status,omitempty"`
+	Decision  *CodeReviewDecision     `json:"decision,omitempty"`
+	UpdatedAt time.Time               `json:"updated_at"`
+}
+
 type CodeReviewTriggerSource string
 
 const (

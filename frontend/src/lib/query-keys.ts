@@ -43,6 +43,7 @@ export const queryKeys = {
   },
   codeReviews: {
     all: ["code-reviews"] as const,
+    lists: () => ["code-reviews", "list"] as const,
     list: (params?: unknown) => ["code-reviews", "list", params ?? null] as const,
     policy: (repositoryId?: string | null) => ["code-reviews", "policy", repositoryId ?? null] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,

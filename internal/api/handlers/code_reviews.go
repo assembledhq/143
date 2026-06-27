@@ -1,25 +1,42 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/api/sse"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
+
+var (
+	errCodeReviewStreamOrgInvalid   = errors.New("invalid code review stream org")
+	errCodeReviewStreamOrgForbidden = errors.New("forbidden code review stream org")
+	errCodeReviewStreamUnauthorized = errors.New("unauthorized code review stream request")
+)
+
+type codeReviewMembershipStore interface {
+	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
+}
 
 type CodeReviewHandler struct {
 	store        *db.CodeReviewStore
 	repos        *db.RepositoryStore
 	triggerSetup *codereviewsvc.GitHubTriggerSetupService
+	streams      *cache.CodeReviewStreams
+	memberships  codeReviewMembershipStore
 }
 
 func NewCodeReviewHandler(store *db.CodeReviewStore, repos *db.RepositoryStore) *CodeReviewHandler {
@@ -28,6 +45,112 @@ func NewCodeReviewHandler(store *db.CodeReviewStore, repos *db.RepositoryStore) 
 
 func (h *CodeReviewHandler) SetGitHubTriggerSetupService(service *codereviewsvc.GitHubTriggerSetupService) {
 	h.triggerSetup = service
+}
+
+func (h *CodeReviewHandler) SetStreams(streams *cache.CodeReviewStreams) {
+	h.streams = streams
+}
+
+func (h *CodeReviewHandler) SetMembershipStore(store codeReviewMembershipStore) {
+	h.memberships = store
+}
+
+// StreamUpdates is the org-scoped SSE endpoint backing the live code reviews
+// list. It mirrors PullRequestHandler.StreamUpdates: subscribe to the org's
+// Redis channel, heartbeat every 15s, and forward each lifecycle event as a
+// named "code_review.updated" SSE event.
+func (h *CodeReviewHandler) StreamUpdates(w http.ResponseWriter, r *http.Request) {
+	if h.streams == nil || !h.streams.Available() {
+		http.Error(w, "code review streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	_ = middleware.OrgIDFromContext(r.Context())
+
+	sw := sse.NewWriter(w)
+	if sw == nil {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	orgID, err := h.streamOrgIDFromRequest(r)
+	if err != nil {
+		switch {
+		case errors.Is(err, errCodeReviewStreamOrgInvalid):
+			http.Error(w, "invalid code review stream org", http.StatusBadRequest)
+		case errors.Is(err, errCodeReviewStreamOrgForbidden):
+			http.Error(w, "forbidden code review stream org", http.StatusForbidden)
+		case errors.Is(err, errCodeReviewStreamUnauthorized):
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		default:
+			http.Error(w, "failed to authorize code review stream", http.StatusInternalServerError)
+		}
+		return
+	}
+	sub, err := h.streams.Subscribe(orgID)
+	if err != nil {
+		http.Error(w, "code review streams unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer sub.Close()
+
+	logger := zerolog.Ctx(r.Context())
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if err := sw.WriteHeartbeat(); err != nil {
+				logger.Warn().Err(err).Msg("failed to write code review stream heartbeat")
+				return
+			}
+			sw.Flush()
+		case event, ok := <-sub.C:
+			if !ok {
+				logger.Warn().Str("reason", sub.CloseReason()).Msg("code review update subscription closed")
+				return
+			}
+			if err := sw.WriteEvent(sse.EventType("code_review.updated"), event); err != nil {
+				logger.Warn().Err(err).Str("session_id", event.SessionID.String()).Msg("failed to write code review update event")
+				return
+			}
+			sw.Flush()
+		}
+	}
+}
+
+func (h *CodeReviewHandler) streamOrgIDFromRequest(r *http.Request) (uuid.UUID, error) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	requestedRaw := strings.TrimSpace(r.URL.Query().Get("org_id"))
+	if requestedRaw == "" {
+		return orgID, nil
+	}
+
+	requestedOrgID, err := uuid.Parse(requestedRaw)
+	if err != nil {
+		return uuid.Nil, errCodeReviewStreamOrgInvalid
+	}
+	if requestedOrgID == orgID {
+		return requestedOrgID, nil
+	}
+
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		return uuid.Nil, errCodeReviewStreamUnauthorized
+	}
+	if h.memberships == nil {
+		return uuid.Nil, errors.New("membership store not configured")
+	}
+	if _, err := h.memberships.Get(r.Context(), user.ID, requestedOrgID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, errCodeReviewStreamOrgForbidden
+		}
+		return uuid.Nil, err
+	}
+
+	return requestedOrgID, nil
 }
 
 func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {

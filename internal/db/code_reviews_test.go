@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -314,6 +317,73 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	require.Equal(t, metadataID, metadata.ID, "CreateSessionMetadata should scan metadata id")
 	require.True(t, metadata.FromFork, "CreateSessionMetadata should persist fork source evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestCodeReviewStore_CompleteReviewPublishesUpdate verifies the store fans a
+// lifecycle event out to the org-scoped SSE stream after a status transition,
+// so the live code reviews list refreshes. miniredis-backed, mirroring the
+// SessionStore publish tests.
+func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	decisionApproved := models.CodeReviewDecisionApproved
+	acceptableTrue := true
+	finalBody := "final review body"
+	completedAt := now
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		}).AddRow(
+			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, &decisionApproved, &acceptableTrue, false,
+			nil, "pr:head:policy", nil, nil, nil, &finalBody, nil, &completedAt, now,
+		))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	_, err = store.CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
+		SessionID:       sessionID,
+		Decision:        models.CodeReviewDecisionApproved,
+		Acceptable:      true,
+		FinalReviewBody: "final review body",
+	})
+	require.NoError(t, err, "CompleteReview should persist the completed transition")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
 }
 
 func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {
