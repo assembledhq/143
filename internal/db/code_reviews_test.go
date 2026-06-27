@@ -379,11 +379,96 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	require.Eventually(t, func() bool {
 		select {
 		case event := <-sub.C:
-			return event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted
+			return event.SessionID != nil && *event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted
 		default:
 			return false
 		}
 	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
+}
+
+// TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate covers
+// the batch transition: it touches many rows at once, so it publishes a single
+// org-scoped event with no session ID (session_id omitted) when any rows change.
+func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
+	require.Equal(t, int64(2), affected, "MarkStaleForPullRequestExceptHead should report rows affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.SessionID == nil && event.OrgID == orgID && event.Status == models.CodeReviewSessionStatusStale
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "batch stale transition should publish one org-scoped event with no session id")
+}
+
+func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
+	require.Equal(t, int64(0), affected, "no rows should be affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Never(t, func() bool {
+		select {
+		case <-sub.C:
+			return true
+		default:
+			return false
+		}
+	}, 150*time.Millisecond, 20*time.Millisecond, "a no-op batch update should not publish an event")
 }
 
 func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
@@ -60,6 +60,8 @@ const ALL_DECISIONS = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
+// Coalesce a burst of SSE lifecycle events into a single list refetch.
+const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
@@ -151,9 +153,23 @@ export default function CodeReviewsPage() {
     const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
     return buildCodeReviewStreamURL(apiBase, getActiveOrgId());
   }, []);
+  // A single review lifecycle emits several events (queued → running →
+  // completed), and a batch-stale transition can fan out across the org — so
+  // coalesce bursts into one refetch per window rather than one per event.
+  const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onCodeReviewEvent = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+    if (invalidateTimerRef.current) return;
+    invalidateTimerRef.current = setTimeout(() => {
+      invalidateTimerRef.current = null;
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+    }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
   }, [queryClient]);
+  useEffect(
+    () => () => {
+      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+    },
+    [],
+  );
   const { healthy: codeReviewStreamHealthy } = useResourceSSE({
     url: codeReviewStreamURL,
     event: SSE_EVENT.CODE_REVIEW_UPDATED,

@@ -113,7 +113,11 @@ func (h *CodeReviewHandler) StreamUpdates(w http.ResponseWriter, r *http.Request
 				return
 			}
 			if err := sw.WriteEvent(sse.EventType("code_review.updated"), event); err != nil {
-				logger.Warn().Err(err).Str("session_id", event.SessionID.String()).Msg("failed to write code review update event")
+				logEvent := logger.Warn().Err(err).Str("org_id", event.OrgID.String())
+				if event.SessionID != nil {
+					logEvent = logEvent.Str("session_id", event.SessionID.String())
+				}
+				logEvent.Msg("failed to write code review update event")
 				return
 			}
 			sw.Flush()

@@ -45,9 +45,16 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 	if s.streams == nil {
 		return
 	}
+	// Batch transitions publish a synthetic metadata with a zero session ID;
+	// surface that as a nil pointer so the event omits session_id entirely.
+	var sessionID *uuid.UUID
+	if metadata.SessionID != uuid.Nil {
+		id := metadata.SessionID
+		sessionID = &id
+	}
 	if err := s.streams.PublishUpdated(ctx, metadata.OrgID, models.CodeReviewUpdatedEvent{
 		OrgID:     metadata.OrgID,
-		SessionID: metadata.SessionID,
+		SessionID: sessionID,
 		Status:    metadata.Status,
 		Decision:  metadata.Decision,
 		UpdatedAt: time.Now().UTC(),

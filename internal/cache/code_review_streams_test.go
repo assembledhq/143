@@ -53,9 +53,10 @@ func TestCodeReviewStreams_PublishAndSubscribe(t *testing.T) {
 	require.NoError(t, err, "subscribe should succeed against a healthy Redis instance")
 	defer sub.Close()
 
+	sessionID := uuid.New()
 	event := models.CodeReviewUpdatedEvent{
 		OrgID:     orgID,
-		SessionID: uuid.New(),
+		SessionID: &sessionID,
 		Status:    models.CodeReviewSessionStatusCompleted,
 		UpdatedAt: time.Now().UTC(),
 	}
@@ -64,7 +65,7 @@ func TestCodeReviewStreams_PublishAndSubscribe(t *testing.T) {
 	require.Eventually(t, func() bool {
 		select {
 		case got := <-sub.C:
-			return got.SessionID == event.SessionID && got.Status == event.Status
+			return got.SessionID != nil && *got.SessionID == sessionID && got.Status == event.Status
 		default:
 			return false
 		}
