@@ -174,6 +174,22 @@ func (a PullRequestRepairActionType) Validate() error {
 	}
 }
 
+type PullRequestRepairTriggerSource string
+
+const (
+	PullRequestRepairTriggerSourceManual PullRequestRepairTriggerSource = "manual"
+	PullRequestRepairTriggerSourceSystem PullRequestRepairTriggerSource = "system"
+)
+
+func (s PullRequestRepairTriggerSource) Validate() error {
+	switch s {
+	case "", PullRequestRepairTriggerSourceManual, PullRequestRepairTriggerSourceSystem:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestRepairTriggerSource: %q", s)
+	}
+}
+
 type PullRequestCheckSummary struct {
 	Name       string                   `json:"name"`
 	Category   PullRequestCheckCategory `json:"category"`
@@ -253,6 +269,7 @@ type PullRequestHealthResponse struct {
 	FailingTestDetailAvailable   bool                              `json:"failing_test_detail_available"`
 	ObsoleteActiveRepairSessions bool                              `json:"obsolete_active_repair_sessions,omitempty"`
 	MergeWhenReady               PullRequestMergeWhenReadyStatus   `json:"merge_when_ready"`
+	AutoRepairExhaustedActions   []PullRequestRepairActionType     `json:"auto_repair_exhausted_actions,omitempty"`
 }
 
 type PullRequestMergeWhenReadyStatus struct {
@@ -270,6 +287,7 @@ type PullRequestActiveRepair struct {
 	ThreadID      *uuid.UUID                  `json:"thread_id,omitempty"`
 	SessionStatus SessionStatus               `json:"session_status"`
 	HealthVersion int64                       `json:"health_version"`
+	AutoAttempt   bool                        `json:"auto_attempt,omitempty"`
 }
 
 type PullRequestRepairResponse struct {
@@ -328,6 +346,10 @@ type PullRequestRepairRun struct {
 	WorkspaceMode      PullRequestRepairWorkspaceMode `db:"workspace_mode" json:"workspace_mode"`
 	Active             bool                           `db:"active" json:"active"`
 	ObsoletedByVersion *int64                         `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`
+	AutoAttempt        bool                           `db:"auto_attempt" json:"auto_attempt"`
+	TriggerReason      string                         `db:"trigger_reason" json:"trigger_reason,omitempty"`
+	TriggeredBySource  PullRequestRepairTriggerSource `db:"triggered_by_source" json:"triggered_by_source"`
+	TriggeredByUserID  *uuid.UUID                     `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
 	CreatedAt          time.Time                      `db:"created_at" json:"created_at"`
 	UpdatedAt          time.Time                      `db:"updated_at" json:"updated_at"`
 }

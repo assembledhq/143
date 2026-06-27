@@ -807,12 +807,13 @@ type SessionLog struct {
 type SessionMessageSource string
 
 const (
-	SessionMessageSourceAgentTool SessionMessageSource = "agent_tool"
+	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
+	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)

@@ -266,6 +266,9 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 	if err := s.populateActiveRepairs(ctx, pr, resp); err != nil {
 		return nil, err
 	}
+	if err := s.populateAutoRepairAttemptState(ctx, pr, resp); err != nil {
+		return nil, err
+	}
 	resp.Summary = buildPRHealthSummaryText(*resp)
 	return resp, nil
 }
@@ -322,12 +325,47 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 			ThreadID:      run.ThreadID,
 			SessionStatus: session.Status,
 			HealthVersion: run.HealthVersion,
+			AutoAttempt:   run.AutoAttempt,
 		})
 	}
 
 	if len(activeRepairs) > 0 {
 		resp.ActiveRepairs = activeRepairs
 		resp.CanMerge = false
+	}
+	return nil
+}
+
+func (s *PRService) populateAutoRepairAttemptState(ctx context.Context, pr models.PullRequest, resp *models.PullRequestHealthResponse) error {
+	if pr.Status != models.PullRequestStatusOpen || resp.HeadSHA == "" || s.pullRequests == nil || s.orgs == nil || s.users == nil {
+		return nil
+	}
+	org, err := s.orgs.GetByID(ctx, pr.OrgID)
+	if err != nil {
+		return fmt.Errorf("load organization settings for automatic repair state: %w", err)
+	}
+	settings, err := models.ParseOrgSettings(org.Settings)
+	if err != nil {
+		return fmt.Errorf("parse organization settings for automatic repair state: %w", err)
+	}
+	followThrough := settings.SessionAutomation.AutomaticFollowThrough
+	if !followThrough.ResolveConflictsWhenIdle && !followThrough.FixTestsWhenIdle {
+		return nil
+	}
+	for _, action := range []models.PullRequestRepairActionType{models.PullRequestRepairActionTypeResolveConflicts, models.PullRequestRepairActionTypeFixTests} {
+		if action == models.PullRequestRepairActionTypeResolveConflicts && !followThrough.ResolveConflictsWhenIdle {
+			continue
+		}
+		if action == models.PullRequestRepairActionTypeFixTests && !followThrough.FixTestsWhenIdle {
+			continue
+		}
+		exhausted, err := s.autoRepairBudgetExhausted(ctx, pr.OrgID, pr.ID, action, resp.HeadSHA)
+		if err != nil {
+			return err
+		}
+		if exhausted {
+			resp.AutoRepairExhaustedActions = append(resp.AutoRepairExhaustedActions, action)
+		}
 	}
 	return nil
 }
@@ -718,9 +756,11 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 }
 
 type StartPullRequestRepairOptions struct {
-	Action      models.PullRequestRepairActionType
-	ThreadID    *uuid.UUID
-	PushChanges *bool
+	Action          models.PullRequestRepairActionType
+	ThreadID        *uuid.UUID
+	PushChanges     *bool
+	Trigger         PullRequestRepairTrigger
+	ExpectedHeadSHA string
 }
 
 func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, opts StartPullRequestRepairOptions) (*models.PullRequestRepairResponse, error) {
@@ -736,6 +776,9 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
 	if err != nil {
 		return nil, err
+	}
+	if opts.ExpectedHeadSHA != "" && current.HeadSHA != opts.ExpectedHeadSHA {
+		return nil, ErrRepairHeadChanged
 	}
 	snapshot, err := s.pullRequests.GetHealthSnapshot(ctx, orgID, pullRequestID, current.Version)
 	if err != nil {
@@ -806,7 +849,15 @@ func (s *PRService) StartPullRequestRepair(ctx context.Context, orgID, pullReque
 	if workspaceMode == models.PullRequestRepairWorkspaceModeSnapshotContinuation && reason != "" {
 		return nil, fmt.Errorf("%w: canonical pull request session is not ready for repair: %s", ErrRepairSessionBusy, reason)
 	}
-	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action, repairShouldPushChanges(opts)), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID)
+	return s.resumeRepairSession(ctx, pr, session, revisionContext, repairPromptForAction(action, repairShouldPushChanges(opts)), userID, action, current.Version, current.HeadSHA, current.BaseSHA, workspaceMode, opts.ThreadID, opts.Trigger)
+}
+
+type PullRequestRepairTrigger struct {
+	Source            models.PullRequestRepairTriggerSource
+	Reason            string
+	AutoAttempt       bool
+	MessageSource     models.SessionMessageSource
+	TriggeredByUserID *uuid.UUID
 }
 
 func (s *PRService) getActiveRepairRunForCurrentHead(ctx context.Context, orgID, pullRequestID uuid.UUID, action models.PullRequestRepairActionType, current models.PullRequestHealthCurrent) (models.PullRequestRepairRun, error) {
@@ -894,7 +945,7 @@ func (s *PRService) repairWorkspaceMode(session models.Session) (models.PullRequ
 	}
 }
 
-func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode, requestedThreadID *uuid.UUID) (*models.PullRequestRepairResponse, error) {
+func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullRequest, session models.Session, revisionContext []byte, shortPrompt string, userID uuid.UUID, action models.PullRequestRepairActionType, healthVersion int64, headSHA, baseSHA string, workspaceMode models.PullRequestRepairWorkspaceMode, requestedThreadID *uuid.UUID, trigger PullRequestRepairTrigger) (*models.PullRequestRepairResponse, error) {
 	if s.sessionMessages == nil {
 		return nil, fmt.Errorf("session message store not configured")
 	}
@@ -904,6 +955,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 	if err := workspaceMode.Validate(); err != nil {
 		return nil, err
 	}
+	trigger = normalizePullRequestRepairTrigger(trigger, userID)
 
 	tx, err := s.sessions.Begin(ctx)
 	if err != nil {
@@ -945,25 +997,30 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		SessionID:  claimed.ID,
 		OrgID:      pr.OrgID,
 		ThreadID:   threadID,
-		UserID:     &userID,
+		UserID:     trigger.TriggeredByUserID,
 		TurnNumber: turnNumber,
 		Role:       models.MessageRoleUser,
 		Content:    shortPrompt,
+		Source:     trigger.MessageSource,
 	}
-	if err := txMessages.Create(ctx, msg); err != nil {
+	if err := txMessages.CreateWithSource(ctx, msg); err != nil {
 		return nil, err
 	}
 	repairRun := &models.PullRequestRepairRun{
-		OrgID:         pr.OrgID,
-		PullRequestID: pr.ID,
-		SessionID:     claimed.ID,
-		ThreadID:      threadID,
-		ActionType:    action,
-		HealthVersion: healthVersion,
-		HeadSHA:       headSHA,
-		BaseSHA:       baseSHA,
-		WorkspaceMode: workspaceMode,
-		Active:        true,
+		OrgID:             pr.OrgID,
+		PullRequestID:     pr.ID,
+		SessionID:         claimed.ID,
+		ThreadID:          threadID,
+		ActionType:        action,
+		HealthVersion:     healthVersion,
+		HeadSHA:           headSHA,
+		BaseSHA:           baseSHA,
+		WorkspaceMode:     workspaceMode,
+		Active:            true,
+		AutoAttempt:       trigger.AutoAttempt,
+		TriggerReason:     trigger.Reason,
+		TriggeredBySource: trigger.Source,
+		TriggeredByUserID: trigger.TriggeredByUserID,
 	}
 	if err := txPRs.CreateRepairRun(ctx, repairRun); err != nil {
 		if isUniqueActiveRepairRunViolation(err) {
@@ -1010,6 +1067,20 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		HealthVersion:    healthVersion,
 		RepairActionType: action,
 	}, nil
+}
+
+func normalizePullRequestRepairTrigger(trigger PullRequestRepairTrigger, userID uuid.UUID) PullRequestRepairTrigger {
+	if trigger.Source == "" {
+		trigger.Source = models.PullRequestRepairTriggerSourceManual
+	}
+	if trigger.MessageSource == "" && trigger.Source == models.PullRequestRepairTriggerSourceSystem {
+		trigger.MessageSource = models.SessionMessageSourceSystemAutoRepair
+	}
+	if trigger.Source == models.PullRequestRepairTriggerSourceManual && trigger.TriggeredByUserID == nil && userID != uuid.Nil {
+		id := userID
+		trigger.TriggeredByUserID = &id
+	}
+	return trigger
 }
 
 func (s *PRService) CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error {
@@ -1067,6 +1138,10 @@ var ErrRepairAlreadyInProgress = errors.New("a repair session is already in prog
 // ErrRepairSessionBusy is returned when the canonical PR session is doing other runtime work and cannot accept
 // a new repair turn yet.
 var ErrRepairSessionBusy = errors.New("canonical pull request session is busy")
+
+// ErrRepairHeadChanged is returned when a caller bound repair launch to a
+// specific PR head and the branch moved before the repair turn could start.
+var ErrRepairHeadChanged = errors.New("pull request head changed before repair launch")
 
 func selectRepairThreadID(threads []models.SessionThread, requestedThreadID *uuid.UUID) (*uuid.UUID, error) {
 	thread, err := selectRepairThread(threads, requestedThreadID)
