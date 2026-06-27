@@ -540,7 +540,7 @@ if [ "$ROLE" = "app" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" root@"$HOST":/opt/143/
 fi
 scp "${SCP_OPTS[@]}" -r "$PROJECT_DIR/deploy" root@"$HOST":/opt/143/
-ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/configure-docker-daemon.sh /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh"
+ssh "${SSH_OPTS[@]}" root@"$HOST" "chown -R deploy:deploy /opt/143 && chmod +x /opt/143/deploy/scripts/configure-docker-daemon.sh /opt/143/deploy/scripts/install-log-rotation.sh /opt/143/deploy/scripts/install-docker-dns.sh /opt/143/deploy/scripts/install-tailscale.sh /opt/143/deploy/scripts/reconcile-worker-host.sh /opt/143/deploy/scripts/install-pg-backups.sh /opt/143/deploy/scripts/pg-backup.sh /opt/143/deploy/scripts/restore-test.sh"
 
 # Step 2a: Configure Docker daemon hardening in one pass BEFORE step 5
 # starts services. This pins bounded json-file logs and multi-provider DNS
@@ -682,6 +682,14 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" << START
   set -euo pipefail
   su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE up -d'
 START
+
+# For db nodes: install automated backups (pg_dump every 6h + weekly restore
+# test). The scripts were copied with the rest of deploy/ above; the installer
+# is idempotent, so this is a no-op on reprovision.
+if [ "$ROLE" = "db" ]; then
+  echo "Installing automated DB backups..."
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-pg-backups.sh"
+fi
 
 # For app nodes: wait for health + run migrations (single SSH session)
 if [ "$ROLE" = "app" ]; then

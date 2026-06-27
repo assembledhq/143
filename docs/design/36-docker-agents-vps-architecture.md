@@ -960,10 +960,20 @@ These checks are provider-agnostic — they query Postgres directly.
 
 ### Phase 2 Checklist
 
-- [ ] Set up `pg-backup.sh` cron (Layer 2)
-- [ ] Configure offsite backup sync (`rclone` to S3-compatible storage)
+- [x] Set up `pg-backup.sh` cron (Layer 2) — automated via
+      `deploy/scripts/install-pg-backups.sh`, run at the end of `make
+      provision-db` and re-runnable standalone with `make provision-db-backups`.
+      Installs `/etc/cron.d/143-pg-backup`: `pg-backup.sh` every 6h (verified
+      pg_dump, 7-day local retention) + `restore-test.sh` weekly. Note: local
+      retention is 7 days (not 30) so 6-hourly ~900 MB dumps don't fill the disk.
+- [ ] Configure offsite backup sync (`rclone` to S3-compatible storage) —
+      hook is wired: set `BACKUP_SYNC_CMD` in `/opt/143/backup-sync.env` and
+      `pg-backup.sh` ships each verified dump offsite. Still needs a bucket +
+      `rclone` config on the db host.
 - [ ] Enable WAL-G archiving (Layer 3) — **required before accepting users**
-- [ ] Run a restore drill — verify both pg_dump and WAL-G restores work
+- [x] Run a restore drill — `restore-test.sh` runs weekly and restores the
+      newest dump into a throwaway Postgres; verified manually on 2026-06-27.
+      WAL-G restore still pending Layer 3.
 - [ ] Set up monitoring (Datadog, Prometheus, or even just cron + email alerts)
 
 ### Environment Variables (Backup & Recovery)

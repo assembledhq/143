@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -562,6 +562,22 @@ provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+# Install/refresh automated DB backups (pg_dump every 6h + weekly restore
+# test) on the db host. Runs automatically at the end of provision-db; this
+# target is the standalone entry point for an already-provisioned db node and
+# is idempotent (safe to re-run). Resolves the db host from FLEET_HOSTS when
+# HOST is unset.
+# Usage:
+#   make provision-db-backups
+#   make provision-db-backups HOST=87.99.157.99
+provision-db-backups:
+	$(check-ssh-key)
+	@HOST="$(HOST)"; \
+	if [ -z "$$HOST" ]; then $(read-fleet-hosts); HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; fi; \
+	test -n "$$HOST" || { echo "ERROR: no HOST given and no db:<ip> in FLEET_HOSTS."; exit 1; }; \
+	echo "Configuring DB backups on $$HOST..."; \
+	./deploy/scripts/provision-db-backups.sh "$$HOST" "$(SSH_KEY)"
 
 provision-logging:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
