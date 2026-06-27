@@ -164,8 +164,20 @@ func ComputePreviewDependencyCachePlacementKey(orgID, repoID uuid.UUID, configNa
 // and a stale blob degrades to partial build-tool hits rather than wrong
 // output.
 func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
+	key, err := stableJSONSHA256(newPreviewBuildCachePlacementPayload(PreviewBuildCacheRuntimeVersion, orgID, repoID, configName, configDigest, install, effectivePaths))
+	if err != nil {
+		return "", fmt.Errorf("marshal build cache key: %w", err)
+	}
+	return key, nil
+}
+
+// newPreviewBuildCachePlacementPayload builds the canonical placement-key
+// payload shared by the workdir and home build-artifact slots. Centralizing it
+// guarantees that ComputePreviewBuildCacheKey, ComputePreviewBuildCacheHomeKey,
+// and PreviewBuildCacheKeyDebug all hash byte-identical bytes.
+func newPreviewBuildCachePlacementPayload(runtimeVersion string, orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) previewDependencyCachePlacementKey {
 	payload := previewDependencyCachePlacementKey{
-		RuntimeVersion: PreviewBuildCacheRuntimeVersion,
+		RuntimeVersion: runtimeVersion,
 		OrgID:          orgID,
 		RepoID:         repoID,
 		ConfigName:     strings.TrimSpace(configName),
@@ -180,11 +192,29 @@ func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDige
 		}
 		payload.LockfilePaths = sortedNormalizedDependencyPaths(install.Lockfiles)
 	}
-	key, err := stableJSONSHA256(payload)
+	return payload
+}
+
+// PreviewBuildCacheKeyDebug recomputes a build-artifact placement key and also
+// returns the exact canonical JSON payload that is SHA-256'd to produce it.
+//
+// TEMPORARY INSTRUMENTATION: this exists only to diagnose build-cache key
+// instability across launches. Because it shares newPreviewBuildCachePlacementPayload
+// and the same json.Marshal as the production key functions, the returned key is
+// byte-identical to ComputePreviewBuildCacheKey/ComputePreviewBuildCacheHomeKey,
+// and payloadJSON is exactly the bytes that were hashed — diff payloadJSON across
+// two launches to pinpoint, in a single pass, which field changed. Pass the
+// runtime-version constant for the slot under diagnosis
+// (PreviewBuildCacheRuntimeVersion for workdir, PreviewBuildCacheHomeRuntimeVersion
+// for home). Safe to delete once the unstable input is identified.
+func PreviewBuildCacheKeyDebug(runtimeVersion string, orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (key string, payloadJSON string, err error) {
+	payload := newPreviewBuildCachePlacementPayload(runtimeVersion, orgID, repoID, configName, configDigest, install, effectivePaths)
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal build cache key: %w", err)
+		return "", "", fmt.Errorf("marshal build cache debug payload: %w", err)
 	}
-	return key, nil
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum[:]), string(raw), nil
 }
 
 // ComputePreviewBuildCacheHomeKey returns the latest-wins key for the
@@ -193,23 +223,7 @@ func ComputePreviewBuildCacheKey(orgID, repoID uuid.UUID, configName, configDige
 // home-rooted blob occupies its own slot, separate from the workdir build
 // blob, within the build_artifact cache kind.
 func ComputePreviewBuildCacheHomeKey(orgID, repoID uuid.UUID, configName, configDigest string, install *models.PreviewInstallConfig, effectivePaths []string) (string, error) {
-	payload := previewDependencyCachePlacementKey{
-		RuntimeVersion: PreviewBuildCacheHomeRuntimeVersion,
-		OrgID:          orgID,
-		RepoID:         repoID,
-		ConfigName:     strings.TrimSpace(configName),
-		ConfigDigest:   strings.TrimSpace(configDigest),
-		EffectivePaths: sortedNormalizedDependencyPaths(effectivePaths),
-	}
-	if install != nil {
-		payload.InstallCommand = append([]string(nil), install.Command...)
-		payload.InstallCwd = install.Cwd
-		if payload.InstallCwd == "" {
-			payload.InstallCwd = "."
-		}
-		payload.LockfilePaths = sortedNormalizedDependencyPaths(install.Lockfiles)
-	}
-	key, err := stableJSONSHA256(payload)
+	key, err := stableJSONSHA256(newPreviewBuildCachePlacementPayload(PreviewBuildCacheHomeRuntimeVersion, orgID, repoID, configName, configDigest, install, effectivePaths))
 	if err != nil {
 		return "", fmt.Errorf("marshal build cache home key: %w", err)
 	}
