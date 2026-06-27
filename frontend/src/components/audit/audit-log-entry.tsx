@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { AuditLog, User } from "@/lib/types";
-import { formatTimeAgo } from "@/lib/utils";
+import { formatDateTime, formatTimeAgo } from "@/lib/utils";
 import { formatAuditDetailValue } from "@/lib/audit-details";
 import { Button } from "@/components/ui/button";
 
@@ -148,7 +148,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
               )}
               <div className="flex gap-2">
                 <span className="font-medium text-muted-foreground min-w-[80px]">Time:</span>
-                <span className="text-foreground">{new Date(entry.created_at).toLocaleString()}</span>
+                <span className="text-foreground">{formatDateTime(entry.created_at, { year: true, seconds: true })}</span>
               </div>
             </div>
           </div>

@@ -6,6 +6,7 @@ import { Check, Copy, ExternalLink, Github, Globe, Trash2 } from "lucide-react";
 
 import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
+import { formatDateTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -345,7 +346,7 @@ export function VerifiedDomainsSection() {
                       </div>
                       {d.last_checked_at && (
                         <p className="text-muted-foreground">
-                          Last checked {new Date(d.last_checked_at).toLocaleString()}
+                          Last checked {formatDateTime(d.last_checked_at)}
                         </p>
                       )}
                     </div>

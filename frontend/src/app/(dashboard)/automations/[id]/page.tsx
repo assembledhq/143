@@ -72,7 +72,7 @@ import type {
   AutomationRun,
   ListResponse,
 } from "@/lib/types";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import {
   getCodingAgentReasoningOptions,
   supportsReasoningEffort,
@@ -939,7 +939,7 @@ export default function AutomationDetailPage() {
 
   const headerDescription = automation.enabled
     ? automation.next_run_at
-      ? `${schedule} · Next: ${new Date(automation.next_run_at).toLocaleString()}`
+      ? `${schedule} · Next: ${formatDateTime(automation.next_run_at)}`
       : schedule
     : `${schedule} · Paused`;
 
@@ -1181,13 +1181,13 @@ function AutomationDetailRail({
             [
               "Next run",
               automation.next_run_at
-                ? new Date(automation.next_run_at).toLocaleString()
+                ? formatDateTime(automation.next_run_at)
                 : "-",
             ],
             [
               "Last ran",
               automation.last_run_at
-                ? new Date(automation.last_run_at).toLocaleString()
+                ? formatDateTime(automation.last_run_at)
                 : "-",
             ],
             ["Repository", repositoryName],
@@ -1278,7 +1278,7 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
           {run.completed_at
-            ? ` · ${new Date(run.completed_at).toLocaleString()}`
+            ? ` · ${formatDateTime(run.completed_at)}`
             : ""}
         </span>
       </div>

@@ -41,6 +41,7 @@ import {
 import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, CheckCircle2, XCircle, Eye, RotateCw, ShieldCheck, Database } from "lucide-react";
 import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, EvalBootstrapCandidate, EvalBootstrapCandidateStatus, EvalDataset, EvalReleaseGate, ListResponse, Repository, SessionLog, SingleResponse } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 import { addSSEListener, SSE_EVENT, buildEvalBootstrapStreamURL, buildSessionLogsStreamURL } from "@/lib/sse";
 import { shouldSubscribeToEvalBootstrapStream, useEvalSSE } from "@/lib/use-eval-sse";
 import { getActiveOrgId } from "@/lib/active-org";
@@ -676,7 +677,7 @@ function BootstrapDetailSheet({
           ) : bootstrap.completed_at ? (
             <span>Completed in {formatDuration(bootstrap.created_at, bootstrap.completed_at)}</span>
           ) : (
-            <span>Started {new Date(bootstrap.created_at).toLocaleString()}</span>
+            <span>Started {formatDateTime(bootstrap.created_at)}</span>
           )}
         </SheetDescription>
       </SheetHeader>

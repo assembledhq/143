@@ -14,6 +14,7 @@ import {
   ArrowUpRight,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { formatDateTime } from "@/lib/utils";
 
 export const taskStatusConfig: Record<
   string,
@@ -44,8 +45,7 @@ export const attachmentCategoryConfig: Record<string, { label: string; color: st
 };
 
 export function formatTimestamp(dateStr?: string): string {
-  if (!dateStr) return "-";
-  return new Date(dateStr).toLocaleString();
+  return formatDateTime(dateStr, { fallback: "-" });
 }
 
 export function ProgressBar({ completed, total }: { completed: number; total: number }) {

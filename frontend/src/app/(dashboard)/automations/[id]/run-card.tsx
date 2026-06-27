@@ -16,7 +16,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { AutomationRun, AutomationRunStatus, PRCreationState } from "@/lib/types";
 
 export const QUIET_RUN_STATUSES: ReadonlyArray<AutomationRunStatus> = [
@@ -174,7 +174,7 @@ function Header({ run, kind }: { run: AutomationRun; kind: FullCardKind }) {
         )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5 text-xs tabular-nums text-muted-foreground sm:pl-4">
-        <span title={new Date(run.triggered_at).toLocaleString()}>{formatTimeAgo(run.triggered_at)}</span>
+        <span title={formatDateTime(run.triggered_at)}>{formatTimeAgo(run.triggered_at)}</span>
         {kind === "running" && <LiveDuration startedAt={run.triggered_at} />}
         {kind !== "running" && run.completed_at && (
           <span>· {formatDuration(run.triggered_at, run.completed_at)}</span>
@@ -480,7 +480,7 @@ export function QuietRunRow({
           <div className="flex shrink-0 items-center gap-2">
             <span
               className="text-xs tabular-nums text-muted-foreground"
-              title={new Date(run.triggered_at).toLocaleString()}
+              title={formatDateTime(run.triggered_at)}
             >
               {formatTimeAgo(run.triggered_at)}
             </span>
