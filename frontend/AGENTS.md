@@ -12,6 +12,21 @@ This file applies to the entire `frontend/` tree. Follow these patterns strictly
 - **Icons:** lucide-react
 - **Fonts:** Geist Sans (primary), Geist Mono (monospace)
 
+## Design System Direction
+
+Keep **shadcn/ui + Tailwind tokens as the implementation system**: shadcn/ui primitives, local app components, semantic Tailwind tokens, and lucide icons. Do not migrate dashboard work to another component framework unless the user explicitly asks for a framework migration.
+
+Design 143 as a **professional engineering control plane** — not a marketing surface, not a consumer app. Apply these rules:
+
+- **Lead with the task.** Make the next responsible action (inspect, compare, configure, launch, pause, repair, review, publish) obvious without large explanatory copy.
+- **Stay dense but calm.** Use compact rows, tables, split panes, filters, badges, and inline actions. Avoid oversized cards, decorative sections, large empty spacing, and hero-style composition inside the app.
+- **Enforce hierarchy.** Make the primary object, current state, owner/repo/session context, and allowed actions scannable in the first pass. Keep secondary metadata subordinate to the main action.
+- **Disclose progressively.** Show routine controls inline; move rare, destructive, advanced, or high-detail actions into menus, dialogs, sheets, or expandable sections.
+- **Speak one state language.** Use the shared status components and state tokens. Every status must convey what is happening, whether attention is needed, and the available action.
+- **Stay accessible.** Preserve shadcn/Radix keyboard behavior, focus rings, aria labels, disabled states, and contrast. Give icon-only buttons tooltips and accessible names.
+- **Cut decoration.** No gradient blobs, ornamental illustrations, nested cards, or tinted feature panes. Derive visual weight from layout, typography, borders, shadows, and state tokens.
+- **Match existing patterns.** Before adding a new pattern, check this file, nearby pages, and shared components, and extend what exists unless there is a concrete product reason not to.
+
 ## Design System
 
 ### Surface Hierarchy
