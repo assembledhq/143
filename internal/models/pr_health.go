@@ -253,6 +253,7 @@ type PullRequestHealthResponse struct {
 	FailingTestDetailAvailable   bool                              `json:"failing_test_detail_available"`
 	ObsoleteActiveRepairSessions bool                              `json:"obsolete_active_repair_sessions,omitempty"`
 	MergeWhenReady               PullRequestMergeWhenReadyStatus   `json:"merge_when_ready"`
+	AutoRepairExhaustedActions   []PullRequestRepairActionType     `json:"auto_repair_exhausted_actions,omitempty"`
 }
 
 type PullRequestMergeWhenReadyStatus struct {
@@ -270,6 +271,7 @@ type PullRequestActiveRepair struct {
 	ThreadID      *uuid.UUID                  `json:"thread_id,omitempty"`
 	SessionStatus SessionStatus               `json:"session_status"`
 	HealthVersion int64                       `json:"health_version"`
+	AutoAttempt   bool                        `json:"auto_attempt,omitempty"`
 }
 
 type PullRequestRepairResponse struct {
