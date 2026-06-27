@@ -3602,9 +3602,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
+    const diffIdentity = session.latest_diff_snapshot_id ?? session.diff_collected_at ?? "";
     return [
-      session.diff_collected_at ?? "",
-      session.latest_diff_snapshot_id ?? "",
+      diffIdentity,
       session.diff_stats?.added ?? "",
       session.diff_stats?.removed ?? "",
       session.diff_stats?.files_changed ?? "",
