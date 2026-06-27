@@ -5,7 +5,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
-import { formatTimeAgo } from "@/lib/utils";
+import { formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
 import {
   automationTemplateCategories,
@@ -74,16 +74,7 @@ function formatTemplateCadence(template: AutomationTemplate) {
 type AutomationFilter = "all" | "enabled" | "paused";
 
 function formatAutomationRunDate(value?: string) {
-  if (!value) return "Not scheduled";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Not scheduled";
-
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return formatDateTime(value, { fallback: "Not scheduled" });
 }
 
 function automationStatus(automation: Automation) {

@@ -43,6 +43,17 @@ func TestParseUserSettings(t *testing.T) {
 			want: UserSettings{ManualSessionPlanesHidden: true},
 		},
 		{
+			name: "parses automatic pr follow through preferences",
+			raw:  json.RawMessage(`{"automatic_pr_follow_through":{"readiness_after_review_loop":"inherit","resolve_conflicts_when_idle":"on","fix_tests_when_idle":"off"}}`),
+			want: UserSettings{
+				AutomaticPRFollowThrough: &AutomaticPRFollowThroughSettings{
+					ReadinessAfterReviewLoop: AutomaticFollowThroughPreferenceInherit,
+					ResolveConflictsWhenIdle: AutomaticFollowThroughPreferenceOn,
+					FixTestsWhenIdle:         AutomaticFollowThroughPreferenceOff,
+				},
+			},
+		},
+		{
 			name:    "rejects malformed json",
 			raw:     json.RawMessage(`{"coding_agent_reasoning_defaults":`),
 			wantErr: true,
@@ -65,6 +76,11 @@ func TestParseUserSettings(t *testing.T) {
 		{
 			name:    "rejects unsupported default model",
 			raw:     json.RawMessage(`{"coding_agent_model_default":"not-a-model"}`),
+			wantErr: true,
+		},
+		{
+			name:    "rejects invalid automatic follow through preference",
+			raw:     json.RawMessage(`{"automatic_pr_follow_through":{"fix_tests_when_idle":"sometimes"}}`),
 			wantErr: true,
 		},
 	}
@@ -139,6 +155,18 @@ func TestApplyUserSettingsMergePatch(t *testing.T) {
 			want:  UserSettings{DiffViewerFullScreen: true},
 		},
 		{
+			name:    "merges nested automatic follow through preferences",
+			current: json.RawMessage(`{"automatic_pr_follow_through":{"readiness_after_review_loop":"inherit","fix_tests_when_idle":"off"}}`),
+			patch:   json.RawMessage(`{"automatic_pr_follow_through":{"resolve_conflicts_when_idle":"on"}}`),
+			want: UserSettings{
+				AutomaticPRFollowThrough: &AutomaticPRFollowThroughSettings{
+					ReadinessAfterReviewLoop: AutomaticFollowThroughPreferenceInherit,
+					ResolveConflictsWhenIdle: AutomaticFollowThroughPreferenceOn,
+					FixTestsWhenIdle:         AutomaticFollowThroughPreferenceOff,
+				},
+			},
+		},
+		{
 			name:    "empty patch is a no-op",
 			current: json.RawMessage(`{"diff_viewer_full_screen":true}`),
 			patch:   json.RawMessage(`{}`),
@@ -164,6 +192,11 @@ func TestApplyUserSettingsMergePatch(t *testing.T) {
 			current: json.RawMessage(`{"coding_agent_reasoning_defaults":{"claude_code":"max"}}`),
 			patch:   json.RawMessage(`{"coding_agent_reasoning_defaults":{"codex":"max"}}`),
 			wantErr: "is not supported",
+		},
+		{
+			name:    "rejects invalid automatic follow through patch",
+			patch:   json.RawMessage(`{"automatic_pr_follow_through":{"readiness_after_review_loop":"auto"}}`),
+			wantErr: "automatic follow-through preference",
 		},
 	}
 
@@ -235,6 +268,20 @@ func TestUserSettings_MarshalJSONB(t *testing.T) {
 		require.Error(t, err, "MarshalJSONB should reject invalid settings")
 		require.Contains(t, err.Error(), "reasoning effort cannot be empty", "MarshalJSONB should return validation failures")
 	})
+
+	t.Run("marshals automatic pr follow through preferences", func(t *testing.T) {
+		t.Parallel()
+
+		raw, err := (UserSettings{
+			AutomaticPRFollowThrough: &AutomaticPRFollowThroughSettings{
+				ReadinessAfterReviewLoop: AutomaticFollowThroughPreferenceInherit,
+				ResolveConflictsWhenIdle: AutomaticFollowThroughPreferenceOn,
+				FixTestsWhenIdle:         AutomaticFollowThroughPreferenceOff,
+			},
+		}).MarshalJSONB()
+		require.NoError(t, err, "MarshalJSONB should accept automatic follow-through preferences")
+		require.JSONEq(t, `{"automatic_pr_follow_through":{"readiness_after_review_loop":"inherit","resolve_conflicts_when_idle":"on","fix_tests_when_idle":"off"}}`, string(raw), "MarshalJSONB should encode automatic follow-through preferences")
+	})
 }
 
 func TestUserSettings_Validate(t *testing.T) {
@@ -287,6 +334,15 @@ func TestUserSettings_Validate(t *testing.T) {
 				},
 			},
 			wantErr: "is not supported",
+		},
+		{
+			name: "rejects invalid automatic follow through preference",
+			settings: UserSettings{
+				AutomaticPRFollowThrough: &AutomaticPRFollowThroughSettings{
+					ReadinessAfterReviewLoop: "auto",
+				},
+			},
+			wantErr: "automatic follow-through preference",
 		},
 	}
 

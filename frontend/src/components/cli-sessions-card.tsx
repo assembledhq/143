@@ -9,12 +9,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ErrorText } from "@/components/ui/error-notice";
 import type { CliToken, ListResponse } from "@/lib/types";
+import { formatDateTime } from "@/lib/utils";
 
 function formatWhen(value?: string | null): string {
-  if (!value) return "never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "unknown";
-  return date.toLocaleString();
+  return formatDateTime(value, { fallback: value ? "unknown" : "never" });
 }
 
 // CLISessionsCard lists the user's own 143-tools device tokens (one per

@@ -229,29 +229,30 @@ func (p PRAuthorship) Validate() error {
 
 // OrgSettings is the strongly-typed representation of organizations.settings JSONB.
 type OrgSettings struct {
-	AutonomyLevel              AutonomyLevel          `json:"autonomy_level"`
-	Aggressiveness             int                    `json:"execution_aggressiveness"`
-	MaxConcurrentRuns          int                    `json:"max_concurrent_runs"`
-	AgentAutonomy              string                 `json:"agent_autonomy"`
-	PriorityWeights            PriorityWeights        `json:"priority_weights"`
-	MinPriorityThreshold       float64                `json:"min_priority_threshold"`
-	ProductDirection           string                 `json:"product_direction"`
-	ProductContext             *ProductContext        `json:"product_context,omitempty"`
-	PMScheduleHours            int                    `json:"pm_schedule_hours"`
-	PMModel                    string                 `json:"pm_model"`
-	LLMModel                   string                 `json:"llm_model"`
-	LLMReasoningEffort         ReasoningEffort        `json:"llm_reasoning_effort,omitempty"`
-	AgentConfig                AgentEnvConfig         `json:"agent_config,omitempty"`
-	DefaultAgentType           AgentType              `json:"default_agent_type,omitempty"`
-	AuditRetentionDays         int                    `json:"audit_retention_days,omitempty"`
-	ContextRefreshIntervalDays int                    `json:"context_refresh_interval_days,omitempty"`
-	OrgSize                    OrgSize                `json:"org_size,omitempty"`
-	ContextLimits              ContextLimits          `json:"context_limits,omitempty"`
-	PRAuthorship               PRAuthorship           `json:"pr_authorship,omitempty"`
-	PRDraftDefault             bool                   `json:"pr_draft_default,omitempty"`
-	AutoArchiveOnPRClose       *bool                  `json:"auto_archive_on_pr_close,omitempty"`
-	DefaultWorkRepositoryID    *uuid.UUID             `json:"default_work_repository_id,omitempty"`
-	SandboxNetwork             SandboxNetworkSettings `json:"sandbox_network,omitempty"`
+	AutonomyLevel              AutonomyLevel             `json:"autonomy_level"`
+	Aggressiveness             int                       `json:"execution_aggressiveness"`
+	MaxConcurrentRuns          int                       `json:"max_concurrent_runs"`
+	AgentAutonomy              string                    `json:"agent_autonomy"`
+	PriorityWeights            PriorityWeights           `json:"priority_weights"`
+	MinPriorityThreshold       float64                   `json:"min_priority_threshold"`
+	ProductDirection           string                    `json:"product_direction"`
+	ProductContext             *ProductContext           `json:"product_context,omitempty"`
+	PMScheduleHours            int                       `json:"pm_schedule_hours"`
+	PMModel                    string                    `json:"pm_model"`
+	LLMModel                   string                    `json:"llm_model"`
+	LLMReasoningEffort         ReasoningEffort           `json:"llm_reasoning_effort,omitempty"`
+	AgentConfig                AgentEnvConfig            `json:"agent_config,omitempty"`
+	DefaultAgentType           AgentType                 `json:"default_agent_type,omitempty"`
+	AuditRetentionDays         int                       `json:"audit_retention_days,omitempty"`
+	ContextRefreshIntervalDays int                       `json:"context_refresh_interval_days,omitempty"`
+	OrgSize                    OrgSize                   `json:"org_size,omitempty"`
+	ContextLimits              ContextLimits             `json:"context_limits,omitempty"`
+	PRAuthorship               PRAuthorship              `json:"pr_authorship,omitempty"`
+	PRDraftDefault             bool                      `json:"pr_draft_default,omitempty"`
+	AutoArchiveOnPRClose       *bool                     `json:"auto_archive_on_pr_close,omitempty"`
+	DefaultWorkRepositoryID    *uuid.UUID                `json:"default_work_repository_id,omitempty"`
+	SandboxNetwork             SandboxNetworkSettings    `json:"sandbox_network,omitempty"`
+	SessionAutomation          SessionAutomationSettings `json:"session_automation,omitempty"`
 	// CodingAgentTabToolsEnabled controls whether sandbox agents may use
 	// 143-tools to view/create/message tabs in their current session. Pointer
 	// typed so absent settings default on without losing explicit false.
@@ -291,6 +292,48 @@ type OrgSettings struct {
 	// LinearAutomation, which is purely outbound. The feature is opt-in;
 	// nothing happens to a Linear-connected org until an admin enables it.
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+}
+
+// SessionAutomationSettings controls organization-level session follow-through
+// defaults. V1 stores policy only; workers do not read it until later phases.
+type SessionAutomationSettings struct {
+	AutomaticFollowThrough AutomaticFollowThroughOrgSettings `json:"automatic_follow_through,omitempty"`
+}
+
+// AutomaticFollowThroughOrgSettings controls automatic PR/readiness next steps
+// when sessions or review loops reach a stable point. All flags default off.
+type AutomaticFollowThroughOrgSettings struct {
+	ReadinessAfterReviewLoop       bool               `json:"readiness_after_review_loop,omitempty"`
+	ReadinessAfterReviewLoopStates []ReviewLoopStatus `json:"readiness_after_review_loop_states,omitempty"`
+	ResolveConflictsWhenIdle       bool               `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle               bool               `json:"fix_tests_when_idle,omitempty"`
+}
+
+// EffectiveReadinessAfterReviewLoopStates applies the v1 default terminal
+// states for auto-readiness policy.
+func (s AutomaticFollowThroughOrgSettings) EffectiveReadinessAfterReviewLoopStates() []ReviewLoopStatus {
+	if len(s.ReadinessAfterReviewLoopStates) == 0 {
+		return []ReviewLoopStatus{ReviewLoopStatusClean}
+	}
+	return append([]ReviewLoopStatus(nil), s.ReadinessAfterReviewLoopStates...)
+}
+
+// Validate returns an error when the session automation settings are invalid.
+func (s SessionAutomationSettings) Validate() error {
+	return s.AutomaticFollowThrough.Validate()
+}
+
+// Validate returns an error when automatic follow-through settings are invalid.
+func (s AutomaticFollowThroughOrgSettings) Validate() error {
+	for _, status := range s.ReadinessAfterReviewLoopStates {
+		if err := status.Validate(); err != nil {
+			return fmt.Errorf("readiness_after_review_loop_states: %w", err)
+		}
+		if status == ReviewLoopStatusRunning {
+			return fmt.Errorf("readiness_after_review_loop_states: %q is not terminal", status)
+		}
+	}
+	return nil
 }
 
 // SandboxNetworkSettings controls per-org sandbox egress behavior.
@@ -944,6 +987,9 @@ func ParseOrgSettings(raw json.RawMessage) (OrgSettings, error) {
 		if s.RuntimeBudgets.MaxAutomaticExtensionSeconds > maxExtensionByCeiling {
 			s.RuntimeBudgets.MaxAutomaticExtensionSeconds = maxExtensionByCeiling
 		}
+	}
+	if err := s.SessionAutomation.Validate(); err != nil {
+		return s, err
 	}
 
 	return s, nil

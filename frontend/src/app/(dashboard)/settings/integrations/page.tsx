@@ -7,6 +7,7 @@ import { notify } from "@/lib/notify";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CircleHelp, ExternalLink, RefreshCw, Trash2 } from "lucide-react";
 import { ApiError, api } from "@/lib/api";
+import { formatDateTime } from "@/lib/utils";
 import { AllIntegrationCards } from "@/components/integration-connection-cards";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { PageHeader } from "@/components/page-header";
@@ -1778,10 +1779,7 @@ function pagerDutyIncidentRepositoryName(
 }
 
 function formatIntegrationTimestamp(value?: string): string {
-  if (!value) return "Never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
+  return formatDateTime(value, { fallback: value || "Never" });
 }
 
 function IntegrationDangerZone({

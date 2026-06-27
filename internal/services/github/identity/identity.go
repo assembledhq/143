@@ -71,8 +71,8 @@ func (r *Resolution) IsUserToken() bool {
 	return r != nil && r.Source == SourceUser
 }
 
-// AuthoredBy returns the persisted "authored_by" string used by audit
-// columns (pull_requests.authored_by, sessions.git_identity_source).
+// AuthoredBy returns the persisted "authored_by" string used by audit columns
+// (pull_requests.authored_by, session_execution_metadata.git_identity_source).
 func (r *Resolution) AuthoredBy() string {
 	if r != nil && r.Source == SourceUser {
 		return "user"

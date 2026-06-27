@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { cn, formatTimeAgo } from "@/lib/utils";
+import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 
 type SyncTimeTextProps = {
   syncedAt?: string | null;
@@ -63,7 +63,7 @@ function formatRelativeSyncLabel(syncedAt: string | null | undefined, fallback: 
   }
 
   const diffMs = Math.max(0, nowMs - syncedDate.getTime());
-  const title = syncedDate.toLocaleString();
+  const title = formatDateTime(syncedAt);
   const label = formatTimeAgo(syncedAt, { fallback, includeSeconds: true, nowMs });
 
   if (diffMs < 60_000) {

@@ -290,8 +290,8 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 	mock.ExpectQuery("SELECT count").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	// SetLinearIdentifierHint UPDATE.
-	mock.ExpectExec("UPDATE sessions").
+	// SetLinearIdentifierHint side-table upsert.
+	mock.ExpectExec("INSERT INTO session_linear_context").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	// UpdateTitle UPDATE — fired because the session arrived with no
@@ -453,7 +453,7 @@ func TestSessionHandler_CreateManual_LinearIssueOnlySkipsLLMTitleGeneration(t *t
 	mock.ExpectQuery("SELECT count").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectExec("UPDATE sessions").
+	mock.ExpectExec("INSERT INTO session_linear_context").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec("UPDATE sessions SET title").

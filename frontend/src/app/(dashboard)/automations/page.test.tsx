@@ -3,6 +3,7 @@ import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import AutomationsPage from "./page";
+import { formatDateTime } from "@/lib/utils";
 
 const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
@@ -178,6 +179,11 @@ describe("AutomationsPage", () => {
     });
     expect(menuButtons.length).toBeGreaterThan(0);
     expect(menuButtons[0]).toHaveClass("shrink-0");
+
+    // Computed via the same helper so the assertion is independent of the host
+    // timezone (the fixture's next_run_at is a UTC instant).
+    expect(screen.getByText(formatDateTime("2026-05-01T09:15:00Z"))).toBeInTheDocument();
+    expect(screen.queryByText(/9:15:00/)).not.toBeInTheDocument();
   });
 
   it("filters automations by status and search query", async () => {

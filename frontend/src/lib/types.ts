@@ -56,6 +56,15 @@ export interface UserSettings {
   >;
   diff_viewer_full_screen?: boolean;
   manual_session_planes_hidden?: boolean;
+  automatic_pr_follow_through?: AutomaticPRFollowThroughUserSettings;
+}
+
+export type AutomaticFollowThroughPreference = "inherit" | "on" | "off";
+
+export interface AutomaticPRFollowThroughUserSettings {
+  readiness_after_review_loop?: AutomaticFollowThroughPreference;
+  resolve_conflicts_when_idle?: AutomaticFollowThroughPreference;
+  fix_tests_when_idle?: AutomaticFollowThroughPreference;
 }
 
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
@@ -73,6 +82,7 @@ export interface UserSettingsUpdateRequest {
   > | null;
   diff_viewer_full_screen?: boolean | null;
   manual_session_planes_hidden?: boolean | null;
+  automatic_pr_follow_through?: Partial<Record<keyof AutomaticPRFollowThroughUserSettings, AutomaticFollowThroughPreference | null>> | null;
 }
 
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
@@ -2052,6 +2062,7 @@ export interface OrgSettings {
   pr_authorship?: "user_preferred" | "app_only" | "user_required";
   pr_draft_default?: boolean;
   auto_archive_on_pr_close?: boolean;
+  session_automation?: SessionAutomationSettings;
   coding_agent_tab_tools_enabled?: boolean;
   sandbox_network?: {
     static_egress_enabled?: boolean;
@@ -2070,6 +2081,17 @@ export interface OrgSettings {
     preview_max_memory_mib?: number;
     preview_max_ephemeral_disk_mib?: number;
   };
+}
+
+export interface SessionAutomationSettings {
+  automatic_follow_through?: AutomaticFollowThroughOrgSettings;
+}
+
+export interface AutomaticFollowThroughOrgSettings {
+  readiness_after_review_loop?: boolean;
+  readiness_after_review_loop_states?: ReviewLoopStatus[];
+  resolve_conflicts_when_idle?: boolean;
+  fix_tests_when_idle?: boolean;
 }
 
 export type SandboxResourceTier = "small" | "standard" | "large";
