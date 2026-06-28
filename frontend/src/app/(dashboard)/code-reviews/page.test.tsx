@@ -309,6 +309,38 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
   });
 
+  it("explains why GitHub reviewer team setup is disabled", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers({
+      status: "auth_required",
+      repository_id: "repo-1",
+      repository_full_name: "acme/api",
+      github_org: "acme",
+      team_slug: "143-code-reviewer",
+      team_name: "143 Code Reviewer",
+      team_reviewer: "@acme/143-code-reviewer",
+      repo_permission: "pull",
+      message: "Connect your GitHub account before creating the reviewer team.",
+    });
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+
+    const setupButton = await screen.findByRole("button", { name: /Create \/ repair team/i });
+    expect(setupButton).toBeDisabled();
+
+    await user.hover(setupButton);
+
+    expect(
+      await screen.findByRole("tooltip", {
+        name: "Connect your GitHub account first so 143 can create or repair the reviewer team.",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("surfaces GitHub trigger setup permission errors", async () => {
     const user = userEvent.setup();
     let setupCalls = 0;
