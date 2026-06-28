@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3197,6 +3198,8 @@ func (c capturingStringArg) Match(v interface{}) bool {
 	*c.dest = s
 	return true
 }
+
+var enqueuePRPushChangesJobAfterContinueTestMu sync.Mutex
 
 type prCreationStateArg struct {
 	state models.PRCreationState
@@ -9720,8 +9723,10 @@ func TestContinueSessionHandler_UsesRuntimeCeilingDeadline(t *testing.T) {
 }
 
 func TestContinueSessionHandler_PostSuccessPushChangesEnqueuesPushJob(t *testing.T) {
-	// This test swaps a package-level enqueue hook, so it must not run in
-	// parallel with other continue_session handler tests.
+	t.Parallel()
+
+	enqueuePRPushChangesJobAfterContinueTestMu.Lock()
+	t.Cleanup(enqueuePRPushChangesJobAfterContinueTestMu.Unlock)
 
 	stores, mock := newTestStores(t)
 	defer mock.Close()
