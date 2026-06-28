@@ -27,6 +27,10 @@ type PreviewInspector interface {
 	// InspectElement returns metadata about the DOM element at (x, y).
 	InspectElement(ctx context.Context, previewID string, x, y int) (*models.ElementInfo, error)
 
+	// InspectElementBySelector returns metadata about the first DOM element
+	// matching selector.
+	InspectElementBySelector(ctx context.Context, previewID string, selector string) (*models.ElementInfo, error)
+
 	// StartScreencast begins recording frames at the given FPS.
 	StartScreencast(ctx context.Context, previewID string, fps int) (screencastID string, err error)
 

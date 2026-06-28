@@ -29,6 +29,61 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRecommendedPreviewUpdateModeHMR(t *testing.T) {
+	t.Parallel()
+
+	mustConfig := func(primaryHMR bool) json.RawMessage {
+		raw, err := json.Marshal(models.PreviewConfig{
+			Primary:  "web",
+			Services: map[string]models.ServiceConfig{"web": {HMR: primaryHMR}},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	tests := []struct {
+		name          string
+		recycleConfig json.RawMessage
+		expected      models.PreviewUpdateMode
+	}{
+		{
+			name:          "hmr-capable out-of-date preview reloads browser",
+			recycleConfig: mustConfig(true),
+			expected:      models.PreviewUpdateModeBrowserReload,
+		},
+		{
+			name:          "non-hmr out-of-date preview soft restarts",
+			recycleConfig: mustConfig(false),
+			expected:      models.PreviewUpdateModeSoftServiceRestart,
+		},
+		{
+			name:          "missing recycle config falls back to soft restart",
+			recycleConfig: nil,
+			expected:      models.PreviewUpdateModeSoftServiceRestart,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := &PreviewHandler{
+				logger:            zerolog.Nop(),
+				restartClassifier: preview.DefaultPreviewRestartClassifier{},
+			}
+			instance := &models.PreviewInstance{
+				Status:        models.PreviewStatusReady,
+				RecycleConfig: tt.recycleConfig,
+			}
+			freshness := &models.PreviewFreshness{State: models.PreviewFreshnessOutOfDate}
+
+			mode := h.recommendedPreviewUpdateMode(instance, freshness, true)
+			require.Equal(t, tt.expected, mode)
+		})
+	}
+}
+
 func TestComputePreviewFreshness(t *testing.T) {
 	t.Parallel()
 

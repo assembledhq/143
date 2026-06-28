@@ -22,6 +22,27 @@ type RemoteToolSource struct {
 	preview *previewToolExecutor
 }
 
+type previewAugmentedToolSource struct {
+	base    mcp.ToolSource
+	preview *previewToolExecutor
+}
+
+func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.ToolSource {
+	preview := &previewToolExecutor{client: client}
+	return &previewAugmentedToolSource{base: base, preview: preview}
+}
+
+func (s *previewAugmentedToolSource) ListTools() []mcp.Tool {
+	return append(s.base.ListTools(), s.preview.tools()...)
+}
+
+func (s *previewAugmentedToolSource) CallTool(ctx context.Context, name string, args json.RawMessage) *mcp.ToolCallResult {
+	if s.preview.handles(name) {
+		return s.preview.call(ctx, name, args)
+	}
+	return s.base.CallTool(ctx, name, args)
+}
+
 // NewRemoteToolSource fetches the org's tool list and assembles the source.
 func NewRemoteToolSource(ctx context.Context, cfg Config) (*RemoteToolSource, error) {
 	client := NewClient(cfg)

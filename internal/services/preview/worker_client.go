@@ -25,6 +25,8 @@ const previewWorkerTokenTTL = 30 * time.Second
 // finishes, surfacing as "context canceled" on a readiness probe.
 const previewWorkerHTTPTimeout = 10 * time.Minute
 
+const PreviewSoftRestartUnsupportedCode = "PREVIEW_SOFT_RESTART_UNSUPPORTED"
+
 // WorkerRequestError preserves structured worker error responses.
 type WorkerRequestError struct {
 	StatusCode int
@@ -37,6 +39,10 @@ func (e *WorkerRequestError) Error() string {
 		return fmt.Sprintf("worker preview request failed with %d", e.StatusCode)
 	}
 	return fmt.Sprintf("worker preview request failed with %d (%s): %s", e.StatusCode, e.Code, e.Message)
+}
+
+func (e *WorkerRequestError) Is(target error) bool {
+	return target == ErrSoftRestartUnsupported && e.Code == PreviewSoftRestartUnsupportedCode
 }
 
 // RemoteStartPreviewRequest is the app->worker request for starting a preview.
@@ -162,8 +168,9 @@ type RemoteCancelSessionResponse struct {
 
 // RemoteInspectElementRequest targets DOM inspection by coordinates.
 type RemoteInspectElementRequest struct {
-	X int `json:"x"`
-	Y int `json:"y"`
+	X        int    `json:"x"`
+	Y        int    `json:"y"`
+	Selector string `json:"selector,omitempty"`
 }
 
 // RemoteExecuteInteractionRequest runs browser interactions against a preview.
@@ -344,6 +351,25 @@ func (c *WorkerPreviewClient) ResumeWarmPreview(ctx context.Context, worker Work
 	return c.recyclePreview(ctx, worker, orgID, previewID, RemoteRecyclePreviewRequest{ResumeWarm: true})
 }
 
+func (c *WorkerPreviewClient) SoftRestartPreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID) error {
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/soft-restart", worker.BaseURL, previewID), auth.PreviewTokenClaims{
+		OrgID:        orgID,
+		TargetNodeID: worker.ID,
+		PreviewID:    &previewID,
+		Action:       "soft_restart",
+		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
+	}, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("soft restart preview: %w", err)
+	}
+	_, err = decodeWorkerResponse[map[string]string](resp)
+	return err
+}
+
 func (c *WorkerPreviewClient) recyclePreview(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, body RemoteRecyclePreviewRequest) error {
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/recycle", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
@@ -382,13 +408,21 @@ func (c *WorkerPreviewClient) CaptureScreenshot(ctx context.Context, worker Work
 }
 
 func (c *WorkerPreviewClient) InspectElement(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, x, y int) (*models.ElementInfo, error) {
+	return c.inspectElement(ctx, worker, orgID, previewID, RemoteInspectElementRequest{X: x, Y: y})
+}
+
+func (c *WorkerPreviewClient) InspectElementBySelector(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, selector string) (*models.ElementInfo, error) {
+	return c.inspectElement(ctx, worker, orgID, previewID, RemoteInspectElementRequest{Selector: selector})
+}
+
+func (c *WorkerPreviewClient) inspectElement(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, body RemoteInspectElementRequest) (*models.ElementInfo, error) {
 	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/inspect", worker.BaseURL, previewID), auth.PreviewTokenClaims{
 		OrgID:        orgID,
 		TargetNodeID: worker.ID,
 		PreviewID:    &previewID,
 		Action:       "inspect",
 		ExpiresAt:    time.Now().Add(previewWorkerTokenTTL),
-	}, RemoteInspectElementRequest{X: x, Y: y})
+	}, body)
 	if err != nil {
 		return nil, err
 	}
