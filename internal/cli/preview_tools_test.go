@@ -175,6 +175,8 @@ func TestPreviewToolExecutor_RejectsAmbiguousTarget(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := tc.run()
 			require.True(t, result.IsError, "supplying both session_id and preview_id should be rejected")
 			require.Contains(t, firstText(result), "not both", "error should explain the ambiguity")
