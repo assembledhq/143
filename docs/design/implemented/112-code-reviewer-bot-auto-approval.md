@@ -294,7 +294,7 @@ Organizations configure:
 - reviewer agents: Codex, Claude Code, OpenCode, Amp, Pi, or future providers
 - orchestrator agent: the model/provider that reads all outputs and produces the final structured decision
 - review depth: quick, standard, deep
-- timeout and cost ceilings
+- timeout ceiling
 - whether disagreement forces human review
 
 Defaults:
