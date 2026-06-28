@@ -595,6 +595,125 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all stale health expectations should be met")
 }
 
+func TestPRServicePopulateAutoRepairAttemptStateUsesPersonalOverride(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
+		WithArgs(pgx.NamedArgs{"id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(orgID, "Acme", []byte(`{}`), now, now))
+
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
+	for i, column := range prHealthSessionColumns {
+		if column == "triggered_by_user_id" {
+			sessionRow[i] = &userID
+			break
+		}
+	}
+	mock.ExpectQuery("SELECT .* FROM sessions WHERE id").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(sessionRow...))
+
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgx.NamedArgs{"id": userID}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
+		}).AddRow(
+			userID, orgID, "dev@example.com", "Dev", "member", (*int64)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*time.Time)(nil), now,
+			[]byte(`{"automatic_pr_follow_through":{"fix_tests_when_idle":"on"}}`),
+		))
+	expectAutoRepairCount(mock, orgID, prID, models.PullRequestRepairActionTypeFixTests, "head-user-on", 1)
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		users:        db.NewUserStore(mock),
+		orgs:         db.NewOrganizationStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+	resp := &models.PullRequestHealthResponse{HeadSHA: "head-user-on"}
+	pr := models.PullRequest{
+		ID:        prID,
+		OrgID:     orgID,
+		SessionID: &sessionID,
+		Status:    models.PullRequestStatusOpen,
+	}
+
+	err = service.populateAutoRepairAttemptState(context.Background(), pr, resp)
+	require.NoError(t, err, "populateAutoRepairAttemptState should resolve personal automation overrides")
+	require.Equal(t, []models.PullRequestRepairActionType{models.PullRequestRepairActionTypeFixTests}, resp.AutoRepairExhaustedActions, "personal override should expose exhausted automatic test repair state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all automatic repair state expectations should be met")
+}
+
+func TestPRServicePopulateAutoRepairAttemptStatePersonalOverrideDisablesOrgDefault(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgx mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id = @id").
+		WithArgs(pgx.NamedArgs{"id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prTestOrganizationColumns).AddRow(
+			orgID, "Acme", []byte(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true}}}`), now, now,
+		))
+
+	sessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusCompleted)
+	for i, column := range prHealthSessionColumns {
+		if column == "triggered_by_user_id" {
+			sessionRow[i] = &userID
+			break
+		}
+	}
+	mock.ExpectQuery("SELECT .* FROM sessions WHERE id").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(sessionRow...))
+
+	mock.ExpectQuery("SELECT .+ FROM users").
+		WithArgs(pgx.NamedArgs{"id": userID}).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "email", "name", "role", "github_id", "github_login", "avatar_url", "google_id", "email_verified_at", "created_at", "settings",
+		}).AddRow(
+			userID, orgID, "dev@example.com", "Dev", "member", (*int64)(nil), (*string)(nil), (*string)(nil), (*string)(nil), (*time.Time)(nil), now,
+			[]byte(`{"automatic_pr_follow_through":{"resolve_conflicts_when_idle":"off"}}`),
+		))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		users:        db.NewUserStore(mock),
+		orgs:         db.NewOrganizationStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+	resp := &models.PullRequestHealthResponse{HeadSHA: "head-user-off"}
+	pr := models.PullRequest{
+		ID:        prID,
+		OrgID:     orgID,
+		SessionID: &sessionID,
+		Status:    models.PullRequestStatusOpen,
+	}
+
+	err = service.populateAutoRepairAttemptState(context.Background(), pr, resp)
+	require.NoError(t, err, "populateAutoRepairAttemptState should resolve personal automation overrides")
+	require.Empty(t, resp.AutoRepairExhaustedActions, "a personal override disabling the org default should suppress exhausted-action state and skip the budget query")
+	require.NoError(t, mock.ExpectationsWereMet(), "all automatic repair state expectations should be met")
+}
+
 func TestPullRequestStateSyncDedupeKey(t *testing.T) {
 	t.Parallel()
 
