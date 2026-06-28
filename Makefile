@@ -617,14 +617,20 @@ TAG ?= latest
 ROLES ?= app,worker
 force ?=
 # interrupt=true force-interrupts active runtimes (previews/running jobs) during a
-# maintenance worker drain. Only honored with DEPLOY_MODE=maintenance; set
-# DEPLOY_REASON and DEPLOY_REQUESTED_BY alongside it so the drain is auditable.
+# maintenance worker drain. Ignored in routine mode (blue/green never blocking-drains).
+# Requires DEPLOY_REASON and DEPLOY_REQUESTED_BY to be set so the forced drain is
+# auditable — make aborts otherwise rather than recording a generic default reason.
 interrupt ?=
 DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
-deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS)) FORCE_INTERRUPT_ACTIVE_RUNTIMES=$(if $(filter true 1 yes,$(interrupt)),1,$(FORCE_INTERRUPT_ACTIVE_RUNTIMES))
+# Resolve the force-interrupt flag for an opt-in maintenance drain. When
+# interrupt=true, require an auditable reason+requester instead of letting the
+# drain fall back to the generic default reason.
+resolve-interrupt = $(if $(filter true 1 yes,$(interrupt)),$(if $(and $(strip $(DEPLOY_REASON)),$(strip $(DEPLOY_REQUESTED_BY))),1,$(error interrupt=true requires DEPLOY_REASON and DEPLOY_REQUESTED_BY to be set so the forced drain is auditable)),$(FORCE_INTERRUPT_ACTIVE_RUNTIMES))
+
+deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS)) FORCE_INTERRUPT_ACTIVE_RUNTIMES=$(resolve-interrupt)
 worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_START) WORKER_BLUE_GREEN_PORT_END=$(WORKER_BLUE_GREEN_PORT_END)
 
 # Deploy (update) an already-provisioned node.
