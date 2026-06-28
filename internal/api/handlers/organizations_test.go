@@ -20,6 +20,25 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+type orgSettingsArgument struct {
+	t *testing.T
+}
+
+func (m orgSettingsArgument) Match(v any) bool {
+	raw, ok := v.(json.RawMessage)
+	if !ok {
+		bytesValue, bytesOK := v.([]byte)
+		if !bytesOK {
+			return false
+		}
+		raw = json.RawMessage(bytesValue)
+	}
+	settings, err := models.ParseOrgSettings(raw)
+	require.NoError(m.t, err, "created organization settings should be valid")
+	return settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle &&
+		settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle
+}
+
 func TestOrganizationsHandler_Create_Unauthenticated(t *testing.T) {
 	t.Parallel()
 
@@ -123,7 +142,7 @@ func TestOrganizationsHandler_Create_HappyPath(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO organizations").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), orgSettingsArgument{t: t}).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(orgID, createdAt, createdAt))
 	mock.ExpectExec("INSERT INTO organization_memberships").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
