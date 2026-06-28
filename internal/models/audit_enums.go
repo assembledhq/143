@@ -57,6 +57,9 @@ const (
 	AuditActionSessionThreadCreatedByAgentTool  AuditAction = "session.thread.created_by_agent_tool"
 	AuditActionSessionThreadMessagedByAgentTool AuditAction = "session.thread.messaged_by_agent_tool"
 
+	// Pull request actions
+	AuditActionPullRequestAutoRepairStarted AuditAction = "pull_request.auto_repair_started"
+
 	// Project actions
 	AuditActionProjectCreated        AuditAction = "project.created"
 	AuditActionProjectUpdated        AuditAction = "project.updated"
@@ -191,6 +194,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
 		AuditActionSessionThreadInboxReplayed, AuditActionSessionThreadCreatedByAgentTool, AuditActionSessionThreadMessagedByAgentTool,
+		AuditActionPullRequestAutoRepairStarted,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
 		AuditActionProjectStarted, AuditActionProjectCompleted, AuditActionProjectArchived,
 		AuditActionProjectUnarchived, AuditActionProjectRunTriggered,
@@ -253,6 +257,7 @@ const (
 	AuditResourceCredential                 AuditResourceType = "credential"
 	AuditResourceUser                       AuditResourceType = "user"
 	AuditResourceSessionReviewComment       AuditResourceType = "session_review_comment"
+	AuditResourcePullRequest                AuditResourceType = "pull_request"
 	AuditResourcePMDocument                 AuditResourceType = "pm_document"
 	AuditResourcePMDocumentSet              AuditResourceType = "pm_document_set"
 	AuditResourceEvalTask                   AuditResourceType = "eval_task"
@@ -280,7 +285,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceSettings, AuditResourceTeamMember, AuditResourceInvitation,
 		AuditResourceIntegration, AuditResourceExternalUserLink, AuditResourceExternalUserLinkSuggestion,
 		AuditResourceCredential, AuditResourceUser,
-		AuditResourceSessionReviewComment, AuditResourcePMDocument, AuditResourcePMDocumentSet,
+		AuditResourceSessionReviewComment, AuditResourcePullRequest, AuditResourcePMDocument, AuditResourcePMDocumentSet,
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy,
 		AuditResourcePRReadinessPolicy, AuditResourcePRReadinessCustomCheck, AuditResourcePRReadinessBypass,

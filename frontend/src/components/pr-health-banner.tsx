@@ -57,6 +57,8 @@ type PRHealthBannerProps = {
   onQueueMergeWhenReady?: () => void;
   onCancelMergeWhenReady?: () => void;
   onOpenRepairSession?: (sessionId: string, threadId?: string) => void;
+  onStopAutoRepair?: (sessionId: string, threadId?: string) => void;
+  stopAutoRepairPending?: boolean;
   pushChanges?: PushChangesAction;
   reviewAction?: ReviewPRAction;
 };
@@ -77,6 +79,8 @@ export function PRHealthBanner({
   onQueueMergeWhenReady,
   onCancelMergeWhenReady,
   onOpenRepairSession,
+  onStopAutoRepair,
+  stopAutoRepairPending = false,
   pushChanges,
   reviewAction,
 }: PRHealthBannerProps) {
@@ -246,6 +250,17 @@ export function PRHealthBanner({
                         onClick={() => onOpenRepairSession(activeRepairState.openSessionID!, activeRepairState.openThreadID ?? undefined)}
                       >
                         Open repair session
+                      </Button>
+                    )}
+                    {activeRepairState.isAutoRepair && activeRepairState.repairSessionID && onStopAutoRepair && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={stopAutoRepairPending}
+                        onClick={() => onStopAutoRepair(activeRepairState.repairSessionID!, activeRepairState.openThreadID ?? undefined)}
+                      >
+                        {stopAutoRepairPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                        Stop auto-repair for this PR
                       </Button>
                     )}
                   </div>
@@ -492,6 +507,8 @@ function deriveActiveRepairState(
   label: string | null;
   openSessionID: string | null;
   openThreadID: string | null;
+  repairSessionID: string | null;
+  isAutoRepair: boolean;
   suppressFixTests: boolean;
   suppressResolveConflicts: boolean;
   suppressMerge: boolean;
@@ -517,6 +534,8 @@ function deriveActiveRepairState(
       : null,
     openSessionID: dominantRepair && repairIsInDifferentView ? dominantRepair.session_id : null,
     openThreadID: dominantRepair?.thread_id ?? null,
+    repairSessionID: dominantRepair?.session_id ?? null,
+    isAutoRepair: dominantRepair?.auto_attempt ?? false,
     suppressFixTests: !!fixTests || !!resolveConflicts,
     suppressResolveConflicts: !!resolveConflicts,
     suppressMerge: repairs.length > 0,

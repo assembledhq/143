@@ -531,7 +531,7 @@ function PRAuthorshipSettings() {
             <div className="space-y-1">
               <h3 className="text-xs font-medium text-foreground">Branch-writing repair</h3>
               <p className="text-xs text-muted-foreground">
-                These policies use the same repair actions as the manual buttons and are off until later automation phases consume them.
+                These policies use the same repair actions as the manual buttons when an open PR is blocked and the session is idle.
               </p>
             </div>
             {Object.entries(REPAIR_AUTOMATION_COPY).map(([key, copy]) => {

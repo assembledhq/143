@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
@@ -3829,6 +3830,13 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
 
 	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
@@ -3849,6 +3857,9 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.RequestCancel(r.Context(), orgID, sessionID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CANCEL_REQUEST_FAILED", "failed to record cancel request", err)
 		return
+	}
+	if body.Reason == "auto_repair_stop" {
+		metrics.RecordPRAutoRepairStop(r.Context(), orgID.String(), "")
 	}
 
 	// Signal the orchestrator to send SIGINT to the agent.

@@ -2,12 +2,15 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -39,26 +42,32 @@ type AutoRepairDecision struct {
 }
 
 func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*AutoRepairDecision, error) {
+	repository := ""
+	returnDecision := func(decision *AutoRepairDecision) (*AutoRepairDecision, error) {
+		recordAutoRepairDecisionMetric(ctx, orgID, repository, decision)
+		return decision, nil
+	}
 	if s == nil || s.sessions == nil || s.pullRequests == nil || s.orgs == nil {
-		return autoRepairDecision(AutoRepairDecisionDisabled, nil, "", "", "auto-repair dependencies are not configured"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionDisabled, nil, "", "", "auto-repair dependencies are not configured"))
 	}
 	session, err := s.sessions.GetByID(ctx, orgID, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load session for auto-repair: %w", err)
 	}
 	if !autoRepairSessionCanStart(session.Status) {
-		return autoRepairDecision(AutoRepairDecisionNotResumable, nil, "", "", "session is not idle or resumable"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionNotResumable, nil, "", "", "session is not idle or resumable"))
 	}
 
 	pr, err := s.pullRequests.GetBySessionID(ctx, orgID, sessionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return autoRepairDecision(AutoRepairDecisionNoPullRequest, nil, "", "", "session has no linked pull request"), nil
+			return returnDecision(autoRepairDecision(AutoRepairDecisionNoPullRequest, nil, "", "", "session has no linked pull request"))
 		}
 		return nil, fmt.Errorf("load linked pull request for auto-repair: %w", err)
 	}
+	repository = pr.GitHubRepo
 	if pr.Status != models.PullRequestStatusOpen {
-		return autoRepairDecision(AutoRepairDecisionNotOpen, &pr.ID, "", headSHAValue(pr.HeadSHA), "pull request is not open"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionNotOpen, &pr.ID, "", headSHAValue(pr.HeadSHA), "pull request is not open"))
 	}
 
 	policy, policySource, err := s.resolveAutoRepairPolicy(ctx, orgID, session)
@@ -66,7 +75,7 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		return nil, err
 	}
 	if !policy.ResolveConflicts && !policy.FixTests {
-		return autoRepairDecision(AutoRepairDecisionDisabled, &pr.ID, "", headSHAValue(pr.HeadSHA), policySource), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionDisabled, &pr.ID, "", headSHAValue(pr.HeadSHA), policySource))
 	}
 
 	if pr.HeadSHA != nil && *pr.HeadSHA != "" {
@@ -75,7 +84,7 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 			return nil, err
 		}
 		if exhausted {
-			return autoRepairDecision(AutoRepairDecisionBudgetExhausted, &pr.ID, "", *pr.HeadSHA, "automatic repair already attempted for current head"), nil
+			return returnDecision(autoRepairDecision(AutoRepairDecisionBudgetExhausted, &pr.ID, "", *pr.HeadSHA, "automatic repair already attempted for current head"))
 		}
 	}
 
@@ -84,22 +93,22 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		return nil, fmt.Errorf("load pull request health for auto-repair: %w", err)
 	}
 	if health.SyncStatus == models.PullRequestHealthSyncStatusBlocked {
-		return autoRepairDecision(AutoRepairDecisionBlockedHealth, &pr.ID, "", health.HeadSHA, string(health.SyncBlocker)), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionBlockedHealth, &pr.ID, "", health.HeadSHA, string(health.SyncBlocker)))
 	}
 	if len(health.ActiveRepairs) > 0 {
-		return autoRepairDecision(AutoRepairDecisionActiveRepair, &pr.ID, health.ActiveRepairs[0].ActionType, health.HeadSHA, "repair already in progress"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionActiveRepair, &pr.ID, health.ActiveRepairs[0].ActionType, health.HeadSHA, "repair already in progress"))
 	}
 
 	action := chooseAutoRepairAction(policy, health)
 	if action == "" {
-		return autoRepairDecision(AutoRepairDecisionNoBlocker, &pr.ID, "", health.HeadSHA, "no enabled repair blocker found"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionNoBlocker, &pr.ID, "", health.HeadSHA, "no enabled repair blocker found"))
 	}
 	exhausted, err := s.autoRepairBudgetExhausted(ctx, orgID, pr.ID, action, health.HeadSHA)
 	if err != nil {
 		return nil, err
 	}
 	if exhausted {
-		return autoRepairDecision(AutoRepairDecisionBudgetExhausted, &pr.ID, action, health.HeadSHA, "automatic repair already attempted for current head and action"), nil
+		return returnDecision(autoRepairDecision(AutoRepairDecisionBudgetExhausted, &pr.ID, action, health.HeadSHA, "automatic repair already attempted for current head and action"))
 	}
 
 	resp, err := s.StartPullRequestRepair(ctx, orgID, pr.ID, uuid.Nil, StartPullRequestRepairOptions{
@@ -113,18 +122,19 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRepairAlreadyInProgress):
-			return autoRepairDecision(AutoRepairDecisionActiveRepair, &pr.ID, action, health.HeadSHA, "repair already in progress"), nil
+			return returnDecision(autoRepairDecision(AutoRepairDecisionActiveRepair, &pr.ID, action, health.HeadSHA, "repair already in progress"))
 		case errors.Is(err, ErrRepairSessionBusy):
-			return autoRepairDecision(AutoRepairDecisionBusy, &pr.ID, action, health.HeadSHA, "session became busy"), nil
+			return returnDecision(autoRepairDecision(AutoRepairDecisionBusy, &pr.ID, action, health.HeadSHA, "session became busy"))
 		case errors.Is(err, ErrRepairHeadChanged):
-			return autoRepairDecision(AutoRepairDecisionHeadChanged, &pr.ID, action, health.HeadSHA, "pull request head changed"), nil
+			return returnDecision(autoRepairDecision(AutoRepairDecisionHeadChanged, &pr.ID, action, health.HeadSHA, "pull request head changed"))
 		default:
 			return nil, err
 		}
 	}
 	decision := autoRepairDecision(AutoRepairDecisionStarted, &pr.ID, action, health.HeadSHA, reason)
 	decision.Response = resp
-	return decision, nil
+	s.emitAutoRepairStartedAudit(ctx, orgID, pr, session, decision, policySource)
+	return returnDecision(decision)
 }
 
 type autoRepairPolicy struct {
@@ -233,6 +243,51 @@ func autoRepairDecision(status AutoRepairDecisionStatus, pullRequestID *uuid.UUI
 		HeadSHA:       headSHA,
 		Reason:        reason,
 	}
+}
+
+func recordAutoRepairDecisionMetric(ctx context.Context, orgID uuid.UUID, repository string, decision *AutoRepairDecision) {
+	if decision == nil {
+		return
+	}
+	metrics.RecordPRAutoRepairDecision(ctx, orgID.String(), repository, string(decision.Action), string(decision.Status), decision.Reason)
+}
+
+func (s *PRService) emitAutoRepairStartedAudit(ctx context.Context, orgID uuid.UUID, pr models.PullRequest, session models.Session, decision *AutoRepairDecision, policySource string) {
+	if s == nil || s.audit == nil || decision == nil || decision.Response == nil {
+		return
+	}
+	details := map[string]any{
+		"repository":          pr.GitHubRepo,
+		"session_id":          session.ID.String(),
+		"pull_request_id":     pr.ID.String(),
+		"pull_request_number": pr.GitHubPRNumber,
+		"head_sha":            decision.HeadSHA,
+		"action_type":         string(decision.Action),
+		"trigger_reason":      decision.Reason,
+		"policy_source":       policySource,
+		"actor":               string(models.PullRequestRepairTriggeredBySourceSystemAutoRepair),
+		"outcome":             string(AutoRepairDecisionStarted),
+		"repair_session_id":   decision.Response.SessionID.String(),
+	}
+	if decision.Response.ThreadID != nil {
+		details["repair_thread_id"] = decision.Response.ThreadID.String()
+	}
+	raw, err := json.Marshal(details)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).Msg("marshal automatic repair audit details")
+		return
+	}
+	resourceID := pr.ID.String()
+	sessionID := session.ID
+	s.audit.EmitSystemAction(ctx, db.SystemActionParams{
+		OrgID:        orgID,
+		ActorID:      "143",
+		Action:       models.AuditActionPullRequestAutoRepairStarted,
+		ResourceType: models.AuditResourcePullRequest,
+		ResourceID:   &resourceID,
+		Details:      raw,
+		SessionID:    &sessionID,
+	})
 }
 
 func headSHAValue(value *string) string {

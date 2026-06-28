@@ -2,7 +2,9 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -207,6 +209,79 @@ func TestPRServiceBudgetExhaustedBeforeHealth(t *testing.T) {
 	})
 }
 
+func TestPRServiceMaybeStartAutoRepairCheapNoOps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		setup        func(mock pgxmock.PgxPoolIface, orgID, sessionID, prID uuid.UUID, now time.Time)
+		wantStatus   AutoRepairDecisionStatus
+		wantPRLinked bool
+	}{
+		{
+			name: "disabled policy stops before budget or health reads",
+			setup: func(mock pgxmock.PgxPoolIface, orgID, sessionID, prID uuid.UUID, now time.Time) {
+				expectAutoRepairSession(mock, orgID, sessionID, now, models.SessionStatusCompleted)
+				expectAutoRepairPullRequest(mock, orgID, sessionID, prID, now, "head-disabled")
+				expectAutoRepairOrg(mock, orgID, json.RawMessage(`{}`), now)
+			},
+			wantStatus:   AutoRepairDecisionDisabled,
+			wantPRLinked: true,
+		},
+		{
+			name: "missing pull request stops before policy or health reads",
+			setup: func(mock pgxmock.PgxPoolIface, orgID, sessionID, _ uuid.UUID, now time.Time) {
+				expectAutoRepairSession(mock, orgID, sessionID, now, models.SessionStatusCompleted)
+				mock.ExpectQuery("FROM pull_requests").
+					WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+					WillReturnRows(pgxmock.NewRows(handlerPRColumns))
+			},
+			wantStatus: AutoRepairDecisionNoPullRequest,
+		},
+		{
+			name: "exhausted automatic budget stops before health reads",
+			setup: func(mock pgxmock.PgxPoolIface, orgID, sessionID, prID uuid.UUID, now time.Time) {
+				expectAutoRepairSession(mock, orgID, sessionID, now, models.SessionStatusCompleted)
+				expectAutoRepairPullRequest(mock, orgID, sessionID, prID, now, "head-exhausted")
+				expectAutoRepairOrg(mock, orgID, models.DefaultNewOrganizationSettings(), now)
+				expectAutoRepairCount(mock, orgID, prID, models.PullRequestRepairActionTypeResolveConflicts, "head-exhausted", 1)
+				expectAutoRepairCount(mock, orgID, prID, models.PullRequestRepairActionTypeFixTests, "head-exhausted", 1)
+			},
+			wantStatus:   AutoRepairDecisionBudgetExhausted,
+			wantPRLinked: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			prID := uuid.New()
+			now := time.Now()
+			tt.setup(mock, orgID, sessionID, prID, now)
+
+			service := &PRService{
+				sessions:     db.NewSessionStore(mock),
+				pullRequests: db.NewPullRequestStore(mock),
+				orgs:         db.NewOrganizationStore(mock),
+			}
+			decision, err := service.MaybeStartAutoRepair(context.Background(), orgID, sessionID, "session_idle")
+			require.NoError(t, err, "MaybeStartAutoRepair should treat cheap no-op cases as handled decisions")
+			require.NotNil(t, decision, "MaybeStartAutoRepair should return a decision")
+			require.Equal(t, tt.wantStatus, decision.Status, "MaybeStartAutoRepair should return the expected decision status")
+			require.Equal(t, tt.wantPRLinked, decision.PullRequestID != nil, "MaybeStartAutoRepair should include a PR ID only after a PR is loaded")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestAutoRepairSessionCanStart(t *testing.T) {
 	t.Parallel()
 
@@ -229,4 +304,34 @@ func TestAutoRepairSessionCanStart(t *testing.T) {
 			require.Equal(t, tt.expected, actual, "autoRepairSessionCanStart should match idle/resumable session policy")
 		})
 	}
+}
+
+func expectAutoRepairSession(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID, now time.Time, status models.SessionStatus) {
+	mock.ExpectQuery("FROM sessions").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, status)...))
+}
+
+func expectAutoRepairPullRequest(mock pgxmock.PgxPoolIface, orgID, sessionID, prID uuid.UUID, now time.Time, headSHA string) {
+	row := handlerPRRow(prID, &sessionID, orgID, "org/repo", now)
+	setAutoRepairPRRowValue(row, "head_sha", &headSHA)
+	mock.ExpectQuery("FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(row...))
+}
+
+func expectAutoRepairOrg(mock pgxmock.PgxPoolIface, orgID uuid.UUID, settings json.RawMessage, now time.Time) {
+	mock.ExpectQuery("FROM organizations").
+		WithArgs(pgx.NamedArgs{"id": orgID}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).AddRow(orgID, "Acme", settings, now, now))
+}
+
+func setAutoRepairPRRowValue(row []any, column string, value any) {
+	for i, col := range handlerPRColumns {
+		if col == column {
+			row[i] = value
+			return
+		}
+	}
+	panic("unknown pull request column: " + column)
 }

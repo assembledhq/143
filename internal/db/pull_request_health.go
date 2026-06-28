@@ -415,6 +415,26 @@ func (s *PullRequestStore) CountAutoRepairAttemptsByHead(ctx context.Context, or
 	return count, nil
 }
 
+func (s *PullRequestStore) GetAutoRepairRunByThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.PullRequestRepairRun, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+prRepairRunSelectColumns+`
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND thread_id = @thread_id
+		  AND auto_attempt = true
+		ORDER BY created_at DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"thread_id":  threadID,
+	})
+	if err != nil {
+		return models.PullRequestRepairRun{}, fmt.Errorf("query automatic pull request repair run by thread: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
+}
+
 func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.PullRequestRepairRun) error {
 	if run.WorkspaceMode == "" {
 		run.WorkspaceMode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
