@@ -128,6 +128,18 @@ func TestDefaultPreviewRestartClassifier_SelectUpdateMode(t *testing.T) {
 			freshness: &models.PreviewFreshness{State: models.PreviewFreshnessOutOfDate},
 			expected:  models.PreviewUpdateModeColdRelaunch,
 		},
+		{
+			name:      "starting preview has no recommended update mode",
+			status:    models.PreviewStatusStarting,
+			freshness: &models.PreviewFreshness{State: models.PreviewFreshnessCurrent},
+			expected:  "",
+		},
+		{
+			name:      "updating freshness has no recommended update mode",
+			status:    models.PreviewStatusReady,
+			freshness: &models.PreviewFreshness{State: models.PreviewFreshnessUpdating},
+			expected:  "",
+		},
 	}
 
 	for _, tt := range tests {
