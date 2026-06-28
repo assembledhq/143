@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/assembledhq/143/internal/services/mcp"
@@ -112,6 +113,74 @@ func TestPreviewToolExecutor_ListSessionPreview(t *testing.T) {
 	require.Contains(t, firstText(result), `"preview_id": "preview-1"`, "list should wrap the session preview status in a list")
 }
 
+func TestPreviewToolExecutor_BranchCreateWaitPollsUntilReady(t *testing.T) {
+	t.Parallel()
+
+	var statusCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method + " " + r.URL.Path {
+		case http.MethodGet + " /api/v1/repositories":
+			_, err := w.Write([]byte(`{"data":[{"id":"repo-1","full_name":"acme/app"}]}`))
+			require.NoError(t, err, "repositories response should write")
+		case http.MethodGet + " /api/v1/repositories/repo-1/branches":
+			_, err := w.Write([]byte(`{"data":[{"name":"feature"}]}`))
+			require.NoError(t, err, "branches response should write")
+		case http.MethodPost + " /api/v1/previews":
+			var body map[string]string
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body), "create request body should decode")
+			require.Equal(t, "repo-1", body["repository_id"], "create should use resolved repository id")
+			require.Equal(t, "feature", body["branch"], "create should use requested branch")
+			_, err := w.Write([]byte(`{"data":{"target_id":"target-1","preview_id":"preview-1","repository_full_name":"acme/app","branch":"feature","status":"starting"}}`))
+			require.NoError(t, err, "create response should write")
+		case http.MethodGet + " /api/v1/previews/preview-1":
+			atomic.AddInt32(&statusCalls, 1)
+			_, err := w.Write([]byte(`{"data":{"target_id":"target-1","preview_id":"preview-1","repository_full_name":"acme/app","branch":"feature","status":"running","preview_url":"https://preview.test"}}`))
+			require.NoError(t, err, "status response should write")
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.create(context.Background(), mustJSON(map[string]any{
+		"repository": "acme/app",
+		"branch":     "feature",
+		"wait":       true,
+	}))
+
+	require.False(t, result.IsError, "branch create with wait should succeed")
+	require.EqualValues(t, 1, atomic.LoadInt32(&statusCalls), "branch create wait should poll status until live")
+	require.Contains(t, firstText(result), `"status": "running"`, "wait result should return the ready preview status")
+}
+
+func TestPreviewToolExecutor_UpdateWaitReturnsUpdateResponse(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/sessions/session-1/preview/update", r.URL.Path, "update should target session preview endpoint")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "update request body should decode")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"preview_id":"preview-1","session_id":"session-1","mode":"soft_service_restart","action":"restarting","status":"ready","message":"preview service restart started"}}`))
+		require.NoError(t, err, "update response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.update(context.Background(), mustJSON(map[string]any{
+		"session_id": "session-1",
+		"wait":       true,
+	}))
+
+	require.False(t, result.IsError, "update with wait should succeed")
+	require.Equal(t, true, gotBody["wait"], "update should let the server perform the bounded wait")
+	require.Contains(t, firstText(result), `"mode": "soft_service_restart"`, "update wait should preserve selected mode")
+	require.Contains(t, firstText(result), `"action": "restarting"`, "update wait should preserve selected action")
+}
+
 func TestPreviewToolExecutor_InspectAllowsTopLeftCoordinate(t *testing.T) {
 	t.Parallel()
 
@@ -182,4 +251,23 @@ func TestPreviewToolExecutor_RejectsAmbiguousTarget(t *testing.T) {
 			require.Contains(t, firstText(result), "not both", "error should explain the ambiguity")
 		})
 	}
+}
+
+func TestPreviewToolExecutor_CreateRejectsAmbiguousTarget(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP request should be made when create target is ambiguous, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.create(context.Background(), mustJSON(map[string]string{
+		"session_id": "session-1",
+		"repository": "acme/app",
+		"branch":     "feature",
+	}))
+
+	require.True(t, result.IsError, "supplying session_id and branch target should be rejected")
+	require.Contains(t, firstText(result), "not both", "error should explain the ambiguity")
 }
