@@ -26,6 +26,21 @@ func GenerateSkillsDoc(tr ToolSource) string {
 	b.WriteString("143-tools <namespace> <action> --help # detailed usage\n")
 	b.WriteString("143-tools --help                     # list namespaces\n")
 	b.WriteString("```\n\n")
+	// The preview namespace is a built-in 143 tool surface available in every
+	// sandbox, so it is documented unconditionally whenever any tools exist.
+	b.WriteString("## Preview Tools\n\n")
+	b.WriteString("Use `143-tools preview` to inspect and verify web UI work in a running preview:\n\n")
+	b.WriteString("```bash\n")
+	b.WriteString("143-tools preview create --session-id <id> --wait\n")
+	b.WriteString("143-tools preview screenshot --session-id <id> --path /\n")
+	b.WriteString("143-tools preview interact --session-id <id> --steps '[{\"action\":\"click\",\"selector\":\"[data-testid=save]\"}]'\n")
+	b.WriteString("# edit files, then bring the preview up to date:\n")
+	b.WriteString("143-tools preview update --session-id <id> --wait\n")
+	b.WriteString("143-tools preview console --session-id <id> --level error\n")
+	b.WriteString("```\n\n")
+	b.WriteString("- Prefer `--session-id` while editing: session previews reflect unpushed workspace changes. Use `--preview-id` for a published branch preview after pushing.\n")
+	b.WriteString("- `update` picks the fastest safe refresh automatically (browser reload, soft service restart, full recycle, or cold relaunch); you do not choose the mode.\n")
+	b.WriteString("- After editing UI code, run `update` then `screenshot` to confirm the change rendered before reporting the work done.\n\n")
 	if hasCommand(commands, NamespaceTabs, ActionList) {
 		b.WriteString("When using session tab tools:\n")
 		b.WriteString("- Use a new tab for parallel review/testing/investigation in the same branch.\n")

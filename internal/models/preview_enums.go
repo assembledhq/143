@@ -32,6 +32,53 @@ func (s PreviewStatus) Validate() error {
 	}
 }
 
+// PreviewUpdateMode is the lifecycle path selected for making a running
+// session preview reflect the latest workspace changes.
+type PreviewUpdateMode string
+
+const (
+	PreviewUpdateModeBrowserReload      PreviewUpdateMode = "browser_reload"
+	PreviewUpdateModeSoftServiceRestart PreviewUpdateMode = "soft_service_restart"
+	PreviewUpdateModeFullRecycle        PreviewUpdateMode = "full_recycle"
+	PreviewUpdateModeColdRelaunch       PreviewUpdateMode = "cold_relaunch"
+	PreviewUpdateModeNoopCurrent        PreviewUpdateMode = "noop_current"
+)
+
+func (m PreviewUpdateMode) Validate() error {
+	switch m {
+	case PreviewUpdateModeBrowserReload,
+		PreviewUpdateModeSoftServiceRestart,
+		PreviewUpdateModeFullRecycle,
+		PreviewUpdateModeColdRelaunch,
+		PreviewUpdateModeNoopCurrent:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewUpdateMode: %q", m)
+	}
+}
+
+// PreviewUpdateAction is the externally visible action taken by preview update.
+type PreviewUpdateAction string
+
+const (
+	PreviewUpdateActionUpdated        PreviewUpdateAction = "updated"
+	PreviewUpdateActionRestarting     PreviewUpdateAction = "restarting"
+	PreviewUpdateActionStarted        PreviewUpdateAction = "started"
+	PreviewUpdateActionAlreadyCurrent PreviewUpdateAction = "already_current"
+)
+
+func (a PreviewUpdateAction) Validate() error {
+	switch a {
+	case PreviewUpdateActionUpdated,
+		PreviewUpdateActionRestarting,
+		PreviewUpdateActionStarted,
+		PreviewUpdateActionAlreadyCurrent:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewUpdateAction: %q", a)
+	}
+}
+
 // IsActive returns true for statuses where the preview is consuming resources.
 func (s PreviewStatus) IsActive() bool {
 	switch s {
@@ -515,6 +562,7 @@ const (
 	PreviewLogStepInstall        PreviewLogStep = "install"
 	PreviewLogStepInit           PreviewLogStep = "init"
 	PreviewLogStepStart          PreviewLogStep = "start"
+	PreviewLogStepUpdate         PreviewLogStep = "update"
 	PreviewLogStepProxy          PreviewLogStep = "proxy"
 	PreviewLogStepCleanup        PreviewLogStep = "cleanup"
 	PreviewLogStepDesignFeedback PreviewLogStep = "design_feedback"
@@ -526,6 +574,7 @@ func (s PreviewLogStep) Validate() error {
 		PreviewLogStepInstall,
 		PreviewLogStepInit,
 		PreviewLogStepStart,
+		PreviewLogStepUpdate,
 		PreviewLogStepProxy,
 		PreviewLogStepCleanup,
 		PreviewLogStepDesignFeedback:

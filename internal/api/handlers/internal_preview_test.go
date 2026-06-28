@@ -40,6 +40,9 @@ func (internalPreviewTestInspector) ReadConsole(context.Context, string) ([]prev
 func (internalPreviewTestInspector) InspectElement(context.Context, string, int, int) (*models.ElementInfo, error) {
 	return &models.ElementInfo{TagName: "div", DOMPath: "#app"}, nil
 }
+func (internalPreviewTestInspector) InspectElementBySelector(context.Context, string, string) (*models.ElementInfo, error) {
+	return &models.ElementInfo{TagName: "button", DOMPath: "[data-testid=save]"}, nil
+}
 func (internalPreviewTestInspector) StartScreencast(context.Context, string, int) (string, error) {
 	return "screencast-1", nil
 }
@@ -84,6 +87,9 @@ func (internalPreviewErrorInspector) ReadConsole(context.Context, string) ([]pre
 }
 func (internalPreviewErrorInspector) InspectElement(context.Context, string, int, int) (*models.ElementInfo, error) {
 	return nil, errors.New("inspect failed")
+}
+func (internalPreviewErrorInspector) InspectElementBySelector(context.Context, string, string) (*models.ElementInfo, error) {
+	return nil, errors.New("inspect selector failed")
 }
 func (internalPreviewErrorInspector) StartScreencast(context.Context, string, int) (string, error) {
 	return "", errors.New("screencast start failed")

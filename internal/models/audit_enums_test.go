@@ -65,6 +65,9 @@ func TestAuditAction_Validate(t *testing.T) {
 		{name: "preview_secret_bundle.revealed is valid", value: AuditActionPreviewSecretBundleRevealed},
 		{name: "preview_secret_bundle.resolved is valid", value: AuditActionPreviewSecretBundleResolved},
 		{name: "preview_policy.updated is valid", value: AuditActionPreviewPolicyUpdated},
+		{name: "preview.tool_invoked is valid", value: AuditActionPreviewToolInvoked},
+		{name: "preview.updated is valid", value: AuditActionPreviewUpdated},
+		{name: "preview.screenshot_captured is valid", value: AuditActionPreviewScreenshotCaptured},
 		{name: "org.join_token_revealed is valid", value: AuditActionOrgJoinTokenRevealed},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foo.bar", expectErr: true},
@@ -101,6 +104,7 @@ func TestAuditResourceType_Validate(t *testing.T) {
 		{name: "pull_request is valid", value: AuditResourcePullRequest},
 		{name: "preview_secret_bundle is valid", value: AuditResourcePreviewSecretBundle},
 		{name: "preview_policy is valid", value: AuditResourcePreviewPolicy},
+		{name: "preview is valid", value: AuditResourcePreview},
 		{name: "empty is invalid", value: "", expectErr: true},
 		{name: "unknown is invalid", value: "foobar", expectErr: true},
 	}

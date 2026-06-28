@@ -1731,6 +1731,62 @@ func TestStartPreview_PreviewInstallFailureStopsBeforeServices(t *testing.T) {
 	}, failures[0].tail, "observer should receive the install output tail")
 }
 
+func TestSoftRestartPreview_CancelsReplacementServicesOnReadinessFailure(t *testing.T) {
+	t.Parallel()
+
+	serviceStarted := make(chan struct{})
+	serviceCanceled := make(chan struct{})
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(ctx context.Context, _ string, _ func([]byte)) (int, error) {
+			close(serviceStarted)
+			<-ctx.Done()
+			close(serviceCanceled)
+			return -1, ctx.Err()
+		},
+		execFn: func(_ context.Context, cmd string) (int, error) {
+			if strings.Contains(cmd, "curl") || strings.Contains(cmd, "lsof") {
+				return 1, nil
+			}
+			return 0, nil
+		},
+	}
+	d := NewDockerPreviewProvider(&mockDockerPreviewClient{}, exec, zerolog.Nop())
+	handle := "preview-soft-restart-fail"
+	d.previews[handle] = &previewState{
+		handle:  handle,
+		sandbox: &agent.Sandbox{ID: "sb"},
+		config: &models.PreviewConfig{
+			Primary: "web",
+			Services: map[string]models.ServiceConfig{
+				"web": {
+					Command: []string{"npm", "run", "dev"},
+					Port:    3000,
+					Ready:   models.ReadinessProbe{HTTPPath: "/", TimeoutSeconds: 1},
+				},
+			},
+		},
+		services: map[string]*serviceState{},
+		infra:    map[string]*preview.InfraHandle{},
+		cancelFn: func() {},
+	}
+
+	got, err := d.SoftRestartPreview(context.Background(), handle, &recordingObserver{})
+	require.Nil(t, got, "soft restart should not return a handle when readiness fails")
+	require.Error(t, err, "soft restart should fail when the replacement service never becomes ready")
+	require.ErrorIs(t, err, preview.ErrServiceNotReady, "soft restart should preserve readiness failure classification")
+
+	select {
+	case <-serviceStarted:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "replacement service should have started before readiness failure")
+	}
+	select {
+	case <-serviceCanceled:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "failed soft restart should cancel replacement service context")
+	}
+}
+
 func TestStartPreview_DependencyCacheHitRestoresBeforeMarkerValidation(t *testing.T) {
 	t.Parallel()
 

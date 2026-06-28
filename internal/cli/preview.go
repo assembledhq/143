@@ -22,12 +22,20 @@ const previewWaitTimeout = 15 * time.Minute
 func runPreview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, `Usage:
-  143-tools preview create [--repo NAME] [--branch NAME] [--wait]
-  143-tools preview status <preview-id>
+  143-tools preview create [--session-id ID] [--repo NAME] [--branch NAME] [--wait]
+  143-tools preview status [--session-id ID|--preview-id ID]
   143-tools preview list
-  143-tools preview stop <preview-id>
+  143-tools preview stop [--session-id ID|--preview-id ID]
+  143-tools preview update --session-id ID [--wait]
+  143-tools preview screenshot --session-id ID [--path /]
+  143-tools preview console --session-id ID [--level error]
+  143-tools preview inspect --session-id ID [--selector CSS|--x N --y N]
+  143-tools preview interact --session-id ID --steps JSON
+  143-tools preview multi_viewport --session-id ID [--viewports JSON]
+  143-tools preview visual_diff --session-id ID --before-snapshot-id ID --after-snapshot-id ID
+  143-tools preview assert --session-id ID --assertions JSON
 
-create infers --repo from the cwd's git remote and --branch from HEAD when omitted.`)
+create infers --repo from the cwd's git remote and --branch from HEAD when omitted for branch previews.`)
 		return 0
 	}
 
@@ -46,25 +54,42 @@ create infers --repo from the cwd's git remote and --branch from HEAD when omitt
 
 	switch args[0] {
 	case "create":
+		if hasFlag(args[1:], "--session-id") {
+			return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
+		}
 		return runPreviewCreate(ctx, executor, args[1:], stdout, stderr)
 	case "status":
-		if len(args) < 2 {
-			fmt.Fprintln(stderr, "Usage: 143-tools preview status <preview-id>")
-			return 1
+		if len(args) == 2 && !strings.HasPrefix(args[1], "--") {
+			return printToolResult(executor.status(ctx, mustJSON(map[string]string{"preview_id": args[1]})), stdout, stderr)
 		}
-		return printToolResult(executor.status(ctx, mustJSON(map[string]string{"preview_id": args[1]})), stdout, stderr)
+		return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
 	case "list":
-		return printToolResult(executor.list(ctx), stdout, stderr)
+		return printToolResult(executor.list(ctx, nil), stdout, stderr)
 	case "stop":
-		if len(args) < 2 {
-			fmt.Fprintln(stderr, "Usage: 143-tools preview stop <preview-id>")
-			return 1
+		if len(args) == 2 && !strings.HasPrefix(args[1], "--") {
+			return printToolResult(executor.stop(ctx, mustJSON(map[string]string{"preview_id": args[1]})), stdout, stderr)
 		}
-		return printToolResult(executor.stop(ctx, mustJSON(map[string]string{"preview_id": args[1]})), stdout, stderr)
+		return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
+	case "restart", "update", "screenshot", "console", "inspect", "interact", "multi_viewport", "visual_diff", "assert":
+		return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown preview subcommand %q\n", args[0])
 		return 1
 	}
+}
+
+func runPreviewViaTools(ctx context.Context, cfg Config, args []string, stdout, stderr io.Writer) int {
+	source := newPreviewAugmentedToolSource(mcp.NewToolRegistry(mcp.BuildRegistryFromEnv(stderr)), NewClient(cfg))
+	return mcp.RunCLI(ctx, source, append([]string{"preview"}, args...), stdout, stderr)
+}
+
+func hasFlag(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag || strings.HasPrefix(arg, flag+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func runPreviewCreate(ctx context.Context, executor *previewToolExecutor, args []string, stdout, stderr io.Writer) int {
