@@ -8,6 +8,7 @@ import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, Plus, Trash2, Fil
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -935,6 +936,13 @@ function GitHubTriggerPanel({
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
+  const setupDisabledReason = githubTriggerSetupDisabledReason({
+    repositorySelected,
+    authRequired,
+    setupPending,
+    deletePending,
+    isLoading,
+  });
 
   return (
     <div className="rounded-md border border-border p-4">
@@ -989,15 +997,17 @@ function GitHubTriggerPanel({
               Connect GitHub
             </Button>
           ) : null}
-          <Button
-            variant={ready ? "outline" : "default"}
-            size="sm"
-            disabled={!repositorySelected || authRequired || setupPending || deletePending || isLoading}
-            onClick={onSetup}
-          >
-            {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-            {ready ? "Repair team" : "Create / repair team"}
-          </Button>
+          <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
+            <Button
+              variant={ready ? "outline" : "default"}
+              size="sm"
+              disabled={!!setupDisabledReason}
+              onClick={onSetup}
+            >
+              {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+              {ready ? "Repair team" : "Create / repair team"}
+            </Button>
+          </DisabledTooltip>
           {ready ? (
             <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
               <Trash2 className="h-4 w-4" />
@@ -1011,6 +1021,37 @@ function GitHubTriggerPanel({
       </div>
     </div>
   );
+}
+
+function githubTriggerSetupDisabledReason({
+  repositorySelected,
+  authRequired,
+  setupPending,
+  deletePending,
+  isLoading,
+}: {
+  repositorySelected: boolean;
+  authRequired: boolean;
+  setupPending: boolean;
+  deletePending: boolean;
+  isLoading: boolean;
+}): string | undefined {
+  if (!repositorySelected) {
+    return "Select a repository before creating the GitHub reviewer team.";
+  }
+  if (authRequired) {
+    return "Connect your GitHub account first so 143 can create or repair the reviewer team.";
+  }
+  if (setupPending) {
+    return "Team setup is already running. Wait for it to finish before trying again.";
+  }
+  if (deletePending) {
+    return "The reviewer team trigger is being disabled. Wait for that action to finish before repairing it.";
+  }
+  if (isLoading) {
+    return "143 is checking the repository's reviewer team status. Wait for the check to finish.";
+  }
+  return undefined;
 }
 
 function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["status"]): string {
