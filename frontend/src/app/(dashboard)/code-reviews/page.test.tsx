@@ -266,6 +266,10 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Allow policy changes")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: /About Require passing checks/i }));
+    expect(
+      (await screen.findAllByText(/Blocks approval until the PR's required GitHub checks are passing/i)).length,
+    ).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Description requirements/i }));
     expect(await screen.findByDisplayValue("Understandable description")).toBeInTheDocument();
