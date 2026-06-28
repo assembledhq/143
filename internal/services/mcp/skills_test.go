@@ -23,6 +23,8 @@ func TestGenerateSkillsDoc_WithIntegrations(t *testing.T) {
 	require.Contains(t, doc, "143-tools sentry list_errors", "skills doc should include high-value hierarchical examples")
 	require.Contains(t, doc, "143-tools linear get_task", "skills doc should include high-value hierarchical examples")
 	require.Contains(t, doc, "143-tools logs query", "skills doc should include high-value hierarchical examples")
+	require.Contains(t, doc, "143-tools preview", "skills doc should teach the built-in preview namespace")
+	require.Contains(t, doc, "--session-id", "preview guidance should steer agents toward session previews while editing")
 	require.NotContains(t, doc, "sentry_list_errors", "skills doc should not mention old flat command names")
 	require.NotContains(t, doc, "linear_create_task", "skills doc should not mention old flat command names")
 	require.NotContains(t, doc, "143-tools <tool_name>", "skills doc should not teach old flat command shape")

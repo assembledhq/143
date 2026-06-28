@@ -1,6 +1,6 @@
 # Design: Agent Preview Tools
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-27
+> **Status:** Implemented | **Last reviewed:** 2026-06-27
 
 ## Part 1: Product Spec
 
@@ -300,13 +300,22 @@ Branch preview creation additionally accepts:
 
 Resolution order:
 
-1. `preview_id`, when supplied, targets that preview instance/current surface.
-2. `session_id`, when supplied, targets the active preview for that session.
-3. For `create`, `repository` + `branch` creates a branch preview.
-4. For human local CLI only, infer `repository` and `branch` from Git when no
+1. `session_id` and `preview_id` are mutually exclusive. Supplying both is a
+   hard validation error ("specify session_id or preview_id, not both") and no
+   HTTP request is made. The CLI rejects the ambiguity loudly rather than
+   silently preferring one, so an agent never acts on the wrong surface.
+2. `preview_id`, when supplied alone, targets that preview instance/current
+   surface.
+3. `session_id`, when supplied alone, targets the active preview for that
+   session.
+4. For `create`, `repository` + `branch` creates a branch preview.
+5. For human local CLI only, infer `repository` and `branch` from Git when no
    explicit target is provided.
 
-Agent-facing help should recommend `session_id` for visual iteration.
+Agent-facing help should recommend `session_id` for visual iteration: session
+previews reflect unpushed workspace edits, so the restart/update fast paths
+operate against the code the agent is actively changing. `preview_id` targets a
+published branch preview after pushing.
 
 ### API Contract
 
@@ -428,11 +437,12 @@ Errors:
 
 | Code | HTTP | Meaning |
 |---|---:|---|
-| `NO_ACTIVE_PREVIEW` | 404 | No active preview exists for the session. CLI may suggest `preview create`. |
+| `NO_ACTIVE_PREVIEW` | 404 | No active preview exists for a route that requires one. `preview update` normally cold-relaunches instead. |
 | `PREVIEW_NOT_READY` | 409 | Update mode requires a running preview but preview is not usable. |
 | `PREVIEW_UPDATE_CONFLICT` | 409 | Another start/recycle/update is already in progress. |
 | `PREVIEW_UPDATE_MODE_UNSUPPORTED` | 422 | Requested `force_mode` is not available for this preview/config. |
 | `PREVIEW_RESTART_FAILED` | 500 | Existing recycle/restart path failed. |
+| `PREVIEW_UPDATE_FAILED` | 500 | The selected update fast path (browser reload or soft service restart) failed to apply. |
 | `PREVIEW_WORKER_REQUEST_FAILED` | 502 | Worker-routed request failed. |
 
 #### Force Restart
@@ -756,6 +766,14 @@ CREATE INDEX idx_preview_update_attempts_session_started
 
 This table is not required for the first implementation.
 
+When the table lands, treat it as the HMR-declaration tripwire. A primary
+service with `hmr: true` should resolve to `browser_reload` and stay there: a
+session whose attempts repeatedly escalate from `browser_reload` to
+`soft_service_restart` or `full_recycle` for source-only edits is a signal the
+service does not actually hot reload and the config flag is mis-declared. Alert
+on `selected_mode = 'browser_reload'` rows immediately followed by a heavier
+mode for the same `session_id` and overlapping `workspace_revision`.
+
 ### Models And Types
 
 Add typed strings in `internal/models`:
@@ -830,14 +848,15 @@ Inputs:
 - Preview config digest/config path changes.
 - Lockfile/package file changes.
 - Whether the preview sandbox is alive.
-- Whether the preview service advertises HMR/live reload support.
+- Whether the primary service declares HMR support in the preview config (see
+  HMR Capability Signal below).
 - Whether preview is ready/partially ready/starting/failed.
 
 Initial conservative rules:
 
 | Condition | Mode |
 |---|---|
-| No active preview | `cold_relaunch` from create path, or `NO_ACTIVE_PREVIEW` for update. |
+| No active preview | `cold_relaunch` from create/update path. |
 | Preview is starting/recycling | Conflict unless caller only wants status. |
 | Sandbox is dead or unknown-dead | `cold_relaunch`. |
 | `.143/config.json`, preview config digest, service command, port, resource, secret, or env file changed | `full_recycle`. |
@@ -850,23 +869,59 @@ The first implementation may map `soft_service_restart` to `full_recycle` until
 provider support exists, but the API should return a clear mode so the product
 contract can evolve without changing the CLI.
 
+#### HMR Capability Signal
+
+There are two distinct HMR signals, and only one is predictive:
+
+- **Reactive (already implemented):** when the running service hot-reloads an
+  edit on its own, the runtime records `runtime_workspace_revision` with source
+  `hmr`, which surfaces as the `live_updated` freshness state. This says "HMR
+  already applied"; the classifier then treats the preview as current.
+- **Predictive (config-declared):** to choose `browser_reload` *before* an edit
+  lands, the classifier needs to know up front that the primary service can hot
+  reload. This is declared in the preview config rather than detected at
+  runtime:
+
+  ```json
+  {
+    "primary": "web",
+    "services": {
+      "web": { "command": "npm run dev", "hmr": true }
+    }
+  }
+  ```
+
+  `ServiceConfig.HMR` (JSON `hmr`) defaults to `false`. The handler reads it from
+  the instance's already-loaded `recycle_config` (a marshaled `PreviewConfig`),
+  so no schema migration or extra query is needed, and capability is evaluated
+  only on the cold update path. `PreviewConfig.PrimaryServiceSupportsHMR()`
+  returns the primary service's flag, and the classifier consumes it as the
+  `hmrCapable` argument to `SelectUpdateMode`.
+
+A config-declared flag was chosen over runtime detection because it is
+deterministic, testable, and owned by the repo. A wrong declaration is cheap: an
+over-declared service shows at most one stale frame before the next reload, and
+an under-declared service merely falls back to `soft_service_restart`.
+
+`hmrCapable` only affects the out-of-date branch. Config, lockfile, env, and
+infrastructure changes are surfaced as restart reasons and route to
+`full_recycle` *before* this branch is reached, so a hot-reloadable service still
+gets a full recycle when its dependencies or config change.
+
 ### Provider Work
 
 Add optional soft restart support to the preview provider interface:
 
 ```go
-type PreviewSoftRestarter interface {
-    SoftRestartPreview(ctx context.Context, handle string, opts SoftRestartOptions, observer ServiceObserver) (*PreviewHandle, error)
-}
-
-type SoftRestartOptions struct {
-    OrgID        uuid.UUID
-    RepositoryID uuid.UUID
-    SessionID    uuid.UUID
-    PreviewID    uuid.UUID
-    ConfigDigest string
+type PreviewSoftRestartProvider interface {
+    SoftRestartPreview(ctx context.Context, handle string, observer ServiceObserver) (*PreviewHandle, error)
 }
 ```
+
+Providers that cannot soft restart omit this interface; the manager type-asserts
+on it and falls back to a full recycle when unsupported. The restart reuses the
+existing handle and the org/session/config context already carried by
+`StartPreviewOptions`, so no separate options struct is required.
 
 For Docker provider:
 

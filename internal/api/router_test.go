@@ -102,6 +102,45 @@ func TestPreviewPolicyMutationRouteIsAdminOnly(t *testing.T) {
 	require.Greater(t, policyRoute, adminGroupStart, "preview policy mutation route should live in the admin-only group")
 }
 
+func TestPreviewDiagnosticReadsAreViewerReadableButMutationsAreBuilderOnly(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("router.go")
+	require.NoError(t, err, "router.go should be readable for preview diagnostic route grouping regression test")
+
+	readGroupStart := strings.Index(string(source), `RequireRole("admin", "builder", "member", "viewer")`)
+	builderGroupStart := strings.Index(string(source), `RequireRole("admin", "builder", "member")`)
+	sessionConsoleRoute := strings.Index(string(source), `r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)`)
+	previewConsoleRoute := strings.Index(string(source), `r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)`)
+	sessionScreenshotRoute := strings.Index(string(source), `r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)`)
+	sessionInteractRoute := strings.Index(string(source), `r.Post("/api/v1/sessions/{id}/preview/interact", previewHandler.ExecuteInteraction)`)
+	previewScreenshotRoute := strings.Index(string(source), `r.Post("/api/v1/previews/{preview_id}/screenshot", previewHandler.CaptureScreenshot)`)
+	previewInteractRoute := strings.Index(string(source), `r.Post("/api/v1/previews/{preview_id}/interact", previewHandler.ExecuteInteraction)`)
+	updateRoute := strings.Index(string(source), `r.Post("/api/v1/sessions/{id}/preview/update", previewHandler.UpdatePreview)`)
+	restartRoute := strings.Index(string(source), `r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)`)
+
+	require.NotEqual(t, -1, readGroupStart, "router should still define viewer-readable routes")
+	require.NotEqual(t, -1, builderGroupStart, "router should still define builder workflow routes")
+	require.NotEqual(t, -1, sessionConsoleRoute, "session console route should be registered")
+	require.NotEqual(t, -1, previewConsoleRoute, "preview-id console route should be registered")
+	require.NotEqual(t, -1, sessionScreenshotRoute, "session screenshot route should be registered")
+	require.NotEqual(t, -1, sessionInteractRoute, "session interact route should be registered")
+	require.NotEqual(t, -1, previewScreenshotRoute, "preview-id screenshot route should be registered")
+	require.NotEqual(t, -1, previewInteractRoute, "preview-id interact route should be registered")
+	require.NotEqual(t, -1, updateRoute, "preview update route should be registered")
+	require.NotEqual(t, -1, restartRoute, "preview restart route should be registered")
+	require.Greater(t, sessionConsoleRoute, readGroupStart, "session console should live in the readable group")
+	require.Less(t, sessionConsoleRoute, builderGroupStart, "session console should not require builder workflow access")
+	require.Greater(t, previewConsoleRoute, readGroupStart, "preview-id console should live in the readable group")
+	require.Less(t, previewConsoleRoute, builderGroupStart, "preview-id console should not require builder workflow access")
+	require.Greater(t, sessionScreenshotRoute, builderGroupStart, "session screenshot should require builder workflow access because it persists artifacts")
+	require.Greater(t, sessionInteractRoute, builderGroupStart, "session interact should require builder workflow access because it drives the app")
+	require.Greater(t, previewScreenshotRoute, builderGroupStart, "preview-id screenshot should require builder workflow access because it persists artifacts")
+	require.Greater(t, previewInteractRoute, builderGroupStart, "preview-id interact should require builder workflow access because it drives the app")
+	require.Greater(t, updateRoute, builderGroupStart, "preview update should remain builder workflow access")
+	require.Greater(t, restartRoute, builderGroupStart, "preview restart should remain builder workflow access")
+}
+
 func TestNewRouter_WiresLinearWebhookSigningSecret(t *testing.T) {
 	t.Parallel()
 

@@ -38,6 +38,7 @@ import (
 // Compile-time check.
 var _ preview.PreviewCapableProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewCachePrewarmProvider = (*DockerPreviewProvider)(nil)
+var _ preview.PreviewSoftRestartProvider = (*DockerPreviewProvider)(nil)
 
 // DockerPreviewClient defines the subset of the Docker API used for preview infrastructure.
 type DockerPreviewClient interface {
@@ -119,6 +120,7 @@ type previewState struct {
 	handle  string
 	sandbox *agent.Sandbox
 	config  *models.PreviewConfig
+	opts    preview.StartPreviewOptions
 
 	// Infrastructure containers (keyed by infra_name).
 	infra map[string]*preview.InfraHandle
@@ -298,6 +300,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		handle:   handle,
 		sandbox:  sb,
 		config:   cfg,
+		opts:     opts,
 		infra:    make(map[string]*preview.InfraHandle),
 		services: make(map[string]*serviceState),
 		cancelFn: cancelFn,
@@ -621,6 +624,178 @@ func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context,
 		infra:   map[string]*preview.InfraHandle{},
 	}
 	return d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false)
+}
+
+// SoftRestartPreview restarts application service processes in-place while
+// preserving provisioned infrastructure containers and installed dependencies.
+func (d *DockerPreviewProvider) SoftRestartPreview(ctx context.Context, handle string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+	d.mu.RLock()
+	state, ok := d.previews[handle]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("preview %q not found", handle)
+	}
+	if state.config == nil {
+		return nil, fmt.Errorf("preview %q is missing config", handle)
+	}
+
+	notifyPhaseStart(observer, "soft_restart")
+	phaseStarted := time.Now()
+	var phaseErr error
+	defer func() {
+		notifyPhaseEnd(observer, "soft_restart", phaseErr)
+		if state.opts.OrgID != uuid.Nil {
+			metrics.RecordSessionPreviewPhaseDuration(ctx, state.opts.OrgID.String(), "soft_restart", time.Since(phaseStarted))
+		}
+	}()
+
+	state.cancelFn()
+	d.terminateServiceProcesses(state)
+	if err := waitForGroupBounded(ctx, &state.wg, 30*time.Second); err != nil {
+		d.logger.Warn().Err(err).Str("handle", handle).Msg("soft restart: proceeding before prior service goroutines fully stopped")
+	}
+
+	svcCtx, cancelFn := context.WithCancel(context.Background())
+	d.mu.Lock()
+	state.cancelFn = cancelFn
+	state.services = make(map[string]*serviceState)
+	d.mu.Unlock()
+	restartSucceeded := false
+	defer func() {
+		if !restartSucceeded {
+			cancelFn()
+		}
+	}()
+
+	infraCreds := make(map[string]preview.InfraCredential)
+	d.mu.RLock()
+	for name, ih := range state.infra {
+		if ih != nil {
+			infraCreds[name] = ih.Credential
+		}
+	}
+	d.mu.RUnlock()
+	svcEnvs := d.buildServiceEnvs(state.config, infraCreds, state.opts.ExtraEnv)
+
+	cfg := state.config
+	for name, svcCfg := range cfg.Services {
+		if name == cfg.Primary {
+			continue
+		}
+		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
+			phaseErr = fmt.Errorf("start service %q: %w", name, err)
+			return nil, phaseErr
+		}
+	}
+	primaryPort := 0
+	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+		primaryPort = primaryCfg.Port
+		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
+			phaseErr = fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
+			return nil, phaseErr
+		}
+	}
+	d.mu.Lock()
+	state.primaryPort = primaryPort
+	d.mu.Unlock()
+
+	partiallyReady := false
+	if cfg.Progressive && len(cfg.Services) > 1 {
+		primaryCfg, ok := cfg.Services[cfg.Primary]
+		if !ok {
+			phaseErr = fmt.Errorf("primary service %q is missing", cfg.Primary)
+			return nil, phaseErr
+		}
+		timeout := defaultServiceReadinessTimeout
+		if primaryCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+			notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+			notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		d.mu.Lock()
+		if ss, ok := state.services[cfg.Primary]; ok {
+			ss.status = models.PreviewServiceStatusReady
+			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, ss.pid)
+		}
+		d.mu.Unlock()
+		partiallyReady = true
+		d.warmPrimaryRoute(svcCtx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath)
+		state.wg.Add(1)
+		go d.waitForSupportServicesAfterSoftRestart(svcCtx, state, observer)
+		restartSucceeded = true
+		return &preview.PreviewHandle{Handle: handle, PrimaryPort: primaryPort, PartiallyReady: partiallyReady}, nil
+	}
+
+	for name, svcCfg := range cfg.Services {
+		timeout := defaultServiceReadinessTimeout
+		if svcCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+			notifyServiceFailed(observer, name, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		if name == cfg.Primary {
+			if err := d.verifyPrimaryReachable(ctx, state, name, svcCfg.Port); err != nil {
+				errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+				notifyServiceFailed(observer, name, errMsg, tail)
+				phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				return nil, phaseErr
+			}
+		}
+		d.mu.Lock()
+		if ss, ok := state.services[name]; ok {
+			ss.status = models.PreviewServiceStatusReady
+			notifyServiceReady(observer, name, svcCfg.Port, ss.pid)
+		}
+		d.mu.Unlock()
+		if name == cfg.Primary {
+			d.warmPrimaryRoute(svcCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath)
+		}
+	}
+	restartSucceeded = true
+	return &preview.PreviewHandle{Handle: handle, PrimaryPort: primaryPort}, nil
+}
+
+func (d *DockerPreviewProvider) waitForSupportServicesAfterSoftRestart(ctx context.Context, state *previewState, observer preview.ServiceObserver) {
+	defer state.wg.Done()
+	for name, svcCfg := range state.config.Services {
+		if name == state.config.Primary {
+			continue
+		}
+		timeout := defaultServiceReadinessTimeout
+		if svcCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		bgCtx, cancel := context.WithTimeout(ctx, timeout)
+		if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+			d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed after soft restart")
+			notifyServiceFailed(observer, name, errMsg, tail)
+		} else {
+			d.mu.Lock()
+			var pid int
+			if ss, ok := state.services[name]; ok {
+				ss.status = models.PreviewServiceStatusReady
+				pid = ss.pid
+			}
+			d.mu.Unlock()
+			notifyServiceReady(observer, name, svcCfg.Port, pid)
+		}
+		cancel()
+	}
 }
 
 func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {

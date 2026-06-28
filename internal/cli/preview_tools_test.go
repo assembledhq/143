@@ -1,0 +1,185 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/assembledhq/143/internal/services/mcp"
+	"github.com/stretchr/testify/require"
+)
+
+func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.Equal(t, http.MethodPost, r.Method, "screenshot should use POST")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{
+		"session_id":    "session-1",
+		"path":          "/dashboard",
+		"viewport_w":    1024,
+		"viewport_h":    768,
+		"inline_base64": false,
+	}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.Equal(t, "/api/v1/sessions/session-1/preview/screenshot", gotPath, "screenshot should target session preview endpoint")
+	require.Equal(t, "/dashboard", gotBody["path"], "screenshot should forward requested path")
+	require.NotContains(t, firstText(result), "png_base64", "inline_base64=false should remove large screenshot payloads from CLI output")
+}
+
+func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/sessions/session-1/preview/interact", r.URL.Path, "interact should target session preview endpoint")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"steps":[{"action":"click","success":true}]}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.interact(context.Background(), mustJSON(map[string]string{
+		"session_id": "session-1",
+		"steps":      `[{"action":"click","selector":"[data-testid=save]"}]`,
+	}))
+
+	require.False(t, result.IsError, "interact should succeed")
+	steps, ok := gotBody["steps"].([]any)
+	require.True(t, ok, "steps should be forwarded as a JSON array")
+	require.Len(t, steps, 1, "one interaction step should be forwarded")
+	require.Contains(t, firstText(result), `"success": true`, "interact should print response JSON")
+}
+
+func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.Equal(t, http.MethodPost, r.Method, "screenshot should use POST")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"artifact":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{
+		"preview_id": "preview-1",
+		"path":       "/",
+	}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.Equal(t, "/api/v1/previews/preview-1/screenshot", gotPath, "screenshot should target preview-id endpoint")
+	require.Contains(t, firstText(result), "preview.png", "screenshot should print artifact metadata")
+}
+
+func TestPreviewToolExecutor_ListSessionPreview(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.Equal(t, http.MethodGet, r.Method, "list by session should read status")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":"ready"},"preview_origin":"https://preview.test"}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.list(context.Background(), mustJSON(map[string]string{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "list by session should succeed")
+	require.Equal(t, "/api/v1/sessions/session-1/preview", gotPath, "list should target session status endpoint")
+	require.Contains(t, firstText(result), `"preview_id": "preview-1"`, "list should wrap the session preview status in a list")
+}
+
+func TestPreviewToolExecutor_InspectAllowsTopLeftCoordinate(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/sessions/session-1/preview/inspect", r.URL.Path, "inspect should target session preview endpoint")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"tag":"div"}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.inspect(context.Background(), mustJSON(map[string]any{
+		"session_id": "session-1",
+		"x":          0,
+		"y":          0,
+	}))
+
+	require.False(t, result.IsError, "inspecting the top-left pixel (0,0) should be allowed, not treated as missing coordinates")
+	require.EqualValues(t, 0, gotBody["x"], "x=0 should be forwarded")
+	require.EqualValues(t, 0, gotBody["y"], "y=0 should be forwarded")
+}
+
+func TestPreviewToolExecutor_InspectRequiresSelectorOrCoordinates(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP request should be made when neither selector nor coordinates are given, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.inspect(context.Background(), mustJSON(map[string]string{"session_id": "session-1"}))
+
+	require.True(t, result.IsError, "omitting both selector and coordinates should be rejected")
+	require.Contains(t, firstText(result), "selector or x/y coordinates are required", "error should explain the requirement")
+}
+
+func TestPreviewToolExecutor_RejectsAmbiguousTarget(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("no HTTP request should be made when the target is ambiguous, got %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	both := mustJSON(map[string]string{"session_id": "session-1", "preview_id": "preview-1"})
+
+	cases := []struct {
+		name string
+		run  func() *mcp.ToolCallResult
+	}{
+		{"screenshot", func() *mcp.ToolCallResult { return executor.screenshot(context.Background(), both) }},
+		{"status", func() *mcp.ToolCallResult { return executor.status(context.Background(), both) }},
+		{"stop", func() *mcp.ToolCallResult { return executor.stop(context.Background(), both) }},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := tc.run()
+			require.True(t, result.IsError, "supplying both session_id and preview_id should be rejected")
+			require.Contains(t, firstText(result), "not both", "error should explain the ambiguity")
+		})
+	}
+}
