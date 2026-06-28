@@ -256,10 +256,9 @@ export function PRHealthBanner({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={stopAutoRepairPending}
+                        loading={stopAutoRepairPending}
                         onClick={() => onStopAutoRepair(activeRepairState.repairSessionID!, activeRepairState.openThreadID ?? undefined)}
                       >
-                        {stopAutoRepairPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
                         Stop auto-repair for this PR
                       </Button>
                     )}
