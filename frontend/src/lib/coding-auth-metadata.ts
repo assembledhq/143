@@ -52,6 +52,13 @@ export const ORG_PROVIDER_OPTIONS: Array<{
     supportsStackOrder: true,
   },
   {
+    key: "opencode",
+    label: "OpenCode",
+    iconSrc: "/agents/opencode.svg",
+    supportsSubscription: false,
+    supportsStackOrder: true,
+  },
+  {
     key: "amp",
     label: "Amp",
     iconSrc: "/agents/amp.svg",
@@ -62,12 +69,6 @@ export const ORG_PROVIDER_OPTIONS: Array<{
     key: "pi",
     label: "Pi",
     iconSrc: "/agents/pi.svg",
-    supportsSubscription: false,
-    supportsStackOrder: true,
-  },
-  {
-    key: "opencode",
-    label: "OpenCode",
     supportsSubscription: false,
     supportsStackOrder: true,
   },
@@ -86,9 +87,9 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
 }> = [
   { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg", supportsSubscription: true },
   { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg", supportsSubscription: true },
+  { key: "opencode", label: "OpenCode", iconSrc: "/agents/opencode.svg", supportsSubscription: false },
   { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
   { key: "pi", label: "Pi", iconSrc: "/agents/pi.svg", supportsSubscription: false },
-  { key: "opencode", label: "OpenCode", iconSrc: "/agents/opencode.svg", supportsSubscription: false },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {

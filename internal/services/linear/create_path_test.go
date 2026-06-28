@@ -216,21 +216,21 @@ func (a rawDataURLArg) Match(v interface{}) bool {
 
 func expectPrepareStateUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
 	t.Helper()
-	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+	mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
 }
 
 func expectPrepareStateUpdateError(t *testing.T, mock pgxmock.PgxPoolIface, err error) {
 	t.Helper()
-	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+	mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(err)
 }
 
 func expectIdentifierHintUpdate(t *testing.T, mock pgxmock.PgxPoolIface, rowsAffected int64) {
 	t.Helper()
-	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_identifier_hint").
+	mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_identifier_hint").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", rowsAffected))
 }
@@ -354,7 +354,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 			require.Fail(t, "enqueue must not run when the prepare-state gate was not persisted")
 			return nil
 		})
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+		mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
 
@@ -647,7 +647,7 @@ func TestResolveAndLinkAtCreate(t *testing.T) {
 		// inline path must still return success — the run-agent gate
 		// passes through on the default "none" state, so turn 1 still
 		// boots with the snapshot already written.
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state").
+		mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("db hiccup"))
 

@@ -1681,7 +1681,7 @@ export interface SessionMessage {
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
-  source?: "agent_tool";
+  source?: "agent_tool" | "system_auto_repair";
   created_at: string;
 }
 
@@ -1890,6 +1890,7 @@ export interface PullRequestActiveRepair {
   thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+  auto_attempt?: boolean;
 }
 
 export interface PullRequestRepairRequest {
@@ -1952,6 +1953,7 @@ export interface PullRequestHealthResponse {
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
   merge_when_ready: PullRequestMergeWhenReadyStatus;
+  auto_repair_exhausted_actions?: Array<"fix_tests" | "resolve_conflicts">;
 }
 
 export interface PullRequestRepairResponse {
@@ -1978,6 +1980,14 @@ export interface PullRequestUpdatedEvent {
   head_sha: string;
   base_sha: string;
   synced_at: string;
+}
+
+export interface CodeReviewUpdatedEvent {
+  org_id: string;
+  session_id?: string;
+  status?: CodeReviewSessionStatus;
+  decision?: CodeReviewDecision;
+  updated_at: string;
 }
 
 export interface SessionReviewComment {

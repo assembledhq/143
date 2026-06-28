@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   shouldSubscribeToEvalBatchStream,
   shouldSubscribeToEvalBootstrapStream,
-} from "./use-eval-sse";
+} from "./eval-streams";
 
 describe("eval SSE stream subscription gating", () => {
   it("keeps batch streams only for active batch statuses", () => {

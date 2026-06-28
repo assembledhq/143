@@ -37,6 +37,65 @@ func TestPreviewStatus_Validate(t *testing.T) {
 	}
 }
 
+func TestPreviewUpdateMode_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    PreviewUpdateMode
+		wantErr bool
+	}{
+		{name: "browser reload is valid", mode: PreviewUpdateModeBrowserReload},
+		{name: "soft service restart is valid", mode: PreviewUpdateModeSoftServiceRestart},
+		{name: "full recycle is valid", mode: PreviewUpdateModeFullRecycle},
+		{name: "cold relaunch is valid", mode: PreviewUpdateModeColdRelaunch},
+		{name: "noop current is valid", mode: PreviewUpdateModeNoopCurrent},
+		{name: "unknown mode is invalid", mode: PreviewUpdateMode("unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.mode.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should reject invalid preview update modes")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known preview update modes")
+		})
+	}
+}
+
+func TestPreviewUpdateAction_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		action  PreviewUpdateAction
+		wantErr bool
+	}{
+		{name: "updated is valid", action: PreviewUpdateActionUpdated},
+		{name: "restarting is valid", action: PreviewUpdateActionRestarting},
+		{name: "started is valid", action: PreviewUpdateActionStarted},
+		{name: "already current is valid", action: PreviewUpdateActionAlreadyCurrent},
+		{name: "unknown action is invalid", action: PreviewUpdateAction("unknown"), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.action.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "Validate should reject invalid preview update actions")
+				return
+			}
+			require.NoError(t, err, "Validate should accept known preview update actions")
+		})
+	}
+}
+
 func TestPreviewStatus_IsActive(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -709,6 +768,7 @@ func TestPreviewLogStep_Validate(t *testing.T) {
 		{PreviewLogStepInstall, false},
 		{PreviewLogStepInit, false},
 		{PreviewLogStepStart, false},
+		{PreviewLogStepUpdate, false},
 		{PreviewLogStepProxy, false},
 		{PreviewLogStepCleanup, false},
 		{"bogus", true},

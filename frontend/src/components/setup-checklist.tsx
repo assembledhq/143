@@ -75,6 +75,11 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },
+    opencode: {
+      description: "OpenCode uses explicit OpenCode-scoped keys and can route to lower-cost provider/model choices.",
+      configureLabel: "Configure",
+      ctaLabel: "Configure",
+    },
     amp: {
       description: "Sourcegraph Amp uses agent modes (smart/deep/large/rush) and stores auth in the shared coding-agent credential stack.",
       configureLabel: "Configure",
@@ -82,11 +87,6 @@ function AgentSelectionSection({ onConnectedChange }: { onConnectedChange?: (con
     },
     pi: {
       description: "Pi uses its own API key and lets you choose the provider/model pair it should target by default.",
-      configureLabel: "Configure",
-      ctaLabel: "Configure",
-    },
-    opencode: {
-      description: "OpenCode uses explicit OpenCode-scoped keys and can route to lower-cost provider/model choices.",
       configureLabel: "Configure",
       ctaLabel: "Configure",
     },

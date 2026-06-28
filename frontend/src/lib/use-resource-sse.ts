@@ -3,34 +3,25 @@
 import { useEffect, useState } from "react";
 import { addSSEListener, type SSEEventPayloads } from "./sse";
 import { pollMs } from "./poll-intervals";
-import type { EvalBatchStatus, EvalBootstrapStatus } from "./types";
 
-// Connect cadence shared between the two eval SSE consumers (batch detail
-// page + bootstrap detail sheet). Capped exponential backoff (1s → 2s → 4s
-// → 8s → 15s ceiling) so a transient Redis outage doesn't burn into the
-// page lifecycle, but a sustained outage hands off to the polling backstop
-// in the calling component without retrying forever.
+// Connect cadence shared across SSE consumers (eval batch/bootstrap pages, the
+// code reviews list, …). Capped exponential backoff (1s → 2s → 4s → 8s → 15s
+// ceiling) so a transient Redis outage doesn't burn into the page lifecycle,
+// but a sustained outage hands off to the polling backstop in the calling
+// component without retrying forever.
 const SSE_INITIAL_RECONNECT_DELAY_MS = pollMs(1_000);
 const SSE_MAX_RECONNECT_DELAY_MS = 15_000;
 const SSE_MAX_RECONNECT_ATTEMPTS = 5;
 
-export function shouldSubscribeToEvalBatchStream(status: EvalBatchStatus | undefined): boolean {
-  return status === "pending" || status === "running";
-}
-
-export function shouldSubscribeToEvalBootstrapStream(status: EvalBootstrapStatus | undefined): boolean {
-  return status === "pending" || status === "running";
-}
-
-export interface UseEvalSSEOptions<K extends keyof SSEEventPayloads> {
+export interface UseResourceSSEOptions<K extends keyof SSEEventPayloads> {
   /**
-   * Fully-qualified SSE URL (typically built by buildEvalBatchStreamURL or
-   * buildEvalBootstrapStreamURL). Pass null when there's nothing to
-   * subscribe to (e.g. no active bootstrap run); the hook stays idle and
-   * the previous connection is torn down on transition.
+   * Fully-qualified SSE URL (typically built by one of the build*StreamURL
+   * helpers). Pass null when there's nothing to subscribe to (e.g. no active
+   * bootstrap run); the hook stays idle and the previous connection is torn
+   * down on transition.
    */
   url: string | null;
-  /** SSE event name to listen for, e.g. SSE_EVENT.EVAL_BATCH_UPDATED. */
+  /** SSE event name to listen for, e.g. SSE_EVENT.CODE_REVIEW_UPDATED. */
   event: K;
   /**
    * Fires on every received event. Typically just a queryClient.invalidate.
@@ -41,7 +32,7 @@ export interface UseEvalSSEOptions<K extends keyof SSEEventPayloads> {
   onEvent: (payload: SSEEventPayloads[K]) => void;
 }
 
-export interface UseEvalSSEResult {
+export interface UseResourceSSEResult {
   /**
    * True after EventSource.onopen fires; flips to false on any error so
    * callers can drive a faster polling backstop while Redis recovers.
@@ -53,16 +44,17 @@ export interface UseEvalSSEResult {
 }
 
 /**
- * useEvalSSE wires an EventSource for the eval batch / bootstrap SSE
- * channels with capped exponential reconnect and stream-health tracking.
- * Extracted so the batch detail page and the evals page share one
- * implementation — see batch/[id]/page.tsx and settings/evals/page.tsx.
+ * useResourceSSE wires an EventSource for a single org/resource-scoped SSE
+ * channel with capped exponential reconnect and stream-health tracking.
+ * Shared by the eval batch/bootstrap pages and the code reviews list — see
+ * settings/evals/batch/[id]/page.tsx, settings/evals/page.tsx, and
+ * code-reviews/page.tsx.
  */
-export function useEvalSSE<K extends keyof SSEEventPayloads>({
+export function useResourceSSE<K extends keyof SSEEventPayloads>({
   url,
   event,
   onEvent,
-}: UseEvalSSEOptions<K>): UseEvalSSEResult {
+}: UseResourceSSEOptions<K>): UseResourceSSEResult {
   const [healthy, setHealthy] = useState(true);
 
   useEffect(() => {

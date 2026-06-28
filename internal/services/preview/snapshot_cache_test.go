@@ -268,3 +268,32 @@ func TestSnapshotCache_RestoreSnapshotStreamsBlobToSandbox(t *testing.T) {
 	require.Equal(t, body, executor.written, "RestoreSnapshot should stream the exact blob contents")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
+
+func TestSnapshotExtraExcludeFlags(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty input yields no flags", func(t *testing.T) {
+		t.Parallel()
+		require.Empty(t, snapshotExtraExcludeFlags(nil))
+		require.Empty(t, snapshotExtraExcludeFlags([]string{}))
+	})
+
+	t.Run("emits bare and ./-rooted forms, quoted", func(t *testing.T) {
+		t.Parallel()
+		flags := snapshotExtraExcludeFlags([]string{"config/dev.json"})
+		// Members are stored as "./config/dev.json"; both forms guarantee a match
+		// regardless of how the tar implementation anchors patterns.
+		require.Contains(t, flags, "'--exclude=config/dev.json'")
+		require.Contains(t, flags, "'--exclude=./config/dev.json'")
+		// Concatenated directly after the shared flags, so it must lead with a space.
+		require.True(t, strings.HasPrefix(flags, " "), "extra flags should begin with a separating space")
+	})
+
+	t.Run("normalizes a ./-prefixed path so it is not double-rooted", func(t *testing.T) {
+		t.Parallel()
+		flags := snapshotExtraExcludeFlags([]string{"./.env.local"})
+		require.Contains(t, flags, "'--exclude=.env.local'")
+		require.Contains(t, flags, "'--exclude=./.env.local'")
+		require.NotContains(t, flags, "././", "leading ./ must be trimmed before re-rooting")
+	})
+}

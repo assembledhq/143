@@ -20,6 +20,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
@@ -27,6 +28,7 @@ import (
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
 	previewsvc "github.com/assembledhq/143/internal/services/preview"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/sessiontimeline"
 	"github.com/assembledhq/143/internal/services/storage"
 	"github.com/go-chi/chi/v5"
@@ -83,13 +85,16 @@ type SessionHandler struct {
 	slackSessionLinks  *db.SlackSessionLinkStore
 	issueSnapshots     *db.SessionTurnIssueSnapshotStore
 	threadStore        *db.SessionThreadStore
-	threadInboxStore   *db.ThreadInboxStore
-	attributionStore   *db.SessionAttributionStore
-	sandboxHolders     *db.SessionSandboxHolderStore
-	viewStore          *db.SessionViewStore
-	memberships        sessionMembershipStore
-	prCredentials      githubStatusCredentialStore
-	prAuthChecker      interface {
+	readinessRunner    interface {
+		EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
+	}
+	threadInboxStore *db.ThreadInboxStore
+	attributionStore *db.SessionAttributionStore
+	sandboxHolders   *db.SessionSandboxHolderStore
+	viewStore        *db.SessionViewStore
+	memberships      sessionMembershipStore
+	prCredentials    githubStatusCredentialStore
+	prAuthChecker    interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
 	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
@@ -1985,6 +1990,12 @@ func (h *SessionHandler) SetReadinessStore(store *db.PRReadinessStore) {
 	h.readinessStore = store
 }
 
+func (h *SessionHandler) SetReadinessRunner(runner interface {
+	EnqueueRun(ctx context.Context, req prreadinesssvc.EnqueueRunRequest) (*models.PRReadinessRun, error)
+}) {
+	h.readinessRunner = runner
+}
+
 func (h *SessionHandler) GetReadiness(w http.ResponseWriter, r *http.Request) {
 	if h.readinessStore == nil {
 		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
@@ -2089,7 +2100,7 @@ func (h *SessionHandler) UpsertReadinessContext(w http.ResponseWriter, r *http.R
 }
 
 func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
-	if h.readinessStore == nil || h.jobStore == nil {
+	if h.readinessRunner == nil {
 		writeError(w, r, http.StatusNotImplemented, "READINESS_NOT_CONFIGURED", "PR readiness is not configured")
 		return
 	}
@@ -2111,51 +2122,16 @@ func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
 	if user := middleware.UserFromContext(r.Context()); user != nil {
 		triggeredByUserID = &user.ID
 	}
-	run, err := h.enqueuePRReadinessRun(r.Context(), orgID, session, triggeredByUserID)
+	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: triggeredByUserID,
+	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PRReadinessRun]{Data: *run})
-}
-
-func (h *SessionHandler) enqueuePRReadinessRun(ctx context.Context, orgID uuid.UUID, session models.Session, triggeredByUserID *uuid.UUID) (*models.PRReadinessRun, error) {
-	// Return the existing run if one is already queued or running for this session
-	// to avoid creating orphaned runs that no worker will ever process.
-	existing, err := h.readinessStore.GetLatestBySession(ctx, orgID, session.ID)
-	if err == nil && existing != nil && (existing.Status == models.PRReadinessRunStatusQueued || existing.Status == models.PRReadinessRunStatusRunning) {
-		return existing, nil
-	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return nil, err
-	}
-	snapshotKey := stringPtrValue(session.SnapshotKey)
-	run := &models.PRReadinessRun{
-		OrgID:                      orgID,
-		SessionID:                  session.ID,
-		RepositoryID:               session.RepositoryID,
-		Status:                     models.PRReadinessRunStatusQueued,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
-		EvaluatedSnapshotKey:       nil,
-		Summary:                    "Queued",
-	}
-	if snapshotKey != "" {
-		run.EvaluatedSnapshotKey = &snapshotKey
-	}
-	run.TriggeredByUserID = triggeredByUserID
-	if err := h.readinessStore.CreateRun(ctx, run); err != nil {
-		return nil, err
-	}
-	payload := map[string]string{
-		"org_id":       orgID.String(),
-		"session_id":   session.ID.String(),
-		"readiness_id": run.ID.String(),
-	}
-	dedupeKey := "pr_readiness:" + session.ID.String()
-	if _, err := h.jobStore.Enqueue(ctx, orgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
-		return nil, err
-	}
-	return run, nil
 }
 
 // maxReadinessReasonLength caps free-text reasons (bypass reason, issue-less
@@ -2686,7 +2662,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session) bool {
-	if h.readinessStore == nil || h.jobStore == nil {
+	if h.readinessStore == nil || h.readinessRunner == nil {
 		return false
 	}
 	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
@@ -2715,7 +2691,11 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 	if user := middleware.UserFromContext(r.Context()); user != nil {
 		userID = &user.ID
 	}
-	run, err := h.enqueuePRReadinessRun(r.Context(), orgID, session, userID)
+	run, err := h.readinessRunner.EnqueueRun(r.Context(), prreadinesssvc.EnqueueRunRequest{
+		OrgID:             orgID,
+		Session:           session,
+		TriggeredByUserID: userID,
+	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
 		return true
@@ -3850,6 +3830,13 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
 		return
 	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
 
 	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
 	if err != nil {
@@ -3870,6 +3857,9 @@ func (h *SessionHandler) CancelSession(w http.ResponseWriter, r *http.Request) {
 	if err := h.runStore.RequestCancel(r.Context(), orgID, sessionID); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CANCEL_REQUEST_FAILED", "failed to record cancel request", err)
 		return
+	}
+	if body.Reason == "auto_repair_stop" {
+		metrics.RecordPRAutoRepairStop(r.Context(), orgID.String(), "")
 	}
 
 	// Signal the orchestrator to send SIGINT to the agent.

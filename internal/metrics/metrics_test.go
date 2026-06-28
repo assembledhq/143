@@ -54,6 +54,16 @@ func TestHTTPMetrics_RecordRequest(t *testing.T) {
 	m.RecordRequest(context.Background(), "GET", "/api/v1/usage", "200", 0.05)
 }
 
+func TestPRAutoRepairMetrics_Record(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	RecordPRAutoRepairDecision(ctx, "org-1", "acme/repo", "fix_tests", "started", "session_idle")
+	RecordPRAutoRepairOutcome(ctx, "org-1", "acme/repo", "fix_tests", "completed")
+	RecordPRAutoRepairStop(ctx, "org-1", "acme/repo")
+	RecordPRAutoRepairRegret(ctx, "org-1", "acme/repo", "fix_tests", "thread_revert")
+}
+
 func TestNewMemoryMetrics(t *testing.T) {
 	t.Parallel()
 

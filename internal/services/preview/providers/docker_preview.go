@@ -38,6 +38,7 @@ import (
 // Compile-time check.
 var _ preview.PreviewCapableProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewCachePrewarmProvider = (*DockerPreviewProvider)(nil)
+var _ preview.PreviewSoftRestartProvider = (*DockerPreviewProvider)(nil)
 
 // DockerPreviewClient defines the subset of the Docker API used for preview infrastructure.
 type DockerPreviewClient interface {
@@ -119,6 +120,7 @@ type previewState struct {
 	handle  string
 	sandbox *agent.Sandbox
 	config  *models.PreviewConfig
+	opts    preview.StartPreviewOptions
 
 	// Infrastructure containers (keyed by infra_name).
 	infra map[string]*preview.InfraHandle
@@ -298,6 +300,7 @@ func (d *DockerPreviewProvider) StartPreview(ctx context.Context, sb *agent.Sand
 		handle:   handle,
 		sandbox:  sb,
 		config:   cfg,
+		opts:     opts,
 		infra:    make(map[string]*preview.InfraHandle),
 		services: make(map[string]*serviceState),
 		cancelFn: cancelFn,
@@ -621,6 +624,178 @@ func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context,
 		infra:   map[string]*preview.InfraHandle{},
 	}
 	return d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false)
+}
+
+// SoftRestartPreview restarts application service processes in-place while
+// preserving provisioned infrastructure containers and installed dependencies.
+func (d *DockerPreviewProvider) SoftRestartPreview(ctx context.Context, handle string, observer preview.ServiceObserver) (*preview.PreviewHandle, error) {
+	d.mu.RLock()
+	state, ok := d.previews[handle]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("preview %q not found", handle)
+	}
+	if state.config == nil {
+		return nil, fmt.Errorf("preview %q is missing config", handle)
+	}
+
+	notifyPhaseStart(observer, "soft_restart")
+	phaseStarted := time.Now()
+	var phaseErr error
+	defer func() {
+		notifyPhaseEnd(observer, "soft_restart", phaseErr)
+		if state.opts.OrgID != uuid.Nil {
+			metrics.RecordSessionPreviewPhaseDuration(ctx, state.opts.OrgID.String(), "soft_restart", time.Since(phaseStarted))
+		}
+	}()
+
+	state.cancelFn()
+	d.terminateServiceProcesses(state)
+	if err := waitForGroupBounded(ctx, &state.wg, 30*time.Second); err != nil {
+		d.logger.Warn().Err(err).Str("handle", handle).Msg("soft restart: proceeding before prior service goroutines fully stopped")
+	}
+
+	svcCtx, cancelFn := context.WithCancel(context.Background())
+	d.mu.Lock()
+	state.cancelFn = cancelFn
+	state.services = make(map[string]*serviceState)
+	d.mu.Unlock()
+	restartSucceeded := false
+	defer func() {
+		if !restartSucceeded {
+			cancelFn()
+		}
+	}()
+
+	infraCreds := make(map[string]preview.InfraCredential)
+	d.mu.RLock()
+	for name, ih := range state.infra {
+		if ih != nil {
+			infraCreds[name] = ih.Credential
+		}
+	}
+	d.mu.RUnlock()
+	svcEnvs := d.buildServiceEnvs(state.config, infraCreds, state.opts.ExtraEnv)
+
+	cfg := state.config
+	for name, svcCfg := range cfg.Services {
+		if name == cfg.Primary {
+			continue
+		}
+		if err := d.startService(svcCtx, state, name, svcCfg, svcEnvs[name], observer); err != nil {
+			phaseErr = fmt.Errorf("start service %q: %w", name, err)
+			return nil, phaseErr
+		}
+	}
+	primaryPort := 0
+	if primaryCfg, ok := cfg.Services[cfg.Primary]; ok {
+		primaryPort = primaryCfg.Port
+		if err := d.startService(svcCtx, state, cfg.Primary, primaryCfg, svcEnvs[cfg.Primary], observer); err != nil {
+			phaseErr = fmt.Errorf("start primary service %q: %w", cfg.Primary, err)
+			return nil, phaseErr
+		}
+	}
+	d.mu.Lock()
+	state.primaryPort = primaryPort
+	d.mu.Unlock()
+
+	partiallyReady := false
+	if cfg.Progressive && len(cfg.Services) > 1 {
+		primaryCfg, ok := cfg.Services[cfg.Primary]
+		if !ok {
+			phaseErr = fmt.Errorf("primary service %q is missing", cfg.Primary)
+			return nil, phaseErr
+		}
+		timeout := defaultServiceReadinessTimeout
+		if primaryCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(primaryCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		if err := d.waitForReadiness(ctx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+			notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		if err := d.verifyPrimaryReachable(ctx, state, cfg.Primary, primaryCfg.Port); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, cfg.Primary, err)
+			notifyServiceFailed(observer, cfg.Primary, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: primary service %q (port %d): %s", preview.ErrServiceNotReady, cfg.Primary, primaryCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		d.mu.Lock()
+		if ss, ok := state.services[cfg.Primary]; ok {
+			ss.status = models.PreviewServiceStatusReady
+			notifyServiceReady(observer, cfg.Primary, primaryCfg.Port, ss.pid)
+		}
+		d.mu.Unlock()
+		partiallyReady = true
+		d.warmPrimaryRoute(svcCtx, state, cfg.Primary, primaryCfg.Port, primaryCfg.Ready.HTTPPath)
+		state.wg.Add(1)
+		go d.waitForSupportServicesAfterSoftRestart(svcCtx, state, observer)
+		restartSucceeded = true
+		return &preview.PreviewHandle{Handle: handle, PrimaryPort: primaryPort, PartiallyReady: partiallyReady}, nil
+	}
+
+	for name, svcCfg := range cfg.Services {
+		timeout := defaultServiceReadinessTimeout
+		if svcCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		if err := d.waitForReadiness(ctx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+			notifyServiceFailed(observer, name, errMsg, tail)
+			phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+			return nil, phaseErr
+		}
+		if name == cfg.Primary {
+			if err := d.verifyPrimaryReachable(ctx, state, name, svcCfg.Port); err != nil {
+				errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+				notifyServiceFailed(observer, name, errMsg, tail)
+				phaseErr = fmt.Errorf("%w: service %q (port %d): %s", preview.ErrServiceNotReady, name, svcCfg.Port, errMsg)
+				return nil, phaseErr
+			}
+		}
+		d.mu.Lock()
+		if ss, ok := state.services[name]; ok {
+			ss.status = models.PreviewServiceStatusReady
+			notifyServiceReady(observer, name, svcCfg.Port, ss.pid)
+		}
+		d.mu.Unlock()
+		if name == cfg.Primary {
+			d.warmPrimaryRoute(svcCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath)
+		}
+	}
+	restartSucceeded = true
+	return &preview.PreviewHandle{Handle: handle, PrimaryPort: primaryPort}, nil
+}
+
+func (d *DockerPreviewProvider) waitForSupportServicesAfterSoftRestart(ctx context.Context, state *previewState, observer preview.ServiceObserver) {
+	defer state.wg.Done()
+	for name, svcCfg := range state.config.Services {
+		if name == state.config.Primary {
+			continue
+		}
+		timeout := defaultServiceReadinessTimeout
+		if svcCfg.Ready.TimeoutSeconds > 0 {
+			timeout = time.Duration(svcCfg.Ready.TimeoutSeconds) * time.Second
+		}
+		bgCtx, cancel := context.WithTimeout(ctx, timeout)
+		if err := d.waitForReadiness(bgCtx, state, name, svcCfg.Port, svcCfg.Ready.HTTPPath, timeout); err != nil {
+			errMsg, tail := d.recordServiceReadinessFailure(state, name, err)
+			d.logger.Warn().Err(err).Str("service", name).Strs("output_tail", tail).Msg("support service readiness failed after soft restart")
+			notifyServiceFailed(observer, name, errMsg, tail)
+		} else {
+			d.mu.Lock()
+			var pid int
+			if ss, ok := state.services[name]; ok {
+				ss.status = models.PreviewServiceStatusReady
+				pid = ss.pid
+			}
+			d.mu.Unlock()
+			notifyServiceReady(observer, name, svcCfg.Port, pid)
+		}
+		cancel()
+	}
 }
 
 func previewConfigHasInitScripts(cfg *models.PreviewConfig) bool {
@@ -1656,6 +1831,113 @@ func (d *DockerPreviewProvider) saveDependencyCache(ctx context.Context, state *
 	save()
 }
 
+// logBuildCacheKeyDiagnostics emits one structured record capturing every input
+// that feeds a build-artifact placement key, the resulting key, the exact bytes
+// hashed, and the lookup outcome.
+//
+// TEMPORARY INSTRUMENTATION (diagnosing build-cache misses across launches whose
+// config looks identical): emit it on two launches and diff the fields —
+// key_payload_json alone usually shows what moved; config_json and the dual
+// config_digest_* fields cover the case where the digest itself is the unstable
+// input (e.g. opts.ConfigDigest empty → recomputed from a per-launch state.config).
+// root is "workdir" or "home"; runtimeVersion is the matching slot constant;
+// outcome is one of disabled|key_failed|hit|miss|lookup_failed. Safe to delete
+// once the unstable input is identified.
+func (d *DockerPreviewProvider) logBuildCacheKeyDiagnostics(
+	state *previewState,
+	opts preview.StartPreviewOptions,
+	install *models.PreviewInstallConfig,
+	root string,
+	runtimeVersion string,
+	paths []string,
+	pathsEnabled bool,
+	configDigestUsed string,
+	computedKey string,
+	outcome string,
+	hitKey string,
+) {
+	var configName string
+	if state != nil && state.config != nil {
+		configName = state.config.Name
+	}
+	// Recompute the digest from state.config regardless of which source the key
+	// actually used, so we can tell whether opts.ConfigDigest was empty and the
+	// key fell back to a digest derived from a possibly per-launch state.config.
+	recomputedDigest, _ := preview.ComputePreviewConfigDigest(stateConfig(state))
+	digestSource := "opts.ConfigDigest"
+	if strings.TrimSpace(opts.ConfigDigest) == "" {
+		digestSource = "recomputed_from_state_config"
+	}
+
+	ev := d.logger.Info().
+		Str("diag", "build_cache_key").
+		Str("root", root).
+		Str("runtime_version", runtimeVersion).
+		Str("outcome", outcome).
+		Str("preview_handle", previewHandle(state)).
+		Str("org_id", opts.OrgID.String()).
+		Str("repo_id", opts.RepositoryID.String()).
+		Str("session_id", opts.SessionID.String()).
+		Str("config_name", configName).
+		Str("config_digest_used", configDigestUsed).
+		Str("config_digest_opts", opts.ConfigDigest).
+		Str("config_digest_recomputed", recomputedDigest).
+		Str("config_digest_source", digestSource).
+		Bool("paths_enabled", pathsEnabled).
+		Strs("resolved_paths", paths).
+		Str("computed_key", computedKey)
+	if hitKey != "" {
+		ev = ev.Str("hit_key", hitKey)
+	}
+
+	// Raw, pre-normalization install inputs so ordering/whitespace drift is visible.
+	if install != nil {
+		ev = ev.
+			Strs("install_command", install.Command).
+			Str("install_cwd", install.Cwd).
+			Strs("install_lockfiles", install.Lockfiles).
+			Strs("install_clean_paths", install.CleanPaths)
+		if install.Cache != nil && install.Cache.Build != nil {
+			if buildJSON, mErr := json.Marshal(install.Cache.Build); mErr == nil {
+				ev = ev.RawJSON("install_cache_build", buildJSON)
+			}
+		}
+	}
+
+	// The exact bytes that get SHA-256'd into the key — the primary diff target.
+	if dbgKey, payloadJSON, dErr := preview.PreviewBuildCacheKeyDebug(runtimeVersion, opts.OrgID, opts.RepositoryID, configName, configDigestUsed, install, paths); dErr == nil {
+		ev = ev.Str("key_payload_json", payloadJSON)
+		// Sanity check: the debug recompute must reproduce the production key.
+		if computedKey != "" && dbgKey != computedKey {
+			ev = ev.Str("key_payload_mismatch", dbgKey)
+		}
+	}
+
+	// Full committed preview config feeding config_digest_recomputed. Runtime
+	// secret env/files are json:"-" and excluded, so no secret values appear.
+	if state != nil && state.config != nil {
+		if cfgJSON, mErr := json.Marshal(state.config); mErr == nil {
+			ev = ev.RawJSON("config_json", cfgJSON)
+		}
+	}
+
+	ev.Msg("build cache key diagnostics")
+}
+
+func stateConfig(state *previewState) *models.PreviewConfig {
+	if state == nil {
+		return nil
+	}
+	return state.config
+}
+
+func previewHandle(state *previewState) string {
+	if state == nil {
+		return ""
+	}
+	return state.handle
+}
+
 // restorePreviewBuildCache restores the latest build-artifact blob (e.g.
 // Turborepo's local cache) into the sandbox workdir. It runs after the install
 // phase so install commands that wipe node_modules cannot delete the restored
@@ -1671,6 +1953,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	}
 	paths, enabled := preview.ResolvePreviewBuildCachePaths(install)
 	if !enabled {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, false, strings.TrimSpace(opts.ConfigDigest), "", "disabled", "")
 		notifyBuildCacheRestore(observer, "disabled", "", 0, nil)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "disabled", 0)
 		return
@@ -1683,6 +1966,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	}
 	cacheKey, err := preview.ComputePreviewBuildCacheKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
 	if err != nil {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, true, configDigest, "", "key_failed", "")
 		notifyBuildCacheRestore(observer, "key_failed", "", 0, err)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "key_failed", 0)
 		d.logger.Warn().Err(err).Msg("preview build cache key unavailable; continuing cold")
@@ -1696,6 +1980,18 @@ func (d *DockerPreviewProvider) restorePreviewBuildCache(ctx context.Context, st
 	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
 	notifyPhaseEnd(observer, "build_cache_lookup", findErr)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_lookup", time.Since(lookupStarted))
+	{
+		outcome := "hit"
+		hitKey := ""
+		if findErr != nil {
+			outcome = "lookup_failed"
+		} else if hit == nil {
+			outcome = "miss"
+		} else {
+			hitKey = cacheKey // FindPathCache matched this exact key
+		}
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "workdir", preview.PreviewBuildCacheRuntimeVersion, paths, true, configDigest, cacheKey, outcome, hitKey)
+	}
 	if findErr != nil {
 		notifyBuildCacheRestore(observer, "restore_failed", cacheKey, 0, findErr)
 		metrics.RecordSessionBuildCacheRestore(ctx, opts.OrgID.String(), "restore_failed", time.Since(lookupStarted))
@@ -1742,6 +2038,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	}
 	paths, enabled := preview.ResolvePreviewBuildCacheHomePaths(install)
 	if !enabled {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, false, strings.TrimSpace(opts.ConfigDigest), "", "disabled", "")
 		return
 	}
 	configDigest := opts.ConfigDigest
@@ -1752,6 +2049,7 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	}
 	cacheKey, err := preview.ComputePreviewBuildCacheHomeKey(opts.OrgID, opts.RepositoryID, state.config.Name, configDigest, install, paths)
 	if err != nil {
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, true, configDigest, "", "key_failed", "")
 		d.logger.Warn().Err(err).Msg("preview home build cache key unavailable; continuing cold")
 		return
 	}
@@ -1763,6 +2061,18 @@ func (d *DockerPreviewProvider) restorePreviewBuildCacheHome(ctx context.Context
 	hit, findErr := pathCache.FindPathCache(ctx, opts.OrgID, opts.RepositoryID, models.PreviewCacheKindBuildArtifact, cacheKey)
 	notifyPhaseEnd(observer, "build_cache_home_lookup", findErr)
 	metrics.RecordSessionPreviewPhaseDuration(ctx, opts.OrgID.String(), "build_cache_home_lookup", time.Since(lookupStarted))
+	{
+		outcome := "hit"
+		hitKey := ""
+		if findErr != nil {
+			outcome = "lookup_failed"
+		} else if hit == nil {
+			outcome = "miss"
+		} else {
+			hitKey = cacheKey // FindPathCache matched this exact key
+		}
+		d.logBuildCacheKeyDiagnostics(state, opts, install, "home", preview.PreviewBuildCacheHomeRuntimeVersion, paths, true, configDigest, cacheKey, outcome, hitKey)
+	}
 	if findErr != nil {
 		d.logger.Warn().Err(findErr).Str("cache_key", cacheKey).Msg("preview home build cache lookup failed; continuing cold")
 		return

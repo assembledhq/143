@@ -485,7 +485,7 @@ func TestSessionStore_UpdatePRCreationState(t *testing.T) {
 			now := time.Now()
 
 			if !tt.expectErr {
-				mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
+				mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
 			}
@@ -520,22 +520,22 @@ func TestSessionStore_UpdatePRPushStateWithCode(t *testing.T) {
 			errMsg:  "branch diverged",
 			errCode: models.PRPushErrorCodeBranchDiverged,
 			wantArgs: []any{
+				pgxmock.AnyArg(),
+				pgxmock.AnyArg(),
 				string(models.PRPushStateFailed),
 				"branch diverged",
 				string(models.PRPushErrorCodeBranchDiverged),
-				pgxmock.AnyArg(),
-				pgxmock.AnyArg(),
 			},
 		},
 		{
 			name:  "queued state clears stale error message and code",
 			state: models.PRPushStateQueued,
 			wantArgs: []any{
+				pgxmock.AnyArg(),
+				pgxmock.AnyArg(),
 				string(models.PRPushStateQueued),
 				nil,
 				nil,
-				pgxmock.AnyArg(),
-				pgxmock.AnyArg(),
 			},
 		},
 		{
@@ -563,7 +563,7 @@ func TestSessionStore_UpdatePRPushStateWithCode(t *testing.T) {
 			now := time.Now()
 
 			if !tt.expectErr {
-				mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING").
+				mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_push_state[\\s\\S]*pr_push_error_code[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 					WithArgs(tt.wantArgs...).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
 			}
@@ -609,7 +609,7 @@ func TestSessionStore_UpdatePRCreationState_PublishesSessionStatus(t *testing.T)
 	issueID := uuid.New()
 	orgID := uuid.New()
 
-	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
+	mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, issueID, orgID, now)...))
 
@@ -640,7 +640,7 @@ func TestSessionStore_UpdatePRCreationState_NoMatchingRowIsNoOp(t *testing.T) {
 	orgID := uuid.New()
 	sessionID := uuid.New()
 
-	mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING").
+	mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_creation_state[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 
@@ -686,7 +686,7 @@ func TestSessionStore_TryMarkPRPushQueued(t *testing.T) {
 
 			// CAS update should pass exactly two args (id, org_id) and
 			// guard with a NOT IN ('queued','pushing') predicate.
-			expect := mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*pr_push_state NOT IN[\\s\\S]*RETURNING").
+			expect := mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_push_state = 'queued'[\\s\\S]*pr_push_error_code = NULL[\\s\\S]*session_publish_state\\.pr_push_state NOT IN[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg())
 			if tt.returnRow {
 				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
@@ -737,7 +737,7 @@ func TestSessionStore_TryMarkPRCreationQueued(t *testing.T) {
 			sessionID := uuid.New()
 			now := time.Now()
 
-			expect := mock.ExpectQuery("UPDATE sessions[\\s\\S]*pr_creation_state = 'queued'[\\s\\S]*pr_creation_state NOT IN[\\s\\S]*RETURNING").
+			expect := mock.ExpectQuery("INSERT INTO session_publish_state[\\s\\S]*pr_creation_state = 'queued'[\\s\\S]*session_publish_state\\.pr_creation_state NOT IN[\\s\\S]*RETURNING session_id[\\s\\S]*FROM sessions").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg())
 			if tt.returnRow {
 				expect.WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
@@ -1974,7 +1974,7 @@ func TestSessionStore_SetGitIdentity(t *testing.T) {
 	store := NewSessionStore(mock)
 	userID := uuid.New()
 
-	mock.ExpectExec(`UPDATE sessions\s+SET git_identity_source = @source,\s+git_identity_user_id = @user_id\s+WHERE id = @id AND org_id = @org_id`).
+	mock.ExpectExec(`INSERT INTO session_execution_metadata[\s\S]+git_identity_source[\s\S]+ON CONFLICT`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -2954,7 +2954,7 @@ func TestSessionStore_LinearSessionFields(t *testing.T) {
 			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
 				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
 			},
-			sql:  "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			sql:  "INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state",
 			rows: 1,
 		},
 		{
@@ -2962,7 +2962,7 @@ func TestSessionStore_LinearSessionFields(t *testing.T) {
 			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
 				return store.SetLinearPrepareState(context.Background(), orgID, sessionID, models.LinearPrepareStateReady)
 			},
-			sql:       "UPDATE sessions[\\s\\S]+SET linear_prepare_state",
+			sql:       "INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state",
 			rows:      0,
 			errText:   "session not found",
 			expectErr: true,
@@ -2972,7 +2972,7 @@ func TestSessionStore_LinearSessionFields(t *testing.T) {
 			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
 				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
 			},
-			sql:  "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			sql:  "INSERT INTO session_linear_context[\\s\\S]+linear_identifier_hint",
 			rows: 1,
 		},
 		{
@@ -2980,7 +2980,7 @@ func TestSessionStore_LinearSessionFields(t *testing.T) {
 			call: func(store *SessionStore, orgID, sessionID uuid.UUID) error {
 				return store.SetLinearIdentifierHint(context.Background(), orgID, sessionID, "ACS-123")
 			},
-			sql:       "UPDATE sessions[\\s\\S]+SET linear_identifier_hint",
+			sql:       "INSERT INTO session_linear_context[\\s\\S]+linear_identifier_hint",
 			rows:      0,
 			errText:   "session not found",
 			expectErr: true,
@@ -3027,7 +3027,7 @@ func TestSessionStore_SetLinearPrepareStateIfNotReady(t *testing.T) {
 		require.NoError(t, err, "should create mock pool")
 		defer mock.Close()
 
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+		mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state[\\s\\S]+session_linear_context\\.linear_prepare_state <>").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
@@ -3043,7 +3043,7 @@ func TestSessionStore_SetLinearPrepareStateIfNotReady(t *testing.T) {
 		require.NoError(t, err, "should create mock pool")
 		defer mock.Close()
 
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+		mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state[\\s\\S]+session_linear_context\\.linear_prepare_state <>").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 
@@ -3059,7 +3059,7 @@ func TestSessionStore_SetLinearPrepareStateIfNotReady(t *testing.T) {
 		require.NoError(t, err, "should create mock pool")
 		defer mock.Close()
 
-		mock.ExpectExec("UPDATE sessions[\\s\\S]+SET linear_prepare_state[\\s\\S]+linear_prepare_state <>").
+		mock.ExpectExec("INSERT INTO session_linear_context[\\s\\S]+linear_prepare_state[\\s\\S]+session_linear_context\\.linear_prepare_state <>").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnError(errors.New("db unavailable"))
 

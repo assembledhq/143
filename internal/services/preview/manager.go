@@ -1995,6 +1995,22 @@ func (m *Manager) RecyclePreviewWithConfigAndRevision(ctx context.Context, orgID
 	})
 }
 
+// ErrSoftRestartUnsupported is returned by SoftRestartPreview when the active
+// provider does not implement PreviewSoftRestartProvider. Callers should treat
+// it as a signal to fall back to a full recycle.
+var ErrSoftRestartUnsupported = errors.New("preview provider does not support soft restart")
+
+func (m *Manager) SoftRestartPreview(ctx context.Context, orgID, previewID uuid.UUID) error {
+	return m.softRestartPreview(ctx, orgID, previewID, nil)
+}
+
+func (m *Manager) SoftRestartPreviewWithRevision(ctx context.Context, orgID, previewID uuid.UUID, revision int64, revisionUpdatedAt time.Time) error {
+	return m.softRestartPreview(ctx, orgID, previewID, &workspaceRevisionStamp{
+		revision:  revision,
+		updatedAt: revisionUpdatedAt,
+	})
+}
+
 // ResumeStoppedWarmPreview starts a session preview that was fully warmed and
 // then stopped by the session prewarm policy. It intentionally does not accept
 // arbitrary terminal previews: this path exists only to make a user click on a
@@ -2184,6 +2200,93 @@ func (m *Manager) probeSandboxAlive(ctx context.Context, sb *agent.Sandbox) (boo
 		}
 	}
 	return false, lastErr
+}
+
+func (m *Manager) softRestartPreview(ctx context.Context, orgID, previewID uuid.UUID, revisionStamp *workspaceRevisionStamp) error {
+	instance, err := m.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return fmt.Errorf("get preview instance: %w", err)
+	}
+	if instance.Status.IsTerminal() {
+		return fmt.Errorf("cannot soft restart terminal preview (status=%s)", instance.Status)
+	}
+	if m.provider == nil {
+		return fmt.Errorf("preview provider is not configured")
+	}
+	softProvider, ok := m.provider.(PreviewSoftRestartProvider)
+	if !ok {
+		return ErrSoftRestartUnsupported
+	}
+	if instance.PreviewHandle == "" {
+		return fmt.Errorf("preview is missing a provider handle")
+	}
+
+	m.pollStopMu.Lock()
+	if ch, ok := m.pollStopChs[previewID]; ok {
+		close(ch)
+		delete(m.pollStopChs, previewID)
+	}
+	m.pollStopMu.Unlock()
+
+	updated, err := m.store.UpdatePreviewStatusIfActive(ctx, orgID, previewID, models.PreviewStatusStarting, "")
+	if err != nil {
+		return fmt.Errorf("set starting status: %w", err)
+	}
+	if !updated {
+		return fmt.Errorf("preview was stopped concurrently before soft restart could begin")
+	}
+	if revisionStamp != nil && !revisionStamp.updatedAt.IsZero() {
+		// A soft restart re-runs the service against the current workspace, so the
+		// runtime now reflects the recycle baseline, not an incremental file event.
+		// Use the recycle source (not file_event) so freshness logic treats it like
+		// the full-recycle path it mirrors.
+		if err := m.store.UpdatePreviewRuntimeWorkspaceRevision(ctx, orgID, previewID, revisionStamp.revision, revisionStamp.updatedAt, models.PreviewRuntimeRevisionSourceRecycle); err != nil {
+			return err
+		}
+	}
+
+	observer := m.newServiceObserver(orgID, previewID, "", "", instance.PrimaryService, instance.MemoryLimitMB)
+	defer observer.Close()
+	handle, err := softProvider.SoftRestartPreview(ctx, instance.PreviewHandle, observer)
+	if err != nil {
+		if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, err.Error()); statusErr != nil {
+			m.logger.Warn().Err(statusErr).Msg("soft restart: failed to set failed status")
+		}
+		return fmt.Errorf("soft restart: %w", err)
+	}
+	if handle != nil && (handle.Handle != instance.PreviewHandle || handle.PrimaryPort != instance.Port) {
+		if err := m.store.UpdatePreviewHandle(ctx, orgID, previewID, handle.Handle, handle.PrimaryPort); err != nil {
+			if statusErr := m.store.UpdatePreviewStatus(ctx, orgID, previewID, models.PreviewStatusFailed, "soft restart failed: could not persist handle"); statusErr != nil {
+				m.logger.Warn().Err(statusErr).Msg("soft restart: failed to set failed status after handle update error")
+			}
+			return fmt.Errorf("soft restart: update handle: %w", err)
+		}
+	}
+
+	nextStatus := models.PreviewStatusReady
+	if handle != nil && handle.PartiallyReady {
+		nextStatus = models.PreviewStatusPartiallyReady
+	}
+	if err := m.store.UpdatePreviewStatus(ctx, orgID, previewID, nextStatus, ""); err != nil {
+		return fmt.Errorf("soft restart: set ready status: %w", err)
+	}
+	if handle != nil && handle.PartiallyReady {
+		stopCh := make(chan struct{})
+		m.pollStopMu.Lock()
+		m.pollStopChs[previewID] = stopCh
+		m.pollStopMu.Unlock()
+		go func() {
+			m.pollSupportServiceStatus(stopCh, orgID, previewID, handle.Handle)
+			m.pollStopMu.Lock()
+			delete(m.pollStopChs, previewID)
+			m.pollStopMu.Unlock()
+		}()
+	}
+	if m.hmrWatcher != nil {
+		m.hmrWatcher.StopWatching(previewID)
+		m.hmrWatcher.StartWatching(previewID, orgID)
+	}
+	return nil
 }
 
 func (m *Manager) recyclePreview(ctx context.Context, orgID, previewID uuid.UUID, refreshedConfig *models.PreviewConfig, revisionStamp *workspaceRevisionStamp) error {

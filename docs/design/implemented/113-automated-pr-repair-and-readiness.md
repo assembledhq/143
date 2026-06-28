@@ -1,12 +1,12 @@
 # Design: Automated PR Repair and Readiness Follow-Through
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-27
+> **Status:** Implemented | **Last reviewed:** 2026-06-27
 >
-> **Depends on:** [implemented/61-pr-state-sync-and-repair-actions.md](implemented/61-pr-state-sync-and-repair-actions.md), [implemented/78-review-agent-loops.md](implemented/78-review-agent-loops.md), [implemented/107-pr-readiness-checks.md](implemented/107-pr-readiness-checks.md), [implemented/88-shared-sandbox-thread-runtimes.md](implemented/88-shared-sandbox-thread-runtimes.md)
+> **Depends on:** [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [88-shared-sandbox-thread-runtimes.md](88-shared-sandbox-thread-runtimes.md)
 
 ## Summary
 
-143 should automatically take the next obvious step when a session is idle and a linked open PR has conflicts, broken tests, or a completed review loop waiting on readiness. Users should not have to watch the product and press routine buttons.
+143 automatically takes the next obvious step when a session is idle and a linked open PR has conflicts, broken tests, or a completed review loop waiting on readiness. Users should not have to watch the product and press routine buttons.
 
 This is not a new agent capability. It is product follow-through on existing primitives:
 
@@ -37,15 +37,15 @@ Add policy-controlled backend follow-through for two cases:
 1. **Auto-readiness after review loops:** when a review loop reaches a configured terminal state, enqueue PR readiness for the current workspace.
 2. **Auto-repair PR blockers:** when an idle/resumable session has a linked open PR with conflicts or failing tests, start the same repair action the button would start.
 
-Auto-readiness ships first because it is read-only and already supports platform-triggered runs. Auto-repair ships later because it writes to the user's PR branch and requires a durable system-actor model.
+Auto-readiness shipped first because it is read-only and already supports platform-triggered runs. Auto-repair now runs behind session automation policy because system-authored repair prompts and automatic attempt accounting are durable.
 
-Defaults are off for existing and new orgs until internal rollout proves this is reliable.
+Defaults remain off for existing orgs. New orgs default automatic conflict repair and automatic test repair on; readiness after review loop remains off by default.
 
 ## Implementation Status
 
-Phase 1 is implemented: the org and user settings contracts exist, validation covers the new enum/settings shapes, frontend types mirror the backend, the Organization settings page has a compact **Session automation** section, and Account settings has personal inherit/on/off controls that display the current organization default. No backend automation behavior is wired yet.
+All implementation phases are complete. The org/user settings contracts and UI shell exist, PR readiness enqueueing is extracted into a reusable runner, clean review-loop completion can atomically enqueue readiness behind the org policy, session messages support `system_auto_repair` attribution, repair runs persist automatic-attempt accounting fields, auto-repair evaluates after successful `continue_session`, and the PR health UI shows automatic progress, exhausted attempt state, and a stop path.
 
-Phases 2-8 remain planned. The next implementation chunk should extract the PR readiness enqueue logic into a reusable service without changing runtime behavior.
+Outcome notifications cover automatic repair failures, exhausted attempt budgets, and blocked/failed automatic readiness checks. Metrics cover auto-repair decisions, outcomes, explicit user stop requests, and repair-regret signals for user reverts of automatic repair work and PR-head changes while automatic repair is running.
 
 ## Principles and Boundaries
 
@@ -205,15 +205,15 @@ Defaults:
 | Setting | Existing orgs | New orgs |
 |---|---:|---:|
 | Run readiness after clean review loop | off | off initially |
-| Resolve conflicts when idle | off | off initially |
-| Fix tests when idle | off | off initially |
+| Resolve conflicts when idle | off | on |
+| Fix tests when idle | off | on |
 | Max automatic attempts per head/action | 1 | 1 |
 
 User defaults are `inherit`, so organization defaults remain the team baseline until a user deliberately chooses a personal preference.
 
 ## Audit, Notifications, and Metrics
 
-Every automatic action needs an audit/event trail with org, repo, session, PR, head SHA, action type, trigger reason, policy source, actor, and outcome.
+Started automatic repairs emit a system audit entry with org, repo, session, PR, head SHA, action type, trigger reason, policy source, actor, and outcome. Attention-needed outcomes enqueue Slack notifications, and aggregate rollout counters are emitted for decisions, outcomes, explicit stops, and regret signals.
 
 Notify on outcomes that need attention, not every start:
 
@@ -227,11 +227,13 @@ Success metrics:
 - fewer manual clicks from PR creation to reviewable state
 - lower time from blocker detection to repair start
 - fewer idle sessions with actionable PR blockers
-- low duplicate-repair rate
-- low stop/disable rate
+- low duplicate-repair rate, derived from `active_repair` decisions
+- low stop/disable rate, derived from explicit auto-repair stop requests and `disabled` decisions
+- low failed-loop recurrence, derived from automatic readiness blocked/failed outcomes
+- low repair regret, derived from user reverts of automatic repair threads and PR-head changes while automatic repair is running
 - more PRs with current readiness evidence before human review
 
-Counter-metric before customer rollout: **repair regret**, measured by humans reverting, force-pushing over, or redoing automatic repair work. Efficiency can improve while the feature quietly does the wrong thing; regret catches that.
+Counter-metric before broad customer rollout: **repair regret**, measured by humans reverting automatic repair work or force-pushing over an in-flight automatic repair. Efficiency can improve while the feature quietly does the wrong thing; regret catches that.
 
 ## Rollout
 
@@ -368,10 +370,10 @@ Worker hooks:
 ### Implementation Phases
 
 1. **Implemented - Settings types and UI shell:** added org/user settings types, validation tests, frontend types, Organization -> Session automation section, and Account personal controls. No automation behavior yet.
-2. **Planned - Readiness runner extraction:** move readiness enqueue logic into a reusable service with no behavior change; update handler tests.
-3. **Planned - Auto-readiness after clean review loop:** wire terminal clean loop -> readiness enqueue behind effective policy; add worker/service tests and quiet readiness UI reason.
-4. **Planned - System-authored session messages:** add `system_auto_repair` source support, transcript labeling, and tests proving no real user attribution is required.
-5. **Planned - Repair attempt accounting:** add migration/store/model fields and tests for per-head/action automatic attempt caps.
-6. **Planned - Auto-repair coordinator:** implement eligibility, cheap short-circuits, head-SHA consistency, action ordering, and service tests. Keep policy default off.
-7. **Planned - Session completion hook and UI states:** invoke coordinator after successful continuation, expose active/attempted/exhausted states in PR health UI, and hide duplicate manual buttons while automation is running.
-8. **Planned - Internal rollout:** enable for selected internal repos/orgs, measure duplicate rate, disable rate, failed-loop recurrence, and repair regret before customer opt-in.
+2. **Implemented - Readiness runner extraction:** moved readiness enqueue logic into a reusable service with no behavior change.
+3. **Implemented - Auto-readiness after clean review loop:** terminal clean loops enqueue readiness atomically behind org policy defaults.
+4. **Implemented - System-authored session messages:** added `system_auto_repair` source support and transcript labeling so automatic repair prompts do not require real user attribution.
+5. **Implemented - Repair attempt accounting:** added migration/store/model fields and tests for per-head/action automatic attempt caps.
+6. **Implemented - Auto-repair coordinator:** implemented eligibility, cheap short-circuits, head-SHA consistency, action ordering, system-authored repair launch, and focused service tests.
+7. **Implemented - Session completion hook and UI states:** coordinator runs after successful continuation, active/attempted/exhausted states are exposed in PR health UI, duplicate manual buttons are hidden while automation is running, and automatic repairs have a stop path.
+8. **Implemented - Outcome notifications and rollout metrics:** attention-needed automatic repair/readiness notifications are implemented, and counters cover decisions, outcomes, explicit stops, failed-loop recurrence, and repair-regret signals.

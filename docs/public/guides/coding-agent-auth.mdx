@@ -9,7 +9,7 @@ tags:
   - agents
   - auth
   - codex
-llm_summary: Configure personal or organization-level coding-agent authentication so 143 sessions can run with Codex or supported fallback agents.
+llm_summary: Configure personal or organization-level coding-agent authentication so 143 sessions can run with Codex, Claude Code, OpenCode, or supported fallback agents.
 ---
 
 Agent auth is runtime infrastructure, not prompt context. Set it up in 143 settings so sessions can start reliably without exposing provider keys in issues, repo config, or user instructions.
@@ -22,7 +22,7 @@ Agent auth is runtime infrastructure, not prompt context. Set it up in 143 setti
 
 ## Good defaults
 
-- Start with Codex unless your team has a strong existing provider preference.
+- Start with Codex by default, then Claude Code and OpenCode as the next main coding agents in the stack unless your team has a strong existing provider preference.
 - Keep personal credentials scoped to the user.
 - Use organization fallback credentials only when the team explicitly wants that behavior.
 - Rotate credentials when a provider account changes ownership.
