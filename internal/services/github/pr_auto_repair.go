@@ -156,8 +156,15 @@ func (s *PRService) resolveAutoRepairPolicy(ctx context.Context, orgID uuid.UUID
 		ResolveConflicts: followThrough.ResolveConflictsWhenIdle,
 		FixTests:         followThrough.FixTestsWhenIdle,
 	}
-	source := "organization default"
+	return s.applySessionAutoRepairOverride(ctx, policy, session)
+}
 
+// applySessionAutoRepairOverride layers the session owner's per-user automatic
+// follow-through preferences on top of the supplied organization-default
+// policy. Shared by the auto-repair scheduler and the PR health endpoint so
+// both surfaces resolve the same effective policy.
+func (s *PRService) applySessionAutoRepairOverride(ctx context.Context, policy autoRepairPolicy, session models.Session) (autoRepairPolicy, string, error) {
+	source := "organization default"
 	if session.TriggeredByUserID == nil || s.users == nil {
 		return policy, source, nil
 	}
