@@ -966,10 +966,18 @@ These checks are provider-agnostic — they query Postgres directly.
       Installs `/etc/cron.d/143-pg-backup`: `pg-backup.sh` every 6h (verified
       pg_dump, 7-day local retention) + `restore-test.sh` weekly. Note: local
       retention is 7 days (not 30) so 6-hourly ~900 MB dumps don't fill the disk.
-- [ ] Configure offsite backup sync (`rclone` to S3-compatible storage) —
-      hook is wired: set `BACKUP_SYNC_CMD` in `/opt/143/backup-sync.env` and
-      `pg-backup.sh` ships each verified dump offsite. Still needs a bucket +
-      `rclone` config on the db host.
+- [x] Configure offsite backup sync — `pg-backup.sh` ships each verified dump
+      to S3 after every run, via `BACKUP_SYNC_CMD` in `/opt/143/backup-sync.env`
+      (the official `aws-cli` Docker image, so no host package installs).
+      `provision-db-backups.sh` writes that file from the `BACKUP_*` vars in
+      `.env.production.enc`, so reprovision recreates it. Bucket
+      `143-prod-db-backups-407539787773-us-east-1` lives in the **isolated
+      143.dev account (407539787773)**, not the shared prod account — DR
+      blast-radius isolation. Versioning on, public access blocked, SSE-S3,
+      30-day lifecycle (offsite retention is independent of the 7-day local
+      retention because `s3 sync` never deletes). Scoped IAM user
+      `143-db-backup-bot` (s3:ListBucket/PutObject/GetObject on that bucket
+      only). Verified 2026-06-27.
 - [ ] Enable WAL-G archiving (Layer 3) — **required before accepting users**
 - [x] Run a restore drill — `restore-test.sh` runs weekly and restores the
       newest dump into a throwaway Postgres; verified manually on 2026-06-27.

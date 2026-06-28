@@ -574,8 +574,16 @@ provision-db:
 provision-db-backups:
 	$(check-ssh-key)
 	@HOST="$(HOST)"; \
-	if [ -z "$$HOST" ]; then $(read-fleet-hosts); HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; fi; \
+	ENV_DUMP="$$(sops --decrypt --input-type dotenv --output-type dotenv $(_PROD_ENC) 2>/dev/null || true)"; \
+	if [ -z "$$HOST" ]; then \
+		FLEET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^FLEET_HOSTS=' | cut -d= -f2-)"; \
+		HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; \
+	fi; \
 	test -n "$$HOST" || { echo "ERROR: no HOST given and no db:<ip> in FLEET_HOSTS."; exit 1; }; \
+	export BACKUP_S3_BUCKET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_BUCKET=' | cut -d= -f2-)"; \
+	export BACKUP_S3_REGION="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_REGION=' | cut -d= -f2-)"; \
+	export BACKUP_AWS_ACCESS_KEY_ID="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_ACCESS_KEY_ID=' | cut -d= -f2-)"; \
+	export BACKUP_AWS_SECRET_ACCESS_KEY="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_SECRET_ACCESS_KEY=' | cut -d= -f2-)"; \
 	echo "Configuring DB backups on $$HOST..."; \
 	./deploy/scripts/provision-db-backups.sh "$$HOST" "$(SSH_KEY)"
 

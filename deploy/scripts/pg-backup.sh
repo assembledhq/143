@@ -55,9 +55,11 @@ echo "$(date -Iseconds) Backup complete: $BACKUP_FILE ($BACKUP_SIZE)"
 find "$BACKUP_DIR" -name "*.dump" -mtime +"$RETENTION_DAYS" -delete
 echo "$(date -Iseconds) Cleaned backups older than $RETENTION_DAYS days"
 
-# Optional offsite sync (true disaster recovery). Without it, dumps live only
-# on this host's disk — a disk/VPS loss takes the backups with it. To enable,
-# drop a BACKUP_SYNC_CMD into /opt/143/backup-sync.env, e.g.:
+# Offsite sync (true disaster recovery). Without it, dumps live only on this
+# host's disk — a disk/VPS loss takes the backups with it. /opt/143/backup-sync.env
+# is written by deploy/scripts/provision-db-backups.sh from the BACKUP_* vars in
+# .env.production.enc; it exports AWS creds + a BACKUP_SYNC_CMD that pushes
+# $BACKUP_DIR to S3. To wire a different target by hand, set e.g.:
 #   BACKUP_SYNC_CMD='rclone sync /backups/postgres s3:143-backups/postgres/'
 SYNC_ENV="${BACKUP_SYNC_ENV:-/opt/143/backup-sync.env}"
 # shellcheck disable=SC1090

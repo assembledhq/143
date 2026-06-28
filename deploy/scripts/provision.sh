@@ -684,11 +684,12 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" << START
 START
 
 # For db nodes: install automated backups (pg_dump every 6h + weekly restore
-# test). The scripts were copied with the rest of deploy/ above; the installer
-# is idempotent, so this is a no-op on reprovision.
+# test) and the offsite sync config. The wrapper is idempotent, so this is a
+# no-op on reprovision. BACKUP_* (if present in .env.production.enc) were
+# exported above and drive /opt/143/backup-sync.env.
 if [ "$ROLE" = "db" ]; then
-  echo "Installing automated DB backups..."
-  ssh "${SSH_OPTS[@]}" root@"$HOST" "/opt/143/deploy/scripts/install-pg-backups.sh"
+  echo "Configuring DB backups..."
+  "$SCRIPT_DIR/provision-db-backups.sh" "$HOST" "$SSH_KEY"
 fi
 
 # For app nodes: wait for health + run migrations (single SSH session)
