@@ -31,6 +31,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DurationInput } from "@/components/duration-input";
 import { ApiError, api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
@@ -573,13 +574,15 @@ export default function CodeReviewsPage() {
                         autosave={autosave}
                         buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
                       />
-                      <NumberPolicyInput
-                        label="Timeout seconds"
-                        serverValue={config?.agent_roster.timeout_seconds}
-                        min={60}
+                      <DurationInput
+                        label="Timeout"
+                        valueSeconds={config?.agent_roster.timeout_seconds ?? 60}
+                        minSeconds={60}
                         disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.timeout_seconds = value; })}
+                        defaultUnit="minutes"
+                        onChangeSeconds={(seconds) =>
+                          autosave.save(buildConfig((next) => { next.agent_roster.timeout_seconds = seconds; }))
+                        }
                       />
                       <NumberPolicyInput
                         label="Cost ceiling cents"

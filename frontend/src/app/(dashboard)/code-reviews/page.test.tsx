@@ -228,6 +228,9 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     }),
     http.get("/api/v1/code-review-github-trigger", () => HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>)),
   );
+  return {
+    getCurrentConfig: () => currentConfig,
+  };
 }
 
 describe("CodeReviewsPage", () => {
@@ -280,9 +283,29 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: /Apply template/i }));
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
     expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
+    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("saves code review timeout in seconds from the selected unit", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
+
+    expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
+    await user.click(screen.getByRole("combobox", { name: "Timeout unit" }));
+    await user.click(await screen.findByRole("option", { name: "Hours" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.timeout_seconds).toBe(30 * 60 * 60);
+    });
   });
 
   it("renders GitHub trigger account-required state", async () => {
