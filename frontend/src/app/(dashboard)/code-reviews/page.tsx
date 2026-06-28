@@ -47,6 +47,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { DurationInput } from "@/components/duration-input";
 import { ApiError, api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
@@ -153,6 +154,7 @@ export default function CodeReviewsPage() {
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
+  const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
@@ -276,6 +278,22 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
+  const selectedTemplateAlreadyApplied = useMemo(() => {
+    if (!selectedTemplate || !config) return false;
+    return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
+  }, [config, selectedTemplate]);
+  useEffect(() => {
+    setPendingTemplateApply(null);
+  }, [selectedTemplateKey, repositoryId]);
+  useEffect(() => {
+    if (!pendingTemplateApply) return;
+    if (autosave.status === "saved") {
+      toast.success(`Applied ${pendingTemplateApply.title}`);
+      setPendingTemplateApply(null);
+    } else if (autosave.status === "error") {
+      setPendingTemplateApply(null);
+    }
+  }, [autosave.status, pendingTemplateApply]);
   // Build a fully-merged config from the freshest cache value. Returns null
   // only before the policy has loaded (controls are disabled until then).
   const draftFrom = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig | null => {
@@ -566,6 +584,20 @@ export default function CodeReviewsPage() {
                       disabled={!selectedTemplate || !config}
                       onClick={() => {
                         if (!selectedTemplate) return;
+                        const latestConfig = readLatestConfig();
+                        const alreadyApplied =
+                          selectedTemplateAlreadyApplied ||
+                          (latestConfig
+                            ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
+                            : false);
+                        if (alreadyApplied) {
+                          toast.info(`${selectedTemplate.title} is already applied`);
+                          return;
+                        }
+                        setPendingTemplateApply({
+                          key: selectedTemplate.key,
+                          title: selectedTemplate.title,
+                        });
                         autosave.save(clonePolicy(selectedTemplate.config));
                       }}
                     >
