@@ -298,13 +298,6 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return mcp.ErrorResult(ctx.Err().Error())
-		case <-deadline.C:
-			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for session preview %s", sessionID))
-		case <-ticker.C:
-		}
 		result := e.sessionStatus(ctx, sessionID)
 		if result.IsError {
 			return result
@@ -319,6 +312,13 @@ func (e *previewToolExecutor) waitSessionReady(ctx context.Context, sessionID st
 			return result
 		case "failed", "stopped", "expired", "unavailable":
 			return mcp.ErrorResult(fmt.Sprintf("preview %s: %v", state, status["error"]))
+		}
+		select {
+		case <-ctx.Done():
+			return mcp.ErrorResult(ctx.Err().Error())
+		case <-deadline.C:
+			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for session preview %s", sessionID))
+		case <-ticker.C:
 		}
 	}
 }
@@ -399,7 +399,11 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview create arguments")
 	}
+	hasBranchTarget := strings.TrimSpace(params.Repository) != "" || strings.TrimSpace(params.Branch) != ""
 	if params.SessionID != "" {
+		if hasBranchTarget {
+			return mcp.ErrorResult("specify session_id or repository and branch, not both")
+		}
 		var resp struct {
 			Data ensurePreviewWire `json:"data"`
 		}
@@ -437,7 +441,46 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 	if err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("preview create failed: %s", err))
 	}
+	if params.Wait {
+		return e.waitBranchReady(ctx, resp.Data.view().PreviewID)
+	}
 	return jsonResult(resp.Data.view())
+}
+
+func (e *previewToolExecutor) waitBranchReady(ctx context.Context, previewID string) *mcp.ToolCallResult {
+	if strings.TrimSpace(previewID) == "" {
+		return mcp.ErrorResult("preview create did not return a preview_id to wait on")
+	}
+	deadline := time.NewTimer(previewWaitTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		result := e.status(ctx, mustJSON(map[string]string{"preview_id": previewID}))
+		if result.IsError {
+			return result
+		}
+		var status previewView
+		if err := json.Unmarshal([]byte(firstText(result)), &status); err != nil {
+			return result
+		}
+		switch status.Status {
+		case "running", "ready", "partially_ready":
+			return result
+		case "failed", "stopped", "expired", "unavailable":
+			if status.Error != "" {
+				return mcp.ErrorResult(fmt.Sprintf("preview %s: %s", status.Status, status.Error))
+			}
+			return mcp.ErrorResult(fmt.Sprintf("preview %s", status.Status))
+		}
+		select {
+		case <-ctx.Done():
+			return mcp.ErrorResult(ctx.Err().Error())
+		case <-deadline.C:
+			return mcp.ErrorResult(fmt.Sprintf("timed out waiting for preview %s", previewID))
+		case <-ticker.C:
+		}
+	}
 }
 
 func (e *previewToolExecutor) status(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
@@ -548,7 +591,7 @@ func (e *previewToolExecutor) update(ctx context.Context, args json.RawMessage) 
 	if err := json.Unmarshal(args, &params); err != nil || params.SessionID == "" {
 		return mcp.ErrorResult("session_id is required")
 	}
-	body := map[string]any{"path": params.Path, "wait": false, "force_mode": params.ForceMode}
+	body := map[string]any{"path": params.Path, "wait": params.Wait, "force_mode": params.ForceMode}
 	if params.ReloadBrowser != nil {
 		body["reload_browser"] = *params.ReloadBrowser
 	}
@@ -564,9 +607,6 @@ func (e *previewToolExecutor) update(ctx context.Context, args json.RawMessage) 
 	}
 	if err := e.client.Do(ctx, http.MethodPost, "/api/v1/sessions/"+params.SessionID+"/preview/update", body, &resp); err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("preview update failed: %s", err))
-	}
-	if params.Wait {
-		return e.waitSessionReady(ctx, params.SessionID)
 	}
 	return jsonResult(resp.Data)
 }
