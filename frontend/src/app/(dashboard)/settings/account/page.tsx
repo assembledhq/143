@@ -247,11 +247,11 @@ const PERSONAL_AUTOMATION_COPY: Record<PersonalAutomationKey, { title: string; d
   },
   resolve_conflicts_when_idle: {
     title: "Resolve conflicts when idle",
-    description: "Allow automatic conflict repair for your idle sessions when the org also permits it.",
+    description: "Allow automatic conflict repair for your idle sessions, overriding the organization default when needed.",
   },
   fix_tests_when_idle: {
     title: "Fix failing tests when idle",
-    description: "Allow automatic test repair for your idle sessions when the org also permits it.",
+    description: "Allow automatic test repair for your idle sessions, overriding the organization default when needed.",
   },
 };
 

@@ -9855,12 +9855,20 @@ func TestContinueSessionHandler_CompletesPRRepairAfterSuccess(t *testing.T) {
 		},
 	}
 	var completed bool
+	var synced bool
 	prSvc := &stubPRService{
 		completePullRequestRepairRunFn: func(ctx context.Context, gotOrgID, gotPullRequestID, gotRepairRunID uuid.UUID) error {
 			completed = true
 			require.Equal(t, orgID, gotOrgID, "repair completion should use the payload org")
 			require.Equal(t, prID, gotPullRequestID, "repair completion should use the payload PR")
 			require.Equal(t, repairRunID, gotRepairRunID, "repair completion should use the payload repair run")
+			return nil
+		},
+		syncPullRequestStateFn: func(ctx context.Context, gotOrgID, gotPullRequestID uuid.UUID) error {
+			synced = true
+			require.True(t, completed, "repair health sync should run after repair completion bookkeeping")
+			require.Equal(t, orgID, gotOrgID, "repair health sync should use the payload org")
+			require.Equal(t, prID, gotPullRequestID, "repair health sync should use the payload PR")
 			return nil
 		},
 	}
@@ -9883,6 +9891,74 @@ func TestContinueSessionHandler_CompletesPRRepairAfterSuccess(t *testing.T) {
 	err = handler(context.Background(), "continue_session", payloadJSON)
 	require.NoError(t, err, "continue_session should succeed when repair completion notification succeeds")
 	require.True(t, completed, "continue_session should complete the linked PR repair run after a successful repair turn")
+	require.True(t, synced, "continue_session should refresh PR health after repair completion")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_PendingMergeabilityStillEvaluatesAutoRepair(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	prID := uuid.New()
+	repairRunID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "continue_session should pass PR repair metadata to the orchestrator")
+			require.NotNil(t, opts.PRRepair, "continue_session should decode PR repair metadata before completion")
+			return nil
+		},
+	}
+	var synced bool
+	var evaluated bool
+	prSvc := &stubPRService{
+		syncPullRequestStateFn: func(ctx context.Context, gotOrgID, gotPullRequestID uuid.UUID) error {
+			synced = true
+			// GitHub has refreshed the snapshot to the post-repair head but is
+			// still computing mergeability; the follow-through should proceed.
+			return ghservice.ErrPullRequestMergeabilityPending
+		},
+		maybeStartAutoRepairFn: func(ctx context.Context, gotOrgID, gotSessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+			evaluated = true
+			require.True(t, synced, "auto-repair evaluation should run after the post-repair health sync")
+			require.Equal(t, orgID, gotOrgID, "auto-repair evaluation should use the payload org")
+			require.Equal(t, sessionID, gotSessionID, "auto-repair evaluation should use the continued session")
+			return nil, nil
+		},
+	}
+
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch, PR: prSvc}, zerolog.Nop())
+	payload := map[string]any{
+		"session_id":          sessionID.String(),
+		"org_id":              orgID.String(),
+		"pull_request_id":     prID.String(),
+		"repair_run_id":       repairRunID.String(),
+		"command_type":        "fix_tests",
+		"health_version":      12,
+		"head_sha":            "head-sha",
+		"workspace_mode":      "snapshot_continuation",
+		"pull_request_number": 42,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	require.NoError(t, err, "test payload should marshal")
+
+	err = handler(context.Background(), "continue_session", payloadJSON)
+	require.NoError(t, err, "continue_session should succeed when only mergeability is still pending")
+	require.True(t, synced, "continue_session should refresh PR health after repair completion")
+	require.True(t, evaluated, "pending mergeability should not strand the automatic repair follow-through")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

@@ -9264,6 +9264,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		autoRepairAfterContinue := true
 		if continueOpts != nil && continueOpts.PRRepair != nil && services.PR != nil {
 			if completionErr := services.PR.CompletePullRequestRepairRun(ctx, orgID, continueOpts.PRRepair.PullRequestID, continueOpts.PRRepair.RepairRunID); completionErr != nil {
 				logger.Warn().
@@ -9276,8 +9277,28 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			if input.AutoAttempt {
 				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(continueOpts.PRRepair.CommandType), "completed")
 			}
+			if syncErr := services.PR.SyncPullRequestState(ctx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
+				if errors.Is(syncErr, ghservice.ErrPullRequestMergeabilityPending) {
+					// The health snapshot was refreshed to the post-repair head;
+					// only GitHub's mergeability flag is still settling. The
+					// blocker signals the follow-through relies on are current,
+					// so proceed rather than stranding the repair chain.
+					logger.Debug().
+						Err(syncErr).
+						Str("session_id", sessionID.String()).
+						Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+						Msg("pull request mergeability still settling after repair; continuing automatic repair follow-through on refreshed health")
+				} else {
+					autoRepairAfterContinue = false
+					logger.Warn().
+						Err(syncErr).
+						Str("session_id", sessionID.String()).
+						Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+						Msg("skipping automatic pull request repair follow-through until PR health is fresh")
+				}
+			}
 		}
-		if services.PR != nil {
+		if services.PR != nil && autoRepairAfterContinue {
 			if decision, autoRepairErr := services.PR.MaybeStartAutoRepair(ctx, orgID, sessionID, "session_idle"); autoRepairErr != nil {
 				logger.Warn().
 					Err(autoRepairErr).

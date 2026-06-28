@@ -337,7 +337,7 @@ func (s *PRService) populateActiveRepairs(ctx context.Context, pr models.PullReq
 }
 
 func (s *PRService) populateAutoRepairAttemptState(ctx context.Context, pr models.PullRequest, resp *models.PullRequestHealthResponse) error {
-	if pr.Status != models.PullRequestStatusOpen || resp.HeadSHA == "" || s.pullRequests == nil || s.orgs == nil || s.users == nil {
+	if pr.Status != models.PullRequestStatusOpen || resp.HeadSHA == "" || s.pullRequests == nil || s.orgs == nil {
 		return nil
 	}
 	org, err := s.orgs.GetByID(ctx, pr.OrgID)
@@ -348,15 +348,35 @@ func (s *PRService) populateAutoRepairAttemptState(ctx context.Context, pr model
 	if err != nil {
 		return fmt.Errorf("parse organization settings for automatic repair state: %w", err)
 	}
-	followThrough := settings.SessionAutomation.AutomaticFollowThrough
-	if !followThrough.ResolveConflictsWhenIdle && !followThrough.FixTestsWhenIdle {
+	policy := autoRepairPolicy{
+		ResolveConflicts: settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle,
+		FixTests:         settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle,
+	}
+	// Personal preferences can independently flip either action on or off, so
+	// resolve the effective policy whenever the PR has an owning session. This
+	// keeps the exhausted-action badges aligned with what MaybeStartAutoRepair
+	// would actually attempt.
+	if pr.SessionID != nil && s.sessions != nil && s.users != nil {
+		session, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("load session for automatic repair state: %w", err)
+			}
+		} else {
+			policy, _, err = s.applySessionAutoRepairOverride(ctx, policy, session)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if !policy.ResolveConflicts && !policy.FixTests {
 		return nil
 	}
 	for _, action := range []models.PullRequestRepairActionType{models.PullRequestRepairActionTypeResolveConflicts, models.PullRequestRepairActionTypeFixTests} {
-		if action == models.PullRequestRepairActionTypeResolveConflicts && !followThrough.ResolveConflictsWhenIdle {
+		if action == models.PullRequestRepairActionTypeResolveConflicts && !policy.ResolveConflicts {
 			continue
 		}
-		if action == models.PullRequestRepairActionTypeFixTests && !followThrough.FixTestsWhenIdle {
+		if action == models.PullRequestRepairActionTypeFixTests && !policy.FixTests {
 			continue
 		}
 		exhausted, err := s.autoRepairBudgetExhausted(ctx, pr.OrgID, pr.ID, action, resp.HeadSHA)
