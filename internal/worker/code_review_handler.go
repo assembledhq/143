@@ -892,7 +892,6 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		BlockingFindings:       codeReviewBlockingFindings(findings),
 		ReviewerDisagreement:   reviewerFailures > 0,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
-		ReviewCostCents:        codeReviewAgentResultCostCents(agentResults),
 		PromptInjectionFound:   description.PromptInjectionFound,
 	})
 	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum {
@@ -1589,7 +1588,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		BlockingFindings:       blockingFindings,
 		ReviewerDisagreement:   reviewerFailures > 0 || input.OrchestratorSynthesis.ReviewerDisagreement,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
-		ReviewCostCents:        codeReviewAgentResultCostCents(input.AgentResults),
 		ScopeMismatch:          input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
@@ -1877,25 +1875,6 @@ func codeReviewReviewerEvidence(results []models.CodeReviewAgentResult) (quorum 
 		}
 	}
 	return quorum, failures
-}
-
-func codeReviewAgentResultCostCents(results []models.CodeReviewAgentResult) float64 {
-	total := 0.0
-	for _, result := range results {
-		switch result.Role {
-		case models.CodeReviewAgentRoleReviewer:
-			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
-			if ok {
-				total += state.CostCents
-			}
-		case models.CodeReviewAgentRoleOrchestrator:
-			state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
-			if ok {
-				total += state.CostCents
-			}
-		}
-	}
-	return total
 }
 
 func codeReviewBlockingFindings(findings []models.CodeReviewFinding) int {
