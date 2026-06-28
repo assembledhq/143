@@ -616,11 +616,15 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+# interrupt=true force-interrupts active runtimes (previews/running jobs) during a
+# maintenance worker drain. Only honored with DEPLOY_MODE=maintenance; set
+# DEPLOY_REASON and DEPLOY_REQUESTED_BY alongside it so the drain is auditable.
+interrupt ?=
 DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
-deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS))
+deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS)) FORCE_INTERRUPT_ACTIVE_RUNTIMES=$(if $(filter true 1 yes,$(interrupt)),1,$(FORCE_INTERRUPT_ACTIVE_RUNTIMES))
 worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_START) WORKER_BLUE_GREEN_PORT_END=$(WORKER_BLUE_GREEN_PORT_END)
 
 # Deploy (update) an already-provisioned node.
@@ -632,6 +636,9 @@ worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_ST
 #   make deploy-app    TAG=<sha>
 #   make deploy-worker force=true
 #   make deploy-fleet ROLES=app,worker
+#   # Force a maintenance worker drain past active previews/running jobs (interrupts them):
+#   DEPLOY_REASON="re-baseline host-runtime" DEPLOY_REQUESTED_BY=john \
+#     DEPLOY_MODE=maintenance make deploy-fleet ROLES=worker interrupt=true
 
 # Shell snippet to read FLEET_HOSTS from env var or $(_PROD_ENC) via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);
