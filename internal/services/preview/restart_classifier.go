@@ -57,7 +57,7 @@ func (DefaultPreviewRestartClassifier) SelectUpdateMode(status models.PreviewSta
 	}
 	switch status {
 	case models.PreviewStatusStarting:
-		return models.PreviewUpdateModeFullRecycle
+		return ""
 	case models.PreviewStatusFailed, models.PreviewStatusStopped, models.PreviewStatusExpired, models.PreviewStatusUnavailable:
 		return models.PreviewUpdateModeColdRelaunch
 	}
@@ -76,7 +76,7 @@ func (DefaultPreviewRestartClassifier) SelectUpdateMode(status models.PreviewSta
 		}
 		return models.PreviewUpdateModeSoftServiceRestart
 	case models.PreviewFreshnessUpdating:
-		return models.PreviewUpdateModeFullRecycle
+		return ""
 	default:
 		return models.PreviewUpdateModeColdRelaunch
 	}

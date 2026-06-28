@@ -1970,6 +1970,10 @@ func (h *PreviewHandler) UpdatePreview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	freshness := h.previewFreshness(r.Context(), orgID, sessionID, instance)
+	if freshness != nil && freshness.State == models.PreviewFreshnessUpdating {
+		writeError(w, r, http.StatusConflict, "PREVIEW_UPDATE_CONFLICT", "preview start or update is already in progress")
+		return
+	}
 	mode := h.recommendedPreviewUpdateMode(instance, freshness, reloadBrowser)
 	if body.ForceMode != "" {
 		mode = body.ForceMode
