@@ -575,11 +575,14 @@ provision-db-backups:
 	$(check-ssh-key)
 	@HOST="$(HOST)"; \
 	ENV_DUMP="$$(sops --decrypt --input-type dotenv --output-type dotenv $(_PROD_ENC) 2>/dev/null || true)"; \
+	if [ -z "$$ENV_DUMP" ]; then \
+		echo "WARNING: could not decrypt $(_PROD_ENC) (missing age key?). Offsite sync config will be left unchanged; cron will still be (re)installed." >&2; \
+	fi; \
 	if [ -z "$$HOST" ]; then \
 		FLEET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^FLEET_HOSTS=' | cut -d= -f2-)"; \
 		HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; \
 	fi; \
-	test -n "$$HOST" || { echo "ERROR: no HOST given and no db:<ip> in FLEET_HOSTS."; exit 1; }; \
+	test -n "$$HOST" || { echo "ERROR: no HOST given and no db:<ip> in FLEET_HOSTS (set HOST=<ip> or fix the age key)."; exit 1; }; \
 	export BACKUP_S3_BUCKET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_BUCKET=' | cut -d= -f2-)"; \
 	export BACKUP_S3_REGION="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_REGION=' | cut -d= -f2-)"; \
 	export BACKUP_AWS_ACCESS_KEY_ID="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_ACCESS_KEY_ID=' | cut -d= -f2-)"; \

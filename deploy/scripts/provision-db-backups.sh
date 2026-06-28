@@ -49,8 +49,10 @@ if [ -n "${BACKUP_S3_BUCKET:-}" ]; then
   # The official AWS CLI image syncs the local backup dir to S3 with no host
   # package install. `s3 sync` (no --delete) never removes remote objects, so
   # offsite retention is governed by the bucket lifecycle, independent of the
-  # shorter local retention.
-  SYNC_CMD="docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -v /backups/postgres:/backups:ro public.ecr.aws/aws-cli/aws-cli:latest s3 sync /backups s3://$BACKUP_S3_BUCKET/postgres/ --only-show-errors"
+  # shorter local retention. The image is pinned by digest (not :latest) for
+  # reproducibility — bump AWS_CLI_IMAGE deliberately. (aws-cli v2.35.11.)
+  AWS_CLI_IMAGE="public.ecr.aws/aws-cli/aws-cli@sha256:749bfaf91d690b9a1768083822d620f96c19defdf9ca2dc227eb3695281fda5b"
+  SYNC_CMD="docker run --rm -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -v /backups/postgres:/backups:ro $AWS_CLI_IMAGE s3 sync /backups s3://$BACKUP_S3_BUCKET/postgres/ --only-show-errors"
   printf '# Managed by deploy/scripts/provision-db-backups.sh — do not edit by hand.\n# Offsite sync config sourced by pg-backup.sh after each verified dump.\nexport AWS_ACCESS_KEY_ID=%s\nexport AWS_SECRET_ACCESS_KEY=%s\nexport AWS_DEFAULT_REGION=%s\nexport BACKUP_SYNC_CMD=%s\n' \
     "$BACKUP_AWS_ACCESS_KEY_ID" "$BACKUP_AWS_SECRET_ACCESS_KEY" "$BACKUP_S3_REGION" "'$SYNC_CMD'" \
     | ssh "${SSH_OPTS[@]}" root@"$HOST" 'cat > /opt/143/backup-sync.env && chown deploy:deploy /opt/143/backup-sync.env && chmod 600 /opt/143/backup-sync.env'

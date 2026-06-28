@@ -62,8 +62,10 @@ echo "$(date -Iseconds) Cleaned backups older than $RETENTION_DAYS days"
 # $BACKUP_DIR to S3. To wire a different target by hand, set e.g.:
 #   BACKUP_SYNC_CMD='rclone sync /backups/postgres s3:143-backups/postgres/'
 SYNC_ENV="${BACKUP_SYNC_ENV:-/opt/143/backup-sync.env}"
-# shellcheck disable=SC1090
-[ -f "$SYNC_ENV" ] && . "$SYNC_ENV"
+if [ -f "$SYNC_ENV" ]; then
+  # shellcheck disable=SC1090
+  . "$SYNC_ENV"
+fi
 if [ -n "${BACKUP_SYNC_CMD:-}" ]; then
   echo "$(date -Iseconds) Running offsite sync..."
   if eval "$BACKUP_SYNC_CMD"; then

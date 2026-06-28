@@ -976,12 +976,16 @@ These checks are provider-agnostic — they query Postgres directly.
       blast-radius isolation. Versioning on, public access blocked, SSE-S3,
       30-day lifecycle (offsite retention is independent of the 7-day local
       retention because `s3 sync` never deletes). Scoped IAM user
-      `143-db-backup-bot` (s3:ListBucket/PutObject/GetObject on that bucket
-      only). Verified 2026-06-27.
+      `143-db-backup-bot` is **write-only** — `s3:ListBucket` + `s3:PutObject`
+      on that bucket only (no GetObject/Delete), so the creds (which propagate
+      to app/worker hosts via the enc bundle) can't exfiltrate or destroy
+      backups; restores use admin creds. The `aws-cli` image is pinned by
+      digest. Verified 2026-06-27.
 - [ ] Enable WAL-G archiving (Layer 3) — **required before accepting users**
 - [x] Run a restore drill — `restore-test.sh` runs weekly and restores the
-      newest dump into a throwaway Postgres; verified manually on 2026-06-27.
-      WAL-G restore still pending Layer 3.
+      newest dump into a throwaway Postgres (image pinned to the prod major,
+      `postgres:18`); verified manually on 2026-06-27. WAL-G restore still
+      pending Layer 3.
 - [ ] Set up monitoring (Datadog, Prometheus, or even just cron + email alerts)
 
 ### Environment Variables (Backup & Recovery)
