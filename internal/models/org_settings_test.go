@@ -155,6 +155,16 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 	}
 }
 
+func TestDefaultNewOrganizationSettings_EnablesAutomaticRepair(t *testing.T) {
+	t.Parallel()
+
+	settings, err := ParseOrgSettings(DefaultNewOrganizationSettings())
+	require.NoError(t, err, "DefaultNewOrganizationSettings should produce valid org settings")
+	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.ResolveConflictsWhenIdle, "new organizations should default automatic conflict repair on")
+	require.True(t, settings.SessionAutomation.AutomaticFollowThrough.FixTestsWhenIdle, "new organizations should default automatic test repair on")
+	require.False(t, settings.SessionAutomation.AutomaticFollowThrough.ReadinessAfterReviewLoop, "new organizations should not change the readiness default")
+}
+
 func TestAutomaticFollowThroughOrgSettings_EffectiveReadinessAfterReviewLoopStates(t *testing.T) {
 	t.Parallel()
 

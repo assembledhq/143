@@ -1059,6 +1059,7 @@ func (s *PRService) resumeRepairSession(ctx context.Context, pr models.PullReque
 		"workspace_mode":      string(workspaceMode),
 		"pull_request_number": pr.GitHubPRNumber,
 		"queued_message_id":   strconv.FormatInt(msg.ID, 10),
+		"auto_attempt":        opts.AutoAttempt,
 	}
 	if threadID != nil {
 		payload["thread_id"] = threadID.String()

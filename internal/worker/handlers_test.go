@@ -414,10 +414,14 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		expected  bool
 	}{
 		{name: "balanced includes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: true},
+		{name: "balanced includes auto repair attention", preset: &balanced, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: true},
+		{name: "balanced includes readiness attention", preset: &balanced, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: true},
 		{name: "balanced excludes preview ready", preset: &balanced, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
 		{name: "balanced excludes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
 		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
+		{name: "quiet includes auto repair attention", preset: &quiet, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: true},
+		{name: "quiet includes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: true},
 		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: true},
@@ -496,6 +500,37 @@ func TestRenderSlackNotificationUsesKindDefaultsAndActions(t *testing.T) {
 	require.Contains(t, text, "Pull request opened", "notification should default the title from event kind")
 	require.Contains(t, text, "ready for review", "notification should default the body from event kind")
 	require.True(t, slackBlocksContainURLButton(blocks, "Review PR"), "PR notifications should include a review action")
+}
+
+func TestRenderSlackNotificationUsesAutoRepairAttentionDefaults(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	prID := uuid.New()
+	text, blocks := renderSlackNotification(&Services{FrontendURL: "https://143.test"}, models.SlackSendNotificationJobPayload{
+		Kind:          string(models.SlackNotificationPRAutoRepairAttention),
+		SessionID:     sessionID.String(),
+		PullRequestID: prID.String(),
+	})
+
+	require.Contains(t, text, "Automatic PR repair needs attention", "notification should default the auto repair attention title")
+	require.Contains(t, text, "could not complete automatic PR repair", "notification should default the auto repair attention body")
+	require.True(t, slackBlocksContainURLButton(blocks, "Open session"), "auto repair attention notifications should include a session action")
+	require.True(t, slackBlocksContainURLButton(blocks, "Review PR"), "auto repair attention notifications should include a PR action")
+}
+
+func TestRenderSlackNotificationUsesReadinessAttentionDefaults(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	text, blocks := renderSlackNotification(&Services{FrontendURL: "https://143.test"}, models.SlackSendNotificationJobPayload{
+		Kind:      string(models.SlackNotificationPRReadinessAttention),
+		SessionID: sessionID.String(),
+	})
+
+	require.Contains(t, text, "PR readiness needs attention", "notification should default the readiness attention title")
+	require.Contains(t, text, "readiness checks found blockers", "notification should default the readiness attention body")
+	require.True(t, slackBlocksContainURLButton(blocks, "Open session"), "readiness attention notifications should include a session action")
 }
 
 func TestRenderSlackPromptIncludesReferencesAndFiles(t *testing.T) {
