@@ -582,14 +582,6 @@ export default function CodeReviewsPage() {
                         buildPatch={(value) => buildConfig((next) => { next.agent_roster.timeout_seconds = value; })}
                       />
                       <NumberPolicyInput
-                        label="Cost ceiling cents"
-                        serverValue={config?.agent_roster.max_cost_cents}
-                        min={0}
-                        disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.max_cost_cents = value; })}
-                      />
-                      <NumberPolicyInput
                         label="Reviewer quorum"
                         serverValue={config?.agent_roster.require_reviewer_quorum}
                         min={1}
@@ -1088,6 +1080,7 @@ function NumberPolicyInput({
       <Input
         className="mt-2"
         type="number"
+        aria-label={label}
         min={min}
         max={max}
         value={field.value}
