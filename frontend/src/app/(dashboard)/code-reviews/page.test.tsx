@@ -81,7 +81,6 @@ const policy: CodeReviewResolvedPolicy = {
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
-      max_cost_cents: 500,
     },
     inline_comment_limit: 4,
     inheritance: {
