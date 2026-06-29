@@ -390,7 +390,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			AgentType:       string(agentType),
 			Model:           stringPtrValue(agentModel),
 			Label:           codeReviewReviewerThreadLabel(agentType),
-			Instructions:    "Inspect only. Do not edit files, commit, push, or change the workspace.",
+			Instructions:    "Inspect and report only. Identify and describe problems — do not fix them. Do not edit, create, or delete files, apply patches or fixes, commit, push, or otherwise change the workspace, even for trivial fixes. Fixes happen later in a separate step.",
 			FileScope:       fileScope,
 			ExecutionMode:   models.ThreadExecutionModeReview,
 			FilesystemMode:  models.ThreadFilesystemModeReadOnly,
@@ -1378,25 +1378,24 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		return err
 	}
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
-	thread, err := threads.CreateThread(ctx, threadsvc.CreateThreadInput{
-		SessionID:       job.SessionID,
-		OrgID:           job.OrgID,
-		AgentType:       string(cfg.AgentRoster.Orchestrator),
-		Model:           stringPtrValue(agentModel),
-		Label:           "Code review: orchestrator",
-		Instructions:    "Synthesize only. Do not edit files, commit, push, or change the workspace.",
-		FileScope:       codeReviewChangedPaths(changedFiles),
-		ExecutionMode:   models.ThreadExecutionModeReview,
-		FilesystemMode:  models.ThreadFilesystemModeReadOnly,
-		CreatedBySource: models.ThreadCreatedBySourceSystem,
-	})
+	// Run the orchestrator on the session's primary ("Main") thread rather than
+	// spinning up a dedicated tab. The primary thread is created with the
+	// session's AgentType (the orchestrator) and model, so synthesis lands on the
+	// main session thread the user sees first instead of a separate review tab.
+	// The reviewers keep their own read-only tabs; only the final synthesis is
+	// folded back onto the main thread.
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
-		return fmt.Errorf("create code review orchestrator thread: %w", err)
+		return fmt.Errorf("load code review session for orchestrator: %w", err)
+	}
+	threadID, err := primaryThreadIDForSession(ctx, stores, session)
+	if err != nil {
+		return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-		ThreadID:          thread.ID.String(),
+		ThreadID:          threadID.String(),
 		PromptArtifactKey: artifactKey,
-		ReadOnly:          true,
+		ReadOnly:          false,
 	})
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
@@ -1413,19 +1412,19 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:     job.SessionID,
 		OrgID:         job.OrgID,
-		ThreadID:      thread.ID,
+		ThreadID:      threadID,
 		Message:       promptText,
 		MessageSource: models.SessionMessageSourceAgentTool,
 	}); err != nil {
 		raw := err.Error()
 		if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-			ThreadID:          thread.ID.String(),
+			ThreadID:          threadID.String(),
 			PromptArtifactKey: artifactKey,
 			Error:             raw,
 		})); updateErr != nil {
-			logger.Warn().Err(updateErr).Str("thread_id", thread.ID.String()).Msg("failed to record failed code review orchestrator result")
+			logger.Warn().Err(updateErr).Str("thread_id", threadID.String()).Msg("failed to record failed code review orchestrator result")
 		}
-		logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to start code review orchestrator thread")
+		logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
 		return nil
 	}
 	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusRunning, nil, structured); err != nil {
