@@ -6500,6 +6500,13 @@ func TestContinueSession_ContextCanceledWithoutUserCancelIsInterruptedNotCancell
 	require.NotErrorIs(t, err, agent.ErrSessionCancelled, "plain parent context cancellation should not be classified as user cancellation")
 	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusCancelled), "system interruptions must not mark the session cancelled")
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "system interruptions without a checkpoint should restore the pre-turn status")
+	queuedRecovery := false
+	for _, update := range d.sessions.recoveryStates {
+		if update.state == models.RecoveryStateQueued {
+			queuedRecovery = true
+		}
+	}
+	require.True(t, queuedRecovery, "system interruptions should queue session recovery so the UI's recovery banner fires instead of a bare \"Agent is working…\"")
 }
 
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
@@ -9799,6 +9806,50 @@ func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"error should name the missing credential so users know what to configure")
 	require.False(t, sandboxCreated,
 		"pre-flight auth check must fire before sandbox creation")
+}
+
+// TestRunAgent_AuthFailureTerminalizesPrimaryThread is a regression test for the
+// stuck "Agent is working…" indicator: a pre-flight auth failure (e.g. the user
+// picks a model with no backing credential) marked the session failed but left
+// the primary thread at "running". Because the UI binds that indicator to the
+// thread status — not the session status — the spinner kept running until the
+// reaper swept the thread ~2.5h later. failRun must now terminalize the thread
+// on every early-exit failure path, not just the main run loop.
+func TestRunAgent_AuthFailureTerminalizesPrimaryThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypeAmp
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+	d.sessionThreads = &mockSessionThreadStore{}
+
+	var sandboxCreated bool
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		sandboxCreated = true
+		return &agent.Sandbox{ID: "amp-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "missing-credential run must fail fast")
+	require.False(t, sandboxCreated, "auth check must fire before sandbox creation")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "auth failure should persist a session result")
+	require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status,
+		"pre-flight auth failure should mark the session failed")
+
+	statuses := d.sessionThreads.statuses()
+	require.NotEmpty(t, statuses, "the primary thread should have been touched")
+	require.Equal(t, models.ThreadStatusRunning, statuses[0],
+		"thread is marked running at launch, before the auth check")
+	require.Equal(t, models.ThreadStatusFailed, statuses[len(statuses)-1],
+		"pre-flight auth failure must terminalize the primary thread so the UI's "+
+			"thread-bound \"Agent is working…\" indicator clears instead of spinning until the reaper")
 }
 
 // TestRunAgent_PiModelOverrideReachesSandbox asserts that a per-run override
