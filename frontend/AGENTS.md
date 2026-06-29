@@ -24,6 +24,7 @@ Design 143 as a **professional engineering control plane** — not a marketing s
 - **Disclose progressively.** Show routine controls inline; move rare, destructive, advanced, or high-detail actions into menus, dialogs, sheets, or expandable sections.
 - **Speak one state language.** Use the shared status components and state tokens. Every status must convey what is happening, whether attention is needed, and the available action.
 - **Stay accessible.** Preserve shadcn/Radix keyboard behavior, focus rings, aria labels, disabled states, and contrast. Give icon-only buttons tooltips and accessible names.
+- **Explain disabled actions.** Whenever a button can be disabled, wrap it with `DisabledTooltip` from `@/components/ui/disabled-tooltip` and provide concise hover/focus copy explaining why the action is unavailable and what will make it available. Loading-only disabled states may use a short wait message.
 - **Cut decoration.** No gradient blobs, ornamental illustrations, nested cards, or tinted feature panes. Derive visual weight from layout, typography, borders, shadows, and state tokens.
 - **Match existing patterns.** Before adding a new pattern, check this file, nearby pages, and shared components, and extend what exists unless there is a concrete product reason not to.
 

@@ -333,7 +333,6 @@ type CodeReviewAgentRoster struct {
 	DisagreementBlocks    bool        `json:"disagreement_blocks"`
 	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
 	TimeoutSeconds        int         `json:"timeout_seconds"`
-	MaxCostCents          int         `json:"max_cost_cents"`
 }
 
 type CodeReviewPolicyConfig struct {
@@ -409,7 +408,6 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,
-			MaxCostCents:          500,
 		},
 		InlineCommentLimit: 4,
 		Inheritance: CodeReviewPolicyInheritance{
@@ -547,9 +545,6 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	}
 	if c.AgentRoster.TimeoutSeconds < 60 {
 		return fmt.Errorf("timeout_seconds must be at least 60")
-	}
-	if c.AgentRoster.MaxCostCents < 0 {
-		return fmt.Errorf("max_cost_cents must not be negative")
 	}
 	return nil
 }
@@ -910,7 +905,6 @@ type CodeReviewRiskInput struct {
 	UnresolvedHumanThreads int
 	BlockingFindings       int
 	ReviewerDisagreement   bool
-	ReviewCostCents        float64
 	ScopeMismatch          bool
 	UnresolvedUncertainty  bool
 	PromptInjectionFound   bool
@@ -992,9 +986,6 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	}
 	if input.ReviewerDisagreement && policy.AgentRoster.DisagreementBlocks {
 		reasons = append(reasons, "reviewer agents disagreed on material risk")
-	}
-	if policy.AgentRoster.MaxCostCents > 0 && input.ReviewCostCents > float64(policy.AgentRoster.MaxCostCents) {
-		reasons = append(reasons, fmt.Sprintf("review cost %.2f cents exceeds policy limit %d cents", input.ReviewCostCents, policy.AgentRoster.MaxCostCents))
 	}
 	if input.ScopeMismatch {
 		reasons = append(reasons, "orchestrator reported the change may not match the stated intent")

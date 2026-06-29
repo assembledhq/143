@@ -500,7 +500,11 @@ provision-worker:
 	$(check-ssh-key)
 	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
-	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
+	@# Unset HOST so provision-egress.sh resolves the egress gateway from FLEET_HOSTS
+	@# (its empty $$1 arg). make exports the HOST command-line var, and
+	@# provision-egress.sh falls back to $$HOST when $$1 is empty — without this it
+	@# would target the WORKER as an egress node (tag:prod-egress) instead.
+	@env -u HOST deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
@@ -616,11 +620,21 @@ spin-down-worker:
 TAG ?= latest
 ROLES ?= app,worker
 force ?=
+# interrupt=true force-interrupts active runtimes (previews/running jobs) during a
+# maintenance worker drain. Ignored in routine mode (blue/green never blocking-drains).
+# Requires DEPLOY_REASON and DEPLOY_REQUESTED_BY to be set so the forced drain is
+# auditable — make aborts otherwise rather than recording a generic default reason.
+interrupt ?=
 DEPLOY_JOBS ?= 4
 WORKER_BLUE_GREEN_PORT_START ?= 8080
 WORKER_BLUE_GREEN_PORT_END ?= 8087
 
-deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS))
+# Resolve the force-interrupt flag for an opt-in maintenance drain. When
+# interrupt=true, require an auditable reason+requester instead of letting the
+# drain fall back to the generic default reason.
+resolve-interrupt = $(if $(filter true 1 yes,$(interrupt)),$(if $(and $(strip $(DEPLOY_REASON)),$(strip $(DEPLOY_REQUESTED_BY))),1,$(error interrupt=true requires DEPLOY_REASON and DEPLOY_REQUESTED_BY to be set so the forced drain is auditable)),$(FORCE_INTERRUPT_ACTIVE_RUNTIMES))
+
+deploy-force-env = FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=$(if $(filter true 1 yes,$(force)),1,$(FORCE_DEPLOY_WITH_ACTIVE_SESSIONS)) FORCE_INTERRUPT_ACTIVE_RUNTIMES=$(resolve-interrupt)
 worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_START) WORKER_BLUE_GREEN_PORT_END=$(WORKER_BLUE_GREEN_PORT_END)
 
 # Deploy (update) an already-provisioned node.
@@ -632,6 +646,9 @@ worker-blue-green-env = WORKER_BLUE_GREEN_PORT_START=$(WORKER_BLUE_GREEN_PORT_ST
 #   make deploy-app    TAG=<sha>
 #   make deploy-worker force=true
 #   make deploy-fleet ROLES=app,worker
+#   # Force a maintenance worker drain past active previews/running jobs (interrupts them):
+#   DEPLOY_REASON="re-baseline host-runtime" DEPLOY_REQUESTED_BY=john \
+#     DEPLOY_MODE=maintenance make deploy-fleet ROLES=worker interrupt=true
 
 # Shell snippet to read FLEET_HOSTS from env var or $(_PROD_ENC) via SOPS.
 # Sets $$FLEET. Use inside a recipe with: $(read-fleet-hosts);

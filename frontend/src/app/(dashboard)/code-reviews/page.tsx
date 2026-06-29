@@ -4,10 +4,23 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, ChevronDown, ExternalLink, Settings2, Plus, Trash2, FileSearch, Users, ShieldCheck, AlertTriangle } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  CircleHelp,
+  ClipboardCheck,
+  ExternalLink,
+  FileSearch,
+  Plus,
+  Settings2,
+  ShieldCheck,
+  Trash2,
+  Users,
+} from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -28,10 +41,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DurationInput } from "@/components/duration-input";
 import { ApiError, api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
@@ -70,6 +86,22 @@ const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, 
   categories: "Categories",
   tests_changed: "Tests changed",
 };
+const QUALITY_GATE_DESCRIPTIONS = {
+  requirePassingChecks:
+    "Blocks approval until the PR's required GitHub checks are passing. The reviewer can still leave comments, but it will not approve failing or pending builds.",
+  requireMergeable:
+    "Blocks approval when GitHub reports merge conflicts or an unknown mergeable state. This keeps approvals from landing on PRs that cannot merge cleanly.",
+  excludeSensitivePaths:
+    "Treats changes matching sensitive paths as blocking approval. Use this for migrations, auth, billing, and other areas that need a human review.",
+  requireUpToDate:
+    "Requires the PR branch to be current with its base branch before approval. This prevents approving a stale diff when newer base changes may affect the result.",
+  allowPolicyChanges:
+    "Allows the bot to approve PRs that modify review policy or automation configuration. Leave this off when those changes should always require a human reviewer.",
+  disagreementBlocks:
+    "Blocks approval when reviewer agents disagree on whether the PR is acceptable. This makes uncertain reviews resolve to a human decision instead of an approval.",
+  allowForks:
+    "Allows approval decisions for PRs opened from forks. Turn this off when forked PRs should be comment-only because they run with less trusted context.",
+} as const;
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -122,6 +154,7 @@ export default function CodeReviewsPage() {
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
+  const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
@@ -245,6 +278,22 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
+  const selectedTemplateAlreadyApplied = useMemo(() => {
+    if (!selectedTemplate || !config) return false;
+    return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
+  }, [config, selectedTemplate]);
+  useEffect(() => {
+    setPendingTemplateApply(null);
+  }, [selectedTemplateKey, repositoryId]);
+  useEffect(() => {
+    if (!pendingTemplateApply) return;
+    if (autosave.status === "saved") {
+      toast.success(`Applied ${pendingTemplateApply.title}`);
+      setPendingTemplateApply(null);
+    } else if (autosave.status === "error") {
+      setPendingTemplateApply(null);
+    }
+  }, [autosave.status, pendingTemplateApply]);
   // Build a fully-merged config from the freshest cache value. Returns null
   // only before the policy has loaded (controls are disabled until then).
   const draftFrom = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig | null => {
@@ -535,6 +584,20 @@ export default function CodeReviewsPage() {
                       disabled={!selectedTemplate || !config}
                       onClick={() => {
                         if (!selectedTemplate) return;
+                        const latestConfig = readLatestConfig();
+                        const alreadyApplied =
+                          selectedTemplateAlreadyApplied ||
+                          (latestConfig
+                            ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
+                            : false);
+                        if (alreadyApplied) {
+                          toast.info(`${selectedTemplate.title} is already applied`);
+                          return;
+                        }
+                        setPendingTemplateApply({
+                          key: selectedTemplate.key,
+                          title: selectedTemplate.title,
+                        });
                         autosave.save(clonePolicy(selectedTemplate.config));
                       }}
                     >
@@ -573,21 +636,15 @@ export default function CodeReviewsPage() {
                         autosave={autosave}
                         buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
                       />
-                      <NumberPolicyInput
-                        label="Timeout seconds"
-                        serverValue={config?.agent_roster.timeout_seconds}
-                        min={60}
+                      <DurationInput
+                        label="Timeout"
+                        valueSeconds={config?.agent_roster.timeout_seconds ?? 60}
+                        minSeconds={60}
                         disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.timeout_seconds = value; })}
-                      />
-                      <NumberPolicyInput
-                        label="Cost ceiling cents"
-                        serverValue={config?.agent_roster.max_cost_cents}
-                        min={0}
-                        disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.max_cost_cents = value; })}
+                        defaultUnit="minutes"
+                        onChangeSeconds={(seconds) =>
+                          autosave.save(buildConfig((next) => { next.agent_roster.timeout_seconds = seconds; }))
+                        }
                       />
                       <NumberPolicyInput
                         label="Reviewer quorum"
@@ -602,45 +659,52 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                   <FineTuningSection title="Quality gates" summary="Merge and check requirements before approval">
-                <div className="grid gap-3 md:grid-cols-2">
+                    <div className="grid gap-x-6 gap-y-2 md:grid-cols-2">
                       <PolicyToggle
                         label="Require passing checks"
+                        description={QUALITY_GATE_DESCRIPTIONS.requirePassingChecks}
                         checked={config?.risk_policy.require_passing_checks ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_passing_checks = checked; })}
                       />
                       <PolicyToggle
                         label="Require mergeable PR"
+                        description={QUALITY_GATE_DESCRIPTIONS.requireMergeable}
                         checked={config?.risk_policy.require_mergeable ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_mergeable = checked; })}
                       />
                       <PolicyToggle
                         label="Enforce sensitive paths"
+                        description={QUALITY_GATE_DESCRIPTIONS.excludeSensitivePaths}
                         checked={config?.risk_policy.exclude_sensitive_paths ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.exclude_sensitive_paths = checked; })}
                       />
                       <PolicyToggle
                         label="Require up-to-date branch"
+                        description={QUALITY_GATE_DESCRIPTIONS.requireUpToDate}
                         checked={config?.risk_policy.require_up_to_date ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_up_to_date = checked; })}
                       />
                       <PolicyToggle
                         label="Allow policy changes"
+                        description={QUALITY_GATE_DESCRIPTIONS.allowPolicyChanges}
                         checked={config?.risk_policy.allow_policy_changes ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_policy_changes = checked; })}
                       />
                       <PolicyToggle
                         label="Block reviewer disagreement"
+                        description={QUALITY_GATE_DESCRIPTIONS.disagreementBlocks}
                         checked={config?.agent_roster.disagreement_blocks ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.agent_roster.disagreement_blocks = checked; })}
                       />
                       <PolicyToggle
                         label="Allow fork PRs"
+                        description={QUALITY_GATE_DESCRIPTIONS.allowForks}
                         checked={config?.risk_policy.allow_forks ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.allow_forks = checked; })}
@@ -957,6 +1021,13 @@ function GitHubTriggerPanel({
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
+  const setupDisabledReason = githubTriggerSetupDisabledReason({
+    repositorySelected,
+    authRequired,
+    setupPending,
+    deletePending,
+    isLoading,
+  });
 
   return (
     <div className="rounded-md border border-border p-4">
@@ -1011,15 +1082,17 @@ function GitHubTriggerPanel({
               Connect GitHub
             </Button>
           ) : null}
-          <Button
-            variant={ready ? "outline" : "default"}
-            size="sm"
-            disabled={!repositorySelected || authRequired || setupPending || deletePending || isLoading}
-            onClick={onSetup}
-          >
-            {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-            {ready ? "Repair team" : "Create / repair team"}
-          </Button>
+          <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
+            <Button
+              variant={ready ? "outline" : "default"}
+              size="sm"
+              disabled={!!setupDisabledReason}
+              onClick={onSetup}
+            >
+              {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+              {ready ? "Repair team" : "Create / repair team"}
+            </Button>
+          </DisabledTooltip>
           {ready ? (
             <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
               <Trash2 className="h-4 w-4" />
@@ -1033,6 +1106,37 @@ function GitHubTriggerPanel({
       </div>
     </div>
   );
+}
+
+function githubTriggerSetupDisabledReason({
+  repositorySelected,
+  authRequired,
+  setupPending,
+  deletePending,
+  isLoading,
+}: {
+  repositorySelected: boolean;
+  authRequired: boolean;
+  setupPending: boolean;
+  deletePending: boolean;
+  isLoading: boolean;
+}): string | undefined {
+  if (!repositorySelected) {
+    return "Select a repository before creating the GitHub reviewer team.";
+  }
+  if (authRequired) {
+    return "Connect your GitHub account first so 143 can create or repair the reviewer team.";
+  }
+  if (setupPending) {
+    return "Team setup is already running. Wait for it to finish before trying again.";
+  }
+  if (deletePending) {
+    return "The reviewer team trigger is being disabled. Wait for that action to finish before repairing it.";
+  }
+  if (isLoading) {
+    return "143 is checking the repository's reviewer team status. Wait for the check to finish.";
+  }
+  return undefined;
 }
 
 function githubTriggerStatusLabel(status: CodeReviewGitHubTriggerResponse["status"]): string {
@@ -1110,6 +1214,7 @@ function NumberPolicyInput({
       <Input
         className="mt-2"
         type="number"
+        aria-label={label}
         min={min}
         max={max}
         value={field.value}
@@ -1122,22 +1227,44 @@ function NumberPolicyInput({
 }
 
 function PolicyToggle({
-	label,
-	checked,
-	disabled,
-	onCheckedChange,
+  label,
+  description,
+  checked,
+  disabled,
+  onCheckedChange,
 }: {
-	label: string;
-	checked: boolean;
-	disabled?: boolean;
-	onCheckedChange: (checked: boolean) => void;
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onCheckedChange: (checked: boolean) => void;
 }) {
-	return (
-		<div className="flex items-center justify-between rounded-md border border-border p-4">
-			<Label className="text-sm text-foreground">{label}</Label>
-			<Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
-		</div>
-	);
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 py-2">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Label className="truncate text-sm text-foreground">{label}</Label>
+        <TooltipProvider delayDuration={150}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                aria-label={`About ${label}`}
+              >
+                <CircleHelp className="h-3.5 w-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top" sideOffset={6} className="max-w-72 leading-5">
+              {description}
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
+      <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+    </div>
+  );
 }
 
 function normalizeListItems(items: string[]): string[] {

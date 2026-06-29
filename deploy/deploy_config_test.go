@@ -1353,6 +1353,22 @@ func TestWorkerMaintenanceBlockingDrainUsesDeployControl(t *testing.T) {
 	require.NotContains(t, functionBody, `docker kill --signal=TERM "$cid"`, "maintenance drain must not bypass DB-backed drain state with a direct TERM")
 }
 
+// TestForceInterruptActiveRuntimesIsForwardedToRemote guards the plumbing gap
+// where the maintenance drain reads FORCE_INTERRUPT_ACTIVE_RUNTIMES on the
+// remote host, but deploy.sh never forwarded it over SSH — so the documented
+// force flag silently no-opped from `make deploy-fleet`. The remote drain only
+// receives env that is explicitly listed in the remote_env_assignment block.
+func TestForceInterruptActiveRuntimesIsForwardedToRemote(t *testing.T) {
+	t.Parallel()
+
+	deployScript, err := os.ReadFile("../deploy/scripts/deploy.sh")
+	require.NoError(t, err, "test should read deploy.sh")
+	deploy := string(deployScript)
+
+	require.Contains(t, deploy, `remote_env_assignment FORCE_INTERRUPT_ACTIVE_RUNTIMES "${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}"`,
+		"deploy.sh must forward FORCE_INTERRUPT_ACTIVE_RUNTIMES to the remote host, or the maintenance drain force flag is unreachable from make deploy-fleet")
+}
+
 func extractShellFunction(t *testing.T, script, startFunc, nextFunc string) string {
 	t.Helper()
 
