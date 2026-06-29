@@ -279,6 +279,8 @@ describe("CodeReviewsPage", () => {
     // Essentials and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
     // Fine-tuning groups are collapsed by default; expand the ones we assert on.
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
@@ -487,7 +489,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
   });
 
-  it("explains why GitHub reviewer team setup is disabled", async () => {
+  it("explains why GitHub reviewer setup is disabled", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers({
       status: "auth_required",
@@ -507,14 +509,14 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
-    const setupButton = await screen.findByRole("button", { name: /Create \/ repair team/i });
+    const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
     expect(setupButton).toBeDisabled();
 
     await user.hover(setupButton);
 
     expect(
       await screen.findByRole("tooltip", {
-        name: "Connect your GitHub account first so 143 can create or repair the reviewer team.",
+        name: "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.",
       }),
     ).toBeInTheDocument();
   });
@@ -547,7 +549,7 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
-    await user.click(await screen.findByRole("button", { name: /Create \/ repair team/i }));
+    await user.click(await screen.findByRole("button", { name: /Set up GitHub reviewer/i }));
 
     await waitFor(() => {
       expect(setupCalls).toBe(1);
