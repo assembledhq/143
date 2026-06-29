@@ -60,7 +60,7 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
 	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
-	require.Equal(t, OpenCodeModelGPT54Mini, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
+	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
 }
 
