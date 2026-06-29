@@ -52,6 +52,7 @@ import {
 import { BranchPicker } from "@/components/branch-picker";
 import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
+import { parseAutomationIntervalInput } from "@/lib/automation-draft";
 import {
   removeAutomationFromListCaches,
   upsertAutomationInListCaches,
@@ -479,6 +480,11 @@ function SettingsTab({
                   max={365}
                   value={intervalValue}
                   onChange={(e) => setIntervalValue(e.target.value)}
+                  onBlur={() =>
+                    setIntervalValue(
+                      String(parseAutomationIntervalInput(intervalValue)),
+                    )
+                  }
                   aria-invalid={!intervalValueIsValid}
                   className="w-20"
                 />
