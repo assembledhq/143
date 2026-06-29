@@ -68,6 +68,7 @@ func TestServiceResolveForSessionUsesRecommendedDefaultsWhenNoPolicyExists(t *te
 		models.AgentCapabilityIssueSources,
 		models.AgentCapabilityProductionDiagnostics,
 		models.AgentCapabilitySlackNotifications,
+		models.AgentCapabilityAutomationManagement,
 		models.AgentCapabilityPublishing,
 	}, snapshotIDs(snapshot), "manual repository sessions should get recommended commonly-used defaults")
 }

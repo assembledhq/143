@@ -37,6 +37,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       migrations: ${{ steps.filter.outputs.migrations }}
       docker: ${{ steps.filter.outputs.docker }}
+      deploy: ${{ steps.filter.outputs.deploy }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v6
@@ -62,6 +63,8 @@ jobs:
               - 'frontend/Dockerfile*'
               - 'sandbox/Dockerfile*'
               - '.dockerignore'
+            deploy:
+              - 'deploy/scripts/**'
             ci:
               - '.github/workflows/**'
 
@@ -369,9 +372,24 @@ jobs:
           go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4
           gosec ./...
 
+  deploy-scripts-test:
+    name: Deploy Scripts Test
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run deploy shell tests
+        run: |
+          set -euo pipefail
+          for t in deploy/scripts/*_test.sh; do
+            echo "--- $t"
+            bash "$t"
+          done
+
   required-checks:
     name: All Checks Pass
-    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security]
+    needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, migration-check, docker-build, security, deploy-scripts-test]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -384,6 +402,7 @@ jobs:
           echo "migration-check: ${{ needs.migration-check.result }}"
           echo "docker-build: ${{ needs.docker-build.result }}"
           echo "security: ${{ needs.security.result }}"
+          echo "deploy-scripts-test: ${{ needs.deploy-scripts-test.result }}"
 
           for result in \
             "${{ needs.backend-lint.result }}" \
@@ -392,7 +411,8 @@ jobs:
             "${{ needs.frontend-test.result }}" \
             "${{ needs.migration-check.result }}" \
             "${{ needs.docker-build.result }}" \
-            "${{ needs.security.result }}"; do
+            "${{ needs.security.result }}" \
+            "${{ needs.deploy-scripts-test.result }}"; do
             if [[ "$result" != "success" && "$result" != "skipped" ]]; then
               echo "::error::One or more required checks failed"
               exit 1
