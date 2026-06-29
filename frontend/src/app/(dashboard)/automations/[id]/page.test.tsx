@@ -315,7 +315,7 @@ describe("AutomationDetailPage", () => {
     });
   });
 
-  it("allows the interval value to be cleared while editing", async () => {
+  it("allows a blank interval while editing and restores it on blur", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 
@@ -384,11 +384,14 @@ describe("AutomationDetailPage", () => {
     expect(intervalInput).toHaveValue(null);
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
 
-    await user.type(intervalInput, "2");
+    await user.tab();
+
+    expect(intervalInput).toHaveValue(1);
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ interval_value: 2 });
+      expect(updateBody).toMatchObject({ interval_value: 1 });
     });
   });
 
