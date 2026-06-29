@@ -338,14 +338,13 @@ type CodeReviewAgentRoster struct {
 }
 
 type CodeReviewPolicyConfig struct {
-	Enabled             bool                        `json:"enabled"`
-	ApprovalMode        CodeReviewApprovalMode      `json:"approval_mode"`
-	DescriptionPolicy   CodeReviewDescriptionPolicy `json:"description_policy"`
-	RiskPolicy          CodeReviewRiskPolicy        `json:"risk_policy"`
-	AgentRoster         CodeReviewAgentRoster       `json:"agent_roster"`
-	InlineCommentLimit  int                         `json:"inline_comment_limit"`
-	FinalReviewTemplate string                      `json:"final_review_template,omitempty"`
-	Inheritance         CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
+	Enabled            bool                        `json:"enabled"`
+	ApprovalMode       CodeReviewApprovalMode      `json:"approval_mode"`
+	DescriptionPolicy  CodeReviewDescriptionPolicy `json:"description_policy"`
+	RiskPolicy         CodeReviewRiskPolicy        `json:"risk_policy"`
+	AgentRoster        CodeReviewAgentRoster       `json:"agent_roster"`
+	InlineCommentLimit int                         `json:"inline_comment_limit"`
+	Inheritance        CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
 }
 
 type CodeReviewPolicyInheritance struct {
@@ -472,9 +471,6 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if config.InlineCommentLimit != 0 {
 		defaults.InlineCommentLimit = config.InlineCommentLimit
 	}
-	if config.FinalReviewTemplate != "" {
-		defaults.FinalReviewTemplate = config.FinalReviewTemplate
-	}
 	defaults.Inheritance = config.Inheritance
 	defaults.DescriptionPolicy = normalizeCodeReviewDescriptionPolicy(defaults.DescriptionPolicy)
 	return defaults
@@ -575,33 +571,31 @@ func (c CodeReviewPolicyConfig) Validate() error {
 }
 
 type CodeReviewPolicyRecord struct {
-	ID                  uuid.UUID                   `db:"id" json:"id"`
-	OrgID               uuid.UUID                   `db:"org_id" json:"org_id"`
-	RepositoryID        *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
-	Active              bool                        `db:"active" json:"active"`
-	Version             int                         `db:"version" json:"version"`
-	Enabled             bool                        `db:"enabled" json:"enabled"`
-	ApprovalMode        CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
-	DescriptionPolicy   CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
-	RiskPolicy          CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
-	AgentRoster         CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
-	InlineCommentLimit  int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	FinalReviewTemplate string                      `db:"final_review_template" json:"final_review_template,omitempty"`
-	Inheritance         CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
-	CreatedByUserID     *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
-	CreatedAt           time.Time                   `db:"created_at" json:"created_at"`
+	ID                 uuid.UUID                   `db:"id" json:"id"`
+	OrgID              uuid.UUID                   `db:"org_id" json:"org_id"`
+	RepositoryID       *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
+	Active             bool                        `db:"active" json:"active"`
+	Version            int                         `db:"version" json:"version"`
+	Enabled            bool                        `db:"enabled" json:"enabled"`
+	ApprovalMode       CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
+	DescriptionPolicy  CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
+	RiskPolicy         CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
+	AgentRoster        CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
+	InlineCommentLimit int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
+	Inheritance        CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
+	CreatedByUserID    *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt          time.Time                   `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
-		ApprovalMode:        r.ApprovalMode,
-		Enabled:             r.Enabled,
-		DescriptionPolicy:   r.DescriptionPolicy,
-		RiskPolicy:          r.RiskPolicy,
-		AgentRoster:         r.AgentRoster,
-		InlineCommentLimit:  r.InlineCommentLimit,
-		FinalReviewTemplate: r.FinalReviewTemplate,
-		Inheritance:         r.Inheritance,
+		ApprovalMode:       r.ApprovalMode,
+		Enabled:            r.Enabled,
+		DescriptionPolicy:  r.DescriptionPolicy,
+		RiskPolicy:         r.RiskPolicy,
+		AgentRoster:        r.AgentRoster,
+		InlineCommentLimit: r.InlineCommentLimit,
+		Inheritance:        r.Inheritance,
 	}
 }
 
@@ -613,13 +607,12 @@ type CodeReviewResolvedPolicy struct {
 }
 
 const (
-	CodeReviewPolicyFieldEnabled             = "enabled"
-	CodeReviewPolicyFieldApprovalMode        = "approval_mode"
-	CodeReviewPolicyFieldDescriptionPolicy   = "description_policy"
-	CodeReviewPolicyFieldRiskPolicy          = "risk_policy"
-	CodeReviewPolicyFieldAgentRoster         = "agent_roster"
-	CodeReviewPolicyFieldInlineCommentLimit  = "inline_comment_limit"
-	CodeReviewPolicyFieldFinalReviewTemplate = "final_review_template"
+	CodeReviewPolicyFieldEnabled            = "enabled"
+	CodeReviewPolicyFieldApprovalMode       = "approval_mode"
+	CodeReviewPolicyFieldDescriptionPolicy  = "description_policy"
+	CodeReviewPolicyFieldRiskPolicy         = "risk_policy"
+	CodeReviewPolicyFieldAgentRoster        = "agent_roster"
+	CodeReviewPolicyFieldInlineCommentLimit = "inline_comment_limit"
 )
 
 func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
@@ -652,9 +645,6 @@ func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeRevi
 	if apply(CodeReviewPolicyFieldInlineCommentLimit) {
 		merged.InlineCommentLimit = override.InlineCommentLimit
 	}
-	if apply(CodeReviewPolicyFieldFinalReviewTemplate) {
-		merged.FinalReviewTemplate = override.FinalReviewTemplate
-	}
 	merged.Inheritance = override.Inheritance
 	return ResolveCodeReviewPolicyConfig(&merged)
 }
@@ -662,7 +652,7 @@ func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeRevi
 func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []string {
 	base = ResolveCodeReviewPolicyConfig(&base)
 	override = ResolveCodeReviewPolicyConfig(&override)
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 6)
 	if base.Enabled != override.Enabled {
 		fields = append(fields, CodeReviewPolicyFieldEnabled)
 	}
@@ -681,9 +671,6 @@ func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []str
 	if base.InlineCommentLimit != override.InlineCommentLimit {
 		fields = append(fields, CodeReviewPolicyFieldInlineCommentLimit)
 	}
-	if base.FinalReviewTemplate != override.FinalReviewTemplate {
-		fields = append(fields, CodeReviewPolicyFieldFinalReviewTemplate)
-	}
 	return fields
 }
 
@@ -700,8 +687,7 @@ func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct
 			CodeReviewPolicyFieldDescriptionPolicy,
 			CodeReviewPolicyFieldRiskPolicy,
 			CodeReviewPolicyFieldAgentRoster,
-			CodeReviewPolicyFieldInlineCommentLimit,
-			CodeReviewPolicyFieldFinalReviewTemplate:
+			CodeReviewPolicyFieldInlineCommentLimit:
 			out[field] = struct{}{}
 		}
 	}

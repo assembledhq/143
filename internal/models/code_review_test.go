@@ -104,24 +104,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	}
 }
 
-func TestCodeReviewPolicyRecordConfigPreservesFinalReviewTemplate(t *testing.T) {
-	t.Parallel()
-
-	record := CodeReviewPolicyRecord{
-		ApprovalMode:        CodeReviewApprovalModeCommentOnly,
-		Enabled:             true,
-		DescriptionPolicy:   DefaultCodeReviewPolicyConfig().DescriptionPolicy,
-		RiskPolicy:          DefaultCodeReviewPolicyConfig().RiskPolicy,
-		AgentRoster:         DefaultCodeReviewPolicyConfig().AgentRoster,
-		InlineCommentLimit:  4,
-		FinalReviewTemplate: "custom final review template",
-	}
-
-	config := record.Config()
-
-	require.Equal(t, "custom final review template", config.FinalReviewTemplate, "policy records should round-trip final review templates")
-}
-
 func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
 	t.Parallel()
 

@@ -231,14 +231,13 @@ func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
 		},
 	}}
 	policy := models.CodeReviewPolicyRecord{
-		Version:             3,
-		Enabled:             policyConfig.Enabled,
-		ApprovalMode:        policyConfig.ApprovalMode,
-		DescriptionPolicy:   policyConfig.DescriptionPolicy,
-		RiskPolicy:          policyConfig.RiskPolicy,
-		AgentRoster:         policyConfig.AgentRoster,
-		InlineCommentLimit:  policyConfig.InlineCommentLimit,
-		FinalReviewTemplate: policyConfig.FinalReviewTemplate,
+		Version:            3,
+		Enabled:            policyConfig.Enabled,
+		ApprovalMode:       policyConfig.ApprovalMode,
+		DescriptionPolicy:  policyConfig.DescriptionPolicy,
+		RiskPolicy:         policyConfig.RiskPolicy,
+		AgentRoster:        policyConfig.AgentRoster,
+		InlineCommentLimit: policyConfig.InlineCommentLimit,
 	}
 	llm := &codeReviewDescriptionLLMStub{response: `{"passed":true,"reason":"fresh call"}`}
 
