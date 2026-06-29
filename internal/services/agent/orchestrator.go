@@ -4267,7 +4267,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, prRepairOpts)
+		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, log, prRepairOpts)
 		if err != nil {
 			if errors.Is(err, ErrStalePullRequestHead) {
 				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
@@ -4282,7 +4282,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
-		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log, session); err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
@@ -4753,7 +4752,7 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64
 // full name (for memory lookup). Handles sessions with or without a repository.
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -4799,9 +4798,17 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", err)
 		}
+		// Configure the git credential helper immediately after the clone, so any
+		// subsequent authenticated git operation in this fresh workspace can reach
+		// GitHub through the per-session auth socket. CloneRepo scrubs the
+		// installation token out of origin, so without the helper in place git
+		// would fall back to an interactive credential prompt and fail in the
+		// sandbox. (The PR-head fetch below authenticates explicitly and does not
+		// depend on this, but running bootstrap here keeps any future git op safe.)
+		o.runSandboxGitBootstrap(ctx, sandbox, sandbox.WorkDir, log)
 		workingBranch := sessionWorkingBranch(session, &issue)
 		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
-			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+			if err := o.checkoutPullRequestHead(ctx, sandbox, repo.CloneURL, token, workingBranch, repairOpts); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4809,7 +4816,7 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			if workingBranch == "" {
 				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
 			}
-			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
+			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4874,7 +4881,7 @@ func codeReviewCheckoutContextFromSession(session *models.Session) (int, string,
 	return parsed.GitHubPRNumber, headSHA, true, nil
 }
 
-func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {
+func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, repoURL, token, workingBranch string, repairOpts *PRRepairContinueOptions) error {
 	if repairOpts == nil {
 		return nil
 	}
@@ -4888,18 +4895,31 @@ func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *San
 	if repairOpts.PullRequestNumber <= 0 {
 		return fmt.Errorf("pull request repair reconstruction missing pull request number")
 	}
-	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
+	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repoURL, token, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
 }
 
-func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
-	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin 'pull/%d/head'", pullRequestNumber)
+func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, repoURL, token string, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
+	// Fetch the PR head from an explicitly authenticated URL rather than the
+	// `origin` remote. CloneRepo scrubs the installation token out of origin
+	// after cloning, so `git fetch origin` relies entirely on the credential
+	// helper being configured. Authenticating the fetch directly makes it
+	// self-sufficient: it does not depend on git-bootstrap having run, so it
+	// cannot regress into git falling back to an interactive username prompt
+	// (which fails in the sandbox with "could not read Username for
+	// 'https://github.com': No such device or address"). Embedding the
+	// short-lived token in the fetch URL leaves nothing at rest in .git/config.
+	fetchRemote := "origin"
+	if token != "" && repoURL != "" {
+		fetchRemote = authenticatedGitURL(repoURL, token)
+	}
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags '%s' 'pull/%d/head'", shellEscapeSingleQuote(fetchRemote), pullRequestNumber)
 	var fetchErr bytes.Buffer
 	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
 	if fetchExecErr != nil {
 		return fmt.Errorf("fetch pull request head: %w", fetchExecErr)
 	}
 	if fetchExit != 0 {
-		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, fetchErr.String())
+		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, redactGitToken(fetchErr.String(), token))
 	}
 
 	checkoutCmd := fmt.Sprintf("git checkout -B '%s' FETCH_HEAD", shellEscapeSingleQuote(workingBranch))
@@ -7475,6 +7495,25 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
 func shellEscapeSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// authenticatedGitURL embeds a short-lived installation token into an https git
+// URL, mirroring DockerProvider.CloneRepo so authenticated fetches work without
+// relying on the credential helper being configured yet.
+func authenticatedGitURL(repoURL, token string) string {
+	if token == "" {
+		return repoURL
+	}
+	return strings.Replace(repoURL, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
+}
+
+// redactGitToken removes an installation token from a string so it is safe to
+// surface in error messages.
+func redactGitToken(s, token string) string {
+	if token == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, token, "***")
 }
 
 func derefString(value *string) string {
