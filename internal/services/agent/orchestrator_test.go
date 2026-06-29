@@ -10041,9 +10041,9 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	cache := agent.NewOrgSettingsCache(time.Minute)
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
@@ -10135,9 +10135,9 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	// Prime the cache with a value distinct from the org store so a cache hit
 	// is observable in the captured sandbox env. The Set timestamp uses the
 	// current (base) clock, so the entry expires at base + 1 minute.
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp

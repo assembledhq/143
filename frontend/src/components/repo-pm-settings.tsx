@@ -13,9 +13,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -23,6 +21,8 @@ import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
+import { ModelOptionGroups } from "@/components/model-option-groups";
+import { useOpenCodeAvailability } from "@/hooks/use-opencode-models";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodingCredentialSummary,
@@ -145,6 +145,10 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
       { orgAgentConfig: orgSettings.agent_config },
     );
   }, [pmResolvedCredentials, orgCodingCredentials, orgSettings.default_agent_type, orgSettings.agent_config]);
+  const openCodeAvailability = useOpenCodeAvailability(
+    orgCodingCredentials,
+    orgSettings.opencode_routing?.require_openrouter ?? false,
+  );
 
   const credentialsLoaded = Boolean(
     resolvedCredsResponse && orgCodingCredentialsResponse,
@@ -346,16 +350,10 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                           No providers configured
                         </SelectItem>
                       ) : (
-                        pmModelGroups.map((group) => (
-                          <SelectGroup key={group.key}>
-                            <SelectLabel>{group.label}</SelectLabel>
-                            {group.models.map((model) => (
-                              <SelectItem key={model} value={model}>
-                                {model}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        ))
+                        <ModelOptionGroups
+                          modelGroups={pmModelGroups}
+                          openCodeAvailability={openCodeAvailability}
+                        />
                       )}
                     </SelectContent>
                   </Select>

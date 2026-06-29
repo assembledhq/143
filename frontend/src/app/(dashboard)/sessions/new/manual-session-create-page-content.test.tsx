@@ -1059,7 +1059,7 @@ describe("ManualSessionCreatePageContent", () => {
     renderWithProviders(<ManualSessionCreatePageContent />);
 
     await user.click(await screen.findByRole("combobox", { name: /Model/i }));
-    await user.click(screen.getByRole("option", { name: "openai/gpt-5.4-mini" }));
+    await user.click(screen.getByRole("option", { name: "GPT-5.4 Mini" }));
 
     const textarea = await screen.findByPlaceholderText("Tell the agent what to do...");
     await user.type(textarea, "Fix the login bug");
