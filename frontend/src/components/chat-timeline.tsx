@@ -626,6 +626,10 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
 interface ChatTimelineProps {
   entries: TimelineEntry[];
   isRunning: boolean;
+  // When the runtime was interrupted (worker drain / deploy) and is waiting to
+  // resume, the thread is still "running" but the agent is not actively working.
+  // Show a recovery label instead of "Agent is working…" so the spinner is honest.
+  recoveryActive?: boolean;
   stoppingLabel?: string;
   stoppedLabel?: string;
   diffStats?: { added: number; removed: number; files_changed: number } | null;
@@ -644,7 +648,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -824,6 +828,17 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
         </div>
       </div>
     );
+  } else if (isRunning && recoveryActive) {
+    rendered.push(
+      <div key="recovering" className="flex justify-start">
+        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+          <span className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            Resuming after maintenance...
+          </span>
+        </div>
+      </div>
+    );
   } else if (isRunning) {
     rendered.push(
       <div key="working" className="flex justify-start">
@@ -884,6 +899,7 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
   return (
     prev.entries === next.entries &&
     prev.isRunning === next.isRunning &&
+    prev.recoveryActive === next.recoveryActive &&
     prev.stoppingLabel === next.stoppingLabel &&
     prev.stoppedLabel === next.stoppedLabel &&
     prev.onDiffClick === next.onDiffClick &&

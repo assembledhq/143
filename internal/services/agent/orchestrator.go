@@ -1424,10 +1424,7 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps)
-		o.updatePrimaryThreadTerminal(cleanupCtx, session, models.ThreadStatusFailed, &models.SessionResult{
-			Error:           &explanation,
-			FailureCategory: strPtr(FailureCategoryRecovery),
-		}, log)
+		// failRun (via failRunWithCategory) terminalizes the primary thread.
 		if err := o.sessions.UpdateRecoveryState(cleanupCtx, session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
 			log.Warn().Err(err).Msg("failed to clear recovery state after exhausting no-checkpoint recovery")
 		}
@@ -3032,9 +3029,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
-		o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, &models.SessionResult{
-			Error: strPtr(err.Error()),
-		}, log)
+		// failRun now terminalizes the primary thread; no explicit update needed here.
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -5617,6 +5612,12 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
+	// Drive the primary thread terminal too. The frontend's "Agent is working…"
+	// indicator is bound to the thread status, not the session status, so failing
+	// only the session leaves the thread stuck at "running" — the UI keeps spinning
+	// until the reaper sweeps it (~2.5h later). updatePrimaryThreadTerminal also
+	// publishes a thread-runtime SSE event so any open page flips immediately.
+	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
@@ -5750,10 +5751,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 	)
-	o.updatePrimaryThreadTerminal(cleanupCtx, run, models.ThreadStatusFailed, &models.SessionResult{
-		Error:           &explanation,
-		FailureCategory: strPtr(FailureCategoryTimeout),
-	}, log)
+	// failRun (via failRunWithCategory) terminalizes the primary thread.
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox. On failure
@@ -6898,6 +6896,16 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus); err != nil {
 		log.Warn().Err(err).Str("status", string(fallbackStatus)).Msg("failed to restore session status after system interruption")
 	}
+	// Surface the interruption at the session level so the UI's recovery banner
+	// ("Restoring runtime from checkpoint") fires while the requeued turn waits to
+	// resume — matching how lost-job reclaim queues session recovery. Without this
+	// the banner stays hidden (it reads session.recovery_state, not the thread's)
+	// and the only signal is a "running" thread, i.e. a bare "Agent is working…".
+	// BeginRuntime / RecoverSession clear recovery_state once the turn resumes.
+	queuedAt := time.Now().UTC()
+	if err := o.sessions.UpdateRecoveryState(bgCtx, session.OrgID, session.ID, models.RecoveryStateQueued, &queuedAt, nil, false); err != nil {
+		log.Warn().Err(err).Msg("failed to mark session recovery as queued after system interruption")
+	}
 	if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
 		if recorder, ok := o.sessionThreads.(sessionThreadRecoveryMetadataStore); ok {
 			if err := recorder.RecordRecoveryMetadata(bgCtx, session.OrgID, *session.PrimaryThreadID, runtimeReason, time.Now().UTC(), string(models.RecoveryStateQueued), string(runtimeReason)); err != nil {
@@ -7252,10 +7260,7 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer terminalCancel()
 	o.failRunWithCategory(terminalCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
-	o.updatePrimaryThreadTerminal(terminalCtx, session, models.ThreadStatusFailed, &models.SessionResult{
-		Error:           &explanation,
-		FailureCategory: strPtr(FailureCategoryTimeout),
-	}, log)
+	// failRun (via failRunWithCategory) terminalizes the primary thread.
 
 	if snapshotKey != "" {
 		warmCtx, warmCancel := context.WithTimeout(context.Background(), 15*time.Second)

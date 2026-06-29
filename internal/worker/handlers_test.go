@@ -9544,6 +9544,116 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and active thread after capacity retries exhaust; logs: %s", logBuf.String())
 }
 
+func TestRunAgentHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+	stores.ProjectTasks = db.NewProjectTaskStore(mock)
+	stores.Projects = db.NewProjectStore(mock)
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	runID := uuid.New()
+	issueID := uuid.New()
+	threadID := uuid.New()
+	projectID := uuid.New()
+	projectTaskID := uuid.New()
+	automationRunID := uuid.New()
+
+	sessionRow := workerSessionRow(runID, issueID, orgID, models.SessionStatusRunning, 0, nil, nil)
+	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				sessionRow...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		recoverSessionFn: func(ctx context.Context, run *models.Session) error {
+			require.NotNil(t, run.PrimaryThreadID, "run_agent recovery should carry the payload thread ID into the orchestrator")
+			require.Equal(t, threadID, *run.PrimaryThreadID, "run_agent recovery should preserve the primary thread ID from the job payload")
+			return fmt.Errorf("worker draining: %w", agent.ErrSessionInterrupted)
+		},
+	}
+	var logBuf bytes.Buffer
+	handler := newRunAgentHandler(stores, &Services{
+		Orchestrator:   orch,
+		ProjectTasks:   pm.NewProjectHooks(stores.ProjectTasks, stores.Projects, zerolog.New(&logBuf)),
+		AutomationRuns: automations.NewAutomationHooks(stores.AutomationRuns, zerolog.New(&logBuf)),
+	}, zerolog.New(&logBuf))
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + runID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "run_agent", payload)
+	require.Error(t, err, "run_agent should keep system interruptions retryable so the turn can resume on another worker")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "system interruptions should remain retryable until the worker dead-letters the job")
+	require.NoError(t, mock.ExpectationsWereMet(), "an interrupted turn should not mark the session failed before dead-letter")
+	require.Equal(t, 1, orch.recoverSessionCalls, "running sessions should use the recovery path")
+
+	// Same failure cascade as the capacity dead-letter path (minus the dynamic
+	// capacity explanation query): session result + structured failure details,
+	// primary thread failed, project-task and automation-run completion, and a
+	// failed Linear milestone job.
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(11)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
+		))
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+SET failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads[\\s\\S]+SET status = @status").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	now := time.Now()
+	mock.ExpectQuery("SELECT [\\s\\S]+ FROM project_tasks WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerProjectTaskColumns).AddRow(
+			workerProjectTaskRow(projectTaskID, projectID, orgID, models.ProjectTaskStatusRunning, now)...,
+		))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE project_tasks SET").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("DELETE FROM project_task_dependencies").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	mock.ExpectCommit()
+	mock.ExpectExec("UPDATE projects SET").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the session and active thread after an unrecoverable interruption; logs: %s", logBuf.String())
+}
+
 func TestRunAgentHandler_RecoveryAttemptsExhaustedDeadLetters(t *testing.T) {
 	t.Parallel()
 
@@ -10559,6 +10669,94 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	require.NotContains(t, failureExplanation, "2/2", "failure explanation should not expose local slot counts")
 	require.NotContains(t, failureExplanation, "Current worker load", "failure explanation should not expose fleet load details")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after capacity retry exhaustion")
+}
+
+func TestContinueSessionHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	projectTaskID := uuid.New()
+	automationRunID := uuid.New()
+	sessionRow := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	setWorkerSessionColumnValue(sessionRow, "project_task_id", &projectTaskID)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				sessionRow...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+				workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+			),
+		)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			return fmt.Errorf("worker draining: %w", agent.ErrSessionInterrupted)
+		},
+	}
+	projectHooks := &sessionCompleteRecorder{}
+	automationHooks := &sessionCompleteRecorder{}
+	handler := newContinueSessionHandler(stores, &Services{
+		Orchestrator:   orch,
+		ProjectTasks:   projectHooks,
+		AutomationRuns: automationHooks,
+	}, zerolog.Nop())
+	handlerCtx := jobctx.WithDeadLetterHooks(context.Background())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(handlerCtx, "continue_session", payload)
+
+	require.Error(t, err, "continue_session should stay retryable so an interrupted turn can resume on another worker")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "system interruptions should remain retryable before dead-letter")
+
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(workerAnyArgs(11)...).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
+			),
+		)
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
+		WithArgs(
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+			pgxmock.AnyArg(),
+		).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_threads").
+		WithArgs(workerAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	jobctx.RunDeadLetterHooks(handlerCtx, err)
+	expectedCompletionCalls := []sessionCompleteCall{{
+		sessionID: sessionID,
+		status:    models.SessionStatusFailed,
+		errText:   "Session stopped: it was interrupted by maintenance and could not be resumed before the retry window expired.",
+	}}
+	require.Equal(t, expectedCompletionCalls, projectHooks.calls, "dead-letter hook should update the owning project task")
+	require.Equal(t, expectedCompletionCalls, automationHooks.calls, "dead-letter hook should update the owning automation run")
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail both the session and thread after an unrecoverable interruption")
 }
 
 func TestContinueSessionHandler_StaleSandboxClearDeadLetterFailsSessionAndThread(t *testing.T) {

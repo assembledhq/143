@@ -368,6 +368,25 @@ describe("ChatTimeline", () => {
     expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
   });
 
+  it("shows recovery indicator instead of working indicator while resuming after an interruption", () => {
+    render(<ChatTimeline entries={[]} isRunning={true} recoveryActive={true} />);
+    expect(screen.getByText("Resuming after maintenance...")).toBeInTheDocument();
+    expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
+  it("prefers the stopping indicator over the recovery indicator when both apply", () => {
+    render(
+      <ChatTimeline entries={[]} isRunning={true} recoveryActive={true} stoppingLabel="Stopping agent..." />,
+    );
+    expect(screen.getByText("Stopping agent...")).toBeInTheDocument();
+    expect(screen.queryByText("Resuming after maintenance...")).not.toBeInTheDocument();
+  });
+
+  it("does not show recovery indicator when not running", () => {
+    render(<ChatTimeline entries={[]} isRunning={false} recoveryActive={true} />);
+    expect(screen.queryByText("Resuming after maintenance...")).not.toBeInTheDocument();
+  });
+
   it("does not show working indicator when not running", () => {
     render(<ChatTimeline entries={[]} isRunning={false} />);
     expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
