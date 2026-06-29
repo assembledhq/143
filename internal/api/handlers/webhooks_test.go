@@ -788,15 +788,14 @@ type codeReviewWebhookPolicyStore struct {
 
 func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	record := models.CodeReviewPolicyRecord{
-		ID:                  s.policyID,
-		Version:             1,
-		Enabled:             s.config.Enabled,
-		ApprovalMode:        s.config.ApprovalMode,
-		DescriptionPolicy:   s.config.DescriptionPolicy,
-		RiskPolicy:          s.config.RiskPolicy,
-		AgentRoster:         s.config.AgentRoster,
-		InlineCommentLimit:  s.config.InlineCommentLimit,
-		FinalReviewTemplate: s.config.FinalReviewTemplate,
+		ID:                 s.policyID,
+		Version:            1,
+		Enabled:            s.config.Enabled,
+		ApprovalMode:       s.config.ApprovalMode,
+		DescriptionPolicy:  s.config.DescriptionPolicy,
+		RiskPolicy:         s.config.RiskPolicy,
+		AgentRoster:        s.config.AgentRoster,
+		InlineCommentLimit: s.config.InlineCommentLimit,
 	}
 	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "repository", Policy: &record}, nil
 }

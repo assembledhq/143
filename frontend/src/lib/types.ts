@@ -146,7 +146,6 @@ export interface CodeReviewPolicyConfig {
     timeout_seconds: number;
   };
   inline_comment_limit: number;
-  final_review_template?: string;
   inheritance?: {
     inherit_org_defaults: boolean;
     override_fields?: string[];

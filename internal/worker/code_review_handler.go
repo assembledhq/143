@@ -244,7 +244,6 @@ func buildUnavailableCodeReviewOutcome(policy models.CodeReviewPolicyConfig, job
 		PolicyVersion: job.PolicyVersion,
 		HeadSHA:       job.HeadSHA,
 		Summary:       "143 recorded the review request and withheld automated approval.",
-		Template:      policy.FinalReviewTemplate,
 	})
 	return decision, body
 }
@@ -1629,7 +1628,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		PolicyVersion:             input.Job.PolicyVersion,
 		HeadSHA:                   input.Job.HeadSHA,
 		Summary:                   codeReviewOutcomeSummary(decision, input.OrchestratorSynthesis),
-		Template:                  policy.FinalReviewTemplate,
 		DescriptionPassed:         &descriptionPassed,
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,

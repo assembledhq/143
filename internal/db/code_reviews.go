@@ -67,7 +67,7 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		description_policy, risk_policy, agent_roster, inline_comment_limit, final_review_template, inheritance, created_by_user_id, created_at`
+		description_policy, risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
@@ -383,24 +383,23 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
 				org_id, repository_id, active, version, enabled, approval_mode, description_policy,
-				risk_policy, agent_roster, inline_comment_limit, final_review_template, inheritance, created_by_user_id
+				risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id
 			) VALUES (
 				@org_id, @repository_id, true, @version, @enabled, @approval_mode, @description_policy,
-				@risk_policy, @agent_roster, @inline_comment_limit, @final_review_template, @inheritance, @created_by_user_id
+				@risk_policy, @agent_roster, @inline_comment_limit, @inheritance, @created_by_user_id
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
-		"org_id":                orgID,
-		"repository_id":         repositoryID,
-		"version":               version,
-		"enabled":               config.Enabled,
-		"approval_mode":         config.ApprovalMode,
-		"description_policy":    descriptionPolicy,
-		"risk_policy":           riskPolicy,
-		"agent_roster":          agentRoster,
-		"inline_comment_limit":  config.InlineCommentLimit,
-		"final_review_template": config.FinalReviewTemplate,
-		"inheritance":           inheritance,
-		"created_by_user_id":    createdByUserID,
+		"org_id":               orgID,
+		"repository_id":        repositoryID,
+		"version":              version,
+		"enabled":              config.Enabled,
+		"approval_mode":        config.ApprovalMode,
+		"description_policy":   descriptionPolicy,
+		"risk_policy":          riskPolicy,
+		"agent_roster":         agentRoster,
+		"inline_comment_limit": config.InlineCommentLimit,
+		"inheritance":          inheritance,
+		"created_by_user_id":   createdByUserID,
 	})
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("insert code review policy: %w", err)
@@ -1084,7 +1083,7 @@ func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) 
 	var record models.CodeReviewPolicyRecord
 	var descriptionPolicy, riskPolicy, agentRoster, inheritance []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.FinalReviewTemplate, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
+		&descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {
