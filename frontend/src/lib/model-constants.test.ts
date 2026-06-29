@@ -4,6 +4,10 @@ import {
   AVAILABLE_CODEX_MODELS,
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_OPENCODE_MODELS,
+  OPENCODE_LOGICAL_MODELS,
+  DEFAULT_OPENCODE_MODEL,
+  isOpenCodeLogicalModel,
+  openCodeModelLabel,
   AVAILABLE_PI_MODELS,
   DEFAULT_CLAUDE_CODE_MODEL,
   DEFAULT_CODEX_MODEL,
@@ -239,5 +243,32 @@ describe("ownerProviderForModel", () => {
     };
     expect(ownerProviderForModel("gpt-5.4-mini", groups, status)).toBe("openai");
     expect(ownerProviderForModel("meta-only-model", groups, status)).toBe("openrouter");
+  });
+});
+
+describe("OpenCode logical models", () => {
+  it("offers one entry per model with GLM 5.2 leading", () => {
+    expect(OPENCODE_LOGICAL_MODELS[0]).toBe("glm-5.2");
+    expect(DEFAULT_OPENCODE_MODEL).toBe("glm-5.2");
+    // No OpenRouter/native physical route ids leak into the picker list.
+    for (const id of OPENCODE_LOGICAL_MODELS) {
+      expect(id.startsWith("openrouter/")).toBe(false);
+      expect(id.startsWith("opencode/")).toBe(false);
+    }
+    // Collapsed: far fewer entries than the physical route list.
+    expect(OPENCODE_LOGICAL_MODELS.length).toBeLessThan(AVAILABLE_OPENCODE_MODELS.length);
+  });
+
+  it("labels logical and physical ids with a friendly name and passes through custom slugs", () => {
+    expect(openCodeModelLabel("glm-5.2")).toBe("GLM 5.2");
+    expect(openCodeModelLabel("openrouter/z-ai/glm-5.2")).toBe("GLM 5.2");
+    expect(openCodeModelLabel("opencode/glm-5.2")).toBe("GLM 5.2");
+    expect(openCodeModelLabel("xai/grok-code-fast")).toBe("xai/grok-code-fast");
+  });
+
+  it("recognizes logical ids", () => {
+    expect(isOpenCodeLogicalModel("glm-5.2")).toBe(true);
+    expect(isOpenCodeLogicalModel("openrouter/z-ai/glm-5.2")).toBe(false);
+    expect(isOpenCodeLogicalModel("gpt-5.5")).toBe(true);
   });
 });

@@ -151,6 +151,124 @@ export const AVAILABLE_OPENCODE_MODELS = [
   OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5,
 ] as const;
 
+// OpenCode logical models — one user-facing entry per model. The OpenRouter and
+// OpenCode-native physical routes are collapsed; the backend resolves the
+// transport at launch (OpenRouter first, native fallback unless the org sets
+// RequireOpenRouter). Single-route first-party models keep their physical id as
+// the logical id. Mirror of internal/models/opencode_models.go
+// (OpenCodeModelRegistry); keep in sync.
+export const OPENCODE_LOGICAL_GLM_5_2 = "glm-5.2";
+export const OPENCODE_LOGICAL_GLM_5_1 = "glm-5.1";
+export const OPENCODE_LOGICAL_KIMI_K2_5 = "kimi-k2.5";
+export const OPENCODE_LOGICAL_KIMI_K2_6 = "kimi-k2.6";
+export const OPENCODE_LOGICAL_MINIMAX_M2_7 = "minimax-m2.7";
+export const OPENCODE_LOGICAL_MINIMAX_M2_5 = "minimax-m2.5";
+export const OPENCODE_LOGICAL_DEEPSEEK_V4_FLASH = "deepseek-v4-flash";
+export const OPENCODE_LOGICAL_DEEPSEEK_V4_PRO = "deepseek-v4-pro";
+export const OPENCODE_LOGICAL_GEMINI_3_5_FLASH = "gemini-3.5-flash";
+export const OPENCODE_LOGICAL_GEMINI_3_1_PRO = "gemini-3.1-pro";
+export const OPENCODE_LOGICAL_GPT_5_2 = "gpt-5.2";
+export const OPENCODE_LOGICAL_GPT_5_5 = "gpt-5.5";
+export const OPENCODE_LOGICAL_GPT_5_5_PRO = "gpt-5.5-pro";
+export const OPENCODE_LOGICAL_CLAUDE_FABLE_5 = "claude-fable-5";
+
+// Ordered logical model ids the OpenCode picker offers (cost-first; GLM 5.2
+// leads as the default).
+export const OPENCODE_LOGICAL_MODELS = [
+  OPENCODE_LOGICAL_GLM_5_2,
+  OPENCODE_MODEL_GPT_5_4_MINI,
+  OPENCODE_MODEL_GPT_5_3_CODEX_SPARK,
+  OPENCODE_MODEL_CLAUDE_HAIKU_45,
+  OPENCODE_LOGICAL_GEMINI_3_5_FLASH,
+  OPENCODE_MODEL_GEMINI_3_FLASH,
+  OPENCODE_LOGICAL_MINIMAX_M2_7,
+  OPENCODE_LOGICAL_MINIMAX_M2_5,
+  OPENCODE_LOGICAL_DEEPSEEK_V4_FLASH,
+  OPENCODE_LOGICAL_DEEPSEEK_V4_PRO,
+  OPENCODE_LOGICAL_GLM_5_1,
+  OPENCODE_LOGICAL_KIMI_K2_5,
+  OPENCODE_MODEL_GPT_5_4,
+  OPENCODE_MODEL_CLAUDE_SONNET_46,
+  OPENCODE_LOGICAL_GEMINI_3_1_PRO,
+  OPENCODE_LOGICAL_KIMI_K2_6,
+  OPENCODE_LOGICAL_GPT_5_2,
+  OPENCODE_LOGICAL_GPT_5_5,
+  OPENCODE_LOGICAL_GPT_5_5_PRO,
+  OPENCODE_MODEL_CLAUDE_OPUS_48,
+  OPENCODE_MODEL_CLAUDE_OPUS_47,
+  OPENCODE_LOGICAL_CLAUDE_FABLE_5,
+] as const;
+
+export const DEFAULT_OPENCODE_MODEL = OPENCODE_LOGICAL_GLM_5_2;
+
+// Human labels for OpenCode logical ids and the physical route ids they
+// collapse, so the picker shows "GLM 5.2" and older pinned physical selections
+// still render a friendly name. Keyed by both logical and physical id.
+export const OPENCODE_MODEL_LABELS: Readonly<Record<string, string>> = {
+  [OPENCODE_LOGICAL_GLM_5_2]: "GLM 5.2",
+  [OPENCODE_MODEL_GLM_5_2]: "GLM 5.2",
+  [OPENCODE_MODEL_OPENROUTER_GLM_5_2]: "GLM 5.2",
+  [OPENCODE_LOGICAL_GLM_5_1]: "GLM 5.1",
+  [OPENCODE_MODEL_GLM_5_1]: "GLM 5.1",
+  [OPENCODE_MODEL_OPENROUTER_GLM_5_1]: "GLM 5.1",
+  [OPENCODE_LOGICAL_KIMI_K2_5]: "Kimi K2.5",
+  [OPENCODE_MODEL_KIMI_K2_5]: "Kimi K2.5",
+  [OPENCODE_MODEL_OPENROUTER_KIMI_K2_5]: "Kimi K2.5",
+  [OPENCODE_LOGICAL_KIMI_K2_6]: "Kimi K2.6",
+  [OPENCODE_MODEL_KIMI_K2_6]: "Kimi K2.6",
+  [OPENCODE_MODEL_OPENROUTER_KIMI_K2_6]: "Kimi K2.6",
+  [OPENCODE_LOGICAL_MINIMAX_M2_7]: "MiniMax M2.7",
+  [OPENCODE_MODEL_MINIMAX_M2_7]: "MiniMax M2.7",
+  [OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_7]: "MiniMax M2.7",
+  [OPENCODE_LOGICAL_MINIMAX_M2_5]: "MiniMax M2.5",
+  [OPENCODE_MODEL_MINIMAX_M2_5]: "MiniMax M2.5",
+  [OPENCODE_MODEL_OPENROUTER_MINIMAX_M2_5]: "MiniMax M2.5",
+  [OPENCODE_LOGICAL_DEEPSEEK_V4_FLASH]: "DeepSeek V4 Flash",
+  [OPENCODE_MODEL_DEEPSEEK_V4_FLASH]: "DeepSeek V4 Flash",
+  [OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_FLASH]: "DeepSeek V4 Flash",
+  [OPENCODE_LOGICAL_DEEPSEEK_V4_PRO]: "DeepSeek V4 Pro",
+  [OPENCODE_MODEL_DEEPSEEK_V4_PRO]: "DeepSeek V4 Pro",
+  [OPENCODE_MODEL_OPENROUTER_DEEPSEEK_V4_PRO]: "DeepSeek V4 Pro",
+  [OPENCODE_LOGICAL_GEMINI_3_5_FLASH]: "Gemini 3.5 Flash",
+  [OPENCODE_MODEL_GEMINI_3_5_FLASH]: "Gemini 3.5 Flash",
+  [OPENCODE_MODEL_OPENROUTER_GEMINI_3_5_FLASH]: "Gemini 3.5 Flash",
+  [OPENCODE_LOGICAL_GEMINI_3_1_PRO]: "Gemini 3.1 Pro",
+  [OPENCODE_MODEL_GEMINI_3_1_PRO]: "Gemini 3.1 Pro",
+  [OPENCODE_MODEL_OPENROUTER_GEMINI_3_1_PRO]: "Gemini 3.1 Pro",
+  [OPENCODE_LOGICAL_GPT_5_2]: "GPT-5.2",
+  [OPENCODE_MODEL_GPT_5_2]: "GPT-5.2",
+  [OPENCODE_MODEL_OPENROUTER_GPT_5_2]: "GPT-5.2",
+  [OPENCODE_LOGICAL_GPT_5_5]: "GPT-5.5",
+  [OPENCODE_MODEL_GPT_5_5]: "GPT-5.5",
+  [OPENCODE_MODEL_OPENROUTER_GPT_5_5]: "GPT-5.5",
+  [OPENCODE_LOGICAL_GPT_5_5_PRO]: "GPT-5.5 Pro",
+  [OPENCODE_MODEL_GPT_5_5_PRO]: "GPT-5.5 Pro",
+  [OPENCODE_MODEL_OPENROUTER_GPT_5_5_PRO]: "GPT-5.5 Pro",
+  [OPENCODE_LOGICAL_CLAUDE_FABLE_5]: "Claude Fable 5",
+  [OPENCODE_MODEL_CLAUDE_FABLE_5]: "Claude Fable 5",
+  [OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5]: "Claude Fable 5",
+  [OPENCODE_MODEL_GPT_5_4_MINI]: "GPT-5.4 Mini",
+  [OPENCODE_MODEL_GPT_5_3_CODEX_SPARK]: "GPT-5.3 Codex Spark",
+  [OPENCODE_MODEL_CLAUDE_HAIKU_45]: "Claude Haiku 4.5",
+  [OPENCODE_MODEL_GEMINI_3_FLASH]: "Gemini 3 Flash",
+  [OPENCODE_MODEL_GPT_5_4]: "GPT-5.4",
+  [OPENCODE_MODEL_CLAUDE_SONNET_46]: "Claude Sonnet 4.6",
+  [OPENCODE_MODEL_CLAUDE_OPUS_48]: "Claude Opus 4.8",
+  [OPENCODE_MODEL_CLAUDE_OPUS_47]: "Claude Opus 4.7",
+};
+
+const OPENCODE_LOGICAL_MODEL_SET: ReadonlySet<string> = new Set(OPENCODE_LOGICAL_MODELS);
+
+export function isOpenCodeLogicalModel(model: string): boolean {
+  return OPENCODE_LOGICAL_MODEL_SET.has(model);
+}
+
+// openCodeModelLabel returns a friendly display name for an OpenCode logical or
+// physical model id, falling back to the raw id for uncurated custom slugs.
+export function openCodeModelLabel(model: string): string {
+  return OPENCODE_MODEL_LABELS[model] ?? model;
+}
+
 export const DEFAULT_PM_MODEL = DEFAULT_CODEX_MODEL;
 
 // PM and session model dropdowns are both built from the AGENTS registry in

@@ -2073,6 +2073,9 @@ export interface OrgSettings {
   auto_archive_on_pr_close?: boolean;
   session_automation?: SessionAutomationSettings;
   coding_agent_tab_tools_enabled?: boolean;
+  opencode_routing?: {
+    require_openrouter?: boolean;
+  };
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };

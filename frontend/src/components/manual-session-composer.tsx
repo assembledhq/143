@@ -75,6 +75,7 @@ import {
   agentTypeForModel,
   availableAgentModelGroups,
   isAgentAvailable,
+  modelOptionLabel,
 } from "@/lib/agents";
 import { SetupRequirementsCard } from "@/components/setup-requirements-card";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
@@ -253,7 +254,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
               <SelectLabel>{group.label}</SelectLabel>
               {group.models.map((model) => (
                 <SelectItem key={model} value={model}>
-                  {model}
+                  {modelOptionLabel(model)}
                 </SelectItem>
               ))}
             </SelectGroup>
@@ -1134,7 +1135,7 @@ export function ManualSessionComposer({
                 <SelectLabel>{group.label}</SelectLabel>
                 {group.models.map((model) => (
                   <SelectItem key={model} value={model}>
-                    {model}
+                    {modelOptionLabel(model)}
                   </SelectItem>
                 ))}
               </SelectGroup>

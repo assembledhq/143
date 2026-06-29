@@ -1589,6 +1589,121 @@ func TestAgentEnvResolve_OpenCodeUsesOrgDefaultModelForProviderAwarePick(t *test
 	require.Equal(t, models.OpenCodeModelClaudeHaiku45, resolved["OPENCODE_MODEL"], "Resolve should preserve the org default OpenCode model")
 }
 
+// openCodeRoutingEnv builds an AgentEnv with the given OpenCode credentials and
+// optional org routing policy. A nil routing pointer leaves settings at their
+// defaults (native fallback allowed).
+func openCodeRoutingEnv(t *testing.T, orgID uuid.UUID, routing *models.OpenCodeRoutingSettings, creds []models.DecryptedCodingCredential) *AgentEnv {
+	t.Helper()
+	deps := AgentEnvDeps{
+		CodingCredentials: &envCodingCredentialProvider{
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: creds,
+			},
+		},
+		Provider: &envSandboxProvider{},
+		Logger:   zerolog.Nop(),
+	}
+	if routing != nil {
+		deps.Orgs = &envOrgStore{org: models.Organization{
+			ID:       orgID,
+			Settings: marshalAgentSettings(t, models.OrgSettings{OpenCodeRouting: *routing}),
+		}}
+	}
+	return NewAgentEnv(deps)
+}
+
+func openCodeCred(orgID uuid.UUID, userID *uuid.UUID, priority int, apiKey string, backing models.ProviderName) models.DecryptedCodingCredential {
+	return models.DecryptedCodingCredential{
+		ID:       uuid.New(),
+		OrgID:    orgID,
+		UserID:   userID,
+		Provider: models.ProviderOpenCode,
+		Priority: priority,
+		Status:   models.CodingCredentialStatusActive,
+		Config:   models.OpenCodeConfig{APIKey: apiKey, BackingProvider: backing},
+	}
+}
+
+// Acceptance criterion 1: a logical selection with only an OpenRouter key runs
+// over OpenRouter with the audited US allowlist — no "missing credential" error.
+func TestAgentEnvResolveForModel_OpenCodeLogicalPrefersOpenRouter(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+		openCodeCred(orgID, &userID, 0, "sk-or-opencode", models.ProviderOpenRouter),
+		openCodeCred(orgID, &userID, 10, "oc-native-key", models.ProviderOpenCode),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
+	require.Equal(t, "sk-or-opencode", resolved["OPENROUTER_API_KEY"], "logical glm-5.2 should prefer the OpenRouter route")
+	require.Empty(t, resolved["OPENCODE_API_KEY"], "OpenRouter route should not also inject the native key")
+	require.Equal(t, models.OpenCodeModelOpenRouterGLM52, resolved["OPENCODE_MODEL"], "resolved physical model should be the OpenRouter route id")
+	require.Contains(t, resolved["OPENCODE_CONFIG_CONTENT"], "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
+}
+
+// Acceptance criterion 2: a logical selection with only a native key runs over
+// native when org policy permits (the default).
+func TestAgentEnvResolveForModel_OpenCodeLogicalFallsBackToNative(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+		openCodeCred(orgID, &userID, 0, "oc-native-key", models.ProviderOpenCode),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
+	require.Equal(t, "oc-native-key", resolved["OPENCODE_API_KEY"], "with only a native key, logical glm-5.2 should fall back to native")
+	require.Equal(t, models.OpenCodeModelGLM52, resolved["OPENCODE_MODEL"], "resolved physical model should be the native route id")
+}
+
+// Acceptance criterion 3: with both keys, a rate-limited OpenRouter credential
+// fails over to native instead of erroring.
+func TestAgentEnvResolveForModel_OpenCodeFailsOverOnRateLimit(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	rateLimited := openCodeCred(orgID, &userID, 0, "sk-or-opencode", models.ProviderOpenRouter)
+	until := time.Now().Add(time.Hour)
+	rateLimited.RateLimitedUntil = &until
+	env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+		rateLimited,
+		openCodeCred(orgID, &userID, 10, "oc-native-key", models.ProviderOpenCode),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
+	require.Equal(t, "oc-native-key", resolved["OPENCODE_API_KEY"], "a rate-limited OpenRouter route should fail over to native")
+	require.Empty(t, resolved["OPENROUTER_API_KEY"], "the rate-limited OpenRouter credential must not be selected")
+	require.Equal(t, models.OpenCodeModelGLM52, resolved["OPENCODE_MODEL"], "failover should run the native physical model")
+}
+
+// RequireOpenRouter blocks native fallback: with only a native key the session
+// is blocked (not silently downgraded), and the block names the model + transport.
+func TestAgentEnvResolveForModel_OpenCodeRequireOpenRouterBlocksNativeFallback(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	env := openCodeRoutingEnv(t, orgID, &models.OpenCodeRoutingSettings{RequireOpenRouter: true}, []models.DecryptedCodingCredential{
+		openCodeCred(orgID, &userID, 0, "oc-native-key", models.ProviderOpenCode),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
+	require.Empty(t, resolved["OPENCODE_API_KEY"], "RequireOpenRouter must not fall back to the native key")
+	detail := resolved[internalAuthBlockedKey]
+	require.Contains(t, detail, "GLM 5.2", "block should name the logical model")
+	require.Contains(t, detail, "OpenRouter", "block should name the transport that was tried")
+}
+
+// A pinned native model id is an explicit user choice and bypasses
+// RequireOpenRouter.
+func TestAgentEnvResolveForModel_OpenCodePinnedNativeBypassesPolicy(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	env := openCodeRoutingEnv(t, orgID, &models.OpenCodeRoutingSettings{RequireOpenRouter: true}, []models.DecryptedCodingCredential{
+		openCodeCred(orgID, &userID, 0, "oc-native-key", models.ProviderOpenCode),
+	})
+
+	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, models.OpenCodeModelGLM52)
+	require.Equal(t, "oc-native-key", resolved["OPENCODE_API_KEY"], "a pinned native model id should bypass RequireOpenRouter")
+	require.Equal(t, models.OpenCodeModelGLM52, resolved["OPENCODE_MODEL"], "pinned native model should be used verbatim")
+}
+
 // TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards
 // the picked credential id to the underlying CodingCredentialShedder.
 //

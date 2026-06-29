@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
+import { availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials } from "@/lib/agents";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type {
@@ -112,7 +112,7 @@ export function AutomationModelSelect({
             <SelectLabel>{group.label}</SelectLabel>
             {group.models.map((model) => (
               <SelectItem key={model} value={model}>
-                {model}
+                {modelOptionLabel(model)}
               </SelectItem>
             ))}
           </SelectGroup>

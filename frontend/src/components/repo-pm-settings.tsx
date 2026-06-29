@@ -22,7 +22,7 @@ import {
 import { X } from "lucide-react";
 import { useAutosave } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
-import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
+import { availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials } from "@/lib/agents";
 import { queryKeys } from "@/lib/query-keys";
 import type {
   CodingCredentialSummary,
@@ -351,7 +351,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                             <SelectLabel>{group.label}</SelectLabel>
                             {group.models.map((model) => (
                               <SelectItem key={model} value={model}>
-                                {model}
+                                {modelOptionLabel(model)}
                               </SelectItem>
                             ))}
                           </SelectGroup>

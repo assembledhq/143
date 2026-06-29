@@ -838,10 +838,12 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 	case models.AgentTypeOpenCode:
 		cfg := e.resolveOpenCodeProviderConfig(ctx, orgID, userID, modelOverride)
 		if oc, ok := cfg.(models.OpenCodeConfig); ok && oc.APIKey != "" {
-			if modelOverride != "" {
-				oc.Model = strings.TrimSpace(modelOverride)
-			} else {
-				oc.Model = e.effectiveOpenCodeModel(ctx, orgID, oc.Model)
+			// The resolver pins oc.Model to the chosen route's physical model
+			// id. Only the generic-fallback path (no curated route matched)
+			// can leave it empty; fill it with a physical default for the
+			// resolved backing so the CLI never receives a bare logical id.
+			if strings.TrimSpace(oc.Model) == "" {
+				oc.Model = e.effectiveOpenCodeModel(ctx, orgID, oc.NormalizedBackingProvider())
 			}
 			applyOpenCodeEnv(merged, oc)
 			e.updateRuntimeCredentialBindingModel(orgID, userID, models.ProviderOpenCode, oc.Model)
@@ -1063,55 +1065,160 @@ func applyOpenCodeEnv(env map[string]string, cfg models.OpenCodeConfig) {
 	}
 }
 
-func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, credentialModel string) string {
-	if credentialModel != "" {
-		return credentialModel
+// effectiveOpenCodeModel returns the physical OpenCode CLI model id to use when
+// a credential resolved without one (the generic-fallback path). It maps the
+// org's configured logical model to a physical route for the resolved backing;
+// with no configured model it picks the registry default model compatible with
+// the backing (so an org whose only OpenCode key is, say, OpenAI-backed runs a
+// first-party OpenAI model rather than a GLM route it can't reach).
+func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, backing models.ProviderName) string {
+	if selection := e.openCodeModelFromAgentConfig(ctx, orgID); selection != "" {
+		return models.OpenCodePhysicalModelForBacking(selection, backing)
 	}
-	return e.openCodeModelFromAgentConfig(ctx, orgID)
+	return models.DefaultOpenCodePhysicalModelForBacking(backing)
 }
 
+// resolveOpenCodeProviderConfig resolves an OpenCode model selection to a
+// concrete provider config by walking the selection's routes in priority order
+// and returning the first one backed by a runnable credential. A logical
+// selection auto-routes (OpenRouter first, OpenCode-native gated by org
+// policy); a pinned "provider/model" id resolves a single explicit transport.
+// Returns nil and records a structured credential block when no route is
+// runnable.
 func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
-	selectionModel := strings.TrimSpace(modelOverride)
-	if selectionModel == "" {
-		selectionModel = e.openCodeModelFromAgentConfig(ctx, orgID)
+	selection := strings.TrimSpace(modelOverride)
+	if selection == "" {
+		selection = e.openCodeModelFromAgentConfig(ctx, orgID)
 	}
-	targetBacking := openCodeBackingProviderForModel(selectionModel)
-	if targetBacking == "" {
+	if selection == "" {
+		// No model preference at all: pick any runnable OpenCode credential and
+		// let the caller derive a backing-compatible default model. This keeps
+		// orgs that configured a first-party-backed OpenCode key (OpenAI /
+		// Anthropic / Gemini) without a default model working — forcing the
+		// product default (GLM 5.2) would route only to OpenRouter/native. The
+		// frontend picker sends an explicit default, so this path is rare.
 		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
 	}
-	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, []models.ProviderName{models.ProviderOpenCode})
+
+	routes, recognized := e.openCodeRoutesForSelection(ctx, orgID, selection)
+	if !recognized {
+		// Uncurated custom slug ("provider/model"): pin a single route whose
+		// backing is inferred from the prefix, preserving the slug verbatim as
+		// the model. Any uncurated "vendor/model" slug routes through OpenRouter
+		// (the universal proxy); only non-"provider/model" shapes defer to the
+		// generic resolver so an existing OpenCode key still serves the run.
+		backing := openCodeBackingProviderForModel(selection)
+		if backing == "" {
+			if !strings.Contains(selection, "/") {
+				return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+			}
+			backing = models.ProviderOpenRouter
+		}
+		routes = []models.OpenCodeRoute{{Backing: backing, PhysicalModelID: selection}}
+	}
+
+	return e.resolveAcrossOpenCodeRoutes(ctx, orgID, userID, selection, routes)
+}
+
+// openCodeRoutesForSelection returns the ordered routes to try for a selection
+// and whether the selection was recognized (a registry logical id or a curated
+// physical id). A pinned physical id yields its single route and bypasses org
+// routing policy — it is an explicit user choice. A logical id yields the
+// registry routes filtered/ordered by org policy.
+func (e *AgentEnv) openCodeRoutesForSelection(ctx context.Context, orgID uuid.UUID, selection string) ([]models.OpenCodeRoute, bool) {
+	if _, route, ok := models.OpenCodeRouteForPhysicalModel(selection); ok {
+		return []models.OpenCodeRoute{route}, true
+	}
+	if logical, ok := models.LookupOpenCodeModel(selection); ok {
+		return e.applyOpenCodeRoutingPolicy(ctx, orgID, logical.Routes), true
+	}
+	return nil, false
+}
+
+// applyOpenCodeRoutingPolicy drops OpenCode-native fallback routes unless the
+// org has opted into native routing. OpenRouter (and first-party) routes are
+// always kept. The returned slice is read-only and may alias the shared
+// registry route slice — callers must not mutate it.
+func (e *AgentEnv) applyOpenCodeRoutingPolicy(ctx context.Context, orgID uuid.UUID, routes []models.OpenCodeRoute) []models.OpenCodeRoute {
+	if e.openCodeAllowNativeFallback(ctx, orgID) {
+		return routes
+	}
+	out := make([]models.OpenCodeRoute, 0, len(routes))
+	for _, route := range routes {
+		if route.IsNativeOpenCode() {
+			continue
+		}
+		out = append(out, route)
+	}
+	return out
+}
+
+// openCodeAllowNativeFallback reports whether the org permits auto-routing to
+// fall through to the OpenCode-native transport. Defaults to true (native
+// fallback allowed; OpenRouter still tried first) — including when settings
+// can't be loaded — so native-only orgs keep working. US-sensitive orgs opt
+// into OpenRouter-only via OpenCodeRouting.RequireOpenRouter.
+func (e *AgentEnv) openCodeAllowNativeFallback(ctx context.Context, orgID uuid.UUID) bool {
+	routing, ok := e.loadOpenCodeRouting(ctx, orgID)
+	if !ok {
+		return true
+	}
+	return !routing.RequireOpenRouter
+}
+
+// resolveAcrossOpenCodeRoutes walks routes in order and returns the first
+// OpenCode credential whose backing matches a route and is runnable, pinning
+// the config's Model to that route's physical id. Records a rate-limit or
+// no-runnable-route block when nothing matches.
+func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) models.ProviderConfig {
+	providers := []models.ProviderName{models.ProviderOpenCode}
+	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok || !sawRows {
 		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
 	}
 
 	rows := append([]models.DecryptedCodingCredential(nil), rowsByProvider[models.ProviderOpenCode]...)
 	sortCodingCredentialResolutionRows(rows)
-	sawMatchingRows := false
+
 	sawRateLimitedMatchingRows := false
-	for _, cred := range rows {
-		cfg, ok := cred.Config.(models.OpenCodeConfig)
-		if !ok || cfg.APIKey == "" {
-			continue
-		}
-		if cfg.NormalizedBackingProvider() != targetBacking {
-			continue
-		}
-		sawMatchingRows = true
-		if !credentialRunnableForModelAwarePick(cred) {
-			if cred.RateLimitedUntil != nil && cred.RateLimitedUntil.After(time.Now()) {
-				sawRateLimitedMatchingRows = true
+	for routeIndex, route := range routes {
+		for _, cred := range rows {
+			cfg, ok := cred.Config.(models.OpenCodeConfig)
+			if !ok || cfg.APIKey == "" {
+				continue
 			}
-			continue
+			if cfg.NormalizedBackingProvider() != route.Backing {
+				continue
+			}
+			if !credentialRunnableForModelAwarePick(cred) {
+				if cred.RateLimitedUntil != nil && cred.RateLimitedUntil.After(time.Now()) {
+					sawRateLimitedMatchingRows = true
+				}
+				continue
+			}
+			// Surface a genuine failover — a non-preferred route won *after* an
+			// earlier route's credential was skipped for rate limiting. Gated on
+			// sawRateLimitedMatchingRows so a native-only org (whose OpenRouter
+			// route simply has no key) doesn't log on every session.
+			if routeIndex > 0 && sawRateLimitedMatchingRows {
+				e.logger.Info().
+					Str("org_id", orgID.String()).
+					Str("selection", selection).
+					Str("resolved_model", route.PhysicalModelID).
+					Str("transport", openCodeBackingProviderLabel(route.Backing)).
+					Msg("opencode route resolution fell back to a non-preferred transport after rate limiting")
+			}
+			cfg.BackingProvider = route.Backing
+			cfg.Model = route.PhysicalModelID
+			e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
+			return cfg
 		}
-		cfg.BackingProvider = cfg.NormalizedBackingProvider()
-		e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
-		return cfg
 	}
 
 	if sawRateLimitedMatchingRows {
-		e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(models.ProviderOpenCode, rowsByProvider, []models.ProviderName{models.ProviderOpenCode}))
-	} else if !sawMatchingRows {
-		e.recordCredentialBlock(orgID, userID, missingOpenCodeBackingBlock(targetBacking))
+		e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(models.ProviderOpenCode, rowsByProvider, providers))
+	} else {
+		e.recordCredentialBlock(orgID, userID, noRunnableOpenCodeRouteBlock(selection, routes))
 	}
 	return nil
 }
@@ -1160,12 +1267,36 @@ func credentialRunnableForModelAwarePick(cred models.DecryptedCodingCredential) 
 	return cred.RateLimitedUntil == nil || !cred.RateLimitedUntil.After(time.Now())
 }
 
-func missingOpenCodeBackingBlock(backing models.ProviderName) credentialBlock {
-	label := openCodeBackingProviderLabel(backing)
+// noRunnableOpenCodeRouteBlock describes a logical/pinned OpenCode selection
+// that has no runnable credential on any of its routes. It names the model and
+// the transports that were tried so the user can add the right key (or enable
+// native routing) rather than guessing.
+func noRunnableOpenCodeRouteBlock(selection string, routes []models.OpenCodeRoute) credentialBlock {
+	name := models.OpenCodeDisplayName(selection)
+	detail := fmt.Sprintf("no runnable OpenCode credential for %s.", name)
+	if tried := openCodeRouteTransportLabels(routes); len(tried) > 0 {
+		detail += fmt.Sprintf(" Tried %s.", strings.Join(tried, " and "))
+	}
+	detail += " Add an OpenRouter or OpenCode key, or enable OpenCode native routing in Settings."
 	return credentialBlock{
 		provider: models.ProviderOpenCode,
-		detail:   fmt.Sprintf("missing OpenCode credential for %s. Add an OpenCode via %s auth or choose a model backed by an existing OpenCode key.", label, label),
+		detail:   detail,
 	}
+}
+
+// openCodeRouteTransportLabels returns the distinct transport labels for a
+// route set, in order, e.g. ["OpenRouter", "OpenCode native"].
+func openCodeRouteTransportLabels(routes []models.OpenCodeRoute) []string {
+	seen := make(map[models.ProviderName]struct{}, len(routes))
+	labels := make([]string, 0, len(routes))
+	for _, route := range routes {
+		if _, ok := seen[route.Backing]; ok {
+			continue
+		}
+		seen[route.Backing] = struct{}{}
+		labels = append(labels, openCodeBackingProviderLabel(route.Backing))
+	}
+	return labels
 }
 
 func openCodeBackingProviderLabel(backing models.ProviderName) string {
@@ -1249,35 +1380,18 @@ func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
 	return string(data)
 }
 
-// Audited against OpenRouter endpoint lists and provider-company locations on
-// 2026-06-26. Keys use OpenCode's "~upstream/provider-model" custom model key
-// format for model IDs that contain slashes. Keep
-// docs/design/implemented/95-opencode-agent-adapter.md in sync when changing
-// this map.
-var auditedUSOpenRouterModelProviders = map[string][]string{
-	"~anthropic/claude-fable-5":      {"anthropic", "amazon-bedrock/us", "azure"},
-	"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
-	"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
-	"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
-	"~google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
-	"~minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
-	"~minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
-	"~moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
-	"~moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
-	"~openai/gpt-5.2":                {"openai", "azure"},
-	"~openai/gpt-5.5":                {"openai", "azure"},
-	// OpenRouter currently exposes only OpenAI for GPT 5.5 Pro.
-	"~openai/gpt-5.5-pro": {"openai"},
-	"~z-ai/glm-5.1":       {"deepinfra", "baseten", "together"},
-	"~z-ai/glm-5.2":       {"deepinfra", "together", "fireworks"},
-}
-
+// openCodeOpenRouterModelConfigs pins the audited US-only inference-provider
+// allowlist for an OpenRouter route. The allowlist is sourced from the logical
+// model registry (models.OpenCodeUSProviderList), the single source of truth;
+// see docs/design/implemented/95-opencode-agent-adapter.md and
+// docs/design/115-logical-models-and-route-resolution.md. The config key uses
+// OpenCode's "~upstream/provider-model" custom-model-key format.
 func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig {
 	modelKey, ok := openCodeOpenRouterModelKey(model)
 	if !ok {
 		return nil
 	}
-	providers := auditedUSOpenRouterModelProviders[modelKey]
+	providers := models.OpenCodeUSProviderList(model)
 	if len(providers) == 0 {
 		return nil
 	}
@@ -1364,17 +1478,42 @@ func (e *AgentEnv) applyAgentConfigOverrides(ctx context.Context, orgID uuid.UUI
 	}
 }
 
-// loadAgentConfig returns the org's AgentEnvConfig, using the configured
-// OrgSettingsCache as a front when present. Returns (nil, false) and logs a
-// warning if the org can't be loaded; callers should treat that as "no
-// overrides available" rather than failing the session start.
+// loadAgentConfig returns the org's AgentEnvConfig from the cached agent
+// settings snapshot. Returns (nil, false) when the org can't be loaded;
+// callers should treat that as "no overrides available" rather than failing
+// the session start.
 func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (models.AgentEnvConfig, bool) {
+	snapshot, ok := e.loadAgentSettingsSnapshot(ctx, orgID, agentType)
+	if !ok {
+		return nil, false
+	}
+	return snapshot.AgentConfig, true
+}
+
+// loadOpenCodeRouting returns the org's OpenCode routing policy from the cached
+// agent settings snapshot. Returns (zero, false) when the org can't be loaded
+// (callers fall back to safe defaults). Shares the snapshot cache with
+// loadAgentConfig, so reading the policy does not cost an extra DB round-trip
+// on a warm cache.
+func (e *AgentEnv) loadOpenCodeRouting(ctx context.Context, orgID uuid.UUID) (models.OpenCodeRoutingSettings, bool) {
+	snapshot, ok := e.loadAgentSettingsSnapshot(ctx, orgID, models.AgentTypeOpenCode)
+	if !ok {
+		return models.OpenCodeRoutingSettings{}, false
+	}
+	return snapshot.OpenCodeRouting, true
+}
+
+// loadAgentSettingsSnapshot loads the agent-relevant slice of org settings,
+// using the configured OrgSettingsCache as a front when present. The agentType
+// is used only for log context. Returns (zero, false) and logs a warning if
+// the org can't be loaded.
+func (e *AgentEnv) loadAgentSettingsSnapshot(ctx context.Context, orgID uuid.UUID, agentType models.AgentType) (AgentSettingsSnapshot, bool) {
 	if e.orgs == nil {
 		e.logger.Warn().
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
-			Msg("agent env helper has no orgs store; skipping agent_config overrides (agent may run without auth)")
-		return nil, false
+			Msg("agent env helper has no orgs store; skipping agent settings (agent may run without auth)")
+		return AgentSettingsSnapshot{}, false
 	}
 
 	if e.orgSettingsCache != nil {
@@ -1389,8 +1528,8 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 			Err(err).
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
-			Msg("failed to load org for agent_config overrides; agent may run without auth")
-		return nil, false
+			Msg("failed to load org for agent settings; agent may run without auth")
+		return AgentSettingsSnapshot{}, false
 	}
 	orgSettings, parseErr := models.ParseOrgSettings(org.Settings)
 	if parseErr != nil {
@@ -1398,17 +1537,21 @@ func (e *AgentEnv) loadAgentConfig(ctx context.Context, orgID uuid.UUID, agentTy
 			Err(parseErr).
 			Str("agent_type", string(agentType)).
 			Str("org_id", orgID.String()).
-			Msg("failed to parse org settings for agent_config overrides; agent may run without auth")
-		return nil, false
+			Msg("failed to parse org settings for agent settings; agent may run without auth")
+		return AgentSettingsSnapshot{}, false
 	}
 
+	snapshot := AgentSettingsSnapshot{
+		AgentConfig:     orgSettings.AgentConfig,
+		OpenCodeRouting: orgSettings.OpenCodeRouting,
+	}
 	if e.orgSettingsCache != nil {
-		// Store the (possibly nil) AgentConfig so a second hit doesn't
-		// re-fetch just to discover the org has no agent_config.
-		e.orgSettingsCache.Set(orgID, orgSettings.AgentConfig)
+		// Store the (possibly empty) snapshot so a second hit doesn't re-fetch
+		// just to discover the org has no agent_config or routing overrides.
+		e.orgSettingsCache.Set(orgID, snapshot)
 	}
 
-	return orgSettings.AgentConfig, true
+	return snapshot, true
 }
 
 // resolveProviderConfig returns the best ProviderConfig for a provider.
