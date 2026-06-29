@@ -11,7 +11,6 @@ import {
   ClipboardCheck,
   ExternalLink,
   FileSearch,
-  Pencil,
   Plus,
   PowerOff,
   Settings2,
@@ -874,17 +873,6 @@ export default function CodeReviewsPage() {
                     />
                   </FineTuningSection>
 
-                  <FineTuningSection title="GitHub review output" summary="Template for the final review comment">
-                    <div className="space-y-2">
-                      <Label className="text-xs text-muted-foreground">Final review template</Label>
-                      <PolicyTextarea
-                        serverValue={config?.final_review_template ?? ""}
-                        disabled={!config}
-                        rows={4}
-                        onCommit={(value) => commitPolicy((next) => { next.final_review_template = value; })}
-                      />
-                    </div>
-                  </FineTuningSection>
                 </div>
               </CardContent>
             </Card>
@@ -1216,7 +1204,6 @@ function DescriptionRequirementsList({
                       aria-label={`Edit ${requirement.title || "requirement"}`}
                       onClick={() => onEdit(requirement.key)}
                     >
-                      <Pencil className="h-4 w-4" />
                       Edit
                     </Button>
                   </div>
