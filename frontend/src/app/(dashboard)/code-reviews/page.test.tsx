@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 
 const toast = vi.hoisted(() => ({
@@ -79,6 +79,8 @@ const policy: CodeReviewResolvedPolicy = {
       allowed_path_patterns: ["internal/**"],
       blocked_path_patterns: ["migrations/**"],
       exclude_categories: ["auth", "billing"],
+      required_checks: ["lint", "test"],
+      eligible_authors: ["anya"],
       require_mergeable: true,
       require_up_to_date: false,
       allow_forks: false,
@@ -207,7 +209,10 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   },
 };
 
-function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady) {
+function mockCodeReviewBaseHandlers(
+  trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady,
+  onPolicyUpdate?: (config: CodeReviewPolicyConfig) => void,
+) {
   // Autosave issues whole-config PUTs and refetches on settle, so the GET must
   // reflect the last saved config for optimistic values to stick across the
   // invalidation round-trip.
@@ -223,6 +228,7 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     http.put("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig };
       currentConfig = body.config;
+      onPolicyUpdate?.(body.config);
       return HttpResponse.json({
         data: {
           ...currentConfig,
@@ -274,10 +280,13 @@ describe("CodeReviewsPage", () => {
 
     // Fine-tuning groups are collapsed by default; expand the ones we assert on.
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
-    expect(await screen.findByDisplayValue("*auth*")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
+    expect(await screen.findByText("*auth*")).toBeInTheDocument();
+    expect(screen.getByText("internal/**")).toBeInTheDocument();
+    expect(screen.getByText("migrations/**")).toBeInTheDocument();
+    expect(screen.getByText("billing")).toBeInTheDocument();
+    expect(screen.getByText("lint")).toBeInTheDocument();
+    expect(screen.getByText("anya")).toBeInTheDocument();
+    expect(screen.getAllByText("1 item").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
@@ -338,6 +347,71 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Close" }));
     expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
+  });
+
+  it("edits paths, authors, and checks as compact autosaved lists", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    const sensitivePathsInput = await screen.findByRole("textbox", { name: "Sensitive paths" });
+    await user.type(sensitivePathsInput, " src/payments/** {enter}");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/payments/**")).toBeInTheDocument();
+
+    await user.click(sensitivePathsInput);
+    await user.paste("src/admin/**\nsrc/reports/**\nsrc/admin/**");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/admin/**")).toBeInTheDocument();
+    expect(screen.getByText("src/reports/**")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove *auth*" }));
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(screen.queryByText("*auth*")).not.toBeInTheDocument();
+
+    const requiredChecksEditor = screen.getByText("Required checks").closest("section");
+    expect(requiredChecksEditor).not.toBeNull();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("2 items")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("lint")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
+
+    // Add-button labels are singularized correctly, including "categories" -> "category".
+    expect(screen.getByRole("button", { name: "Add excluded category" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
   });
 
   it("surfaces template apply save failures through the shared toast", async () => {

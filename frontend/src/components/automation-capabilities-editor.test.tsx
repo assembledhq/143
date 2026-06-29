@@ -37,6 +37,7 @@ const CATALOG: AgentCapabilityDefinition[] = [
     category: "Actions",
     scope: "integration",
   }),
+  def("automation_management", { max_access_level: "write", risk: "high", category: "Actions" }),
 ];
 
 describe("recommendedDefaultGrants", () => {
@@ -60,6 +61,7 @@ describe("recommendedDefaultGrants", () => {
     expect(byID.get("issue_sources")?.enabled).toBe(true);
     expect(byID.get("production_diagnostics")?.enabled).toBe(true);
     expect(byID.get("slack_notifications")?.enabled).toBe(true);
+    expect(byID.get("automation_management")?.enabled).toBe(true);
   });
 
   it("uses each capability's max access level for its grant", () => {
@@ -69,6 +71,7 @@ describe("recommendedDefaultGrants", () => {
     expect(byID.get("repo_context")?.access_level).toBe("read");
     expect(byID.get("publishing")?.access_level).toBe("publish");
     expect(byID.get("slack_notifications")?.access_level).toBe("write");
+    expect(byID.get("automation_management")?.access_level).toBe("write");
   });
 });
 

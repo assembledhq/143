@@ -2,12 +2,17 @@
 set -euo pipefail
 
 # Automated backup restore verification.
-# Run weekly via cron to confirm backups are actually restorable.
-#   0 4 * * 0 /opt/143/deploy/scripts/restore-test.sh >> /var/log/restore-test.log 2>&1
+# Run weekly via cron (installed by install-pg-backups.sh) to confirm backups
+# are actually restorable.
 
 BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
 DB_USER="${POSTGRES_USER:-onefortythree}"
 DB_NAME="${POSTGRES_DB:-onefortythree}"
+# Must match the major version of the production server (docker-compose.db.yml):
+# pg_restore from an older server rejects a newer custom-format archive
+# ("unsupported version in file header"), which would fail the drill it is
+# meant to validate. Override only to test against a different image.
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:18}"
 # Minimum number of non-system tables expected after restore.
 MIN_TABLE_COUNT="${MIN_TABLE_COUNT:-5}"
 
@@ -26,7 +31,7 @@ docker run -d --name "$TEST_CONTAINER" \
   -e POSTGRES_USER="$DB_USER" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB="$DB_NAME" \
-  postgres:17
+  "$POSTGRES_IMAGE"
 
 # Wait for Postgres to be ready
 for i in $(seq 1 30); do

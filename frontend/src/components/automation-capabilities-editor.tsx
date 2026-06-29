@@ -15,8 +15,8 @@ export function capabilityAccessFor(definition: AgentCapabilityDefinition) {
 // Capabilities that ship enabled by default for the org session-default policy
 // when an admin has not configured one yet. These are the broadly-useful
 // capabilities (code/PR/test context, integration issue context, read-only
-// production diagnostics, Slack status notifications, plus branch & PR
-// publishing).
+// production diagnostics, Slack status notifications, automation management,
+// plus branch & PR publishing).
 // Keep in sync with recommendedDefaultGrants in
 // internal/services/agentcapabilities/service.go.
 export const RECOMMENDED_DEFAULT_CAPABILITY_IDS: readonly AgentCapabilityID[] = [
@@ -27,6 +27,7 @@ export const RECOMMENDED_DEFAULT_CAPABILITY_IDS: readonly AgentCapabilityID[] = 
   "issue_sources",
   "production_diagnostics",
   "slack_notifications",
+  "automation_management",
   "publishing",
 ];
 
