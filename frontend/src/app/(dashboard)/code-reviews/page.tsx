@@ -47,7 +47,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { DurationInput } from "@/components/duration-input";
 import { ApiError, api } from "@/lib/api";
+import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
 import { getActiveOrgId } from "@/lib/active-org";
 import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
@@ -158,6 +160,7 @@ export default function CodeReviewsPage() {
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
+  const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
@@ -291,6 +294,22 @@ export default function CodeReviewsPage() {
   );
   const editingRequirement =
     editingRequirementIndex >= 0 && config ? config.description_policy.requirements[editingRequirementIndex] : null;
+  const selectedTemplateAlreadyApplied = useMemo(() => {
+    if (!selectedTemplate || !config) return false;
+    return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
+  }, [config, selectedTemplate]);
+  useEffect(() => {
+    setPendingTemplateApply(null);
+  }, [selectedTemplateKey, repositoryId]);
+  useEffect(() => {
+    if (!pendingTemplateApply) return;
+    if (autosave.status === "saved") {
+      toast.success(`Applied ${pendingTemplateApply.title}`);
+      setPendingTemplateApply(null);
+    } else if (autosave.status === "error") {
+      setPendingTemplateApply(null);
+    }
+  }, [autosave.status, pendingTemplateApply]);
   // Build a fully-merged config from the freshest cache value. Returns null
   // only before the policy has loaded (controls are disabled until then).
   const draftFrom = (mutate: (next: CodeReviewPolicyConfig) => void): CodeReviewPolicyConfig | null => {
@@ -583,6 +602,20 @@ export default function CodeReviewsPage() {
                       disabled={!selectedTemplate || !config}
                       onClick={() => {
                         if (!selectedTemplate) return;
+                        const latestConfig = readLatestConfig();
+                        const alreadyApplied =
+                          selectedTemplateAlreadyApplied ||
+                          (latestConfig
+                            ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
+                            : false);
+                        if (alreadyApplied) {
+                          toast.info(`${selectedTemplate.title} is already applied`);
+                          return;
+                        }
+                        setPendingTemplateApply({
+                          key: selectedTemplate.key,
+                          title: selectedTemplate.title,
+                        });
                         autosave.save(clonePolicy(selectedTemplate.config));
                       }}
                     >
@@ -621,21 +654,15 @@ export default function CodeReviewsPage() {
                         autosave={autosave}
                         buildPatch={(value) => buildConfig((next) => { next.inline_comment_limit = value; })}
                       />
-                      <NumberPolicyInput
-                        label="Timeout seconds"
-                        serverValue={config?.agent_roster.timeout_seconds}
-                        min={60}
+                      <DurationInput
+                        label="Timeout"
+                        valueSeconds={config?.agent_roster.timeout_seconds ?? 60}
+                        minSeconds={60}
                         disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.timeout_seconds = value; })}
-                      />
-                      <NumberPolicyInput
-                        label="Cost ceiling cents"
-                        serverValue={config?.agent_roster.max_cost_cents}
-                        min={0}
-                        disabled={!config}
-                        autosave={autosave}
-                        buildPatch={(value) => buildConfig((next) => { next.agent_roster.max_cost_cents = value; })}
+                        defaultUnit="minutes"
+                        onChangeSeconds={(seconds) =>
+                          autosave.save(buildConfig((next) => { next.agent_roster.timeout_seconds = seconds; }))
+                        }
                       />
                       <NumberPolicyInput
                         label="Reviewer quorum"
@@ -1402,6 +1429,7 @@ function NumberPolicyInput({
       <Input
         className="mt-2"
         type="number"
+        aria-label={label}
         min={min}
         max={max}
         value={field.value}

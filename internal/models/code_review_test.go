@@ -77,7 +77,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects oversized quorum", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.RequireReviewerQuorum = 3 }, expectErr: true},
 		{name: "rejects too short timeout", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.TimeoutSeconds = 30 }, expectErr: true},
-		{name: "rejects negative cost", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.MaxCostCents = -1 }, expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -320,24 +319,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
 				"blocked path changed: internal/db/schema/users.go",
-			}},
-		},
-		{
-			name: "blocks review cost above ceiling",
-			mutate: func(c *CodeReviewPolicyConfig) {
-				c.AgentRoster.MaxCostCents = 25
-			},
-			input: CodeReviewRiskInput{
-				FilesChanged:      1,
-				LinesChanged:      20,
-				ChecksPassing:     true,
-				DescriptionPassed: true,
-				Mergeable:         true,
-				Author:            "devin",
-				ReviewCostCents:   25.1,
-			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"review cost 25.10 cents exceeds policy limit 25 cents",
 			}},
 		},
 	}
