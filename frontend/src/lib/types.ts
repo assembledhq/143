@@ -129,7 +129,6 @@ export interface CodeReviewPolicyConfig {
     allowed_path_patterns?: string[];
     blocked_path_patterns?: string[];
     exclude_categories?: string[];
-    require_mergeable: boolean;
     require_up_to_date: boolean;
     allow_forks: boolean;
     allow_policy_changes: boolean;

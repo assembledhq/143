@@ -319,7 +319,6 @@ type CodeReviewRiskPolicy struct {
 	AllowedPathPatterns   []string              `json:"allowed_path_patterns,omitempty"`
 	BlockedPathPatterns   []string              `json:"blocked_path_patterns,omitempty"`
 	ExcludeCategories     []string              `json:"exclude_categories,omitempty"`
-	RequireMergeable      bool                  `json:"require_mergeable"`
 	RequireUpToDate       bool                  `json:"require_up_to_date"`
 	AllowForks            bool                  `json:"allow_forks"`
 	AllowPolicyChanges    bool                  `json:"allow_policy_changes"`
@@ -429,7 +428,6 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			ExcludeSensitivePaths: true,
 			SensitivePaths:        defaultPRReadinessSensitivePaths(),
 			ExcludeCategories:     []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
-			RequireMergeable:      true,
 			RequireUpToDate:       false,
 			AllowForks:            false,
 			AllowPolicyChanges:    false,
@@ -492,7 +490,6 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.ExcludeCategories) > 0 {
 		defaults.RiskPolicy.ExcludeCategories = config.RiskPolicy.ExcludeCategories
 	}
-	defaults.RiskPolicy.RequireMergeable = config.RiskPolicy.RequireMergeable
 	defaults.RiskPolicy.RequireUpToDate = config.RiskPolicy.RequireUpToDate
 	defaults.RiskPolicy.AllowForks = config.RiskPolicy.AllowForks
 	defaults.RiskPolicy.AllowPolicyChanges = config.RiskPolicy.AllowPolicyChanges
@@ -953,7 +950,6 @@ type CodeReviewRiskInput struct {
 	ChecksPassing          bool
 	RequiredChecksPassing  map[string]bool
 	DescriptionPassed      bool
-	Mergeable              bool
 	UpToDate               bool
 	Author                 string
 	AuthorClass            string
@@ -1026,9 +1022,6 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	}
 	if !input.DescriptionPassed {
 		reasons = append(reasons, "PR description policy did not pass")
-	}
-	if policy.RiskPolicy.RequireMergeable && !input.Mergeable {
-		reasons = append(reasons, "PR is not mergeable")
 	}
 	if policy.RiskPolicy.RequireUpToDate && !input.UpToDate {
 		reasons = append(reasons, "PR branch is not up to date")

@@ -24,7 +24,6 @@ Risk rules:
 - Max files changed: {{.MaxFilesChanged}}
 - Max lines changed: {{.MaxLinesChanged}}
 - Passing checks required: {{.RequirePassingChecks}}
-- Mergeable required: {{.RequireMergeable}}
 - Up to date required: {{.RequireUpToDate}}
 - Forks allowed: {{.AllowForks}}
 - Sensitive paths excluded: {{.ExcludeSensitivePaths}}

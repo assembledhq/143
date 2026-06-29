@@ -835,7 +835,6 @@ func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, c
 		MaxFilesChanged:         cfg.RiskPolicy.MaxFilesChanged,
 		MaxLinesChanged:         cfg.RiskPolicy.MaxLinesChanged,
 		RequirePassingChecks:    cfg.RiskPolicy.RequirePassingChecks,
-		RequireMergeable:        cfg.RiskPolicy.RequireMergeable,
 		RequireUpToDate:         cfg.RiskPolicy.RequireUpToDate,
 		AllowForks:              cfg.RiskPolicy.AllowForks,
 		ExcludeSensitivePaths:   cfg.RiskPolicy.ExcludeSensitivePaths,
@@ -902,7 +901,6 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		ChecksPassing:          codeReviewChecksPassing(cfg, health),
 		RequiredChecksPassing:  codeReviewRequiredChecksPassing(cfg, health),
 		DescriptionPassed:      descriptionPassed,
-		Mergeable:              codeReviewMergeable(health),
 		UpToDate:               codeReviewUpToDate(health),
 		Author:                 codeReviewAuthor(job, pr),
 		AuthorClass:            codeReviewAuthorClass(pr),
@@ -1613,7 +1611,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ChecksPassing:          codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing:  codeReviewRequiredChecksPassing(policy, input.Health),
 		DescriptionPassed:      descriptionPassed,
-		Mergeable:              codeReviewMergeable(input.Health),
 		UpToDate:               codeReviewUpToDate(input.Health),
 		Author:                 codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:            codeReviewAuthorClass(input.PullRequest),
@@ -1644,7 +1641,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
 		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasons, input.ChangedFiles),
-		Checklist:                 codeReviewApprovalChecklist(policy, input, descriptionPassed),
 	})
 	return decision, body
 }
@@ -2291,10 +2287,6 @@ func codeReviewAllChecksPassing(confirmed bool, checks []models.PullRequestCheck
 	return true
 }
 
-func codeReviewMergeable(health *models.PullRequestHealthResponse) bool {
-	return health != nil && health.Status == models.PullRequestStatusOpen && health.CanMerge && health.MergeState == models.PullRequestMergeStateClean && !health.HasConflicts
-}
-
 func codeReviewUpToDate(health *models.PullRequestHealthResponse) bool {
 	return health != nil && health.MergeState != models.PullRequestMergeStateBehind
 }
@@ -2655,31 +2647,6 @@ func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codere
 		}
 	}
 	return out
-}
-
-func codeReviewApprovalChecklist(policy models.CodeReviewPolicyConfig, input liveCodeReviewOutcomeInput, descriptionPassed bool) []string {
-	checklist := []string{
-		fmt.Sprintf("Changed files: %d/%d", len(input.ChangedFiles), policy.RiskPolicy.MaxFilesChanged),
-		fmt.Sprintf("Changed lines: %d/%d", codeReviewLinesChanged(input.ChangedFiles), policy.RiskPolicy.MaxLinesChanged),
-	}
-	if policy.RiskPolicy.RequirePassingChecks {
-		if codeReviewChecksPassing(policy, input.Health) {
-			checklist = append(checklist, "Required checks: passing")
-		} else {
-			checklist = append(checklist, "Required checks: not passing")
-		}
-	}
-	if descriptionPassed {
-		checklist = append(checklist, "PR description: passed")
-	} else {
-		checklist = append(checklist, "PR description: failed")
-	}
-	if codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health) {
-		checklist = append(checklist, "Reviewed head: stale")
-	} else {
-		checklist = append(checklist, "Reviewed head: current")
-	}
-	return checklist
 }
 
 func ensureCodeReviewOrchestratorResult(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, decision models.CodeReviewDecisionEvaluation, raw string) error {

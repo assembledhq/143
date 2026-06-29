@@ -17,7 +17,6 @@ type CodeReviewFinalReviewInput struct {
 	AgentSummaries            []string
 	Findings                  []CodeReviewFinding
 	RecommendedHumanReviewers []string
-	Checklist                 []string
 }
 
 func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
@@ -76,12 +75,6 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		b.WriteString("\nRecommended human reviewers: " + strings.Join(reviewers, ", ") + "\n")
-	}
-	if checklist := nonEmptyStrings(input.Checklist); len(checklist) > 0 {
-		b.WriteString("\nApproval checklist:\n")
-		for _, item := range checklist {
-			b.WriteString("- " + item + "\n")
-		}
 	}
 	return strings.TrimSpace(b.String())
 }
