@@ -307,7 +307,6 @@ type CodeReviewReviewerPromptData struct {
 	MaxFilesChanged         int
 	MaxLinesChanged         int
 	RequirePassingChecks    bool
-	RequireMergeable        bool
 	RequireUpToDate         bool
 	AllowForks              bool
 	ExcludeSensitivePaths   bool
