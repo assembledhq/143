@@ -375,12 +375,12 @@ func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
 	whitespace := cfg
 	blank := "   "
 	whitespace.AgentRoster.OrchestratorModel = &blank
-	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(whitespace),
+	require.Equal(t, models.OpenCodeModelGPT55, *codeReviewOrchestratorAgentModel(whitespace),
 		"whitespace-only orchestrator model should fall back to the per-agent default")
 
 	unset := cfg
 	unset.AgentRoster.OrchestratorModel = nil
-	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(unset),
+	require.Equal(t, models.OpenCodeModelGPT55, *codeReviewOrchestratorAgentModel(unset),
 		"nil orchestrator model should fall back to the per-agent default")
 }
 

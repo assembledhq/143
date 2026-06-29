@@ -654,7 +654,7 @@ func codeReviewDefaultAgentModel(agentType models.AgentType) *string {
 	case models.AgentTypePi:
 		model = models.PiModelClaudeOpus48
 	case models.AgentTypeOpenCode:
-		model = models.OpenCodeModelGPT54Mini
+		model = models.OpenCodeModelGPT55
 	default:
 		return nil
 	}

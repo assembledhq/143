@@ -407,7 +407,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
 			Orchestrator:          AgentTypeOpenCode,
 			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
-			OrchestratorModel:     strPtr(OpenCodeModelGPT54Mini),
+			OrchestratorModel:     strPtr(OpenCodeModelGPT55),
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,
