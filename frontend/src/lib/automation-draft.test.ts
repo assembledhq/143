@@ -5,6 +5,7 @@ import {
   clearAutomationDraft,
   defaultAutomationFormState,
   loadAutomationDraft,
+  parseAutomationIntervalInput,
   saveAutomationDraft,
   type AutomationFormState,
 } from "./automation-draft";
@@ -238,6 +239,13 @@ describe("automation-draft storage", () => {
         ],
       }),
     );
+  });
+
+  it("normalizes interval input to the supported range", () => {
+    expect(parseAutomationIntervalInput("")).toBe(1);
+    expect(parseAutomationIntervalInput("0")).toBe(1);
+    expect(parseAutomationIntervalInput("14")).toBe(14);
+    expect(parseAutomationIntervalInput("999")).toBe(365);
   });
 
   it("clears the stored draft", () => {

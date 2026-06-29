@@ -90,6 +90,11 @@ function getStorage(): Storage | null {
   }
 }
 
+export function parseAutomationIntervalInput(value: string): number {
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? 1 : clampInteger(parsed, 1, 365, 1);
+}
+
 export function defaultAutomationFormState(
   overrides: Partial<AutomationFormState> = {},
 ): AutomationFormState {
