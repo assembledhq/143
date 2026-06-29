@@ -13,8 +13,8 @@ import {
   FileSearch,
   Pencil,
   Plus,
+  PowerOff,
   Settings2,
-  ShieldCheck,
   Trash2,
   Users,
 } from "lucide-react";
@@ -572,39 +572,20 @@ export default function CodeReviewsPage() {
 
           <TabsContent value="config" className="space-y-4">
             <Card>
-              <CardHeader>
+              <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>Bot behavior</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {repositoryId
+                    ? policyQuery.data?.data.source === "repository"
+                      ? "This repository has review policy overrides and inherits organization defaults where fields are unset."
+                      : "This repository uses the organization default review policy."
+                    : "Organization defaults apply to repositories without their own review policy override."}
+                </p>
               </CardHeader>
               <CardContent className="space-y-5">
-                <div className="rounded-md border border-border p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-foreground">
-                        {repositoryId ? "Repository policy" : "Organization default"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        {policyQuery.data?.data.source === "repository"
-                          ? "This repository uses an insert-only override that inherits organization defaults."
-                          : "These settings provide the default policy for repositories without their own override."}
-                      </div>
-                    </div>
-                    <Badge variant={policyQuery.data?.data.source === "repository" ? "secondary" : "outline"}>
-                      {policyQuery.data?.data.source ?? "loading"}
-                    </Badge>
-                  </div>
-                  {config?.inheritance?.inherit_org_defaults ? (
-                    <div className="mt-3 text-xs text-muted-foreground">
-                      Inherited from version {policyQuery.data?.data.inherited_policy?.version ?? "default"}.
-                      {config.inheritance.override_fields?.length
-                        ? ` Override fields: ${config.inheritance.override_fields.join(", ")}.`
-                        : " No explicit override fields."}
-                    </div>
-                  ) : null}
-                </div>
-
                 <GitHubTriggerPanel
                   repositorySelected={Boolean(repositoryId)}
                   trigger={githubTriggerQuery.data?.data}
@@ -966,6 +947,7 @@ function GitHubTriggerPanel({
   const ready = status === "ready";
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
+  const needsRepair = status === "error" || permissionRequired;
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
     repositorySelected,
@@ -980,20 +962,20 @@ function GitHubTriggerPanel({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-medium text-foreground">GitHub reviewer trigger</div>
+            <div className="text-sm font-medium text-foreground">GitHub reviewer menu option</div>
             <Badge variant={githubTriggerStatusVariant(status)}>
               {isLoading ? "Checking" : githubTriggerStatusLabel(status)}
             </Badge>
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {repositorySelected
-              ? "Humans request this GitHub team on a PR to start a 143 code review."
-              : "Select a repository to create or repair its reviewer team trigger."}
+              ? "People select this team from GitHub's Reviewers menu on a PR to start a 143 code review."
+              : "Select a repository to set up the reviewer that appears in GitHub's Reviewers menu."}
           </div>
           {repositorySelected ? (
             <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
               <div className="rounded-md bg-muted/40 px-3 py-2">
-                <div className="text-muted-foreground">Reviewer</div>
+                <div className="text-muted-foreground">Menu reviewer</div>
                 <div className="mt-1 truncate font-medium text-foreground">{reviewer}</div>
               </div>
               <div className="rounded-md bg-muted/40 px-3 py-2">
@@ -1028,20 +1010,22 @@ function GitHubTriggerPanel({
               Connect GitHub
             </Button>
           ) : null}
-          <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
-            <Button
-              variant={ready ? "outline" : "default"}
-              size="sm"
-              disabled={!!setupDisabledReason}
-              onClick={onSetup}
-            >
-              {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-              {ready ? "Repair team" : "Create / repair team"}
-            </Button>
-          </DisabledTooltip>
+          {!ready ? (
+            <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={!!setupDisabledReason}
+                onClick={onSetup}
+              >
+                <Users className="h-4 w-4" />
+                {needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
+              </Button>
+            </DisabledTooltip>
+          ) : null}
           {ready ? (
             <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
-              <Trash2 className="h-4 w-4" />
+              <PowerOff className="h-4 w-4" />
               Disable
             </Button>
           ) : null}
@@ -1068,19 +1052,19 @@ function githubTriggerSetupDisabledReason({
   isLoading: boolean;
 }): string | undefined {
   if (!repositorySelected) {
-    return "Select a repository before creating the GitHub reviewer team.";
+    return "Select a repository before setting up the GitHub reviewer menu option.";
   }
   if (authRequired) {
-    return "Connect your GitHub account first so 143 can create or repair the reviewer team.";
+    return "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.";
   }
   if (setupPending) {
-    return "Team setup is already running. Wait for it to finish before trying again.";
+    return "GitHub reviewer setup is already running. Wait for it to finish before trying again.";
   }
   if (deletePending) {
-    return "The reviewer team trigger is being disabled. Wait for that action to finish before repairing it.";
+    return "The GitHub reviewer menu option is being disabled. Wait for that action to finish before repairing it.";
   }
   if (isLoading) {
-    return "143 is checking the repository's reviewer team status. Wait for the check to finish.";
+    return "143 is checking the repository's GitHub reviewer menu option. Wait for the check to finish.";
   }
   return undefined;
 }

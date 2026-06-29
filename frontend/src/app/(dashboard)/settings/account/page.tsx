@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
+import { KeyRound, Plus, PowerOff, ShieldCheck, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
@@ -165,7 +165,7 @@ function CredentialList({
           ) : null}
           {!readOnly && onDelete ? (
             <Button variant="ghost" size="sm" onClick={() => onDelete(row.id)}>
-              <Trash2 className="mr-2 h-4 w-4" />
+              <PowerOff className="mr-2 h-4 w-4" />
               Disable
             </Button>
           ) : null}
@@ -207,7 +207,7 @@ function CredentialList({
                 {!readOnly ? (
                   <TableCell className="text-right">
                     <Button variant="ghost" size="sm" onClick={() => onDelete?.(row.id)}>
-                      <Trash2 className="mr-2 h-4 w-4" />
+                      <PowerOff className="mr-2 h-4 w-4" />
                       Disable
                     </Button>
                   </TableCell>
