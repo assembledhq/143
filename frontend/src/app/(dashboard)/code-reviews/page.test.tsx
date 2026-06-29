@@ -81,7 +81,6 @@ const policy: CodeReviewResolvedPolicy = {
       exclude_categories: ["auth", "billing"],
       required_checks: ["lint", "test"],
       eligible_authors: ["anya"],
-      require_mergeable: true,
       require_up_to_date: false,
       allow_forks: false,
       allow_policy_changes: false,
