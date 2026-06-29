@@ -744,6 +744,22 @@ func TestCodingCredentialSummaryHelpers(t *testing.T) {
 	require.Equal(t, "Setup token renews by Jan 15, 2027", orgRows[4].UsageNote, "setup-token usage note should show the stored expiry")
 	require.Equal(t, "Pi API key", defaultLabelFor(models.AgentTypePi, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover pi")
 	require.Equal(t, "OpenCode API key", defaultLabelFor(models.AgentTypeOpenCode, models.CodingAuthTypeAPIKey), "defaultLabelFor should cover opencode")
+
+	// OpenCode rows are stored under ProviderOpenCode, but the summary must
+	// surface the config's backing provider so the model picker can light up
+	// the OpenRouter-backed routes instead of treating every key as native.
+	openRouterRow := models.DecryptedCodingCredential{
+		ID: uuid.New(), OrgID: orgID, UserID: &userID, Provider: models.ProviderOpenCode,
+		Config:   models.OpenCodeConfig{APIKey: "sk-or-v1-abc123", BackingProvider: models.ProviderOpenRouter},
+		Priority: 1, Status: models.CodingCredentialStatusActive, CreatedAt: now, UpdatedAt: now,
+	}
+	openRouterSummary := summaryFromDecryptedCoding(openRouterRow)
+	require.Equal(t, models.AgentTypeOpenCode, openRouterSummary.Agent, "OpenCode row should map to the opencode agent")
+	require.Equal(t, models.ProviderOpenRouter, openRouterSummary.Provider, "OpenCode summary should surface the openrouter backing provider")
+
+	nativeRow := openRouterRow
+	nativeRow.Config = models.OpenCodeConfig{APIKey: "oc-key"}
+	require.Equal(t, models.ProviderOpenCode, summaryFromDecryptedCoding(nativeRow).Provider, "OpenCode summary should default to native backing when none is stored")
 	require.Equal(t, "Coding auth", defaultLabelFor("", ""), "defaultLabelFor should cover unknown agents")
 
 	cfg, provider, err := codingCredentialConfigFromInput(models.CreateCodingCredentialInput{Agent: models.AgentTypeClaudeCode, AuthType: models.CodingAuthTypeAPIKey, APIKey: "sk-ant", BaseURL: "https://anthropic.test"})
