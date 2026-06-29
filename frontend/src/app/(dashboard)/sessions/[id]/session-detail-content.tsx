@@ -434,12 +434,31 @@ function ReadinessCheckGroup({
   );
 }
 
+function ReadinessCheckList({
+  checks,
+  onAction,
+  actionDisabled,
+}: {
+  checks: PRReadinessCheck[];
+  onAction?: (check: PRReadinessCheck) => void;
+  actionDisabled?: (check: PRReadinessCheck) => boolean;
+}) {
+  if (checks.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {checks.map((check) => (
+        <ReadinessCheckRow key={check.id || check.check_key || check.check_type} check={check} onAction={onAction} actionDisabled={actionDisabled?.(check) ?? false} />
+      ))}
+    </div>
+  );
+}
+
 function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadinessCheck; onAction?: (check: PRReadinessCheck) => void; actionDisabled: boolean }) {
   const [open, setOpen] = useState(false);
   const evidence = formatReadinessCheckDetails(check.details);
   return (
-    <div className="flex items-start gap-2 text-muted-foreground">
-      <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+    <div className="grid grid-cols-[16px_1fr] gap-2 text-muted-foreground">
+      <ReadinessCheckStatusIcon status={check.status} className="mt-0.5 h-3.5 w-3.5" />
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-foreground">{check.title}</span>
@@ -475,6 +494,13 @@ function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadi
       </div>
     </div>
   );
+}
+
+function ReadinessCheckStatusIcon({ status, className }: { status: PRReadinessCheck["status"]; className?: string }) {
+  if (status === "passed") return <CheckCircle2 className={cn("text-success", className)} />;
+  if (status === "failed" || status === "error") return <AlertTriangle className={cn("text-destructive", className)} />;
+  if (status === "warning") return <AlertTriangle className={cn("text-warning", className)} />;
+  return <Clock className={cn("text-muted-foreground", className)} />;
 }
 
 function formatReadinessCheckDetails(value: unknown) {
@@ -604,21 +630,6 @@ const ReadinessPacketSummary = forwardRef<HTMLDivElement, { packet: ReadinessPac
     </div>
   );
 });
-
-function readinessStatusLabel(status: PRReadinessRun["status"]) {
-  switch (status) {
-    case "passed":
-      return "Ready";
-    case "warnings":
-      return "Ready with warnings";
-    case "blocked":
-      return "Blocked";
-    case "failed":
-      return "Checks failed";
-    default:
-      return "Checking...";
-  }
-}
 
 function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
   if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
@@ -4679,13 +4690,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness?.status === "running" ||
     runReadinessMutation.isPending;
   const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessHeadline = !latestReadiness
-    ? "Not reviewed yet"
-    : readinessRunning
-      ? "Checking…"
-      : readinessStale
-        ? "Stale after latest changes"
-        : latestReadiness.summary || readinessStatusLabel(latestReadiness.status);
   const readinessCheckDisabled = readinessRunning || isRunning;
 
   // Readiness findings, grouped with role-aware enforcement so the merged
@@ -4784,6 +4788,66 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     return false;
   };
+  const readinessNeedsActionChecks = [...readinessBlockedChecks, ...readinessWarningChecks];
+  const readinessOptionalCount = readinessWarningChecks.length + readinessBypassedChecks.length;
+  const readinessDetailCount = readinessNeedsActionChecks.length + readinessPassedChecks.length + readinessBypassedChecks.length + (readinessReviewPacket ? 1 : 0);
+  const readinessPrimaryCopy = (() => {
+    if (reviewLoopRunning) {
+      return {
+        title: `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`,
+        description: `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`,
+      };
+    }
+    if (readinessRunning) {
+      return { title: "Checking readiness", description: "Reviewing the latest changes before PR." };
+    }
+    if (!latestReadiness) {
+      return { title: "Review before PR", description: "Run a quick readiness check before opening a PR." };
+    }
+    if (readinessStale) {
+      return { title: "Not ready yet", description: "Files changed since the last check." };
+    }
+    if (latestReadiness.status === "failed") {
+      return { title: "Check failed", description: "Readiness could not finish. Try running it again." };
+    }
+    if (readinessBlockedChecks.length > 0) {
+      return {
+        title: "Not ready yet",
+        description: readinessBlockedChecks.length === 1
+          ? `${readinessBlockedChecks[0].title} needs attention.`
+          : `${readinessBlockedChecks.length} readiness checks need attention.`,
+      };
+    }
+    if (readinessWarningChecks.length > 0) {
+      return {
+        title: "Ready with notes",
+        description: readinessWarningChecks.length === 1
+          ? "1 optional improvement is available."
+          : `${readinessWarningChecks.length} optional improvements are available.`,
+      };
+    }
+    return { title: "Ready for PR", description: "The latest checks passed." };
+  })();
+  const readinessPrimaryAction = (() => {
+    if (reviewLoopRunning) return null;
+    if (!latestReadiness || readinessStale || readinessRunning || latestReadiness.status === "failed") {
+      return {
+        label: latestReadiness ? "Re-check readiness" : "Check readiness",
+        icon: readinessRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />,
+        disabled: readinessCheckDisabled,
+        onClick: () => runReadinessMutation.mutate(),
+      };
+    }
+    if (readinessBlockedChecks.length > 0 && canUseNativeReviewLoop) {
+      return {
+        label: "Review & fix",
+        icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
+        disabled: reviewActionDisabled,
+        onClick: () => setReviewConfigOpen(true),
+      };
+    }
+    return null;
+  })();
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -6280,7 +6344,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
                 <div className="flex flex-col gap-3">
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       {reviewLoopRunning || readinessRunning ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -6290,55 +6354,42 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground">
-                        {reviewLoopRunning
-                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`
-                          : "Review before PR"}
+                        {readinessPrimaryCopy.title}
                       </p>
-                      <p className="text-xs text-muted-foreground">
-                        {reviewLoopRunning
-                          ? `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`
-                          : readinessHeadline}
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {readinessPrimaryCopy.description}
                       </p>
                     </div>
                   </div>
-                  {!reviewLoopRunning ? (
-                    <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                  {readinessPrimaryAction ? (
+                    readinessPrimaryAction.label === "Review & fix" ? (
+                      <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="w-full gap-1.5 sm:w-fit"
+                          disabled={readinessPrimaryAction.disabled}
+                          title={reviewActionDisabledReason}
+                          onClick={readinessPrimaryAction.onClick}
+                        >
+                          {readinessPrimaryAction.icon}
+                          {readinessPrimaryAction.label}
+                        </Button>
+                      </DisabledTooltip>
+                    ) : (
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        className="w-full gap-1.5 sm:w-auto"
-                        disabled={readinessCheckDisabled}
-                        onClick={() => runReadinessMutation.mutate()}
+                        className="w-full gap-1.5 sm:w-fit"
+                        disabled={readinessPrimaryAction.disabled}
+                        onClick={readinessPrimaryAction.onClick}
                       >
-                        {readinessRunning ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                        {latestReadiness ? "Re-check" : "Check readiness"}
+                        {readinessPrimaryAction.icon}
+                        {readinessPrimaryAction.label}
                       </Button>
-                      {canUseNativeReviewLoop ? (
-                        <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="w-full gap-1.5 sm:w-auto"
-                            disabled={reviewActionDisabled}
-                            title={reviewActionDisabledReason}
-                            onClick={() => setReviewConfigOpen(true)}
-                          >
-                            {startReviewLoopMutation.isPending ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Settings2 className="h-3.5 w-3.5" />
-                            )}
-                            Review &amp; fix
-                          </Button>
-                        </DisabledTooltip>
-                      ) : null}
-                    </div>
+                    )
                   ) : null}
                 </div>
                 {readinessRunning ? (
@@ -6350,18 +6401,41 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 ) : null}
                 {!readinessRunning && latestReadiness ? (
-                  <div className="space-y-3 text-xs">
-                    <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Warnings" checks={readinessWarningChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Blocked" checks={readinessBlockedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
-                    {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
-                      <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
-                        Bypass blockers
-                      </Button>
-                    )}
-                  </div>
+                  <Collapsible defaultOpen={readinessBlockedChecks.length > 0 && !readinessStale}>
+                    <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                      <div className="text-xs text-muted-foreground">
+                        {readinessBlockedChecks.length === 0 && readinessOptionalCount > 0
+                          ? `${readinessOptionalCount} optional ${readinessOptionalCount === 1 ? "item" : "items"}`
+                          : readinessDetailCount > 0
+                            ? `${readinessDetailCount} readiness ${readinessDetailCount === 1 ? "detail" : "details"}`
+                            : "No additional details"}
+                      </div>
+                      <CollapsibleTrigger asChild>
+                        <Button type="button" variant="ghost" size="xs" className="gap-1.5" aria-label="Show readiness details">
+                          Details
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        </Button>
+                      </CollapsibleTrigger>
+                    </div>
+                    <CollapsibleContent className="pt-3">
+                      <div className="space-y-3 text-xs">
+                        {readinessNeedsActionChecks.length > 0 ? (
+                          <div className="space-y-1">
+                            <div className="font-medium text-foreground">Needs attention</div>
+                            <ReadinessCheckList checks={readinessNeedsActionChecks} onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                          </div>
+                        ) : null}
+                        <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                        <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                        {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
+                        {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
+                          <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
+                            Bypass blockers
+                          </Button>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
                 ) : null}
               </CardContent>
             </Card>

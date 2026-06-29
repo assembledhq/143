@@ -489,10 +489,11 @@ describe('SessionDetailPage PR creation', () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByText('Review before PR')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Check readiness' })).toHaveAttribute(
       'data-variant',
       'outline',
     );
+    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
     expect(screen.queryByText('Issue-less context')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('Maintenance follow-up requested in Slack')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save context' })).not.toBeInTheDocument();
@@ -549,6 +550,10 @@ describe('SessionDetailPage PR creation', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
+    expect(await screen.findByText('Ready with notes')).toBeInTheDocument();
+    expect(screen.getByText('1 optional improvement is available.')).toBeInTheDocument();
+    expect(screen.queryByText('Sensitive paths changed.')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Show readiness details' }));
     expect(await screen.findByText('Risk flags detected')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Show evidence for Risk flags detected' }));
     expect(await screen.findByText(/analytics\/schema\.json/)).toBeInTheDocument();
@@ -604,8 +609,10 @@ describe('SessionDetailPage PR creation', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
-    expect(await screen.findByText('Stale after latest changes')).toBeInTheDocument();
-    expect(screen.getByText('Readiness is stale')).toBeInTheDocument();
+    expect(await screen.findByText('Not ready yet')).toBeInTheDocument();
+    expect(screen.getByText('Files changed since the last check.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Re-check readiness' })).toBeInTheDocument();
+    expect(screen.queryByText('Readiness is stale')).not.toBeInTheDocument();
   });
 
   it('creates a PR directly when readiness has advisory warnings', async () => {
@@ -716,6 +723,7 @@ describe('SessionDetailPage PR creation', () => {
     const user = userEvent.setup();
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
+    expect(await screen.findByText('Agent review not clean')).toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: 'Bypass blockers' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Bypass readiness blockers' });
