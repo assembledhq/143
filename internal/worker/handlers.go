@@ -62,6 +62,7 @@ var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
 const prePRReviewMaxWait = 30 * time.Minute
 const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
+const failureCategoryInterrupted = "interrupted_unrecovered"
 
 var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
 
@@ -314,6 +315,102 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 					Str("session_id", failedSession.ID.String()).
 					Str("job_type", jobType).
 					Msg("failed to update automation run after sandbox capacity dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
+		}
+		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, "failed", "143 session failed", errMsg, true)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
+	})
+}
+
+// registerSystemInterruptDeadLetter terminalizes a session (and its primary
+// thread) when a turn interrupted by a system stop — a worker drain or rolling
+// deploy — never manages to resume and the requeued job ultimately dead-letters.
+// The interrupt branch returns a RetryableError so the same turn re-runs on
+// another worker; this hook is the deterministic give-up cleanup. Without it the
+// session sits at its pre-turn status with the primary thread still "running"
+// (so the UI keeps showing "Agent is working…") until the reaper sweeps it
+// ~2.5h later — exactly the orphan the reaper's phase-0.5 comment describes.
+func registerSystemInterruptDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped: it was interrupted by maintenance and could not be resumed before the retry window expired."
+		explanation := "A worker drain or system stop interrupted this run and the requeued attempt never completed — the job dead-lettered, e.g. during a rolling deploy. No further automatic retry will happen."
+		nextSteps := []string{
+			"Retry the session — the interruption was most likely a transient deploy or worker restart",
+			"Check worker logs if sessions repeatedly fail to resume after deploys",
+		}
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after a system interruption could not resume")
+		}
+
+		failedSession := session
+		failureCategory := failureCategoryInterrupted
+		failedSession.Status = models.SessionStatusFailed
+		failedSession.Error = &errMsg
+		failedSession.FailureCategory = &failureCategory
+		failedSession.FailureExplanation = &explanation
+		failedSession.FailureNextSteps = nextSteps
+		failedSession.FailureRetryAdvised = true
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, models.SessionStatusFailed, result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after system-interrupt dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, failureCategoryInterrupted, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist system-interrupt failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := failureCategoryInterrupted
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after system-interrupt dead-letter")
+			}
+		}
+		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update project task after system-interrupt dead-letter")
+			}
+		}
+		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update automation run after system-interrupt dead-letter")
 			}
 		}
 		if stores.Jobs != nil {
@@ -7722,6 +7819,10 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			}
 			if errors.Is(err, agent.ErrSessionInterrupted) {
 				retryAfter := 2 * time.Second
+				// Deterministically fail the session + thread if this interrupted
+				// turn never resumes and the requeued job dead-letters, instead of
+				// orphaning them at "running" until the reaper.
+				registerSystemInterruptDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
@@ -9072,6 +9173,15 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			if errors.Is(err, agent.ErrSessionInterrupted) {
 				retryAfter := 2 * time.Second
+				var interruptThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					interruptThreadID = &threadIDLocal
+				}
+				// Deterministically fail the session + thread if this interrupted
+				// turn never resumes and the requeued job dead-letters, instead of
+				// orphaning them at "running" until the reaper.
+				registerSystemInterruptDeadLetter(ctx, stores, services, logger, session, interruptThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).

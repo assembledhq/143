@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 
 const toast = vi.hoisted(() => ({
@@ -79,6 +79,8 @@ const policy: CodeReviewResolvedPolicy = {
       allowed_path_patterns: ["internal/**"],
       blocked_path_patterns: ["migrations/**"],
       exclude_categories: ["auth", "billing"],
+      required_checks: ["lint", "test"],
+      eligible_authors: ["anya"],
       require_mergeable: true,
       require_up_to_date: false,
       allow_forks: false,
@@ -87,6 +89,8 @@ const policy: CodeReviewResolvedPolicy = {
     agent_roster: {
       reviewers: ["codex", "claude_code"],
       orchestrator: "claude_code",
+      reviewer_models: ["gpt-5.4", "claude-sonnet-4-6"],
+      orchestrator_model: "claude-sonnet-4-6",
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
@@ -207,7 +211,10 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   },
 };
 
-function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady) {
+function mockCodeReviewBaseHandlers(
+  trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady,
+  onPolicyUpdate?: (config: CodeReviewPolicyConfig) => void,
+) {
   // Autosave issues whole-config PUTs and refetches on settle, so the GET must
   // reflect the last saved config for optimistic values to stick across the
   // invalidation round-trip.
@@ -223,6 +230,7 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     http.put("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig };
       currentConfig = body.config;
+      onPolicyUpdate?.(body.config);
       return HttpResponse.json({
         data: {
           ...currentConfig,
@@ -271,13 +279,18 @@ describe("CodeReviewsPage", () => {
     // Essentials and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
     // Fine-tuning groups are collapsed by default; expand the ones we assert on.
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
-    expect(await screen.findByDisplayValue("*auth*")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
+    expect(await screen.findByText("*auth*")).toBeInTheDocument();
+    expect(screen.getByText("internal/**")).toBeInTheDocument();
+    expect(screen.getByText("migrations/**")).toBeInTheDocument();
+    expect(screen.getByText("billing")).toBeInTheDocument();
+    expect(screen.getByText("lint")).toBeInTheDocument();
+    expect(screen.getByText("anya")).toBeInTheDocument();
+    expect(screen.getAllByText("1 item").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
@@ -289,11 +302,17 @@ describe("CodeReviewsPage", () => {
     ).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Description requirements/i }));
-    expect(await screen.findByDisplayValue("Understandable description")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
+    expect(await screen.findByText("Understandable description")).toBeInTheDocument();
+    expect(screen.getByText("Every PR")).toBeInTheDocument();
+    expect(screen.getByText("Nontrivial: 2+ files or 31+ lines")).toBeInTheDocument();
 
     // Review depth was removed entirely.
     expect(screen.queryByRole("combobox", { name: /Review depth/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    expect(await screen.findByRole("combobox", { name: "Reviewer 1 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Reviewer 2 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Orchestrator model" })).toBeInTheDocument();
 
     // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
@@ -309,6 +328,99 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("edits description requirements in a focused side sheet", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("button", { name: /Description requirements/i }));
+    await user.click(await screen.findByRole("button", { name: "Edit Testing evidence" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Edit description requirement" });
+    expect(sheet).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Testing evidence")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Requirement applicability" })).toHaveTextContent("Nontrivial");
+    expect(screen.getByText("Files changed at least")).toBeInTheDocument();
+    expect(screen.getByText("Lines changed at least")).toBeInTheDocument();
+    expect(screen.queryByText("Categories")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
+    await user.click(await screen.findByRole("option", { name: "Paths" }));
+
+    expect(await screen.findByText("Path patterns")).toBeInTheDocument();
+    expect(screen.queryByText("Files changed at least")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
+  });
+
+  it("edits paths, authors, and checks as compact autosaved lists", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    const sensitivePathsInput = await screen.findByRole("textbox", { name: "Sensitive paths" });
+    await user.type(sensitivePathsInput, " src/payments/** {enter}");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/payments/**")).toBeInTheDocument();
+
+    await user.click(sensitivePathsInput);
+    await user.paste("src/admin/**\nsrc/reports/**\nsrc/admin/**");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/admin/**")).toBeInTheDocument();
+    expect(screen.getByText("src/reports/**")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove *auth*" }));
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(screen.queryByText("*auth*")).not.toBeInTheDocument();
+
+    const requiredChecksEditor = screen.getByText("Required checks").closest("section");
+    expect(requiredChecksEditor).not.toBeNull();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("2 items")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("lint")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
+
+    // Add-button labels are singularized correctly, including "categories" -> "category".
+    expect(screen.getByRole("button", { name: "Add excluded category" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
   });
 
   it("surfaces template apply save failures through the shared toast", async () => {
@@ -377,7 +489,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
   });
 
-  it("explains why GitHub reviewer team setup is disabled", async () => {
+  it("explains why GitHub reviewer setup is disabled", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers({
       status: "auth_required",
@@ -397,14 +509,14 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
 
-    const setupButton = await screen.findByRole("button", { name: /Create \/ repair team/i });
+    const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
     expect(setupButton).toBeDisabled();
 
     await user.hover(setupButton);
 
     expect(
       await screen.findByRole("tooltip", {
-        name: "Connect your GitHub account first so 143 can create or repair the reviewer team.",
+        name: "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.",
       }),
     ).toBeInTheDocument();
   });
@@ -437,7 +549,7 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
-    await user.click(await screen.findByRole("button", { name: /Create \/ repair team/i }));
+    await user.click(await screen.findByRole("button", { name: /Set up GitHub reviewer/i }));
 
     await waitFor(() => {
       expect(setupCalls).toBe(1);

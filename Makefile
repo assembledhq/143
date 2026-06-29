@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -500,7 +500,11 @@ provision-worker:
 	$(check-ssh-key)
 	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
-	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
+	@# Unset HOST so provision-egress.sh resolves the egress gateway from FLEET_HOSTS
+	@# (its empty $$1 arg). make exports the HOST command-line var, and
+	@# provision-egress.sh falls back to $$HOST when $$1 is empty — without this it
+	@# would target the WORKER as an egress node (tag:prod-egress) instead.
+	@env -u HOST deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
@@ -562,6 +566,33 @@ provision-db:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-db HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
 	$(check-ssh-key)
 	./deploy/scripts/provision.sh db $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
+
+# Install/refresh automated DB backups (pg_dump every 6h + weekly restore
+# test) on the db host. Runs automatically at the end of provision-db; this
+# target is the standalone entry point for an already-provisioned db node and
+# is idempotent (safe to re-run). Resolves the db host from FLEET_HOSTS when
+# HOST is unset.
+# Usage:
+#   make provision-db-backups
+#   make provision-db-backups HOST=87.99.157.99
+provision-db-backups:
+	$(check-ssh-key)
+	@HOST="$(HOST)"; \
+	ENV_DUMP="$$(sops --decrypt --input-type dotenv --output-type dotenv $(_PROD_ENC) 2>/dev/null || true)"; \
+	if [ -z "$$ENV_DUMP" ]; then \
+		echo "WARNING: could not decrypt $(_PROD_ENC) (missing age key?). Offsite sync config will be left unchanged; cron will still be (re)installed." >&2; \
+	fi; \
+	if [ -z "$$HOST" ]; then \
+		FLEET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^FLEET_HOSTS=' | cut -d= -f2-)"; \
+		HOST="$$(echo "$$FLEET" | tr ',' '\n' | grep '^db:' | cut -d: -f2 | head -1)"; \
+	fi; \
+	test -n "$$HOST" || { echo "ERROR: no HOST given and no db:<ip> in FLEET_HOSTS (set HOST=<ip> or fix the age key)."; exit 1; }; \
+	export BACKUP_S3_BUCKET="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_BUCKET=' | cut -d= -f2-)"; \
+	export BACKUP_S3_REGION="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_S3_REGION=' | cut -d= -f2-)"; \
+	export BACKUP_AWS_ACCESS_KEY_ID="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_ACCESS_KEY_ID=' | cut -d= -f2-)"; \
+	export BACKUP_AWS_SECRET_ACCESS_KEY="$$(printf '%s\n' "$$ENV_DUMP" | grep '^BACKUP_AWS_SECRET_ACCESS_KEY=' | cut -d= -f2-)"; \
+	echo "Configuring DB backups on $$HOST..."; \
+	./deploy/scripts/provision-db-backups.sh "$$HOST" "$(SSH_KEY)"
 
 provision-logging:
 	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-logging HOST=<ip> [SSH_KEY=<path>]"; exit 1; }

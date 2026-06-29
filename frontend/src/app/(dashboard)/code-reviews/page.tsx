@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps, ReactNode } from "react";
+import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -11,9 +11,10 @@ import {
   ClipboardCheck,
   ExternalLink,
   FileSearch,
+  Pencil,
   Plus,
+  PowerOff,
   Settings2,
-  ShieldCheck,
   Trash2,
   Users,
 } from "lucide-react";
@@ -26,7 +27,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -41,6 +44,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -58,7 +62,9 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
+import { AGENTS_BY_KEY, availableAgentModelGroups, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
+  CodingCredentialSummary,
   CodeReviewApprovalMode,
   CodeReviewDecision,
   CodeReviewDescriptionApplicabilityKind,
@@ -68,6 +74,8 @@ import type {
   CodeReviewPolicyConfig,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
+  ListResponse,
+  OrgSettings,
   SingleResponse,
 } from "@/lib/types";
 
@@ -78,6 +86,7 @@ const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
+const MAX_REVIEWER_MODELS = 3;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
@@ -86,6 +95,10 @@ const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, 
   categories: "Categories",
   tests_changed: "Tests changed",
 };
+const DEFAULT_NONTRIVIAL_MIN_FILES = 2;
+const DEFAULT_NONTRIVIAL_MIN_LINES = 31;
+type DescriptionRequirement = CodeReviewPolicyConfig["description_policy"]["requirements"][number];
+type DescriptionApplicability = NonNullable<DescriptionRequirement["applies_when"]>;
 const QUALITY_GATE_DESCRIPTIONS = {
   requirePassingChecks:
     "Blocks approval until the PR's required GitHub checks are passing. The reviewer can still leave comments, but it will not approve failing or pending builds.",
@@ -146,6 +159,31 @@ function apiErrorMessage(error: unknown): string | null {
   return "Request failed";
 }
 
+function selectionValue(agent: string, model: string): string {
+  return `${agent}::${model}`;
+}
+
+function parseSelectionValue(value: string): { agent: string; model: string } {
+  const [agent, ...modelParts] = value.split("::");
+  return { agent, model: modelParts.join("::") };
+}
+
+function defaultModelForAgent(agent: string, modelGroups: AgentModelGroup[]): string {
+  return modelGroups.find((group) => group.key === agent)?.models[0] ?? AGENTS_BY_KEY[agent]?.models[0] ?? "";
+}
+
+function modelBelongsToAgent(agent: string, model: string): boolean {
+  return AGENTS_BY_KEY[agent]?.models.includes(model) ?? false;
+}
+
+function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: AgentModelGroup[]): string[] {
+  return config.agent_roster.reviewers.map((agent, index) => {
+    const configured = config.agent_roster.reviewer_models?.[index] ?? "";
+    if (configured && modelBelongsToAgent(agent, configured)) return configured;
+    return defaultModelForAgent(agent, modelGroups);
+  });
+}
+
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
@@ -156,6 +194,7 @@ export default function CodeReviewsPage() {
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
@@ -216,6 +255,22 @@ export default function CodeReviewsPage() {
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
+  });
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+  const resolvedCredentialsQuery = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
+  const orgCodingCredentialsQuery = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("org"),
+    queryFn: () => api.codingCredentials.list("org"),
+  });
+  const codexAuthQuery = useQuery({
+    queryKey: queryKeys.codexAuth.status,
+    queryFn: () => api.codexAuth.status(),
   });
   const githubTriggerQuery = useQuery({
     queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null),
@@ -278,6 +333,37 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
+  const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
+  const codeReviewResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
+    [resolvedCredentialsQuery.data?.data],
+  );
+  const codeReviewModelGroups = useMemo(
+    () =>
+      availableAgentModelGroups(
+        codeReviewResolvedCredentials,
+        codexAuthQuery.data?.data,
+        orgCodingCredentialsQuery.data?.data ?? [],
+        orgSettings.default_agent_type || "codex",
+        { orgAgentConfig: orgSettings.agent_config },
+      ),
+    [
+      codeReviewResolvedCredentials,
+      codexAuthQuery.data?.data,
+      orgCodingCredentialsQuery.data?.data,
+      orgSettings.default_agent_type,
+      orgSettings.agent_config,
+    ],
+  );
+  const editingRequirementIndex = useMemo(
+    () =>
+      editingRequirementKey && config
+        ? config.description_policy.requirements.findIndex((requirement) => requirement.key === editingRequirementKey)
+        : -1,
+    [config, editingRequirementKey],
+  );
+  const editingRequirement =
+    editingRequirementIndex >= 0 && config ? config.description_policy.requirements[editingRequirementIndex] : null;
   const selectedTemplateAlreadyApplied = useMemo(() => {
     if (!selectedTemplate || !config) return false;
     return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
@@ -315,12 +401,14 @@ export default function CodeReviewsPage() {
     if (!next) return config as CodeReviewPolicyConfig;
     return next;
   };
-  const commitRequirement = (
-    index: number,
+  const commitRequirementByKey = (
+    key: string,
     updater: (requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number]) =>
       CodeReviewPolicyConfig["description_policy"]["requirements"][number],
   ) => {
     commitPolicy((next) => {
+      const index = next.description_policy.requirements.findIndex((requirement) => requirement.key === key);
+      if (index === -1) return;
       next.description_policy.requirements[index] = updater(next.description_policy.requirements[index]);
     });
   };
@@ -484,39 +572,20 @@ export default function CodeReviewsPage() {
 
           <TabsContent value="config" className="space-y-4">
             <Card>
-              <CardHeader>
+              <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>Bot behavior</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {repositoryId
+                    ? policyQuery.data?.data.source === "repository"
+                      ? "This repository has review policy overrides and inherits organization defaults where fields are unset."
+                      : "This repository uses the organization default review policy."
+                    : "Organization defaults apply to repositories without their own review policy override."}
+                </p>
               </CardHeader>
               <CardContent className="space-y-5">
-                <div className="rounded-md border border-border p-4">
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-foreground">
-                        {repositoryId ? "Repository policy" : "Organization default"}
-                      </div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        {policyQuery.data?.data.source === "repository"
-                          ? "This repository uses an insert-only override that inherits organization defaults."
-                          : "These settings provide the default policy for repositories without their own override."}
-                      </div>
-                    </div>
-                    <Badge variant={policyQuery.data?.data.source === "repository" ? "secondary" : "outline"}>
-                      {policyQuery.data?.data.source ?? "loading"}
-                    </Badge>
-                  </div>
-                  {config?.inheritance?.inherit_org_defaults ? (
-                    <div className="mt-3 text-xs text-muted-foreground">
-                      Inherited from version {policyQuery.data?.data.inherited_policy?.version ?? "default"}.
-                      {config.inheritance.override_fields?.length
-                        ? ` Override fields: ${config.inheritance.override_fields.join(", ")}.`
-                        : " No explicit override fields."}
-                    </div>
-                  ) : null}
-                </div>
-
                 <GitHubTriggerPanel
                   repositorySelected={Boolean(repositoryId)}
                   trigger={githubTriggerQuery.data?.data}
@@ -713,39 +782,61 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                   <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks">
-                <div className="grid gap-3 lg:grid-cols-2">
-                      <ListTextArea
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <PolicyStringListEditor
                         label="Sensitive paths"
+                        description="Paths that should be treated as higher-risk changes."
+                        placeholder="Add glob pattern, e.g. src/auth/**"
+                        emptyText="No sensitive paths configured."
+                        monospace
                         serverValue={config?.risk_policy.sensitive_paths ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.sensitive_paths = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Allowed path patterns"
+                        description="When set, only matching paths are eligible for automated approval."
+                        placeholder="Add allowed glob pattern"
+                        emptyText="No allowlist configured. All paths are eligible unless blocked."
+                        monospace
                         serverValue={config?.risk_policy.allowed_path_patterns ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.allowed_path_patterns = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Blocked path patterns"
+                        description="Matching paths prevent automated approval."
+                        placeholder="Add blocked glob pattern"
+                        emptyText="No blocked paths configured."
+                        monospace
                         serverValue={config?.risk_policy.blocked_path_patterns ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.blocked_path_patterns = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Excluded categories"
+                        description="Review categories to ignore for this policy."
+                        placeholder="Add category"
+                        emptyText="No excluded categories configured."
                         serverValue={config?.risk_policy.exclude_categories ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.exclude_categories = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Required checks"
+                        description="Check names that must pass before approval."
+                        placeholder="Add required check"
+                        emptyText="No required checks configured."
+                        monospace
                         serverValue={config?.risk_policy.required_checks ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.required_checks = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Eligible authors"
+                        description="Authors allowed by this policy. Leave empty to allow any author."
+                        placeholder="Add GitHub handle or author"
+                        emptyText="Any author is eligible."
                         serverValue={config?.risk_policy.eligible_authors ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.eligible_authors = items; })}
@@ -754,217 +845,75 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                   <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent">
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      <ListTextArea
-                        label="Reviewer agents"
-                        serverValue={config?.agent_roster.reviewers ?? []}
-                        disabled={!config}
-                        onCommitItems={(items) =>
-                          commitPolicy((next) => {
-                            const reviewers = items.length > 0 ? items : next.agent_roster.reviewers;
-                            next.agent_roster.reviewers = reviewers;
-                            next.agent_roster.require_reviewer_quorum = Math.min(
-                              next.agent_roster.require_reviewer_quorum,
-                              Math.max(1, reviewers.length),
-                            );
-                          })
-                        }
-                      />
-                      <div className="space-y-2">
-                        <Label className="text-xs text-muted-foreground">Orchestrator</Label>
-                        <PolicyTextInput
-                          serverValue={config?.agent_roster.orchestrator ?? ""}
-                          disabled={!config}
-                          onCommit={(value) => commitPolicy((next) => { next.agent_roster.orchestrator = value; })}
-                        />
-                      </div>
-                    </div>
+                    <AgentRosterControls
+                      config={config}
+                      disabled={!config}
+                      modelGroups={codeReviewModelGroups}
+                      commitPolicy={commitPolicy}
+                    />
                   </FineTuningSection>
 
-                  <FineTuningSection title="Description requirements" summary="Final review template and per-PR description rules">
-                    <div className="space-y-4">
-                      <div className="space-y-2">
-                        <Label className="text-xs text-muted-foreground">Final review template</Label>
-                        <PolicyTextarea
-                          serverValue={config?.final_review_template ?? ""}
-                          disabled={!config}
-                          rows={4}
-                          onCommit={(value) => commitPolicy((next) => { next.final_review_template = value; })}
-                        />
-                      </div>
+                  <FineTuningSection title="Description requirements" summary="PR description rules checked before approval">
+                    <DescriptionRequirementsList
+                      requirements={config?.description_policy.requirements ?? []}
+                      disabled={!config}
+                      onEdit={setEditingRequirementKey}
+                      onAdd={() => {
+                        const key = `custom_${Date.now()}`;
+                        commitPolicy((next) => {
+                          next.description_policy.requirements.push({
+                            key,
+                            title: "Custom requirement",
+                            prompt: "",
+                            required: true,
+                            applies_when: { kind: "all" },
+                          });
+                        });
+                        setEditingRequirementKey(key);
+                      }}
+                    />
+                  </FineTuningSection>
 
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium text-foreground">Requirements</div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!config}
-                            onClick={() =>
-                              commitPolicy((next) => {
-                                const nextIndex = next.description_policy.requirements.length + 1;
-                                next.description_policy.requirements.push({
-                                  key: `custom_${nextIndex}`,
-                                  title: "Custom requirement",
-                                  prompt: "",
-                                  required: true,
-                                  applies_when: { kind: "all" },
-                                });
-                              })
-                            }
-                          >
-                            <Plus className="h-4 w-4" />
-                            Add requirement
-                          </Button>
-                        </div>
-                        <div className="grid gap-3 lg:grid-cols-3">
-                          {config?.description_policy.requirements.map((requirement, index) => (
-                            <div key={requirement.key} className="space-y-2 rounded-md border border-border p-3">
-                              <div className="flex items-center gap-2">
-                                <PolicyTextInput
-                                  serverValue={requirement.title}
-                                  disabled={!config}
-                                  aria-label={`${requirement.key} title`}
-                                  onCommit={(value) => commitRequirement(index, (current) => ({ ...current, title: value }))}
-                                />
-                                <Button
-                                  variant="ghost"
-                                  size="icon-sm"
-                                  disabled={!config || (config?.description_policy.requirements.length ?? 0) <= 1}
-                                  aria-label={`Remove ${requirement.title}`}
-                                  onClick={() =>
-                                    commitPolicy((next) => {
-                                      next.description_policy.requirements = next.description_policy.requirements.filter(
-                                        (_, itemIndex) => itemIndex !== index,
-                                      );
-                                    })
-                                  }
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                </Button>
-                              </div>
-                              <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
-                                <div className="space-y-2">
-                                  <Label className="text-xs text-muted-foreground">Applies when</Label>
-                                  <Select
-                                    value={requirement.applies_when?.kind ?? "all"}
-                                    disabled={!config}
-                                    onValueChange={(value) =>
-                                      commitRequirement(index, (current) => ({
-                                        ...current,
-                                        applicability: value,
-                                        applies_when: {
-                                          ...(current.applies_when ?? {}),
-                                          kind: value as CodeReviewDescriptionApplicabilityKind,
-                                        },
-                                      }))
-                                    }
-                                  >
-                                    <SelectTrigger aria-label={`${requirement.key} applicability`}>
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {Object.entries(APPLICABILITY_KIND_LABELS).map(([kind, label]) => (
-                                        <SelectItem key={kind} value={kind}>
-                                          {label}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-                                  <Label className="text-xs text-muted-foreground">Required</Label>
-                                  <Switch
-                                    checked={requirement.required}
-                                    disabled={!config}
-                                    onCheckedChange={(checked) =>
-                                      commitRequirement(index, (current) => ({ ...current, required: checked }))
-                                    }
-                                  />
-                                </div>
-                              </div>
-                              <div className="grid gap-2 sm:grid-cols-2">
-                                <NumberPolicyInput
-                                  label="Min files"
-                                  serverValue={requirement.applies_when?.min_files_changed ?? 0}
-                                  min={0}
-                                  disabled={!config}
-                                  autosave={autosave}
-                                  buildPatch={(value) =>
-                                    buildConfig((next) => {
-                                      const req = next.description_policy.requirements[index];
-                                      req.applies_when = { ...(req.applies_when ?? { kind: "all" }), min_files_changed: value };
-                                    })
-                                  }
-                                />
-                                <NumberPolicyInput
-                                  label="Min lines"
-                                  serverValue={requirement.applies_when?.min_lines_changed ?? 0}
-                                  min={0}
-                                  disabled={!config}
-                                  autosave={autosave}
-                                  buildPatch={(value) =>
-                                    buildConfig((next) => {
-                                      const req = next.description_policy.requirements[index];
-                                      req.applies_when = { ...(req.applies_when ?? { kind: "all" }), min_lines_changed: value };
-                                    })
-                                  }
-                                />
-                              </div>
-                              <ListTextArea
-                                label="Path patterns"
-                                serverValue={requirement.applies_when?.path_patterns ?? []}
-                                disabled={!config}
-                                onCommitItems={(items) =>
-                                  commitRequirement(index, (current) => ({
-                                    ...current,
-                                    applies_when: { ...(current.applies_when ?? { kind: "paths" }), path_patterns: items },
-                                  }))
-                                }
-                              />
-                              <ListTextArea
-                                label="Categories"
-                                serverValue={requirement.applies_when?.categories ?? []}
-                                disabled={!config}
-                                onCommitItems={(items) =>
-                                  commitRequirement(index, (current) => ({
-                                    ...current,
-                                    applies_when: { ...(current.applies_when ?? { kind: "categories" }), categories: items },
-                                  }))
-                                }
-                              />
-                              <div className="flex items-center justify-between gap-2 rounded-md border border-border px-3 py-2">
-                                <Label className="text-xs text-muted-foreground">Require changed test files</Label>
-                                <Switch
-                                  checked={requirement.applies_when?.require_test_files_changed ?? false}
-                                  disabled={!config}
-                                  onCheckedChange={(checked) =>
-                                    commitRequirement(index, (current) => ({
-                                      ...current,
-                                      applies_when: {
-                                        ...(current.applies_when ?? { kind: "tests_changed" }),
-                                        require_test_files_changed: checked,
-                                      },
-                                    }))
-                                  }
-                                />
-                              </div>
-                              <PolicyTextarea
-                                serverValue={requirement.prompt}
-                                disabled={!config}
-                                rows={4}
-                                aria-label={`${requirement.key} prompt`}
-                                onCommit={(value) => commitRequirement(index, (current) => ({ ...current, prompt: value }))}
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                  <FineTuningSection title="GitHub review output" summary="Template for the final review comment">
+                    <div className="space-y-2">
+                      <Label className="text-xs text-muted-foreground">Final review template</Label>
+                      <PolicyTextarea
+                        serverValue={config?.final_review_template ?? ""}
+                        disabled={!config}
+                        rows={4}
+                        onCommit={(value) => commitPolicy((next) => { next.final_review_template = value; })}
+                      />
                     </div>
                   </FineTuningSection>
                 </div>
               </CardContent>
             </Card>
+            <DescriptionRequirementSheet
+              requirement={editingRequirement}
+              canDelete={(config?.description_policy.requirements.length ?? 0) > 1}
+              disabled={!config}
+              autosave={autosave}
+              buildConfig={buildConfig}
+              open={Boolean(editingRequirement)}
+              onOpenChange={(open) => {
+                if (!open) setEditingRequirementKey(null);
+              }}
+              onCommit={(updater) => {
+                if (!editingRequirementKey) return;
+                commitRequirementByKey(editingRequirementKey, updater);
+              }}
+              onDelete={() => {
+                if (!editingRequirementKey) return;
+                const key = editingRequirementKey;
+                commitPolicy((next) => {
+                  if (next.description_policy.requirements.length <= 1) return;
+                  next.description_policy.requirements = next.description_policy.requirements.filter(
+                    (requirement) => requirement.key !== key,
+                  );
+                });
+                setEditingRequirementKey(null);
+              }}
+            />
           </TabsContent>
 
         </Tabs>
@@ -998,6 +947,7 @@ function GitHubTriggerPanel({
   const ready = status === "ready";
   const authRequired = status === "auth_required";
   const permissionRequired = status === "permission_required";
+  const needsRepair = status === "error" || permissionRequired;
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
     repositorySelected,
@@ -1012,20 +962,20 @@ function GitHubTriggerPanel({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-medium text-foreground">GitHub reviewer trigger</div>
+            <div className="text-sm font-medium text-foreground">GitHub reviewer menu option</div>
             <Badge variant={githubTriggerStatusVariant(status)}>
               {isLoading ? "Checking" : githubTriggerStatusLabel(status)}
             </Badge>
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {repositorySelected
-              ? "Humans request this GitHub team on a PR to start a 143 code review."
-              : "Select a repository to create or repair its reviewer team trigger."}
+              ? "People select this team from GitHub's Reviewers menu on a PR to start a 143 code review."
+              : "Select a repository to set up the reviewer that appears in GitHub's Reviewers menu."}
           </div>
           {repositorySelected ? (
             <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
               <div className="rounded-md bg-muted/40 px-3 py-2">
-                <div className="text-muted-foreground">Reviewer</div>
+                <div className="text-muted-foreground">Menu reviewer</div>
                 <div className="mt-1 truncate font-medium text-foreground">{reviewer}</div>
               </div>
               <div className="rounded-md bg-muted/40 px-3 py-2">
@@ -1060,20 +1010,22 @@ function GitHubTriggerPanel({
               Connect GitHub
             </Button>
           ) : null}
-          <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
-            <Button
-              variant={ready ? "outline" : "default"}
-              size="sm"
-              disabled={!!setupDisabledReason}
-              onClick={onSetup}
-            >
-              {ready ? <ShieldCheck className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-              {ready ? "Repair team" : "Create / repair team"}
-            </Button>
-          </DisabledTooltip>
+          {!ready ? (
+            <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
+              <Button
+                variant="default"
+                size="sm"
+                disabled={!!setupDisabledReason}
+                onClick={onSetup}
+              >
+                <Users className="h-4 w-4" />
+                {needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
+              </Button>
+            </DisabledTooltip>
+          ) : null}
           {ready ? (
             <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
-              <Trash2 className="h-4 w-4" />
+              <PowerOff className="h-4 w-4" />
               Disable
             </Button>
           ) : null}
@@ -1100,19 +1052,19 @@ function githubTriggerSetupDisabledReason({
   isLoading: boolean;
 }): string | undefined {
   if (!repositorySelected) {
-    return "Select a repository before creating the GitHub reviewer team.";
+    return "Select a repository before setting up the GitHub reviewer menu option.";
   }
   if (authRequired) {
-    return "Connect your GitHub account first so 143 can create or repair the reviewer team.";
+    return "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.";
   }
   if (setupPending) {
-    return "Team setup is already running. Wait for it to finish before trying again.";
+    return "GitHub reviewer setup is already running. Wait for it to finish before trying again.";
   }
   if (deletePending) {
-    return "The reviewer team trigger is being disabled. Wait for that action to finish before repairing it.";
+    return "The GitHub reviewer menu option is being disabled. Wait for that action to finish before repairing it.";
   }
   if (isLoading) {
-    return "143 is checking the repository's reviewer team status. Wait for the check to finish.";
+    return "143 is checking the repository's GitHub reviewer menu option. Wait for the check to finish.";
   }
   return undefined;
 }
@@ -1139,6 +1091,348 @@ function githubTriggerStatusVariant(status: CodeReviewGitHubTriggerResponse["sta
   return "outline";
 }
 
+function requirementKind(requirement: DescriptionRequirement): CodeReviewDescriptionApplicabilityKind {
+  return (requirement.applies_when?.kind || requirement.applicability || "all") as CodeReviewDescriptionApplicabilityKind;
+}
+
+function summarizeItems(items: string[] | undefined, emptyLabel: string): string {
+  if (!items?.length) return emptyLabel;
+  const visible = items.slice(0, 2).join(", ");
+  const hiddenCount = items.length - 2;
+  return hiddenCount > 0 ? `${visible} + ${hiddenCount} more` : visible;
+}
+
+function formatRequirementApplicability(requirement: DescriptionRequirement): string {
+  const appliesWhen = requirement.applies_when;
+  switch (requirementKind(requirement)) {
+    case "nontrivial": {
+      const minFiles = appliesWhen?.min_files_changed ?? DEFAULT_NONTRIVIAL_MIN_FILES;
+      const minLines = appliesWhen?.min_lines_changed ?? DEFAULT_NONTRIVIAL_MIN_LINES;
+      return `Nontrivial: ${minFiles}+ files or ${minLines}+ lines`;
+    }
+    case "frontend_or_ui_visible":
+      return `Frontend/UI: ${summarizeItems(appliesWhen?.path_patterns, "default UI paths")}`;
+    case "paths":
+      return `Paths: ${summarizeItems(appliesWhen?.path_patterns, "no paths set")}`;
+    case "categories":
+      return `Categories: ${summarizeItems(appliesWhen?.categories, "no categories set")}`;
+    case "tests_changed":
+      return appliesWhen?.require_test_files_changed ? "When test files changed" : "Tests changed";
+    default:
+      return "Every PR";
+  }
+}
+
+function appliesWhenForKind(
+  kind: CodeReviewDescriptionApplicabilityKind,
+  previous?: DescriptionApplicability,
+): DescriptionApplicability {
+  switch (kind) {
+    case "nontrivial":
+      return {
+        kind,
+        min_files_changed: previous?.min_files_changed ?? DEFAULT_NONTRIVIAL_MIN_FILES,
+        min_lines_changed: previous?.min_lines_changed ?? DEFAULT_NONTRIVIAL_MIN_LINES,
+      };
+    case "frontend_or_ui_visible":
+    case "paths":
+      return {
+        kind,
+        path_patterns: previous?.path_patterns ?? [],
+      };
+    case "categories":
+      return {
+        kind,
+        categories: previous?.categories ?? [],
+      };
+    case "tests_changed":
+      return {
+        kind,
+        require_test_files_changed: previous?.require_test_files_changed ?? true,
+      };
+    default:
+      return { kind: "all" };
+  }
+}
+
+function DescriptionRequirementsList({
+  requirements,
+  disabled,
+  onEdit,
+  onAdd,
+}: {
+  requirements: DescriptionRequirement[];
+  disabled?: boolean;
+  onEdit: (key: string) => void;
+  onAdd: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-foreground">Requirements</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            143 checks these items in the pull request description before approving.
+          </div>
+        </div>
+        <Button variant="outline" size="sm" disabled={disabled} onClick={onAdd}>
+          <Plus className="h-4 w-4" />
+          Add requirement
+        </Button>
+      </div>
+      <div className="overflow-x-auto rounded-md border border-border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-24">Required</TableHead>
+              <TableHead>Requirement</TableHead>
+              <TableHead>Applies to</TableHead>
+              <TableHead className="w-24 text-right">Action</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {requirements.map((requirement) => (
+              <TableRow key={requirement.key}>
+                <TableCell>
+                  <Badge variant={requirement.required ? "success" : "outline"}>
+                    {requirement.required ? "On" : "Off"}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <div className="font-medium text-foreground">{requirement.title || "Untitled requirement"}</div>
+                  {requirement.prompt ? (
+                    <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{requirement.prompt}</div>
+                  ) : null}
+                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">
+                  {formatRequirementApplicability(requirement)}
+                </TableCell>
+                <TableCell>
+                  <div className="flex justify-end">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={disabled}
+                      aria-label={`Edit ${requirement.title || "requirement"}`}
+                      onClick={() => onEdit(requirement.key)}
+                    >
+                      <Pencil className="h-4 w-4" />
+                      Edit
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
+function DescriptionRequirementSheet({
+  requirement,
+  canDelete,
+  disabled,
+  autosave,
+  buildConfig,
+  open,
+  onOpenChange,
+  onCommit,
+  onDelete,
+}: {
+  requirement: DescriptionRequirement | null;
+  canDelete: boolean;
+  disabled?: boolean;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  buildConfig: (mutate: (next: CodeReviewPolicyConfig) => void) => CodeReviewPolicyConfig;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCommit: (updater: (requirement: DescriptionRequirement) => DescriptionRequirement) => void;
+  onDelete: () => void;
+}) {
+  const kind = requirement ? requirementKind(requirement) : "all";
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-full sm:max-w-xl">
+        <SheetHeader>
+          <SheetTitle>Edit description requirement</SheetTitle>
+          <SheetDescription>
+            Configure when this PR description requirement applies and what the reviewer checks.
+          </SheetDescription>
+        </SheetHeader>
+        {requirement ? (
+          <div className="mt-6 space-y-6">
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Title</Label>
+              <PolicyTextInput
+                serverValue={requirement.title}
+                disabled={disabled}
+                aria-label="Requirement title"
+                onCommit={(value) => onCommit((current) => ({ ...current, title: value }))}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+              <div>
+                <Label className="text-sm text-foreground">Required</Label>
+                <div className="mt-1 text-xs text-muted-foreground">Blocks approval when this item is missing.</div>
+              </div>
+              <Switch
+                checked={requirement.required}
+                disabled={disabled}
+                onCheckedChange={(checked) => onCommit((current) => ({ ...current, required: checked }))}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Applies to</Label>
+              <Select
+                value={kind}
+                disabled={disabled}
+                onValueChange={(value) =>
+                  onCommit((current) => ({
+                    ...current,
+                    applicability: value,
+                    applies_when: appliesWhenForKind(
+                      value as CodeReviewDescriptionApplicabilityKind,
+                      current.applies_when,
+                    ),
+                  }))
+                }
+              >
+                <SelectTrigger aria-label="Requirement applicability">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {Object.entries(APPLICABILITY_KIND_LABELS).map(([value, label]) => (
+                    <SelectItem key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            {kind === "nontrivial" ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <NumberPolicyInput
+                  label="Files changed at least"
+                  serverValue={requirement.applies_when?.min_files_changed ?? DEFAULT_NONTRIVIAL_MIN_FILES}
+                  min={0}
+                  disabled={disabled}
+                  autosave={autosave}
+                  buildPatch={(value) =>
+                    buildConfig((next) => {
+                      const req = next.description_policy.requirements.find((item) => item.key === requirement.key);
+                      if (!req) return;
+                      req.applies_when = {
+                        ...appliesWhenForKind("nontrivial", req.applies_when),
+                        min_files_changed: value,
+                      };
+                    })
+                  }
+                />
+                <NumberPolicyInput
+                  label="Lines changed at least"
+                  serverValue={requirement.applies_when?.min_lines_changed ?? DEFAULT_NONTRIVIAL_MIN_LINES}
+                  min={0}
+                  disabled={disabled}
+                  autosave={autosave}
+                  buildPatch={(value) =>
+                    buildConfig((next) => {
+                      const req = next.description_policy.requirements.find((item) => item.key === requirement.key);
+                      if (!req) return;
+                      req.applies_when = {
+                        ...appliesWhenForKind("nontrivial", req.applies_when),
+                        min_lines_changed: value,
+                      };
+                    })
+                  }
+                />
+              </div>
+            ) : null}
+
+            {kind === "frontend_or_ui_visible" || kind === "paths" ? (
+              <ListTextArea
+                label="Path patterns"
+                serverValue={requirement.applies_when?.path_patterns ?? []}
+                disabled={disabled}
+                onCommitItems={(items) =>
+                  onCommit((current) => ({
+                    ...current,
+                    applies_when: { kind, path_patterns: items },
+                  }))
+                }
+              />
+            ) : null}
+
+            {kind === "categories" ? (
+              <ListTextArea
+                label="Categories"
+                serverValue={requirement.applies_when?.categories ?? []}
+                disabled={disabled}
+                onCommitItems={(items) =>
+                  onCommit((current) => ({
+                    ...current,
+                    applies_when: { kind, categories: items },
+                  }))
+                }
+              />
+            ) : null}
+
+            {kind === "tests_changed" ? (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
+                <div>
+                  <Label className="text-sm text-foreground">Require changed test files</Label>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Applies this rule only when the pull request changes test files.
+                  </div>
+                </div>
+                <Switch
+                  checked={requirement.applies_when?.require_test_files_changed ?? true}
+                  disabled={disabled}
+                  onCheckedChange={(checked) =>
+                    onCommit((current) => ({
+                      ...current,
+                      applies_when: { kind: "tests_changed", require_test_files_changed: checked },
+                    }))
+                  }
+                />
+              </div>
+            ) : null}
+
+            <div className="space-y-2">
+              <Label className="text-xs text-muted-foreground">Reviewer instruction</Label>
+              <PolicyTextarea
+                serverValue={requirement.prompt}
+                disabled={disabled}
+                rows={5}
+                aria-label="Reviewer instruction"
+                onCommit={(value) => onCommit((current) => ({ ...current, prompt: value }))}
+              />
+            </div>
+
+            <div className="border-t border-border pt-4">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                disabled={disabled || !canDelete}
+                onClick={onDelete}
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete requirement
+              </Button>
+            </div>
+          </div>
+        ) : null}
+      </SheetContent>
+    </Sheet>
+  );
+}
+
 function FilterSelect({
   label,
   value,
@@ -1160,6 +1454,177 @@ function FilterSelect({
         <SelectContent>{children}</SelectContent>
       </Select>
     </div>
+  );
+}
+
+function AgentRosterControls({
+  config,
+  disabled,
+  modelGroups,
+  commitPolicy,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  disabled?: boolean;
+  modelGroups: AgentModelGroup[];
+  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
+}) {
+  const reviewers = config?.agent_roster.reviewers ?? [];
+  const reviewerModels = config ? ensureReviewerModels(config, modelGroups) : [];
+  const canAddReviewer = Boolean(config) && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
+  const fallbackGroup = modelGroups[0];
+  const orchestratorModel =
+    config?.agent_roster.orchestrator_model && modelBelongsToAgent(config.agent_roster.orchestrator, config.agent_roster.orchestrator_model)
+      ? config.agent_roster.orchestrator_model
+      : defaultModelForAgent(config?.agent_roster.orchestrator ?? "", modelGroups);
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <Label className="text-xs text-muted-foreground">Reviewer models</Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Run one to three independent reviewers. Quorum stays in Approval criteria.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!canAddReviewer}
+            onClick={() =>
+              commitPolicy((next) => {
+                if (!fallbackGroup || next.agent_roster.reviewers.length >= MAX_REVIEWER_MODELS) return;
+                const reviewerModels = ensureReviewerModels(next, modelGroups);
+                next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
+                next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
+              })
+            }
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            Add
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          {reviewers.map((agent, index) => (
+            <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_auto]">
+              <AgentModelSelect
+                ariaLabel={`Reviewer ${index + 1} model`}
+                value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
+                modelGroups={modelGroups}
+                currentAgent={agent}
+                currentModel={reviewerModels[index]}
+                disabled={disabled}
+                onValueChange={(value) =>
+                  commitPolicy((next) => {
+                    const selection = parseSelectionValue(value);
+                    const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    next.agent_roster.reviewers[index] = selection.agent;
+                    reviewerModels[index] = selection.model;
+                    next.agent_roster.reviewer_models = reviewerModels;
+                  })
+                }
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={`Remove reviewer ${index + 1}`}
+                disabled={disabled || reviewers.length <= 1}
+                onClick={() =>
+                  commitPolicy((next) => {
+                    const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
+                    next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
+                    next.agent_roster.require_reviewer_quorum = Math.min(
+                      next.agent_roster.require_reviewer_quorum,
+                      Math.max(1, next.agent_roster.reviewers.length),
+                    );
+                  })
+                }
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Synthesizes reviewer evidence and decides the final review outcome.
+          </p>
+        </div>
+        <AgentModelSelect
+          ariaLabel="Orchestrator model"
+          value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
+          modelGroups={modelGroups}
+          currentAgent={config?.agent_roster.orchestrator}
+          currentModel={orchestratorModel}
+          disabled={disabled}
+          onValueChange={(value) =>
+            commitPolicy((next) => {
+              const selection = parseSelectionValue(value);
+              next.agent_roster.orchestrator = selection.agent;
+              next.agent_roster.orchestrator_model = selection.model;
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function AgentModelSelect({
+  value,
+  modelGroups,
+  currentAgent,
+  currentModel,
+  disabled,
+  ariaLabel,
+  onValueChange,
+}: {
+  value: string;
+  modelGroups: AgentModelGroup[];
+  currentAgent?: string;
+  currentModel?: string;
+  disabled?: boolean;
+  ariaLabel: string;
+  onValueChange: (value: string) => void;
+}) {
+  const currentValueAvailable = modelGroups.some((group) =>
+    group.models.some((model) => selectionValue(group.key, model) === value),
+  );
+
+  return (
+    <Select value={value} onValueChange={onValueChange} disabled={disabled || modelGroups.length === 0}>
+      <SelectTrigger aria-label={ariaLabel}>
+        <SelectValue placeholder="Select model" />
+      </SelectTrigger>
+      <SelectContent>
+        {!currentValueAvailable && currentAgent && currentModel ? (
+          <SelectGroup>
+            <SelectLabel>Current selection</SelectLabel>
+            <SelectItem value={selectionValue(currentAgent, currentModel)}>
+              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {currentModel}
+            </SelectItem>
+          </SelectGroup>
+        ) : null}
+        {modelGroups.map((group) => (
+          <SelectGroup key={group.key}>
+            <SelectLabel>{group.label}</SelectLabel>
+            {group.models.map((model) => (
+              <SelectItem key={`${group.key}-${model}`} value={selectionValue(group.key, model)}>
+                {model}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -1242,6 +1707,128 @@ function PolicyToggle({
       </div>
       <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
     </div>
+  );
+}
+
+function normalizeListItems(items: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function PolicyStringListEditor({
+  label,
+  description,
+  placeholder,
+  emptyText,
+  serverValue,
+  disabled,
+  monospace = false,
+  onCommitItems,
+}: {
+  label: string;
+  description?: string;
+  placeholder: string;
+  emptyText: string;
+  serverValue: string[];
+  disabled?: boolean;
+  monospace?: boolean;
+  onCommitItems: (items: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const items = normalizeListItems(serverValue);
+  const addLabel = `Add ${label.toLowerCase().replace(/ies$/, "y").replace(/s$/, "")}`;
+  const countLabel = `${items.length} ${items.length === 1 ? "item" : "items"}`;
+
+  const commitNext = (nextItems: string[]) => {
+    onCommitItems(normalizeListItems(nextItems));
+  };
+
+  const addItems = (rawItems: string[]) => {
+    const nextItems = normalizeListItems([...items, ...rawItems]);
+    if (nextItems.length === items.length) return;
+    commitNext(nextItems);
+    setDraft("");
+  };
+
+  const handleAdd = () => addItems([draft]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    handleAdd();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData.getData("text");
+    if (!text.includes("\n")) return;
+    event.preventDefault();
+    addItems(text.split(/\r?\n/));
+  };
+
+  const removeItem = (item: string) => {
+    commitNext(items.filter((current) => current !== item));
+  };
+
+  return (
+    <section className="rounded-md border border-border bg-background">
+      <div className="space-y-1 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor={`${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`} className="text-sm font-medium text-foreground">
+            {label}
+          </Label>
+          <Badge variant="outline" className="shrink-0 text-xs">
+            {countLabel}
+          </Badge>
+        </div>
+        {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+      </div>
+      <div className="divide-y divide-border border-t border-border">
+        {items.length === 0 ? (
+          <div className="px-4 py-3 text-xs text-muted-foreground">{emptyText}</div>
+        ) : (
+          items.map((item) => (
+            <div key={item} className="flex min-h-10 items-center gap-3 px-4 py-2">
+              <span className={`min-w-0 flex-1 truncate text-sm text-foreground ${monospace ? "font-mono" : ""}`}>
+                {item}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={disabled}
+                aria-label={`Remove ${item}`}
+                onClick={() => removeItem(item)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))
+        )}
+        <div className="grid gap-2 p-3 sm:grid-cols-[1fr_auto]">
+          <Input
+            id={`${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`}
+            value={draft}
+            disabled={disabled}
+            placeholder={placeholder}
+            aria-label={label}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+          />
+          <Button type="button" variant="outline" disabled={disabled || !draft.trim()} onClick={handleAdd}>
+            <Plus className="h-4 w-4" />
+            {addLabel}
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 

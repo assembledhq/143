@@ -341,6 +341,50 @@ func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
 	require.Contains(t, body, "Reviewed head: abc123", "final body should include reviewed head")
 }
 
+func TestCodeReviewReviewerAgentModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	cfg.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode}
+	cfg.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel, "  "}
+
+	require.Equal(t, models.DefaultCodexModel, *codeReviewReviewerAgentModel(cfg, 0, models.AgentTypeCodex),
+		"non-empty configured model should win")
+	require.Equal(t, models.DefaultClaudeCodeModel, *codeReviewReviewerAgentModel(cfg, 1, models.AgentTypeClaudeCode),
+		"whitespace-only configured model should fall back to the per-agent default")
+	require.Equal(t, models.DefaultClaudeCodeModel, *codeReviewReviewerAgentModel(cfg, 5, models.AgentTypeClaudeCode),
+		"out-of-range index should fall back to the per-agent default")
+
+	empty := models.DefaultCodeReviewPolicyConfig()
+	empty.AgentRoster.ReviewerModels = nil
+	require.Equal(t, models.DefaultCodexModel, *codeReviewReviewerAgentModel(empty, 0, models.AgentTypeCodex),
+		"missing reviewer_models should fall back to the per-agent default")
+}
+
+func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	cfg.AgentRoster.Orchestrator = models.AgentTypeOpenCode
+
+	pinned := cfg
+	model := models.OpenCodeModelGPT54Mini
+	pinned.AgentRoster.OrchestratorModel = &model
+	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(pinned),
+		"non-empty configured orchestrator model should win")
+
+	whitespace := cfg
+	blank := "   "
+	whitespace.AgentRoster.OrchestratorModel = &blank
+	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(whitespace),
+		"whitespace-only orchestrator model should fall back to the per-agent default")
+
+	unset := cfg
+	unset.AgentRoster.OrchestratorModel = nil
+	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(unset),
+		"nil orchestrator model should fall back to the per-agent default")
+}
+
 func TestCodeReviewStatusTargetURL(t *testing.T) {
 	t.Parallel()
 

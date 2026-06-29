@@ -59,6 +59,8 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
+	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
+	require.Equal(t, OpenCodeModelGPT54Mini, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
 }
 
@@ -75,6 +77,11 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
+		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},
+		{name: "rejects invalid reviewer model", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerModels = []string{DefaultCodexModel, DefaultCodexModel}
+		}, expectErr: true},
+		{name: "rejects invalid orchestrator model", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.OrchestratorModel = strPtr(DefaultCodexModel) }, expectErr: true},
 		{name: "rejects oversized quorum", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.RequireReviewerQuorum = 3 }, expectErr: true},
 		{name: "rejects too short timeout", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.TimeoutSeconds = 30 }, expectErr: true},
 	}

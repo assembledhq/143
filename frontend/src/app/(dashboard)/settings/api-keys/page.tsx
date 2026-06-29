@@ -3,7 +3,7 @@
 import { useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Copy, KeyRound, Pencil, Plus, Shield, Trash2 } from "lucide-react";
+import { Copy, KeyRound, Pencil, Plus, PowerOff, Shield, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
@@ -615,7 +615,10 @@ function APIClientRow({ client, onCreateToken, onEdit, onDisable }: { client: AP
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="outline" onClick={onDisable} disabled={client.status === "disabled"}>Disable</Button>
+          <Button size="sm" variant="outline" onClick={onDisable} disabled={client.status === "disabled"}>
+            <PowerOff className="h-4 w-4" />
+            Disable
+          </Button>
         </div>
       </div>
       <div className="mt-4 overflow-hidden rounded-md border border-border">
