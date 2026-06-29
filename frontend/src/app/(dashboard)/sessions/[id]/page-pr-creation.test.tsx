@@ -493,7 +493,10 @@ describe('SessionDetailPage PR creation', () => {
       'data-variant',
       'outline',
     );
-    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review & fix' })).toHaveAttribute(
+      'data-variant',
+      'outline',
+    );
     expect(screen.queryByText('Issue-less context')).not.toBeInTheDocument();
     expect(screen.queryByDisplayValue('Maintenance follow-up requested in Slack')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Save context' })).not.toBeInTheDocument();

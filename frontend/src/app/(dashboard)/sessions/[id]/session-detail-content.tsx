@@ -4848,6 +4848,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     return null;
   })();
+  const readinessSecondaryReviewAction = !reviewLoopRunning && !latestReadiness && canUseNativeReviewLoop
+    ? {
+      label: "Review & fix",
+      icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
+      disabled: reviewActionDisabled,
+      onClick: () => setReviewConfigOpen(true),
+    }
+    : null;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -6361,35 +6369,55 @@ export function SessionDetailContent({ id }: { id: string }) {
                       </p>
                     </div>
                   </div>
-                  {readinessPrimaryAction ? (
-                    readinessPrimaryAction.label === "Review & fix" ? (
-                      <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="w-full gap-1.5 sm:w-fit"
-                          disabled={readinessPrimaryAction.disabled}
-                          title={reviewActionDisabledReason}
-                          onClick={readinessPrimaryAction.onClick}
-                        >
-                          {readinessPrimaryAction.icon}
-                          {readinessPrimaryAction.label}
-                        </Button>
-                      </DisabledTooltip>
-                    ) : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="w-full gap-1.5 sm:w-fit"
-                        disabled={readinessPrimaryAction.disabled}
-                        onClick={readinessPrimaryAction.onClick}
-                      >
-                        {readinessPrimaryAction.icon}
-                        {readinessPrimaryAction.label}
-                      </Button>
-                    )
+                  {readinessPrimaryAction || readinessSecondaryReviewAction ? (
+                    <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+                      {readinessPrimaryAction ? (
+                        readinessPrimaryAction.label === "Review & fix" ? (
+                          <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="w-full gap-1.5 sm:w-fit"
+                              disabled={readinessPrimaryAction.disabled}
+                              title={reviewActionDisabledReason}
+                              onClick={readinessPrimaryAction.onClick}
+                            >
+                              {readinessPrimaryAction.icon}
+                              {readinessPrimaryAction.label}
+                            </Button>
+                          </DisabledTooltip>
+                        ) : (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="w-full gap-1.5 sm:w-fit"
+                            disabled={readinessPrimaryAction.disabled}
+                            onClick={readinessPrimaryAction.onClick}
+                          >
+                            {readinessPrimaryAction.icon}
+                            {readinessPrimaryAction.label}
+                          </Button>
+                        )
+                      ) : null}
+                      {readinessSecondaryReviewAction ? (
+                        <DisabledTooltip disabled={readinessSecondaryReviewAction.disabled} content={reviewActionDisabledReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="w-full gap-1.5 sm:w-fit"
+                            disabled={readinessSecondaryReviewAction.disabled}
+                            title={reviewActionDisabledReason}
+                            onClick={readinessSecondaryReviewAction.onClick}
+                          >
+                            {readinessSecondaryReviewAction.icon}
+                            {readinessSecondaryReviewAction.label}
+                          </Button>
+                        </DisabledTooltip>
+                      ) : null}
+                    </div>
                   ) : null}
                 </div>
                 {readinessRunning ? (
