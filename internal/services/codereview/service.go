@@ -165,6 +165,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	}
 
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
+	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	revisionContext, err := json.Marshal(map[string]any{
 		"kind":                "code_review",
 		"github_repo":         input.GitHubRepo,
@@ -188,6 +189,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		InteractionMode:  models.SessionInteractionModeSingleRun,
 		ValidationPolicy: models.SessionValidationPolicySkip,
 		AgentType:        resolved.Config.AgentRoster.Orchestrator,
+		ModelOverride:    modelOverride,
 		Status:           models.SessionStatusIdle,
 		AutonomyLevel:    models.SessionAutonomySupervised,
 		TokenMode:        models.DefaultSessionTokenMode,

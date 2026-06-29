@@ -330,6 +330,8 @@ type CodeReviewRiskPolicy struct {
 type CodeReviewAgentRoster struct {
 	Reviewers             []AgentType `json:"reviewers"`
 	Orchestrator          AgentType   `json:"orchestrator"`
+	ReviewerModels        []string    `json:"reviewer_models,omitempty"`
+	OrchestratorModel     *string     `json:"orchestrator_model,omitempty"`
 	DisagreementBlocks    bool        `json:"disagreement_blocks"`
 	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
 	TimeoutSeconds        int         `json:"timeout_seconds"`
@@ -406,6 +408,8 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
 			Orchestrator:          AgentTypeOpenCode,
+			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
+			OrchestratorModel:     strPtr(OpenCodeModelGPT54Mini),
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,
@@ -416,6 +420,10 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			InheritOrgDefaults: false,
 		},
 	}
+}
+
+func strPtr(value string) *string {
+	return &value
 }
 
 func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPolicyConfig {
@@ -536,11 +544,28 @@ func (c CodeReviewPolicyConfig) Validate() error {
 			return fmt.Errorf("agent %q does not support native review", agentType)
 		}
 	}
+	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
+		return fmt.Errorf("reviewer_models must match reviewer count")
+	}
+	for idx, model := range c.AgentRoster.ReviewerModels {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return fmt.Errorf("reviewer model %d must be non-empty", idx+1)
+		}
+		if err := ValidateModelForAgentType(c.AgentRoster.Reviewers[idx], model); err != nil {
+			return fmt.Errorf("invalid reviewer model %d: %w", idx+1, err)
+		}
+	}
 	if err := c.AgentRoster.Orchestrator.Validate(); err != nil {
 		return err
 	}
 	if !AgentSupportsNativeReview(c.AgentRoster.Orchestrator) {
 		return fmt.Errorf("orchestrator %q does not support native review", c.AgentRoster.Orchestrator)
+	}
+	if c.AgentRoster.OrchestratorModel != nil && strings.TrimSpace(*c.AgentRoster.OrchestratorModel) != "" {
+		if err := ValidateModelForAgentType(c.AgentRoster.Orchestrator, strings.TrimSpace(*c.AgentRoster.OrchestratorModel)); err != nil {
+			return fmt.Errorf("invalid orchestrator model: %w", err)
+		}
 	}
 	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
 		return fmt.Errorf("require_reviewer_quorum must be between 1 and reviewer count")
