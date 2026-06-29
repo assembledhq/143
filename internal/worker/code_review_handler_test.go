@@ -687,6 +687,76 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "excluded risk category changed: dependencies",
 		},
+		{
+			name: "approves large docs-only change through the low-risk lane despite timed-out reviewers",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+						// The reviewer's own status is pending while it runs; it must
+						// not be counted as a failing check against its own approval.
+						{Name: "143 Code Reviewer", Status: models.PullRequestCheckStatusPending},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusTimedOut},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusTimedOut},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					// Filename contains "session" — must not be classified as auth.
+					// 607 lines exceeds the base 300 cap but is under the docs lane cap.
+					{Filename: "docs/design/future/111-session-changesets-and-stacks.md", Additions: 607, Deletions: 0},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionApproved,
+		},
+		{
+			name: "still requires human review for a docs change above the low-risk lane ceiling",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "docs/design/future/huge.md", Additions: 1200, Deletions: 0},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "changed lines 1200 exceeds policy limit 1000",
+		},
 	}
 
 	for _, tt := range tests {
@@ -705,6 +775,55 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodeReviewPathCategoriesDocsOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		expected []string
+	}{
+		{
+			name:     "docs filename containing session is not classified as auth",
+			path:     "docs/design/future/111-session-changesets-and-stacks.md",
+			expected: []string{"docs"},
+		},
+		{
+			name:     "docs filename containing token is not classified as crypto",
+			path:     "docs/auth-token-rotation.md",
+			expected: []string{"docs"},
+		},
+		{
+			name:     "non-docs auth path still classified as auth",
+			path:     "internal/auth/session.go",
+			expected: []string{"backend", "auth"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, codeReviewPathCategories(tt.path), "docs prose must not inherit code-risk categories")
+		})
+	}
+}
+
+func TestCodeReviewChecksPassingIgnoresSelfReportedStatuses(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	health := &models.PullRequestHealthResponse{
+		Checks: []models.PullRequestCheckSummary{
+			{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+			{Name: "143 Code Reviewer", Status: models.PullRequestCheckStatusPending},
+			{Name: "preview/143", Status: models.PullRequestCheckStatusPending},
+		},
+	}
+
+	require.True(t, codeReviewChecksPassing(policy, health),
+		"the reviewer's own pending status must not block its own approval")
 }
 
 func stringPtr(value string) *string {

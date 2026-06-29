@@ -135,6 +135,12 @@ export interface CodeReviewPolicyConfig {
     allow_policy_changes: boolean;
     eligible_authors?: string[];
     required_checks?: string[];
+    low_risk_lane?: {
+      enabled: boolean;
+      categories?: string[];
+      max_lines_changed?: number;
+      waive_reviewer_quorum?: boolean;
+    };
   };
   agent_roster: {
     reviewers: string[];

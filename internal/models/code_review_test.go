@@ -310,6 +310,52 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				"blocked path changed: internal/db/schema/users.go",
 			}},
 		},
+		{
+			name: "low-risk docs lane raises the churn ceiling",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      607,
+				ChangedPaths:      []string{"docs/design/future/111-session-changesets-and-stacks.md"},
+				Categories:        []string{"docs"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: true},
+		},
+		{
+			name: "low-risk docs lane still enforces its own ceiling",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      1200,
+				ChangedPaths:      []string{"docs/huge.md"},
+				Categories:        []string{"docs"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"changed lines 1200 exceeds policy limit 1000",
+			}},
+		},
+		{
+			name: "low-risk lane does not apply to mixed docs and code changes",
+			input: CodeReviewRiskInput{
+				FilesChanged:      2,
+				LinesChanged:      607,
+				ChangedPaths:      []string{"docs/x.md", "internal/api/router.go"},
+				Categories:        []string{"docs", "backend"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Mergeable:         true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"changed lines 607 exceeds policy limit 300",
+			}},
+		},
 	}
 
 	for _, tt := range tests {
