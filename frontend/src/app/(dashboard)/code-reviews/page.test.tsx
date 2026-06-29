@@ -298,8 +298,9 @@ describe("CodeReviewsPage", () => {
     ).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Description requirements/i }));
-    expect(await screen.findByDisplayValue("Understandable description")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
+    expect(await screen.findByText("Understandable description")).toBeInTheDocument();
+    expect(screen.getByText("Every PR")).toBeInTheDocument();
+    expect(screen.getByText("Nontrivial: 2+ files or 31+ lines")).toBeInTheDocument();
 
     // Review depth was removed entirely.
     expect(screen.queryByRole("combobox", { name: /Review depth/i })).not.toBeInTheDocument();
@@ -318,6 +319,34 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("edits description requirements in a focused side sheet", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("button", { name: /Description requirements/i }));
+    await user.click(await screen.findByRole("button", { name: "Edit Testing evidence" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Edit description requirement" });
+    expect(sheet).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Testing evidence")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Requirement applicability" })).toHaveTextContent("Nontrivial");
+    expect(screen.getByText("Files changed at least")).toBeInTheDocument();
+    expect(screen.getByText("Lines changed at least")).toBeInTheDocument();
+    expect(screen.queryByText("Categories")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
+    await user.click(await screen.findByRole("option", { name: "Paths" }));
+
+    expect(await screen.findByText("Path patterns")).toBeInTheDocument();
+    expect(screen.queryByText("Files changed at least")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
   });
 
   it("edits paths, authors, and checks as compact autosaved lists", async () => {
