@@ -500,7 +500,11 @@ provision-worker:
 	$(check-ssh-key)
 	@test -n "$(EGRESS_SSH_KEY)" || { echo "EGRESS_SSH_KEY could not be auto-detected. Put the gateway key at ~/.ssh/143-egress or ~/.ssh/143-egress.pem, or set EGRESS_SSH_KEY=<path> or SSH_KEY=<path>."; exit 1; }
 	@PROVISION_WORKER_HOST=$(HOST) deploy/scripts/sync-static-egress-secrets.sh --apply
-	@deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
+	@# Unset HOST so provision-egress.sh resolves the egress gateway from FLEET_HOSTS
+	@# (its empty $$1 arg). make exports the HOST command-line var, and
+	@# provision-egress.sh falls back to $$HOST when $$1 is empty — without this it
+	@# would target the WORKER as an egress node (tag:prod-egress) instead.
+	@env -u HOST deploy/scripts/provision-egress.sh "" "$(EGRESS_SSH_KEY)"
 	./deploy/scripts/provision.sh worker $(HOST) $(SSH_KEY) $(if $(REPROVISION),--reprovision)
 
 provision-egress:
