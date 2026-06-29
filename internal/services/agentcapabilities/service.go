@@ -297,7 +297,7 @@ func (s *Service) resolvePolicyGrants(ctx context.Context, in ResolveInput) ([]m
 // enabled by default when an org has not configured a session-default policy.
 // These cover broadly-useful capabilities (code/PR/test context, integration
 // issue context, read-only production diagnostics, Slack status notifications,
-// plus branch & PR publishing). Keep in sync with
+// automation management, plus branch & PR publishing). Keep in sync with
 // RECOMMENDED_DEFAULT_CAPABILITY_IDS in
 // frontend/src/components/automation-capabilities-editor.tsx.
 var recommendedDefaultEnabledCapabilities = map[models.AgentCapabilityID]bool{
@@ -308,6 +308,7 @@ var recommendedDefaultEnabledCapabilities = map[models.AgentCapabilityID]bool{
 	models.AgentCapabilityIssueSources:          true,
 	models.AgentCapabilityProductionDiagnostics: true,
 	models.AgentCapabilitySlackNotifications:    true,
+	models.AgentCapabilityAutomationManagement:  true,
 	models.AgentCapabilityPublishing:            true,
 }
 
