@@ -1,7 +1,16 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
+
+const toast = vi.hoisted(() => ({
+  success: vi.fn(),
+  info: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("@/lib/notify", () => ({ notify: toast }));
+
 import CodeReviewsPage from "./page";
 
 // jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
@@ -83,7 +92,6 @@ const policy: CodeReviewResolvedPolicy = {
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
-      max_cost_cents: 500,
     },
     inline_comment_limit: 4,
     inheritance: {
@@ -230,9 +238,18 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     }),
     http.get("/api/v1/code-review-github-trigger", () => HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>)),
   );
+  return {
+    getCurrentConfig: () => currentConfig,
+  };
 }
 
 describe("CodeReviewsPage", () => {
+  beforeEach(() => {
+    toast.success.mockReset();
+    toast.info.mockReset();
+    toast.error.mockReset();
+  });
+
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
@@ -289,11 +306,58 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
     await user.click(screen.getByRole("button", { name: /Apply template/i }));
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith("Applied Small backend change");
+    });
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
     expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
+    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("surfaces template apply save failures through the shared toast", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.put("/api/v1/code-review-policies", () =>
+        HttpResponse.json(
+          { error: { code: "SAVE_FAILED", message: "Policy could not be saved" } },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
+    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
+    await user.click(screen.getByRole("button", { name: /Apply template/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Couldn't save. Your change was reverted.");
+    });
+  });
+
+  it("saves code review timeout in seconds from the selected unit", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
+
+    expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
+    await user.click(screen.getByRole("combobox", { name: "Timeout unit" }));
+    await user.click(await screen.findByRole("option", { name: "Hours" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.timeout_seconds).toBe(30 * 60 * 60);
+    });
   });
 
   it("renders GitHub trigger account-required state", async () => {

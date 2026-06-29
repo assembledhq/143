@@ -144,7 +144,6 @@ export interface CodeReviewPolicyConfig {
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;
-    max_cost_cents: number;
   };
   inline_comment_limit: number;
   final_review_template?: string;
