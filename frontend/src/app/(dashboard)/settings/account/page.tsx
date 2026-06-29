@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Plus, PowerOff, ShieldCheck, Trash2, type LucideIcon } from "lucide-react";
+import { KeyRound, Plus, PowerOff, ShieldCheck, type LucideIcon } from "lucide-react";
 import { notify as toast } from "@/lib/notify";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
