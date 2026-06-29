@@ -21,8 +21,9 @@ func TestSlashCommandsForAgent(t *testing.T) {
 		agentType AgentType
 		wantNames []string
 	}{
-		{name: "claude code", agentType: AgentTypeClaudeCode, wantNames: []string{"init", "review", "clear"}},
-		{name: "codex", agentType: AgentTypeCodex, wantNames: []string{"init", "diff", "review"}},
+		{name: "claude code", agentType: AgentTypeClaudeCode, wantNames: []string{"init", "review", "clear", "code-review", "verify"}},
+		{name: "codex", agentType: AgentTypeCodex, wantNames: []string{"init", "diff", "review", "permissions", "statusline"}},
+		{name: "opencode", agentType: AgentTypeOpenCode, wantNames: []string{"init", "undo", "redo", "share", "help"}},
 		{name: "amp", agentType: AgentTypeAmp, wantNames: []string{"agent", "mode"}},
 		{name: "pi (empty)", agentType: AgentTypePi},
 		{name: "unknown", agentType: AgentType("nope")},
@@ -51,29 +52,46 @@ func TestClaudeCodeSlashCommands_DocumentedCoverage(t *testing.T) {
 	t.Parallel()
 
 	expected := []string{
-		"add-dir", "agents", "autofix-pr", "batch", "branch", "btw", "chrome", "claude-api",
-		"clear", "color", "compact", "config", "context", "copy", "cost", "debug", "desktop",
-		"diff", "doctor", "effort", "exit", "export", "extra-usage", "fast", "feedback",
-		"fewer-permission-prompts", "focus", "heapdump", "help", "hooks", "ide", "init",
-		"insights", "install-github-app", "install-slack-app", "keybindings", "login", "logout",
-		"loop", "mcp", "memory", "mobile", "model", "passes", "permissions", "plan", "plugin",
-		"powerup", "pr-comments", "privacy-settings", "recap", "release-notes", "reload-plugins",
-		"remote-control", "remote-env", "rename", "resume", "review", "rewind", "sandbox",
-		"schedule", "security-review", "setup-bedrock", "setup-vertex", "simplify", "skills",
-		"status", "statusline", "stickers", "tasks", "team-onboarding", "teleport",
-		"terminal-setup", "theme", "tui", "ultraplan",
+		"add-dir", "advisor", "agents", "autofix-pr", "background", "batch", "branch", "btw",
+		"cd", "chrome", "claude-api", "clear", "code-review", "color", "compact", "config",
+		"context", "copy", "cost", "debug", "deep-research", "desktop", "diff", "doctor",
+		"effort", "exit", "export", "fast", "feedback", "fewer-permission-prompts", "focus",
+		"fork", "goal", "heapdump", "help", "hooks", "ide", "init", "insights",
+		"install-github-app", "install-slack-app", "keybindings", "login", "logout", "loop",
+		"mcp", "memory", "mobile", "model", "passes", "permissions", "plan", "plugin",
+		"powerup", "privacy-settings", "radio", "recap", "release-notes", "reload-plugins",
+		"reload-skills", "remote-control", "remote-env", "rename", "resume", "review", "rewind",
+		"run", "run-skill-generator", "sandbox", "schedule", "scroll-speed", "security-review",
+		"setup-bedrock", "setup-vertex", "simplify", "skills", "stats", "status", "statusline",
+		"stickers", "stop", "tasks", "team-onboarding", "teleport", "terminal-setup", "theme",
+		"tui", "ultraplan", "ultrareview", "upgrade", "usage", "usage-credits", "verify",
+		"voice", "web-setup", "workflows",
 	}
 
-	catalog := SlashCommandsForAgent(AgentTypeClaudeCode)
-	names := make(map[string]struct{}, len(catalog))
-	for _, cmd := range catalog {
-		names[cmd.Name] = struct{}{}
+	requireCommandNames(t, AgentTypeClaudeCode, expected)
+}
+
+func TestCodexSlashCommands_DocumentedCoverage(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{
+		"agent", "approve", "apps", "archive", "btw", "clear", "compact", "copy",
+		"debug-config", "delete", "diff", "exit", "experimental", "fast", "feedback",
+		"fork", "goal", "hooks", "ide", "import", "init", "keymap", "logout", "mcp",
+		"memories", "mention", "model", "new", "permissions", "personality", "plan",
+		"plugins", "ps", "quit", "raw", "resume", "review", "sandbox-add-read-dir",
+		"side", "skills", "status", "statusline", "stop", "theme", "title", "usage", "vim",
 	}
 
-	for _, want := range expected {
-		require.Contains(t, names, want, "Claude Code catalog should include %q", want)
-	}
-	require.Len(t, names, len(expected), "Claude Code catalog should match the documented command set covered by this test")
+	requireCommandNames(t, AgentTypeCodex, expected)
+}
+
+func TestOpenCodeSlashCommands_DocumentedCoverage(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{"help", "init", "redo", "share", "undo"}
+
+	requireCommandNames(t, AgentTypeOpenCode, expected)
 }
 
 func TestSlashCommandAgentLabel(t *testing.T) {
@@ -83,6 +101,22 @@ func TestSlashCommandAgentLabel(t *testing.T) {
 	require.Equal(t, "Codex commands", SlashCommandAgentLabel(AgentTypeCodex))
 	require.Equal(t, "OpenCode commands", SlashCommandAgentLabel(AgentTypeOpenCode))
 	require.Equal(t, "Slash commands", SlashCommandAgentLabel(AgentType("nope")))
+}
+
+func requireCommandNames(t *testing.T, agentType AgentType, expected []string) {
+	t.Helper()
+
+	catalog := SlashCommandsForAgent(agentType)
+	names := make(map[string]struct{}, len(catalog))
+	for _, cmd := range catalog {
+		require.NotEmpty(t, cmd.Description, "slash command %q should have a picker description", cmd.Name)
+		names[cmd.Name] = struct{}{}
+	}
+
+	for _, want := range expected {
+		require.Contains(t, names, want, "catalog for %s should include %q", agentType, want)
+	}
+	require.Len(t, names, len(expected), "catalog for %s should match the documented command set covered by this test", agentType)
 }
 
 func TestProjectCommandSpecCommandNameFromPath(t *testing.T) {
