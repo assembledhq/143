@@ -188,8 +188,15 @@ var OpenCodeModelRegistry = []OpenCodeModel{
 		openRouterRoute(OpenCodeModelOpenRouterGPT52, usGPT52),
 		nativeRoute(OpenCodeModelGPT52),
 	}},
-	{ID: "gpt-5.5", DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
+	// GPT-5.5 and Claude Fable 5 are NOT collapsed under a bare logical id: those
+	// names belong to the Codex / Claude Code agents (CodexModelGPT55,
+	// ClaudeCodeModelFable5), so a bare "gpt-5.5" / "claude-fable-5" must stay
+	// invalid for OpenCode. They are offered as explicit physical (pinned)
+	// routes instead, which keeps their audited US allowlists in the registry.
+	{ID: OpenCodeModelOpenRouterGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
 		openRouterRoute(OpenCodeModelOpenRouterGPT55, usGPT55),
+	}},
+	{ID: OpenCodeModelGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
 		nativeRoute(OpenCodeModelGPT55),
 	}},
 	{ID: "gpt-5.5-pro", DisplayName: "GPT-5.5 Pro", Routes: []OpenCodeRoute{
@@ -202,8 +209,10 @@ var OpenCodeModelRegistry = []OpenCodeModel{
 	{ID: OpenCodeModelClaudeOpus47, DisplayName: "Claude Opus 4.7", Routes: []OpenCodeRoute{
 		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus47),
 	}},
-	{ID: "claude-fable-5", DisplayName: "Claude Fable 5", Routes: []OpenCodeRoute{
+	{ID: OpenCodeModelOpenRouterClaudeFable5, DisplayName: "Claude Fable 5", Routes: []OpenCodeRoute{
 		openRouterRoute(OpenCodeModelOpenRouterClaudeFable5, usFable5),
+	}},
+	{ID: OpenCodeModelClaudeFable5, DisplayName: "Claude Fable 5", Routes: []OpenCodeRoute{
 		nativeRoute(OpenCodeModelClaudeFable5),
 	}},
 }

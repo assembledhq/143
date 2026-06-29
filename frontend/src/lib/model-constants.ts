@@ -168,9 +168,10 @@ export const OPENCODE_LOGICAL_DEEPSEEK_V4_PRO = "deepseek-v4-pro";
 export const OPENCODE_LOGICAL_GEMINI_3_5_FLASH = "gemini-3.5-flash";
 export const OPENCODE_LOGICAL_GEMINI_3_1_PRO = "gemini-3.1-pro";
 export const OPENCODE_LOGICAL_GPT_5_2 = "gpt-5.2";
-export const OPENCODE_LOGICAL_GPT_5_5 = "gpt-5.5";
 export const OPENCODE_LOGICAL_GPT_5_5_PRO = "gpt-5.5-pro";
-export const OPENCODE_LOGICAL_CLAUDE_FABLE_5 = "claude-fable-5";
+// GPT-5.5 and Claude Fable 5 are NOT collapsed under a bare logical id — those
+// bare names belong to the Codex / Claude Code agents — so OpenCode offers them
+// as explicit physical (pinned) route ids instead. Mirrors the Go registry.
 
 // Ordered logical model ids the OpenCode picker offers (cost-first; GLM 5.2
 // leads as the default).
@@ -192,11 +193,13 @@ export const OPENCODE_LOGICAL_MODELS = [
   OPENCODE_LOGICAL_GEMINI_3_1_PRO,
   OPENCODE_LOGICAL_KIMI_K2_6,
   OPENCODE_LOGICAL_GPT_5_2,
-  OPENCODE_LOGICAL_GPT_5_5,
+  OPENCODE_MODEL_OPENROUTER_GPT_5_5,
+  OPENCODE_MODEL_GPT_5_5,
   OPENCODE_LOGICAL_GPT_5_5_PRO,
   OPENCODE_MODEL_CLAUDE_OPUS_48,
   OPENCODE_MODEL_CLAUDE_OPUS_47,
-  OPENCODE_LOGICAL_CLAUDE_FABLE_5,
+  OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5,
+  OPENCODE_MODEL_CLAUDE_FABLE_5,
 ] as const;
 
 export const DEFAULT_OPENCODE_MODEL = OPENCODE_LOGICAL_GLM_5_2;
@@ -238,13 +241,11 @@ export const OPENCODE_MODEL_LABELS: Readonly<Record<string, string>> = {
   [OPENCODE_LOGICAL_GPT_5_2]: "GPT-5.2",
   [OPENCODE_MODEL_GPT_5_2]: "GPT-5.2",
   [OPENCODE_MODEL_OPENROUTER_GPT_5_2]: "GPT-5.2",
-  [OPENCODE_LOGICAL_GPT_5_5]: "GPT-5.5",
   [OPENCODE_MODEL_GPT_5_5]: "GPT-5.5",
   [OPENCODE_MODEL_OPENROUTER_GPT_5_5]: "GPT-5.5",
   [OPENCODE_LOGICAL_GPT_5_5_PRO]: "GPT-5.5 Pro",
   [OPENCODE_MODEL_GPT_5_5_PRO]: "GPT-5.5 Pro",
   [OPENCODE_MODEL_OPENROUTER_GPT_5_5_PRO]: "GPT-5.5 Pro",
-  [OPENCODE_LOGICAL_CLAUDE_FABLE_5]: "Claude Fable 5",
   [OPENCODE_MODEL_CLAUDE_FABLE_5]: "Claude Fable 5",
   [OPENCODE_MODEL_OPENROUTER_CLAUDE_FABLE_5]: "Claude Fable 5",
   [OPENCODE_MODEL_GPT_5_4_MINI]: "GPT-5.4 Mini",

@@ -250,11 +250,16 @@ describe("OpenCode logical models", () => {
   it("offers one entry per model with GLM 5.2 leading", () => {
     expect(OPENCODE_LOGICAL_MODELS[0]).toBe("glm-5.2");
     expect(DEFAULT_OPENCODE_MODEL).toBe("glm-5.2");
-    // No OpenRouter/native physical route ids leak into the picker list.
-    for (const id of OPENCODE_LOGICAL_MODELS) {
+    // Open-weight models collapse to a single bare logical id (no double entry).
+    for (const id of ["glm-5.2", "glm-5.1", "kimi-k2.5", "kimi-k2.6", "minimax-m2.7", "deepseek-v4-pro"]) {
+      expect(OPENCODE_LOGICAL_MODELS).toContain(id);
       expect(id.startsWith("openrouter/")).toBe(false);
       expect(id.startsWith("opencode/")).toBe(false);
     }
+    // GPT-5.5 / Claude Fable 5 stay as explicit physical ids (their bare names
+    // belong to Codex / Claude Code) — the only intentional physical entries.
+    expect(OPENCODE_LOGICAL_MODELS).toContain("openrouter/openai/gpt-5.5");
+    expect(OPENCODE_LOGICAL_MODELS).not.toContain("gpt-5.5");
     // Collapsed: far fewer entries than the physical route list.
     expect(OPENCODE_LOGICAL_MODELS.length).toBeLessThan(AVAILABLE_OPENCODE_MODELS.length);
   });
@@ -269,6 +274,8 @@ describe("OpenCode logical models", () => {
   it("recognizes logical ids", () => {
     expect(isOpenCodeLogicalModel("glm-5.2")).toBe(true);
     expect(isOpenCodeLogicalModel("openrouter/z-ai/glm-5.2")).toBe(false);
-    expect(isOpenCodeLogicalModel("gpt-5.5")).toBe(true);
+    // Bare "gpt-5.5" belongs to Codex, not OpenCode.
+    expect(isOpenCodeLogicalModel("gpt-5.5")).toBe(false);
+    expect(isOpenCodeLogicalModel("kimi-k2.6")).toBe(true);
   });
 });
