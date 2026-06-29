@@ -696,6 +696,46 @@ describe("NewAutomationPage", () => {
     ).toContain("Review the repository for concrete, actionable security risk");
   });
 
+  it("allows a blank interval while editing a template-backed form and restores it on blur", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const intervalInput = await screen.findByLabelText("Interval value");
+    await user.clear(intervalInput);
+
+    expect(intervalInput).toHaveValue(null);
+    expect(screen.getByRole("button", { name: "Create automation" })).toBeDisabled();
+
+    await user.tab();
+
+    expect(intervalInput).toHaveValue(1);
+  });
+
   it("restores the latest in-progress automation draft when no template is selected", async () => {
     searchParamsState.value = "";
     window.sessionStorage.setItem(
