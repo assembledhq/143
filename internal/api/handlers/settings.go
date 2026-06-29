@@ -156,6 +156,14 @@ func (h *SettingsHandler) GetLLMModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": models.LLMModelsByProvider()})
 }
 
+// GetOpenCodeModels returns the OpenCode logical-model registry — one entry per
+// model with its ordered routes (transports). This is the source of truth for
+// the frontend picker and per-model route availability; see
+// docs/design/115-logical-models-and-route-resolution.md.
+func (h *SettingsHandler) GetOpenCodeModels(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"data": models.OpenCodeModelsForAPI()})
+}
+
 // GetNetworkStatus returns the customer-facing network settings status.
 func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
