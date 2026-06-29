@@ -311,20 +311,51 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged       int      `json:"max_files_changed"`
-	MaxLinesChanged       int      `json:"max_lines_changed"`
-	RequirePassingChecks  bool     `json:"require_passing_checks"`
-	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
-	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
-	ExcludeCategories     []string `json:"exclude_categories,omitempty"`
-	RequireMergeable      bool     `json:"require_mergeable"`
-	RequireUpToDate       bool     `json:"require_up_to_date"`
-	AllowForks            bool     `json:"allow_forks"`
-	AllowPolicyChanges    bool     `json:"allow_policy_changes"`
-	EligibleAuthors       []string `json:"eligible_authors,omitempty"`
-	RequiredChecks        []string `json:"required_checks,omitempty"`
+	MaxFilesChanged       int                   `json:"max_files_changed"`
+	MaxLinesChanged       int                   `json:"max_lines_changed"`
+	RequirePassingChecks  bool                  `json:"require_passing_checks"`
+	ExcludeSensitivePaths bool                  `json:"exclude_sensitive_paths"`
+	SensitivePaths        []string              `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns   []string              `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns   []string              `json:"blocked_path_patterns,omitempty"`
+	ExcludeCategories     []string              `json:"exclude_categories,omitempty"`
+	RequireMergeable      bool                  `json:"require_mergeable"`
+	RequireUpToDate       bool                  `json:"require_up_to_date"`
+	AllowForks            bool                  `json:"allow_forks"`
+	AllowPolicyChanges    bool                  `json:"allow_policy_changes"`
+	EligibleAuthors       []string              `json:"eligible_authors,omitempty"`
+	RequiredChecks        []string              `json:"required_checks,omitempty"`
+	LowRiskLane           CodeReviewLowRiskLane `json:"low_risk_lane,omitempty"`
+}
+
+// CodeReviewLowRiskLane relaxes a subset of approval prerequisites for changes
+// whose risk categories all fall within a low-risk allowlist (e.g. docs-only
+// changes). It never bypasses the substantive gates (sensitive/blocked paths,
+// description policy, passing checks, mergeability, prompt injection, blocking
+// findings); it only raises the churn ceiling and, optionally, waives the
+// reviewer-quorum requirement so a clean low-risk change can approve on the
+// heuristic gates even when the review agents time out.
+type CodeReviewLowRiskLane struct {
+	Enabled             bool     `json:"enabled"`
+	Categories          []string `json:"categories,omitempty"`
+	MaxLinesChanged     int      `json:"max_lines_changed,omitempty"`
+	WaiveReviewerQuorum bool     `json:"waive_reviewer_quorum,omitempty"`
+}
+
+// CodeReviewLowRiskLaneApplies reports whether the lane is enabled and every
+// risk category present in the change is contained in the lane's allowlist. An
+// empty category set never qualifies — we only relax changes we can positively
+// classify as low risk.
+func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []string) bool {
+	if !lane.Enabled || len(lane.Categories) == 0 || len(categories) == 0 {
+		return false
+	}
+	for _, category := range categories {
+		if !stringInSlice(category, lane.Categories) {
+			return false
+		}
+	}
+	return true
 }
 
 type CodeReviewAgentRoster struct {
@@ -402,6 +433,12 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			RequireUpToDate:       false,
 			AllowForks:            false,
 			AllowPolicyChanges:    false,
+			LowRiskLane: CodeReviewLowRiskLane{
+				Enabled:             true,
+				Categories:          []string{"docs"},
+				MaxLinesChanged:     1000,
+				WaiveReviewerQuorum: true,
+			},
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
@@ -464,6 +501,14 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if len(config.RiskPolicy.RequiredChecks) > 0 {
 		defaults.RiskPolicy.RequiredChecks = config.RiskPolicy.RequiredChecks
+	}
+	// Only override the low-risk lane when the stored policy specifies one;
+	// otherwise inherit the default docs lane so existing policies pick up the
+	// relaxed handling without needing to be re-saved.
+	if config.RiskPolicy.LowRiskLane.Enabled ||
+		len(config.RiskPolicy.LowRiskLane.Categories) > 0 ||
+		config.RiskPolicy.LowRiskLane.MaxLinesChanged != 0 {
+		defaults.RiskPolicy.LowRiskLane = config.RiskPolicy.LowRiskLane
 	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
@@ -960,11 +1005,16 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		reasons = append(reasons, "PR head changed after review started")
 	}
+	lowRisk := CodeReviewLowRiskLaneApplies(policy.RiskPolicy.LowRiskLane, input.Categories)
 	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
 		reasons = append(reasons, fmt.Sprintf("changed files %d exceeds policy limit %d", input.FilesChanged, policy.RiskPolicy.MaxFilesChanged))
 	}
-	if input.LinesChanged > policy.RiskPolicy.MaxLinesChanged {
-		reasons = append(reasons, fmt.Sprintf("changed lines %d exceeds policy limit %d", input.LinesChanged, policy.RiskPolicy.MaxLinesChanged))
+	maxLinesChanged := policy.RiskPolicy.MaxLinesChanged
+	if lowRisk && policy.RiskPolicy.LowRiskLane.MaxLinesChanged > maxLinesChanged {
+		maxLinesChanged = policy.RiskPolicy.LowRiskLane.MaxLinesChanged
+	}
+	if input.LinesChanged > maxLinesChanged {
+		reasons = append(reasons, fmt.Sprintf("changed lines %d exceeds policy limit %d", input.LinesChanged, maxLinesChanged))
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		reasons = append(reasons, "required GitHub checks are not passing")

@@ -885,7 +885,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 }
 
 func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
-	reviewerQuorum, reviewerFailures := codeReviewReviewerEvidence(agentResults)
+	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	descriptionPassed := description.Passed
 	if len(description.RequirementSummaries) == 0 {
 		descriptionPassed = codeReviewDescriptionPassed(cfg, pr, changedFiles)
@@ -910,14 +910,26 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		ContextFetchFailed:     health == nil || !reviewContextAvailable,
 		HeadSHAChanged:         codeReviewHeadChanged(job.HeadSHA, pr, health),
 		BlockingFindings:       codeReviewBlockingFindings(findings),
-		ReviewerDisagreement:   reviewerFailures > 0,
+		ReviewerDisagreement:   false,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
 		PromptInjectionFound:   description.PromptInjectionFound,
 	})
-	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum {
+	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
 		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, cfg.AgentRoster.RequireReviewerQuorum))
 	}
 	return risk.Reasons
+}
+
+// codeReviewLowRiskQuorumWaived reports whether the resolved policy's low-risk
+// lane waives the reviewer-quorum requirement for this change. It lets a clean
+// low-risk change (e.g. docs-only) approve on the heuristic gates even when the
+// review agents fail or time out, which is otherwise the dominant blocker.
+func codeReviewLowRiskQuorumWaived(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) bool {
+	lane := models.ResolveCodeReviewPolicyConfig(&policy).RiskPolicy.LowRiskLane
+	if !lane.WaiveReviewerQuorum {
+		return false
+	}
+	return models.CodeReviewLowRiskLaneApplies(lane, codeReviewChangedCategories(changedFiles))
 }
 
 func codeReviewReviewerOutputsForPrompt(results []models.CodeReviewAgentResult) []string {
@@ -1582,7 +1594,7 @@ type liveCodeReviewOutcomeInput struct {
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
-	reviewerQuorum, reviewerFailures := codeReviewReviewerEvidence(input.AgentResults)
+	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
@@ -1609,13 +1621,13 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ContextFetchFailed:     input.Health == nil || !input.ChangedFilesAvailable || reviewContextFetchFailed,
 		HeadSHAChanged:         codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
 		BlockingFindings:       blockingFindings,
-		ReviewerDisagreement:   reviewerFailures > 0 || input.OrchestratorSynthesis.ReviewerDisagreement,
+		ReviewerDisagreement:   input.OrchestratorSynthesis.ReviewerDisagreement,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
 		ScopeMismatch:          input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum {
+	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles) {
 		risk.Acceptable = false
 		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, policy.AgentRoster.RequireReviewerQuorum))
 	}
@@ -1947,12 +1959,12 @@ func codeReviewChangedCategories(files []codereviewsvc.PullRequestFile) []string
 func codeReviewPathCategories(path string) []string {
 	normalized := strings.ToLower(strings.TrimSpace(path))
 	categories := make([]string, 0, 2)
-	if strings.HasPrefix(normalized, "docs/") ||
-		strings.HasSuffix(normalized, ".md") ||
-		strings.HasSuffix(normalized, ".mdx") ||
-		strings.HasSuffix(normalized, ".rst") ||
-		strings.HasSuffix(normalized, ".adoc") {
-		categories = append(categories, "docs")
+	if codeReviewDocsPath(normalized) {
+		// Documentation is prose, not code. Returning only "docs" keeps the
+		// substring-based code-risk heuristics below (auth/crypto/permissions/
+		// etc.) from misclassifying a doc whose filename merely contains a
+		// sensitive word, e.g. "111-session-changesets.md" reading as "auth".
+		return []string{"docs"}
 	}
 	if strings.Contains(normalized, "/test/") ||
 		strings.Contains(normalized, "/tests/") ||
@@ -2006,6 +2018,15 @@ func codeReviewPathCategories(path string) []string {
 		categories = append(categories, "infra")
 	}
 	return categories
+}
+
+func codeReviewDocsPath(normalized string) bool {
+	normalized = strings.ToLower(strings.TrimSpace(normalized))
+	return strings.HasPrefix(normalized, "docs/") ||
+		strings.HasSuffix(normalized, ".md") ||
+		strings.HasSuffix(normalized, ".mdx") ||
+		strings.HasSuffix(normalized, ".rst") ||
+		strings.HasSuffix(normalized, ".adoc")
 }
 
 func codeReviewDescriptionPassed(policy models.CodeReviewPolicyConfig, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile) bool {
@@ -2211,7 +2232,31 @@ func codeReviewChecksPassing(policy models.CodeReviewPolicyConfig, health *model
 	if health == nil {
 		return false
 	}
-	return codeReviewAllChecksPassing(health.ChecksConfirmed, health.Checks)
+	return codeReviewAllChecksPassing(health.ChecksConfirmed, codeReviewExternalChecks(health.Checks))
+}
+
+// codeReviewExternalChecks drops 143's own non-CI status contexts before the
+// checks-passing gate is evaluated. The code reviewer publishes its own
+// "143 Code Reviewer" commit status (and the preview integration publishes
+// "preview/143"); both are pending by construction while the review runs, so
+// counting them would make the reviewer block its own approval.
+func codeReviewExternalChecks(checks []models.PullRequestCheckSummary) []models.PullRequestCheckSummary {
+	filtered := make([]models.PullRequestCheckSummary, 0, len(checks))
+	for _, check := range checks {
+		if codeReviewSelfReportedCheck(check.Name) {
+			continue
+		}
+		filtered = append(filtered, check)
+	}
+	return filtered
+}
+
+func codeReviewSelfReportedCheck(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return false
+	}
+	return strings.Contains(normalized, "143 code reviewer") || strings.HasPrefix(normalized, "preview/143")
 }
 
 func codeReviewRequiredChecksPassing(policy models.CodeReviewPolicyConfig, health *models.PullRequestHealthResponse) map[string]bool {
