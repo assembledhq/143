@@ -2242,6 +2242,10 @@ function ChatPanel({
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
+  // A worker drain / deploy interruption leaves the thread "running" while the
+  // runtime waits to resume. Surface that as "Resuming after maintenance…" in the
+  // timeline spinner instead of an honest-looking "Agent is working…".
+  const recoveryActive = isRuntimeRecoveryActive(session);
   const isPending = activeThread ? activeThread.status === "pending" : session.status === "pending";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
@@ -3144,6 +3148,7 @@ function ChatPanel({
             <ChatTimeline
               entries={timelineEntries}
               isRunning={isRunning}
+              recoveryActive={recoveryActive}
               stoppingLabel={isStopRequested ? "Stopping agent..." : undefined}
               stoppedLabel={
                 session.status === "cancelled" || activeThread?.status === "cancelled"
