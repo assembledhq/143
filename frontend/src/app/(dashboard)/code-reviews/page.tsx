@@ -27,7 +27,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -60,7 +62,9 @@ import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
+import { AGENTS_BY_KEY, availableAgentModelGroups, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
+  CodingCredentialSummary,
   CodeReviewApprovalMode,
   CodeReviewDecision,
   CodeReviewDescriptionApplicabilityKind,
@@ -70,6 +74,8 @@ import type {
   CodeReviewPolicyConfig,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
+  ListResponse,
+  OrgSettings,
   SingleResponse,
 } from "@/lib/types";
 
@@ -80,6 +86,7 @@ const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
+const MAX_REVIEWER_MODELS = 3;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
@@ -150,6 +157,31 @@ function apiErrorMessage(error: unknown): string | null {
   if (error instanceof ApiError) return error.message;
   if (error instanceof Error) return error.message;
   return "Request failed";
+}
+
+function selectionValue(agent: string, model: string): string {
+  return `${agent}::${model}`;
+}
+
+function parseSelectionValue(value: string): { agent: string; model: string } {
+  const [agent, ...modelParts] = value.split("::");
+  return { agent, model: modelParts.join("::") };
+}
+
+function defaultModelForAgent(agent: string, modelGroups: AgentModelGroup[]): string {
+  return modelGroups.find((group) => group.key === agent)?.models[0] ?? AGENTS_BY_KEY[agent]?.models[0] ?? "";
+}
+
+function modelBelongsToAgent(agent: string, model: string): boolean {
+  return AGENTS_BY_KEY[agent]?.models.includes(model) ?? false;
+}
+
+function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: AgentModelGroup[]): string[] {
+  return config.agent_roster.reviewers.map((agent, index) => {
+    const configured = config.agent_roster.reviewer_models?.[index] ?? "";
+    if (configured && modelBelongsToAgent(agent, configured)) return configured;
+    return defaultModelForAgent(agent, modelGroups);
+  });
 }
 
 export default function CodeReviewsPage() {
@@ -224,6 +256,22 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
   });
+  const settingsQuery = useQuery({
+    queryKey: queryKeys.settings.all,
+    queryFn: () => api.settings.get(),
+  });
+  const resolvedCredentialsQuery = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
+  const orgCodingCredentialsQuery = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("org"),
+    queryFn: () => api.codingCredentials.list("org"),
+  });
+  const codexAuthQuery = useQuery({
+    queryKey: queryKeys.codexAuth.status,
+    queryFn: () => api.codexAuth.status(),
+  });
   const githubTriggerQuery = useQuery({
     queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null),
     queryFn: () => api.codeReviews.getGitHubTrigger(repositoryId as string),
@@ -285,6 +333,28 @@ export default function CodeReviewsPage() {
   const repositories = repositoriesQuery.data?.data ?? [];
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
+  const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
+  const codeReviewResolvedCredentials = useMemo(
+    () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
+    [resolvedCredentialsQuery.data?.data],
+  );
+  const codeReviewModelGroups = useMemo(
+    () =>
+      availableAgentModelGroups(
+        codeReviewResolvedCredentials,
+        codexAuthQuery.data?.data,
+        orgCodingCredentialsQuery.data?.data ?? [],
+        orgSettings.default_agent_type || "codex",
+        { orgAgentConfig: orgSettings.agent_config },
+      ),
+    [
+      codeReviewResolvedCredentials,
+      codexAuthQuery.data?.data,
+      orgCodingCredentialsQuery.data?.data,
+      orgSettings.default_agent_type,
+      orgSettings.agent_config,
+    ],
+  );
   const editingRequirementIndex = useMemo(
     () =>
       editingRequirementKey && config
@@ -794,31 +864,12 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                   <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent">
-                    <div className="grid gap-3 lg:grid-cols-2">
-                      <ListTextArea
-                        label="Reviewer agents"
-                        serverValue={config?.agent_roster.reviewers ?? []}
-                        disabled={!config}
-                        onCommitItems={(items) =>
-                          commitPolicy((next) => {
-                            const reviewers = items.length > 0 ? items : next.agent_roster.reviewers;
-                            next.agent_roster.reviewers = reviewers;
-                            next.agent_roster.require_reviewer_quorum = Math.min(
-                              next.agent_roster.require_reviewer_quorum,
-                              Math.max(1, reviewers.length),
-                            );
-                          })
-                        }
-                      />
-                      <div className="space-y-2">
-                        <Label className="text-xs text-muted-foreground">Orchestrator</Label>
-                        <PolicyTextInput
-                          serverValue={config?.agent_roster.orchestrator ?? ""}
-                          disabled={!config}
-                          onCommit={(value) => commitPolicy((next) => { next.agent_roster.orchestrator = value; })}
-                        />
-                      </div>
-                    </div>
+                    <AgentRosterControls
+                      config={config}
+                      disabled={!config}
+                      modelGroups={codeReviewModelGroups}
+                      commitPolicy={commitPolicy}
+                    />
                   </FineTuningSection>
 
                   <FineTuningSection title="Description requirements" summary="PR description rules checked before approval">
@@ -1419,6 +1470,177 @@ function FilterSelect({
         <SelectContent>{children}</SelectContent>
       </Select>
     </div>
+  );
+}
+
+function AgentRosterControls({
+  config,
+  disabled,
+  modelGroups,
+  commitPolicy,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  disabled?: boolean;
+  modelGroups: AgentModelGroup[];
+  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
+}) {
+  const reviewers = config?.agent_roster.reviewers ?? [];
+  const reviewerModels = config ? ensureReviewerModels(config, modelGroups) : [];
+  const canAddReviewer = Boolean(config) && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
+  const fallbackGroup = modelGroups[0];
+  const orchestratorModel =
+    config?.agent_roster.orchestrator_model && modelBelongsToAgent(config.agent_roster.orchestrator, config.agent_roster.orchestrator_model)
+      ? config.agent_roster.orchestrator_model
+      : defaultModelForAgent(config?.agent_roster.orchestrator ?? "", modelGroups);
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <Label className="text-xs text-muted-foreground">Reviewer models</Label>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Run one to three independent reviewers. Quorum stays in Approval criteria.
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!canAddReviewer}
+            onClick={() =>
+              commitPolicy((next) => {
+                if (!fallbackGroup || next.agent_roster.reviewers.length >= MAX_REVIEWER_MODELS) return;
+                const reviewerModels = ensureReviewerModels(next, modelGroups);
+                next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
+                next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
+              })
+            }
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            Add
+          </Button>
+        </div>
+
+        <div className="space-y-2">
+          {reviewers.map((agent, index) => (
+            <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_auto]">
+              <AgentModelSelect
+                ariaLabel={`Reviewer ${index + 1} model`}
+                value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
+                modelGroups={modelGroups}
+                currentAgent={agent}
+                currentModel={reviewerModels[index]}
+                disabled={disabled}
+                onValueChange={(value) =>
+                  commitPolicy((next) => {
+                    const selection = parseSelectionValue(value);
+                    const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    next.agent_roster.reviewers[index] = selection.agent;
+                    reviewerModels[index] = selection.model;
+                    next.agent_roster.reviewer_models = reviewerModels;
+                  })
+                }
+              />
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={`Remove reviewer ${index + 1}`}
+                disabled={disabled || reviewers.length <= 1}
+                onClick={() =>
+                  commitPolicy((next) => {
+                    const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
+                    next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
+                    next.agent_roster.require_reviewer_quorum = Math.min(
+                      next.agent_roster.require_reviewer_quorum,
+                      Math.max(1, next.agent_roster.reviewers.length),
+                    );
+                  })
+                }
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        <div>
+          <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Synthesizes reviewer evidence and decides the final review outcome.
+          </p>
+        </div>
+        <AgentModelSelect
+          ariaLabel="Orchestrator model"
+          value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
+          modelGroups={modelGroups}
+          currentAgent={config?.agent_roster.orchestrator}
+          currentModel={orchestratorModel}
+          disabled={disabled}
+          onValueChange={(value) =>
+            commitPolicy((next) => {
+              const selection = parseSelectionValue(value);
+              next.agent_roster.orchestrator = selection.agent;
+              next.agent_roster.orchestrator_model = selection.model;
+            })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function AgentModelSelect({
+  value,
+  modelGroups,
+  currentAgent,
+  currentModel,
+  disabled,
+  ariaLabel,
+  onValueChange,
+}: {
+  value: string;
+  modelGroups: AgentModelGroup[];
+  currentAgent?: string;
+  currentModel?: string;
+  disabled?: boolean;
+  ariaLabel: string;
+  onValueChange: (value: string) => void;
+}) {
+  const currentValueAvailable = modelGroups.some((group) =>
+    group.models.some((model) => selectionValue(group.key, model) === value),
+  );
+
+  return (
+    <Select value={value} onValueChange={onValueChange} disabled={disabled || modelGroups.length === 0}>
+      <SelectTrigger aria-label={ariaLabel}>
+        <SelectValue placeholder="Select model" />
+      </SelectTrigger>
+      <SelectContent>
+        {!currentValueAvailable && currentAgent && currentModel ? (
+          <SelectGroup>
+            <SelectLabel>Current selection</SelectLabel>
+            <SelectItem value={selectionValue(currentAgent, currentModel)}>
+              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {currentModel}
+            </SelectItem>
+          </SelectGroup>
+        ) : null}
+        {modelGroups.map((group) => (
+          <SelectGroup key={group.key}>
+            <SelectLabel>{group.label}</SelectLabel>
+            {group.models.map((model) => (
+              <SelectItem key={`${group.key}-${model}`} value={selectionValue(group.key, model)}>
+                {model}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 

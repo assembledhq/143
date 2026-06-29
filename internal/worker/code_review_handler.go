@@ -335,6 +335,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	for idx, agentType := range cfg.AgentRoster.Reviewers {
+		agentModel := codeReviewReviewerAgentModel(cfg, idx, agentType)
 		key := codeReviewReviewerKey(idx, agentType)
 		if _, ok := existing[key]; ok {
 			continue
@@ -345,7 +346,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 				OrgID:         job.OrgID,
 				SessionID:     job.SessionID,
 				AgentProvider: string(agentType),
-				AgentModel:    codeReviewDefaultAgentModel(agentType),
+				AgentModel:    agentModel,
 				Role:          models.CodeReviewAgentRoleReviewer,
 				Status:        models.CodeReviewAgentResultStatusTimedOut,
 				RawOutput:     &raw,
@@ -366,6 +367,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 		artifactMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key": key,
 			"agent_type":   agentType,
+			"agent_model":  stringPtrValue(agentModel),
 			"head_sha":     job.HeadSHA,
 		})
 		if err != nil {
@@ -387,6 +389,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			SessionID:       job.SessionID,
 			OrgID:           job.OrgID,
 			AgentType:       string(agentType),
+			Model:           stringPtrValue(agentModel),
 			Label:           codeReviewReviewerThreadLabel(agentType),
 			Instructions:    "Inspect only. Do not edit files, commit, push, or change the workspace.",
 			FileScope:       fileScope,
@@ -409,7 +412,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			OrgID:            job.OrgID,
 			SessionID:        job.SessionID,
 			AgentProvider:    string(agentType),
-			AgentModel:       codeReviewDefaultAgentModel(agentType),
+			AgentModel:       agentModel,
 			Role:             models.CodeReviewAgentRoleReviewer,
 			Status:           models.CodeReviewAgentResultStatusQueued,
 			StructuredResult: structured,
@@ -657,6 +660,24 @@ func codeReviewDefaultAgentModel(agentType models.AgentType) *string {
 		return nil
 	}
 	return &model
+}
+
+func codeReviewReviewerAgentModel(cfg models.CodeReviewPolicyConfig, idx int, agentType models.AgentType) *string {
+	if idx >= 0 && idx < len(cfg.AgentRoster.ReviewerModels) {
+		if model := strings.TrimSpace(cfg.AgentRoster.ReviewerModels[idx]); model != "" {
+			return &model
+		}
+	}
+	return codeReviewDefaultAgentModel(agentType)
+}
+
+func codeReviewOrchestratorAgentModel(cfg models.CodeReviewPolicyConfig) *string {
+	if cfg.AgentRoster.OrchestratorModel != nil {
+		if model := strings.TrimSpace(*cfg.AgentRoster.OrchestratorModel); model != "" {
+			return &model
+		}
+	}
+	return codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator)
 }
 
 func storeCodeReviewPromptArtifact(ctx context.Context, stores *Stores, artifact models.CodeReviewPromptArtifact) error {
@@ -1311,13 +1332,14 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		}
 	}
 	cfg := policy.Config()
+	agentModel := codeReviewOrchestratorAgentModel(cfg)
 	if codeReviewReviewTimedOut(cfg, metadata) {
 		raw := "orchestrator timed out before the worker could start the orchestrator thread"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
 			AgentProvider: string(cfg.AgentRoster.Orchestrator),
-			AgentModel:    codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator),
+			AgentModel:    agentModel,
 			Role:          models.CodeReviewAgentRoleOrchestrator,
 			Status:        models.CodeReviewAgentResultStatusTimedOut,
 			RawOutput:     &raw,
@@ -1341,6 +1363,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		Metadata: mustMarshalCodeReviewJSON(map[string]any{
 			"head_sha":       job.HeadSHA,
 			"policy_version": policy.Version,
+			"agent_model":    stringPtrValue(agentModel),
 		}),
 	}); err != nil {
 		return err
@@ -1350,6 +1373,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		SessionID:       job.SessionID,
 		OrgID:           job.OrgID,
 		AgentType:       string(cfg.AgentRoster.Orchestrator),
+		Model:           stringPtrValue(agentModel),
 		Label:           "Code review: orchestrator",
 		Instructions:    "Synthesize only. Do not edit files, commit, push, or change the workspace.",
 		FileScope:       codeReviewChangedPaths(changedFiles),
@@ -1369,7 +1393,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		OrgID:            job.OrgID,
 		SessionID:        job.SessionID,
 		AgentProvider:    string(cfg.AgentRoster.Orchestrator),
-		AgentModel:       codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator),
+		AgentModel:       agentModel,
 		Role:             models.CodeReviewAgentRoleOrchestrator,
 		Status:           models.CodeReviewAgentResultStatusQueued,
 		StructuredResult: structured,
