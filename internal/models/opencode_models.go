@@ -44,6 +44,32 @@ func (r OpenCodeRoute) IsNativeOpenCode() bool {
 	return r.Backing == ProviderOpenCode
 }
 
+// TransportLabel returns the human transport name for this route, e.g.
+// "OpenRouter" or "OpenCode native".
+func (r OpenCodeRoute) TransportLabel() string {
+	return OpenCodeTransportLabel(r.Backing)
+}
+
+// OpenCodeTransportLabel returns the human transport name for an OpenCode
+// backing provider. Shared by the resolver error messages, the routing log,
+// and the models API so the label is defined once.
+func OpenCodeTransportLabel(backing ProviderName) string {
+	switch backing {
+	case ProviderAnthropic:
+		return "Anthropic"
+	case ProviderOpenAI:
+		return "OpenAI"
+	case ProviderGemini:
+		return "Gemini"
+	case ProviderOpenRouter:
+		return "OpenRouter"
+	case ProviderOpenCode:
+		return "OpenCode native"
+	default:
+		return string(backing)
+	}
+}
+
 // OpenCodeModel is a single user-facing model with one or more interchangeable
 // routes in default priority order.
 type OpenCodeModel struct {
@@ -264,6 +290,40 @@ func OpenCodePhysicalModelForBacking(idOrPhysical string, backing ProviderName) 
 		}
 	}
 	return id
+}
+
+// OpenCodeModelAPI is the wire shape served by GET /api/v1/settings/opencode-models.
+// It is the frontend's source of truth for the picker list and per-model routes
+// (which transports a model can run on), so the route data is not hand-synced.
+type OpenCodeModelAPI struct {
+	ID          string             `json:"id"`
+	DisplayName string             `json:"display_name"`
+	Routes      []OpenCodeRouteAPI `json:"routes"`
+}
+
+// OpenCodeRouteAPI is the wire shape for one route. The US provider allowlist is
+// intentionally omitted — it is a backend-only concern.
+type OpenCodeRouteAPI struct {
+	Backing         string `json:"backing"`
+	TransportLabel  string `json:"transport_label"`
+	PhysicalModelID string `json:"physical_model_id"`
+}
+
+// OpenCodeModelsForAPI projects the registry into the read-API wire shape.
+func OpenCodeModelsForAPI() []OpenCodeModelAPI {
+	out := make([]OpenCodeModelAPI, 0, len(OpenCodeModelRegistry))
+	for _, m := range OpenCodeModelRegistry {
+		routes := make([]OpenCodeRouteAPI, 0, len(m.Routes))
+		for _, route := range m.Routes {
+			routes = append(routes, OpenCodeRouteAPI{
+				Backing:         string(route.Backing),
+				TransportLabel:  route.TransportLabel(),
+				PhysicalModelID: route.PhysicalModelID,
+			})
+		}
+		out = append(out, OpenCodeModelAPI{ID: m.ID, DisplayName: m.DisplayName, Routes: routes})
+	}
+	return out
 }
 
 // DefaultOpenCodePhysicalModelForBacking returns a physical CLI model id for a

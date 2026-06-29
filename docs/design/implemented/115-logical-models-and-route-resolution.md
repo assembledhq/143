@@ -23,13 +23,31 @@ avoids silently breaking orgs whose only OpenCode key is native (they relied on
 the native default), while still defaulting to the recommended OpenRouter route.
 A pinned native model id always bypasses the gate.
 
-**Deferred (follow-ups, not blocking):**
-- Per-model *disabled* state in the picker when an org has no runnable transport
-  for that model. Agent-level availability already hides OpenCode entirely when
-  no OpenCode key exists; per-model gating is a refinement.
-- A resolved-route badge on the session detail ("GLM 5.2 · OpenRouter"). The
-  resolved physical model is already recorded on the runtime credential binding
-  and in `OPENCODE_MODEL`; surfacing it in the session UI is pending.
+**Frontend single source of truth.** The route/transport/US-allowlist data is
+Go-only and served via `GET /api/v1/settings/opencode-models`
+(`SettingsHandler.GetOpenCodeModels` → `models.OpenCodeModelsForAPI`); the
+frontend consumes it through `useOpenCodeModels` for the picker badge/disabled
+state, so route data is no longer hand-synced. The picker *model-id list*
+remains a small static mirror (`OPENCODE_LOGICAL_MODELS`) consumed synchronously
+by the `AGENTS` registry — matching the established `llm-models` convention —
+with the endpoint as the authoritative list.
+
+**Picker + session UX (shipped).**
+- Per-model transport badge ("· OpenRouter") showing the route that would run
+  given current keys, and a *disabled* state for models with no runnable
+  transport (`ModelOptionGroups` / `FlatModelOptions`, fed by
+  `useOpenCodeAvailability`). Applied to the new-session composer, automation and
+  PM model pickers, and the in-session composer.
+- The in-session composer surfaces the resolved transport on the session detail.
+  It is credential-derived (the route that runs given current keys), consistent
+  with the picker badge; the actual physical route of a past run is recorded on
+  the runtime credential binding / `OPENCODE_MODEL` and via usage attribution.
+
+**Testing note.** The resolved-route ⇄ runtime-config assertion is a unit test
+(`TestAgentEnvResolveForModel_OpenCodeResolvedRouteDrivesCLIAndConfig` in
+`env_test.go`) rather than a `make test-integration` case: integration here is
+Postgres-lifecycle-focused, while this assertion (resolved `OPENCODE_MODEL` +
+`OPENCODE_CONFIG_CONTENT` match the route) is DB-independent.
 
 ## Summary
 

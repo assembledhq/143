@@ -1300,20 +1300,7 @@ func openCodeRouteTransportLabels(routes []models.OpenCodeRoute) []string {
 }
 
 func openCodeBackingProviderLabel(backing models.ProviderName) string {
-	switch backing {
-	case models.ProviderAnthropic:
-		return "Anthropic"
-	case models.ProviderOpenAI:
-		return "OpenAI"
-	case models.ProviderGemini:
-		return "Gemini"
-	case models.ProviderOpenRouter:
-		return "OpenRouter"
-	case models.ProviderOpenCode:
-		return "OpenCode native"
-	default:
-		return string(backing)
-	}
+	return models.OpenCodeTransportLabel(backing)
 }
 
 func (e *AgentEnv) updateRuntimeCredentialBindingModel(orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, model string) {

@@ -58,6 +58,37 @@ func TestOpenCodeModelRegistry_Invariants(t *testing.T) {
 	}
 }
 
+func TestOpenCodeModelsForAPI_MirrorsRegistry(t *testing.T) {
+	t.Parallel()
+
+	api := OpenCodeModelsForAPI()
+	require.Len(t, api, len(OpenCodeModelRegistry), "API projection must cover every registry model")
+
+	for i, m := range api {
+		reg := OpenCodeModelRegistry[i]
+		require.Equal(t, reg.ID, m.ID, "order and id must match the registry")
+		require.Equal(t, reg.DisplayName, m.DisplayName)
+		require.Len(t, m.Routes, len(reg.Routes))
+		for j, route := range m.Routes {
+			require.Equal(t, string(reg.Routes[j].Backing), route.Backing)
+			require.Equal(t, reg.Routes[j].PhysicalModelID, route.PhysicalModelID)
+			require.NotEmpty(t, route.TransportLabel, "every route must carry a transport label")
+		}
+	}
+
+	// Spot-check the GLM 5.2 entry the frontend leans on.
+	require.Equal(t, "glm-5.2", api[0].ID)
+	require.Equal(t, "OpenRouter", api[0].Routes[0].TransportLabel)
+	require.Equal(t, "openrouter", api[0].Routes[0].Backing)
+}
+
+func TestOpenCodeTransportLabel(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "OpenRouter", OpenCodeTransportLabel(ProviderOpenRouter))
+	require.Equal(t, "OpenCode native", OpenCodeTransportLabel(ProviderOpenCode))
+	require.Equal(t, "Anthropic", OpenCodeTransportLabel(ProviderAnthropic))
+}
+
 func TestOpenCodeModelRegistry_DefaultModelResolves(t *testing.T) {
 	t.Parallel()
 

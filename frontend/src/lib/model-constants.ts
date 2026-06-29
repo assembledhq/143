@@ -269,6 +269,20 @@ export function openCodeModelLabel(model: string): string {
   return OPENCODE_MODEL_LABELS[model] ?? model;
 }
 
+// openCodeTransportLabelForModel derives the human transport name from a
+// resolved physical OpenCode model id by its prefix (e.g.
+// "openrouter/z-ai/glm-5.2" → "OpenRouter"). Returns null for a logical id or
+// an uncurated slug whose transport can't be determined from the id alone.
+// Mirror of OpenCodeTransportLabel in internal/models/opencode_models.go.
+export function openCodeTransportLabelForModel(model: string): string | null {
+  if (model.startsWith("openrouter/")) return "OpenRouter";
+  if (model.startsWith("opencode/")) return "OpenCode native";
+  if (model.startsWith("anthropic/")) return "Anthropic";
+  if (model.startsWith("openai/")) return "OpenAI";
+  if (model.startsWith("google/")) return "Gemini";
+  return null;
+}
+
 export const DEFAULT_PM_MODEL = DEFAULT_CODEX_MODEL;
 
 // PM and session model dropdowns are both built from the AGENTS registry in

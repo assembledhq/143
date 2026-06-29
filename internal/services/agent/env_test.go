@@ -1704,6 +1704,44 @@ func TestAgentEnvResolveForModel_OpenCodePinnedNativeBypassesPolicy(t *testing.T
 	require.Equal(t, models.OpenCodeModelGLM52, resolved["OPENCODE_MODEL"], "pinned native model should be used verbatim")
 }
 
+// End-to-end: the resolved env that drives the OpenCode CLI (OPENCODE_MODEL,
+// passed to `--model "${OPENCODE_MODEL:-…}"`) and the generated runtime config
+// JSON (OPENCODE_CONFIG_CONTENT) must match the chosen route — physical model
+// id, backing-provider env var, and (OpenRouter only) the audited US allowlist.
+func TestAgentEnvResolveForModel_OpenCodeResolvedRouteDrivesCLIAndConfig(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+
+	t.Run("openrouter route", func(t *testing.T) {
+		t.Parallel()
+		env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+			openCodeCred(orgID, &userID, 0, "sk-or-opencode", models.ProviderOpenRouter),
+		})
+		resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
+
+		require.Equal(t, models.OpenCodeModelOpenRouterGLM52, resolved["OPENCODE_MODEL"],
+			"--model must receive the OpenRouter route's physical id")
+		cfg := resolved["OPENCODE_CONFIG_CONTENT"]
+		require.Contains(t, cfg, "OPENROUTER_API_KEY", "runtime config must reference the OpenRouter key env")
+		require.Contains(t, cfg, "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
+		require.Contains(t, cfg, models.OpenCodeModelOpenRouterGLM52, "runtime config model must be the resolved physical id")
+	})
+
+	t.Run("native route", func(t *testing.T) {
+		t.Parallel()
+		env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+			openCodeCred(orgID, &userID, 0, "oc-native-key", models.ProviderOpenCode),
+		})
+		// Pin the native physical id so the route is unambiguous.
+		resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, models.OpenCodeModelGLM52)
+
+		require.Equal(t, models.OpenCodeModelGLM52, resolved["OPENCODE_MODEL"], "--model must receive the native physical id")
+		cfg := resolved["OPENCODE_CONFIG_CONTENT"]
+		require.Contains(t, cfg, "OPENCODE_API_KEY", "native runtime config must reference the OpenCode key env")
+		require.NotContains(t, cfg, "deepinfra", "native route must not pin an OpenRouter US allowlist")
+	})
+}
+
 // TestAgentEnvShedAfterPick verifies that the shed-on-failure wiring forwards
 // the picked credential id to the underlying CodingCredentialShedder.
 //
