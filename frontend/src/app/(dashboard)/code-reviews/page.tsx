@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentProps, ReactNode } from "react";
+import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -713,39 +713,61 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                   <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks">
-                <div className="grid gap-3 lg:grid-cols-2">
-                      <ListTextArea
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <PolicyStringListEditor
                         label="Sensitive paths"
+                        description="Paths that should be treated as higher-risk changes."
+                        placeholder="Add glob pattern, e.g. src/auth/**"
+                        emptyText="No sensitive paths configured."
+                        monospace
                         serverValue={config?.risk_policy.sensitive_paths ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.sensitive_paths = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Allowed path patterns"
+                        description="When set, only matching paths are eligible for automated approval."
+                        placeholder="Add allowed glob pattern"
+                        emptyText="No allowlist configured. All paths are eligible unless blocked."
+                        monospace
                         serverValue={config?.risk_policy.allowed_path_patterns ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.allowed_path_patterns = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Blocked path patterns"
+                        description="Matching paths prevent automated approval."
+                        placeholder="Add blocked glob pattern"
+                        emptyText="No blocked paths configured."
+                        monospace
                         serverValue={config?.risk_policy.blocked_path_patterns ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.blocked_path_patterns = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Excluded categories"
+                        description="Review categories to ignore for this policy."
+                        placeholder="Add category"
+                        emptyText="No excluded categories configured."
                         serverValue={config?.risk_policy.exclude_categories ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.exclude_categories = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Required checks"
+                        description="Check names that must pass before approval."
+                        placeholder="Add required check"
+                        emptyText="No required checks configured."
+                        monospace
                         serverValue={config?.risk_policy.required_checks ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.required_checks = items; })}
                       />
-                      <ListTextArea
+                      <PolicyStringListEditor
                         label="Eligible authors"
+                        description="Authors allowed by this policy. Leave empty to allow any author."
+                        placeholder="Add GitHub handle or author"
+                        emptyText="Any author is eligible."
                         serverValue={config?.risk_policy.eligible_authors ?? []}
                         disabled={!config}
                         onCommitItems={(items) => commitPolicy((next) => { next.risk_policy.eligible_authors = items; })}
@@ -1242,6 +1264,128 @@ function PolicyToggle({
       </div>
       <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
     </div>
+  );
+}
+
+function normalizeListItems(items: string[]): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+}
+
+function PolicyStringListEditor({
+  label,
+  description,
+  placeholder,
+  emptyText,
+  serverValue,
+  disabled,
+  monospace = false,
+  onCommitItems,
+}: {
+  label: string;
+  description?: string;
+  placeholder: string;
+  emptyText: string;
+  serverValue: string[];
+  disabled?: boolean;
+  monospace?: boolean;
+  onCommitItems: (items: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const items = normalizeListItems(serverValue);
+  const addLabel = `Add ${label.toLowerCase().replace(/ies$/, "y").replace(/s$/, "")}`;
+  const countLabel = `${items.length} ${items.length === 1 ? "item" : "items"}`;
+
+  const commitNext = (nextItems: string[]) => {
+    onCommitItems(normalizeListItems(nextItems));
+  };
+
+  const addItems = (rawItems: string[]) => {
+    const nextItems = normalizeListItems([...items, ...rawItems]);
+    if (nextItems.length === items.length) return;
+    commitNext(nextItems);
+    setDraft("");
+  };
+
+  const handleAdd = () => addItems([draft]);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    handleAdd();
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
+    const text = event.clipboardData.getData("text");
+    if (!text.includes("\n")) return;
+    event.preventDefault();
+    addItems(text.split(/\r?\n/));
+  };
+
+  const removeItem = (item: string) => {
+    commitNext(items.filter((current) => current !== item));
+  };
+
+  return (
+    <section className="rounded-md border border-border bg-background">
+      <div className="space-y-1 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <Label htmlFor={`${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`} className="text-sm font-medium text-foreground">
+            {label}
+          </Label>
+          <Badge variant="outline" className="shrink-0 text-xs">
+            {countLabel}
+          </Badge>
+        </div>
+        {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+      </div>
+      <div className="divide-y divide-border border-t border-border">
+        {items.length === 0 ? (
+          <div className="px-4 py-3 text-xs text-muted-foreground">{emptyText}</div>
+        ) : (
+          items.map((item) => (
+            <div key={item} className="flex min-h-10 items-center gap-3 px-4 py-2">
+              <span className={`min-w-0 flex-1 truncate text-sm text-foreground ${monospace ? "font-mono" : ""}`}>
+                {item}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={disabled}
+                aria-label={`Remove ${item}`}
+                onClick={() => removeItem(item)}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))
+        )}
+        <div className="grid gap-2 p-3 sm:grid-cols-[1fr_auto]">
+          <Input
+            id={`${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`}
+            value={draft}
+            disabled={disabled}
+            placeholder={placeholder}
+            aria-label={label}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+          />
+          <Button type="button" variant="outline" disabled={disabled || !draft.trim()} onClick={handleAdd}>
+            <Plus className="h-4 w-4" />
+            {addLabel}
+          </Button>
+        </div>
+      </div>
+    </section>
   );
 }
 
