@@ -2074,6 +2074,9 @@ export interface OrgSettings {
   auto_archive_on_pr_close?: boolean;
   session_automation?: SessionAutomationSettings;
   coding_agent_tab_tools_enabled?: boolean;
+  opencode_routing?: {
+    require_openrouter?: boolean;
+  };
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };
@@ -2111,6 +2114,21 @@ export interface NetworkSettingsStatus {
   static_egress_enabled: boolean;
   static_egress_public_ip?: string;
   static_egress_unavailable_reason?: string;
+}
+
+// OpenCode logical-model registry served by GET /api/v1/settings/opencode-models.
+// The backend (internal/models/opencode_models.go) is the source of truth for
+// per-model routes, so route data is not hand-synced into the frontend.
+export interface OpenCodeRouteInfo {
+  backing: string;
+  transport_label: string;
+  physical_model_id: string;
+}
+
+export interface OpenCodeModelInfo {
+  id: string;
+  display_name: string;
+  routes: OpenCodeRouteInfo[];
 }
 
 export interface RuntimeSettingsStatus {

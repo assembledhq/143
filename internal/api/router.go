@@ -1282,6 +1282,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
+				r.Get("/api/v1/settings/opencode-models", settingsHandler.GetOpenCodeModels)
 				r.Get("/api/v1/agent-capabilities", agentCapabilitiesHandler.Catalog)
 				r.Get("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.GetSessionDefault)
 				r.Get("/api/v1/pm/current", pmHandler.Current)

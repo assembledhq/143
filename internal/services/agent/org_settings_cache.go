@@ -15,15 +15,25 @@ import (
 // short enough that operators rarely need to think about it.
 const DefaultOrgSettingsCacheTTL = 30 * time.Second
 
-// OrgSettingsCache caches the parsed agent_config section of an org's
-// settings. It is safe for concurrent use. Entries expire after the
-// configured TTL; settings.Update calls Invalidate so changes take effect
+// AgentSettingsSnapshot is the slice of org settings the agent env caches for
+// hot session-start reads: the per-agent env overrides plus the OpenCode
+// routing policy. Kept deliberately small so the cache does not pin unrelated
+// org state (PM config, context limits, …) that might be expected to refresh
+// promptly.
+type AgentSettingsSnapshot struct {
+	AgentConfig     models.AgentEnvConfig
+	OpenCodeRouting models.OpenCodeRoutingSettings
+}
+
+// OrgSettingsCache caches the agent-relevant slice of an org's settings (see
+// AgentSettingsSnapshot). It is safe for concurrent use. Entries expire after
+// the configured TTL; settings.Update calls Invalidate so changes take effect
 // immediately for callers that wire both sides up.
 //
-// Scope: only the AgentEnvConfig slice of org settings is cached — this is
-// the hot path for Amp/Pi session starts, and keeping the payload small
-// avoids holding on to unrelated org state (PM config, context limits, etc.)
-// that might otherwise be expected to refresh promptly.
+// Scope: only AgentSettingsSnapshot is cached — this is the hot path for
+// Amp/Pi/OpenCode session starts, and keeping the payload small avoids holding
+// on to unrelated org state (PM config, context limits, etc.) that might
+// otherwise be expected to refresh promptly.
 type OrgSettingsCache struct {
 	ttl     time.Duration
 	mu      sync.RWMutex
@@ -32,7 +42,7 @@ type OrgSettingsCache struct {
 }
 
 type orgSettingsCacheEntry struct {
-	config    models.AgentEnvConfig
+	snapshot  AgentSettingsSnapshot
 	expiresAt time.Time
 }
 
@@ -49,27 +59,27 @@ func NewOrgSettingsCache(ttl time.Duration) *OrgSettingsCache {
 	}
 }
 
-// Get returns the cached AgentEnvConfig for the org, or (nil, false) if the
-// entry is missing or expired. A cached nil AgentConfig is a legitimate hit:
-// it means "we checked, and this org has no agent_config" — callers should
-// not treat that as a miss.
-func (c *OrgSettingsCache) Get(orgID uuid.UUID) (models.AgentEnvConfig, bool) {
+// Get returns the cached AgentSettingsSnapshot for the org, or (zero, false) if
+// the entry is missing or expired. A cached snapshot with a nil AgentConfig is
+// a legitimate hit: it means "we checked, and this org has no agent_config" —
+// callers should not treat that as a miss.
+func (c *OrgSettingsCache) Get(orgID uuid.UUID) (AgentSettingsSnapshot, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	entry, ok := c.entries[orgID]
 	if !ok || c.now().After(entry.expiresAt) {
-		return nil, false
+		return AgentSettingsSnapshot{}, false
 	}
-	return entry.config, true
+	return entry.snapshot, true
 }
 
-// Set stores the AgentEnvConfig for the org with a fresh TTL. Calling Set
-// with a nil config is valid and caches the "no agent_config" answer.
-func (c *OrgSettingsCache) Set(orgID uuid.UUID, config models.AgentEnvConfig) {
+// Set stores the AgentSettingsSnapshot for the org with a fresh TTL. A snapshot
+// with a nil AgentConfig is valid and caches the "no agent_config" answer.
+func (c *OrgSettingsCache) Set(orgID uuid.UUID, snapshot AgentSettingsSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[orgID] = orgSettingsCacheEntry{
-		config:    config,
+		snapshot:  snapshot,
 		expiresAt: c.now().Add(c.ttl),
 	}
 }

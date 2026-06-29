@@ -660,7 +660,7 @@ describe("CreateSessionDialog", () => {
     );
 
     await user.click(screen.getByRole("combobox", { name: /Model/i }));
-    await user.click(screen.getByRole("option", { name: "openai/gpt-5.4-mini" }));
+    await user.click(screen.getByRole("option", { name: "GPT-5.4 Mini" }));
     await user.type(
       screen.getByPlaceholderText("Tell the agent what to do..."),
       "Fix the login bug",
