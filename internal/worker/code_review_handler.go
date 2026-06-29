@@ -78,6 +78,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 						Str("session_id", job.SessionID.String()).
 						Str("status", string(existing.Status)).
 						Msg("skipping terminal code review job")
+					reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 					return nil
 				}
 			}
@@ -121,6 +122,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				Str("session_id", job.SessionID.String()).
 				Str("reviewed_head", job.HeadSHA).
 				Msg("marked code review stale after PR head changed")
+			reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 			return nil
 		}
 		descriptionEvaluation, err := evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
@@ -184,6 +186,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 			logger.Info().Str("session_id", job.SessionID.String()).Bool("github_submitted", submitted).Msg("completed unavailable code review")
+			reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 			return nil
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
@@ -229,6 +232,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
+		reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 		return nil
 	}
 }
@@ -255,6 +259,38 @@ func codeReviewMetadataTerminal(status models.CodeReviewSessionStatus) bool {
 	default:
 		return false
 	}
+}
+
+// reconcileCodeReviewSessionStatus drives the parent session to a terminal
+// status once the review itself is finished. The run_code_review job — not the
+// per-thread runtime — owns the lifecycle of an origin=code_review session, so
+// when the handler reaches a terminal outcome it must stop leaving the session
+// in whatever transient state (e.g. a 'pending' parked by a sibling reviewer's
+// sandbox-node retry) the thread machinery left behind. Without this, a fully
+// completed review can strand its session in 'pending' until the reaper sweeps
+// it and stamps the misleading "unable to start within the expected time"
+// failure on an already-successful review. Best-effort: a reconciliation
+// failure is logged, not surfaced, so it can never undo a posted review.
+func reconcileCodeReviewSessionStatus(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load session for code review reconciliation")
+		return
+	}
+	if session.Status.IsTerminal() {
+		return
+	}
+	if err := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusCompleted); err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to reconcile code review session to completed")
+		return
+	}
+	logger.Info().
+		Str("session_id", job.SessionID.String()).
+		Str("prev_status", string(session.Status)).
+		Msg("reconciled code review session to completed")
 }
 
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
@@ -1388,6 +1424,23 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	if err != nil {
 		return fmt.Errorf("load code review session for orchestrator: %w", err)
 	}
+
+	// A sibling reviewer's sandbox-node retry can park the parent session in a
+	// non-claimable 'pending' state. Every reviewer thread is terminal by the
+	// time we dispatch the orchestrator, so reset a stranded 'pending' session
+	// back to idle so the SendMessage below can claim it instead of failing with
+	// ErrSessionNotResumable — which would degrade the review and strand the
+	// session for the reaper to sweep as "unable to start within the expected
+	// time".
+	if session.Status == models.SessionStatusPending {
+		if resetErr := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusIdle); resetErr != nil {
+			logger.Warn().Err(resetErr).Str("session_id", job.SessionID.String()).Msg("failed to reset stranded code review session before orchestrator dispatch")
+		} else {
+			session.Status = models.SessionStatusIdle
+			logger.Warn().Str("session_id", job.SessionID.String()).Msg("reset stranded pending code review session to idle before orchestrator dispatch")
+		}
+	}
+
 	threadID, err := primaryThreadIDForSession(ctx, stores, session)
 	if err != nil {
 		return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
@@ -1397,18 +1450,9 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		PromptArtifactKey: artifactKey,
 		ReadOnly:          false,
 	})
-	result := &models.CodeReviewAgentResult{
-		OrgID:            job.OrgID,
-		SessionID:        job.SessionID,
-		AgentProvider:    string(cfg.AgentRoster.Orchestrator),
-		AgentModel:       agentModel,
-		Role:             models.CodeReviewAgentRoleOrchestrator,
-		Status:           models.CodeReviewAgentResultStatusQueued,
-		StructuredResult: structured,
-	}
-	if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
-		return fmt.Errorf("create code review orchestrator result: %w", err)
-	}
+	// The orchestrator agent result is created only once the thread is actually
+	// dispatched. A transient claim race leaves no result behind, so the next
+	// run_code_review poll re-enters this function cleanly and retries.
 	if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:     job.SessionID,
 		OrgID:         job.OrgID,
@@ -1416,19 +1460,51 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		Message:       promptText,
 		MessageSource: models.SessionMessageSourceAgentTool,
 	}); err != nil {
+		// Transient: the session was momentarily non-resumable despite the reset
+		// above (e.g. re-parked by a sibling's sandbox-node retry between the
+		// reset and the claim). Don't record a permanent orchestrator failure —
+		// let run_code_review re-poll so synthesis dispatches once the session
+		// settles. The orchestrator runs on the Main thread, so there is no
+		// transient tab to clean up, and no agent result exists yet, so the next
+		// pass re-enters this function cleanly.
+		if errors.Is(err, threadsvc.ErrSessionNotResumable) {
+			logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("code review session was not resumable for orchestrator dispatch; retrying")
+			return codeReviewWaitingForOrchestrator(cfg)
+		}
+		// Permanent failure: record a terminal orchestrator result so the review
+		// can finish in a degraded state instead of looping forever.
 		raw := err.Error()
-		if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-			ThreadID:          threadID.String(),
-			PromptArtifactKey: artifactKey,
-			Error:             raw,
-		})); updateErr != nil {
-			logger.Warn().Err(updateErr).Str("thread_id", threadID.String()).Msg("failed to record failed code review orchestrator result")
+		failed := &models.CodeReviewAgentResult{
+			OrgID:         job.OrgID,
+			SessionID:     job.SessionID,
+			AgentProvider: string(cfg.AgentRoster.Orchestrator),
+			AgentModel:    agentModel,
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+			Status:        models.CodeReviewAgentResultStatusFailed,
+			RawOutput:     &raw,
+			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				ThreadID:          threadID.String(),
+				PromptArtifactKey: artifactKey,
+				Error:             raw,
+			}),
+		}
+		if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
+			return fmt.Errorf("create failed code review orchestrator result: %w", createErr)
 		}
 		logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
 		return nil
 	}
-	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusRunning, nil, structured); err != nil {
-		return fmt.Errorf("mark code review orchestrator running: %w", err)
+	result := &models.CodeReviewAgentResult{
+		OrgID:            job.OrgID,
+		SessionID:        job.SessionID,
+		AgentProvider:    string(cfg.AgentRoster.Orchestrator),
+		AgentModel:       agentModel,
+		Role:             models.CodeReviewAgentRoleOrchestrator,
+		Status:           models.CodeReviewAgentResultStatusRunning,
+		StructuredResult: structured,
+	}
+	if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+		return fmt.Errorf("create code review orchestrator result: %w", err)
 	}
 	return nil
 }
