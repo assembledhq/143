@@ -683,6 +683,15 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" << START
   su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE up -d'
 START
 
+# For db nodes: install automated backups (pg_dump every 6h + weekly restore
+# test) and the offsite sync config. The wrapper is idempotent, so this is a
+# no-op on reprovision. BACKUP_* (if present in .env.production.enc) were
+# exported above and drive /opt/143/backup-sync.env.
+if [ "$ROLE" = "db" ]; then
+  echo "Configuring DB backups..."
+  "$SCRIPT_DIR/provision-db-backups.sh" "$HOST" "$SSH_KEY"
+fi
+
 # For app nodes: wait for health + run migrations (single SSH session)
 if [ "$ROLE" = "app" ]; then
   echo "Waiting for API health check..."

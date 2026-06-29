@@ -2,14 +2,33 @@
 set -euo pipefail
 
 # Automated pg_dump backup with verification and retention.
-# Usage: run via cron every 6 hours.
-#   0 */6 * * * /opt/143/deploy/scripts/pg-backup.sh >> /var/log/pg-backup.log 2>&1
+# Installed as a cron job by deploy/scripts/install-pg-backups.sh; runs every
+# 6 hours as root on the db host.
+#
+# The postgres container authenticates with scram-sha-256 even for local
+# connections (see deploy/postgres/pg_hba.conf), so pg_dump needs the
+# password. It is read from $DB_PASSWORD if exported, otherwise from
+# /opt/143/.env (written by provision.sh).
 
 BACKUP_DIR="${BACKUP_DIR:-/backups/postgres}"
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
+# Local retention defaults to 7 days. At ~900 MB/dump every 6h that is ~25 GB;
+# 30 days would be ~108 GB and risk filling the disk. Long-term history is the
+# job of the offsite sync, not the local disk.
+RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-7}"
 CONTAINER_NAME="${POSTGRES_CONTAINER:-143-postgres-1}"
 DB_USER="${POSTGRES_USER:-onefortythree}"
 DB_NAME="${POSTGRES_DB:-onefortythree}"
+ENV_FILE="${ENV_FILE:-/opt/143/.env}"
+
+# Resolve the DB password (needed for the in-container pg_dump connection).
+DB_PASSWORD="${DB_PASSWORD:-}"
+if [ -z "$DB_PASSWORD" ] && [ -f "$ENV_FILE" ]; then
+  DB_PASSWORD="$(grep -E '^DB_PASSWORD=' "$ENV_FILE" | cut -d= -f2- || true)"
+fi
+if [ -z "$DB_PASSWORD" ]; then
+  echo "ERROR: DB_PASSWORD not set and not found in $ENV_FILE" >&2
+  exit 1
+fi
 
 mkdir -p "$BACKUP_DIR"
 
@@ -17,7 +36,7 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/$DB_NAME-$TIMESTAMP.dump"
 
 # Custom format: compressed, supports selective restore
-docker exec "$CONTAINER_NAME" \
+docker exec -e PGPASSWORD="$DB_PASSWORD" "$CONTAINER_NAME" \
   pg_dump -U "$DB_USER" -Fc "$DB_NAME" > "$BACKUP_FILE"
 
 # Verify the backup is valid (runs pg_restore inside the container
@@ -35,3 +54,24 @@ echo "$(date -Iseconds) Backup complete: $BACKUP_FILE ($BACKUP_SIZE)"
 # Clean up old backups
 find "$BACKUP_DIR" -name "*.dump" -mtime +"$RETENTION_DAYS" -delete
 echo "$(date -Iseconds) Cleaned backups older than $RETENTION_DAYS days"
+
+# Offsite sync (true disaster recovery). Without it, dumps live only on this
+# host's disk — a disk/VPS loss takes the backups with it. /opt/143/backup-sync.env
+# is written by deploy/scripts/provision-db-backups.sh from the BACKUP_* vars in
+# .env.production.enc; it exports AWS creds + a BACKUP_SYNC_CMD that pushes
+# $BACKUP_DIR to S3. To wire a different target by hand, set e.g.:
+#   BACKUP_SYNC_CMD='rclone sync /backups/postgres s3:143-backups/postgres/'
+SYNC_ENV="${BACKUP_SYNC_ENV:-/opt/143/backup-sync.env}"
+if [ -f "$SYNC_ENV" ]; then
+  # shellcheck disable=SC1090
+  . "$SYNC_ENV"
+fi
+if [ -n "${BACKUP_SYNC_CMD:-}" ]; then
+  echo "$(date -Iseconds) Running offsite sync..."
+  if eval "$BACKUP_SYNC_CMD"; then
+    echo "$(date -Iseconds) Offsite sync complete"
+  else
+    echo "ERROR: offsite sync failed (BACKUP_SYNC_CMD)" >&2
+    exit 1
+  fi
+fi
