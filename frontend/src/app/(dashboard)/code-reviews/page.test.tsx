@@ -89,6 +89,8 @@ const policy: CodeReviewResolvedPolicy = {
     agent_roster: {
       reviewers: ["codex", "claude_code"],
       orchestrator: "claude_code",
+      reviewer_models: ["gpt-5.4", "claude-sonnet-4-6"],
+      orchestrator_model: "claude-sonnet-4-6",
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
@@ -304,6 +306,11 @@ describe("CodeReviewsPage", () => {
 
     // Review depth was removed entirely.
     expect(screen.queryByRole("combobox", { name: /Review depth/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    expect(await screen.findByRole("combobox", { name: "Reviewer 1 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Reviewer 2 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Orchestrator model" })).toBeInTheDocument();
 
     // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
