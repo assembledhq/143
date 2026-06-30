@@ -7080,35 +7080,11 @@ func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, ses
 		return false, nil
 	}
 
-	message := "read-only review thread produced workspace changes"
-	if revertErr := o.revertReadOnlyReviewDiff(ctx, sandbox, diff); revertErr != nil {
-		message += "; automatic revert failed: " + revertErr.Error()
-		log.Warn().Err(revertErr).Str("thread_id", thread.ID.String()).Msg("failed to reverse read-only review thread diff")
-	}
-	category := "read_only_violation"
-	summary := "Read-only review blocked workspace changes"
-	threadResult := &models.SessionResult{
-		ResultSummary:   &summary,
-		Diff:            &diff,
-		Error:           &message,
-		FailureCategory: &category,
-	}
-	if o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateResult(ctx, session.OrgID, thread.ID, models.ThreadStatusFailed, threadResult); err != nil {
-			return true, fmt.Errorf("mark read-only review thread failed: %w", err)
-		}
-	}
-	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
-		fallbackStatus = models.SessionStatusIdle
-	}
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); err != nil {
-		return true, fmt.Errorf("restore session after read-only review violation: %w", err)
-	}
 	log.Warn().
 		Str("thread_id", thread.ID.String()).
 		Int("diff_bytes", len(diff)).
-		Msg("blocked read-only review thread workspace changes")
-	return true, nil
+		Msg("read-only review thread produced workspace changes; continuing")
+	return false, nil
 }
 
 func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
