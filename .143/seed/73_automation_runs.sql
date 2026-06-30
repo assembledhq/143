@@ -350,4 +350,3 @@ ON CONFLICT (id) DO UPDATE
 SET access_level = EXCLUDED.access_level,
     enabled = EXCLUDED.enabled,
     config = EXCLUDED.config;
-

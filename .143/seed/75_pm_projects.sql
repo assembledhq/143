@@ -570,4 +570,3 @@ SET status = EXCLUDED.status,
     proposal = EXCLUDED.proposal,
     confidence = EXCLUDED.confidence,
     updated_at = EXCLUDED.updated_at;
-

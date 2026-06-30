@@ -57,4 +57,3 @@ SET settings = COALESCE(settings, '{}'::jsonb) || '{
 }'::jsonb,
     updated_at = now()
 WHERE id = '00000000-0000-4000-a000-000000000101'::uuid;
-

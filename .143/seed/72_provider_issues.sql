@@ -202,4 +202,3 @@ ON CONFLICT (id) DO UPDATE
 SET payload = EXCLUDED.payload,
     status = EXCLUDED.status,
     processed_at = EXCLUDED.processed_at;
-

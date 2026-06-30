@@ -409,4 +409,3 @@ VALUES
 ON CONFLICT (id) DO UPDATE
 SET activity_type = EXCLUDED.activity_type,
     linear_activity_id = EXCLUDED.linear_activity_id;
-

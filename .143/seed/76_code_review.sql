@@ -312,4 +312,3 @@ SET role = EXCLUDED.role,
     agent_provider = EXCLUDED.agent_provider,
     content = EXCLUDED.content,
     metadata = EXCLUDED.metadata;
-

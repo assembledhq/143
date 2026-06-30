@@ -388,4 +388,3 @@ SET user_id = EXCLUDED.user_id,
     source = EXCLUDED.source,
     linked_at = EXCLUDED.linked_at,
     updated_at = EXCLUDED.updated_at;
-
