@@ -1,8 +1,8 @@
 # 143
 
-The open-source platform where your whole team builds software together.
+Open-source coding agent infrastructure for teams.
 
-143 is an open-source platform for running coding agents in the cloud. Connect your repos, pick the agents you want — Codex, Claude Code, OpenCode, and others — wire in the tools that hold your product context, and let the team kick off work from a browser, Slack, or an issue tracker. What comes back is a reviewable branch or GitHub PR, with the diff, transcript, checks, and a live preview all in one place.
+143 is an open-source platform where your whole team builds software together, running coding agents in the cloud and hooking up to your team's context. You can connect your repos, pick the agents you want (e.g. Codex, Claude Code, OpenCode), integrate with the tools that hold your product context, and let the team kick off work from a browser, Slack, or Linear. You'll get a reviewable branch or GitHub PR, with the diff, transcript, checks, and a live preview all in one place.
 
 [143.dev](https://www.143.dev) · [Docs](https://www.143.dev/docs) · [Architecture](docs/design/overall.md) · [Self-hosting](https://www.143.dev/docs/self-hosting)
 
@@ -12,11 +12,9 @@ The open-source platform where your whole team builds software together.
 
 ## What is this?
 
-Most coding tools are built for one developer at a time. That's fine for local autocomplete, but it falls apart once agents start doing real work — every engineer ends up with their own setup, their own automations, and their own pile of context that no one else can see.
+Coding agents can fix real product issues now — often faster when the person closest to the customer spots the problem. But most agent tooling still assumes one engineer at a time, each with their own terminal, credentials, and automations nobody else can see.
 
-143 runs that work as shared infrastructure instead. Sessions, automations, Autopilot runs, prompts, and history live in one workspace, so the team can watch what the agents are doing rather than find out from a surprise PR. Setup happens once for the org, not once per laptop.
-
-The agent stays close to the tools you already trust: GitHub remains the source of truth for branches, review, CI, and merge rules. 143 owns the workflow around it — context, credentials, sandboxed execution, previews, follow-ups, and audit logs.
+143 runs that work as shared team infrastructure: one workspace for sessions, automations, Autopilot runs, prompts, and history. Engineers can keep full control while builders on support, product, and other teams get scoped workflows with review safeguards. The agent stays close to the tools you already trust: GitHub, PR review, CI, and merge rules.
 
 ## What it does
 
@@ -31,6 +29,8 @@ A common first setup is the smallest one: connect GitHub, choose an agent, conne
 
 ## How it works
 
+The fastest way to get started and try it out is our managed service on [143.dev](https://www.143.dev). Sign up, connect GitHub and your tools, and you're running without provisioning workers, sandboxes, or infrastructure yourself. Self-hosting follows the same flow; see [Self-hosting](#self-hosting) below.
+
 1. Connect GitHub repos and the tools that carry product or production context.
 2. Start a session manually, schedule an automation, or let Autopilot pick up an eligible issue.
 3. 143 spins up an isolated sandbox, checks out the repo, and runs your chosen agent.
@@ -39,9 +39,11 @@ A common first setup is the smallest one: connect GitHub, choose an agent, conne
 
 The backend is Go and Postgres with a Postgres-backed job queue; the frontend is Next.js; workers run agent sandboxes with Docker/gVisor. The full system design lives in [docs/design/overall.md](docs/design/overall.md).
 
-## Getting started
+## Self-hosting
 
-You'll need Go 1.24+, Node.js 24+, and PostgreSQL 17.
+143 is free to run yourself. You bring your own infrastructure, GitHub App, domain, worker capacity, and LLM/coding-agent credentials. This repo contains everything you need: the application code, Dockerfiles, migrations, local dev setup, the single-node deployment path, public docs, and operational scripts.
+
+To run locally, you'll need Go 1.24+, Node.js 24+, and PostgreSQL 17:
 
 ```bash
 git clone https://github.com/assembledhq/143.git
@@ -52,21 +54,9 @@ make dev
 
 `setup.sh` installs missing dependencies (Homebrew on macOS, apt/NodeSource on Linux), creates the local database, copies `.env.example` to `.env`, and runs migrations. `make dev` brings up Postgres, the Go API, and the Next.js frontend through Docker Compose.
 
-For webhook or GitHub OAuth work, use the ngrok flow:
+For production deployment, start with [docs/self-hosting/](docs/self-hosting/README.md). See the [development setup guide](docs/contributing/development-setup.md) for environment variables and the full list of Make targets.
 
-```bash
-make dev-ngrok NGROK_DOMAIN=yourname.ngrok.dev
-```
-
-See the [development setup guide](docs/contributing/development-setup.md) for environment variables and the full list of Make targets.
-
-## Self-hosting
-
-143 is free to run yourself — you bring your own infrastructure, GitHub App, domain, worker capacity, and LLM/coding-agent credentials. Start with [docs/self-hosting/](docs/self-hosting/README.md).
-
-The hosted service at [143.dev](https://www.143.dev) is the managed path. Billing there is based on container runtime minutes, and 143 doesn't mark up LLM usage.
-
-This repo contains everything you need to self-host: the application code, Dockerfiles, migrations, local dev setup, the single-node deployment path, public docs, and operational scripts. Anything that references Assembled's private production infrastructure (encrypted env bundles, deploy keys, fleet hosts, `assembledhq/143-infra`) is specific to the hosted service and isn't needed to run your own instance.
+The hosted service at [143.dev](https://www.143.dev) is the managed path.
 
 ## Contributing
 
@@ -75,6 +65,8 @@ Issues and PRs are welcome. Start with the [development setup guide](docs/contri
 ## Why "143"?
 
 In 1943, Lockheed's Skunk Works built the XP-80 Shooting Star — America's first operational jet fighter — in 143 days. The name is a nod to small teams with enough ownership to move fast.
+
+Built by the team at [Assembled](https://www.assembled.com) and open-sourced from our own internal use.
 
 ## License
 
