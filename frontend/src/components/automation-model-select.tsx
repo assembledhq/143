@@ -113,7 +113,7 @@ export function AutomationModelSelect({
             <SelectItem value={value}>{value}</SelectItem>
           </SelectGroup>
         ) : null}
-        <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} />
+        <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={value} />
       </SelectContent>
     </Select>
   );
