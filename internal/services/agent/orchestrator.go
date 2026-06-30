@@ -3079,6 +3079,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		})
 		return nil
 	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, run, sandbox, result)
+		o.failRunWithResult(ctx, run, runResult, agentErr.Error())
+		logAgentRunFailed(log, run, agentErr, "failed", runStartedAt, nil)
+		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		})
+		return fmt.Errorf("execute agent: %w", agentErr)
+	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
 	currentRuntimeID := uuid.Nil
@@ -4499,6 +4511,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return nil
 		}
 	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, session, sandbox, result)
+		o.failRunWithResult(ctx, session, runResult, agentErr.Error())
+		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
+		return fmt.Errorf("execute agent on continue: %w", agentErr)
+	}
 
 	// 7. Create assistant message with result summary.
 	if err := o.createAssistantMessage(ctx, session.ID, session.OrgID, threadID, messageTurnNumber, result); err != nil {
@@ -5629,6 +5649,16 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
+	o.failRunWithResult(ctx, run, result, errMsg)
+}
+
+func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
+		result.Error = strPtr(errMsg)
+	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
@@ -5655,6 +5685,20 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	}
 	o.notifyPagerDutySessionComplete(ctx, run, models.SessionStatusFailed, errMsg)
 	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || threadID == nil || *threadID == uuid.Nil {
+		return
+	}
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID == *threadID {
+		return
+	}
+	if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Msg("failed to update active thread terminal status")
+	}
 }
 
 func (o *Orchestrator) notifyPagerDutySessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus, summary string) {
