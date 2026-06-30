@@ -9,6 +9,7 @@ import {
   AVAILABLE_CODEX_MODELS,
   OPENCODE_LOGICAL_MODELS,
   AVAILABLE_PI_MODELS,
+  isKnownOpenCodePhysicalModel,
   isOpenCodeLogicalModel,
   openCodeModelLabel,
 } from "@/lib/model-constants";
@@ -160,6 +161,7 @@ export function agentTypeForModel(model: string): string | undefined {
   // curated lists so bare names a first-party agent owns (e.g. "gpt-5.5" →
   // Codex, "claude-fable-5" → Claude Code) keep their existing owner. Mirrors
   // the backend AgentTypeForModel ordering.
+  if (isKnownOpenCodePhysicalModel(model)) return "opencode";
   if (isOpenCodeLogicalModel(model)) return "opencode";
   if (AGENTS_BY_KEY.pi.models.includes(model)) return "pi";
   // Unknown provider/model strings (custom Pi or custom OpenCode models) cannot

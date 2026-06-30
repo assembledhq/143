@@ -845,6 +845,7 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 			if strings.TrimSpace(oc.Model) == "" {
 				oc.Model = e.effectiveOpenCodeModel(ctx, orgID, oc.NormalizedBackingProvider())
 			}
+			oc.Model = openCodeCLIModelID(oc.Model, oc.NormalizedBackingProvider())
 			applyOpenCodeEnv(merged, oc)
 			e.updateRuntimeCredentialBindingModel(orgID, userID, models.ProviderOpenCode, oc.Model)
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderOpenCode); ok {
@@ -1073,9 +1074,9 @@ func applyOpenCodeEnv(env map[string]string, cfg models.OpenCodeConfig) {
 // first-party OpenAI model rather than a GLM route it can't reach).
 func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, backing models.ProviderName) string {
 	if selection := e.openCodeModelFromAgentConfig(ctx, orgID); selection != "" {
-		return models.OpenCodePhysicalModelForBacking(selection, backing)
+		return openCodeCLIModelID(models.OpenCodePhysicalModelForBacking(selection, backing), backing)
 	}
-	return models.DefaultOpenCodePhysicalModelForBacking(backing)
+	return openCodeCLIModelID(models.DefaultOpenCodePhysicalModelForBacking(backing), backing)
 }
 
 // resolveOpenCodeProviderConfig resolves an OpenCode model selection to a
@@ -1209,7 +1210,7 @@ func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.U
 					Msg("opencode route resolution fell back to a non-preferred transport after rate limiting")
 			}
 			cfg.BackingProvider = route.Backing
-			cfg.Model = route.PhysicalModelID
+			cfg.Model = openCodeCLIModelID(route.PhysicalModelID, route.Backing)
 			e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
 			return cfg
 		}
@@ -1380,7 +1381,9 @@ func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig
 	}
 	providers := models.OpenCodeUSProviderList(model)
 	if len(providers) == 0 {
-		return nil
+		return map[string]openCodeModelConfig{
+			modelKey: {},
+		}
 	}
 	return map[string]openCodeModelConfig{
 		modelKey: {
@@ -1403,7 +1406,31 @@ func openCodeOpenRouterModelKey(model string) (string, bool) {
 	if !ok || !strings.Contains(upstreamModel, "/") {
 		return "", false
 	}
+	if strings.HasPrefix(upstreamModel, "~") {
+		return upstreamModel, true
+	}
 	return "~" + upstreamModel, true
+}
+
+func openCodeCLIModelID(model string, backing models.ProviderName) string {
+	if backing != models.ProviderOpenRouter {
+		return model
+	}
+	model = strings.TrimSpace(model)
+	const prefix = "openrouter/"
+	if upstreamModel, ok := strings.CutPrefix(model, prefix); ok {
+		if strings.HasPrefix(upstreamModel, "~") {
+			return model
+		}
+		return prefix + "~" + upstreamModel
+	}
+	if strings.HasPrefix(model, "~") {
+		return prefix + model
+	}
+	if strings.Contains(model, "/") {
+		return prefix + "~" + model
+	}
+	return model
 }
 
 func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {

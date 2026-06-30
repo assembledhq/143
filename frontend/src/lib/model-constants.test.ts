@@ -265,6 +265,7 @@ describe("OpenCode logical models", () => {
   it("labels logical and physical ids with a friendly name and passes through custom slugs", () => {
     expect(openCodeModelLabel("glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("openrouter/z-ai/glm-5.2")).toBe("GLM 5.2");
+    expect(openCodeModelLabel("openrouter/~z-ai/glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("opencode/glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("xai/grok-code-fast")).toBe("xai/grok-code-fast");
   });

@@ -255,20 +255,32 @@ export const OPENCODE_MODEL_LABELS: Readonly<Record<string, string>> = {
 };
 
 const OPENCODE_LOGICAL_MODEL_SET: ReadonlySet<string> = new Set(OPENCODE_LOGICAL_MODELS);
+const OPENCODE_PHYSICAL_MODEL_SET: ReadonlySet<string> = new Set(AVAILABLE_OPENCODE_MODELS);
 
 export function isOpenCodeLogicalModel(model: string): boolean {
   return OPENCODE_LOGICAL_MODEL_SET.has(model);
 }
 
+export function isKnownOpenCodePhysicalModel(model: string): boolean {
+  return OPENCODE_PHYSICAL_MODEL_SET.has(normalizeOpenCodePhysicalModelID(model));
+}
+
 // openCodeModelLabel returns a friendly display name for an OpenCode logical or
 // physical model id, falling back to the raw id for uncurated custom slugs.
 export function openCodeModelLabel(model: string): string {
-  return OPENCODE_MODEL_LABELS[model] ?? model;
+  return OPENCODE_MODEL_LABELS[normalizeOpenCodePhysicalModelID(model)] ?? model;
+}
+
+function normalizeOpenCodePhysicalModelID(model: string): string {
+  if (model.startsWith("openrouter/~")) {
+    return `openrouter/${model.slice("openrouter/~".length)}`;
+  }
+  return model;
 }
 
 // openCodeTransportLabelForModel derives the human transport name from a
 // resolved physical OpenCode model id by its prefix (e.g.
-// "openrouter/z-ai/glm-5.2" → "OpenRouter"). Returns null for a logical id or
+// "openrouter/~z-ai/glm-5.2" → "OpenRouter"). Returns null for a logical id or
 // an uncurated slug whose transport can't be determined from the id alone.
 // Mirror of OpenCodeTransportLabel in internal/models/opencode_models.go.
 export function openCodeTransportLabelForModel(model: string): string | null {

@@ -224,6 +224,9 @@ func AgentTypeForModel(model string) AgentType {
 			return AgentTypeOpenCode
 		}
 	}
+	if IsKnownOpenCodePhysicalModel(model) {
+		return AgentTypeOpenCode
+	}
 	// OpenCode logical model ids (e.g. "glm-5.2") route to OpenCode. Checked
 	// after the curated physical lists so bare names a first-party agent owns
 	// (e.g. "gpt-5.5" → Codex, "claude-fable-5" → Claude Code) keep their
@@ -301,6 +304,9 @@ func IsSupportedPiModel(model string) bool {
 }
 
 func IsSupportedOpenCodeModel(model string) bool {
+	if IsKnownOpenCodePhysicalModel(model) {
+		return true
+	}
 	for _, supportedModel := range AvailableOpenCodeModels {
 		if model == supportedModel {
 			return true

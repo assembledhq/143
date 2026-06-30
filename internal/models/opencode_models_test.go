@@ -155,8 +155,16 @@ func TestOpenCodeRouteForPhysicalModelAndDisplayName(t *testing.T) {
 	require.Equal(t, "glm-5.2", logical.ID)
 	require.Equal(t, ProviderOpenRouter, route.Backing)
 
+	logical, route, ok = OpenCodeRouteForPhysicalModel("openrouter/~z-ai/glm-5.2")
+	require.True(t, ok, "OpenCode CLI custom-model ids should resolve to their registry route")
+	require.Equal(t, "glm-5.2", logical.ID)
+	require.Equal(t, ProviderOpenRouter, route.Backing)
+	require.True(t, IsKnownOpenCodePhysicalModel("openrouter/~z-ai/glm-5.2"), "OpenCode CLI custom-model ids should be recognized")
+	require.Equal(t, []string{"deepinfra", "together", "fireworks"}, OpenCodeUSProviderList("openrouter/~z-ai/glm-5.2"), "CLI custom-model id should retain audited routing")
+
 	require.Equal(t, "GLM 5.2", OpenCodeDisplayName("glm-5.2"), "logical id should resolve to its display name")
 	require.Equal(t, "GLM 5.2", OpenCodeDisplayName(OpenCodeModelGLM52), "physical id should resolve to the owning model's display name")
+	require.Equal(t, "GLM 5.2", OpenCodeDisplayName("openrouter/~z-ai/glm-5.2"), "CLI custom-model id should resolve to the owning model's display name")
 	require.Equal(t, "vendor/custom", OpenCodeDisplayName("vendor/custom"), "uncurated slug should pass through")
 }
 
@@ -167,6 +175,7 @@ func TestAgentTypeForModel_OpenCodeLogicalIDs(t *testing.T) {
 
 	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("glm-5.2"), "open-weight logical id routes to OpenCode")
 	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("kimi-k2.6"))
+	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("openrouter/~z-ai/glm-5.2"), "OpenCode CLI custom-model id routes to OpenCode")
 	require.Equal(t, AgentTypeCodex, AgentTypeForModel("gpt-5.5"), "bare gpt-5.5 stays owned by Codex")
 	require.Equal(t, AgentTypeClaudeCode, AgentTypeForModel("claude-fable-5"), "bare claude-fable-5 stays owned by Claude Code")
 }
