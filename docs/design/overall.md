@@ -1,12 +1,12 @@
 # Design: 143.dev
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-16
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 
 143.dev is shared coding-agent infrastructure for engineering teams. It turns production errors, issue-tracker work, PR feedback, automations, and human requests into repo-scoped coding sessions that run in isolated sandboxes, produce reviewable diffs, launch previews, and publish branches or pull requests through the team's normal GitHub workflow.
 
 This document is the product and architecture map. It should explain the overall system at a high level and link to detailed design docs for contracts, state machines, UI specifics, rollout plans, and operational procedures.
 
-The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. Product imagery uses wide, repeatable screenshots from seeded/demo product states so the homepage shows the real workspace instead of mock-only generated visuals. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md) and [future/88-homepage-product-screenshots.md](future/88-homepage-product-screenshots.md).
+The public homepage positions 143 as shared coding-agent infrastructure for engineering teams: one team-visible workspace for context, integrations, cloud agent execution, previews, review loops, audit logs, and usage analytics. Public docs now live at `/docs`, backed by curated MDX in `docs/public`, raw Markdown routes, `/llms.txt`, and product screenshots from demo states. See [implemented/81-homepage-positioning-refresh.md](implemented/81-homepage-positioning-refresh.md), [future/88-homepage-product-screenshots.md](future/88-homepage-product-screenshots.md), and [implemented/85-public-docs-fumadocs/README.md](implemented/85-public-docs-fumadocs/README.md).
 
 ## Product Model
 
@@ -130,7 +130,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - **Post-deploy impact measurement is still partial.** Deploy records exist around PR merge events, but the full experiment model, metric collection, outcome classification, and customer-impact feedback loop are not complete. See [backlog/09-observability.md](backlog/09-observability.md) and [future/18-fix-quality-feedback.md](future/18-fix-quality-feedback.md).
 - **Advanced codebase context remains future work.** Sessions use repository conventions, structured references, issue context, diffs, and learned review patterns, but deeper file maps, convention extraction, and context quality scoring are not yet a complete product surface. See [future/14-codebase-context.md](future/14-codebase-context.md).
 - **Multi-organization membership is not the default product shape.** The system is already org-scoped, but the long-term "one user, many org memberships" flow is only partially represented in current product surfaces. See [future/50-multi-organization-membership.md](future/50-multi-organization-membership.md).
-- **Public documentation is not yet a first-party product surface.** The intended `/docs` site exists as a future design, while internal design docs remain separate from customer-facing documentation. See [future/85-public-docs-fumadocs/README.md](future/85-public-docs-fumadocs/README.md).
+- **Public documentation exists, but coverage is still selective.** The `/docs` site is a first-party product surface backed by `docs/public`, raw Markdown routes, and `/llms.txt`. The next gaps are deeper API examples and public guides for Slack, code reviews, automations, and PR previews. See [implemented/85-public-docs-fumadocs/README.md](implemented/85-public-docs-fumadocs/README.md).
 
 ## What Belongs Outside This File
 

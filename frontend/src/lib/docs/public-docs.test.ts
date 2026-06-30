@@ -138,15 +138,15 @@ describe("public docs source", () => {
     expect(raw.content).not.toContain("Design: Public Docs");
   });
 
-  it("keeps the homepage benefits bullets with team-level automation wording", () => {
+  it("keeps the homepage focused on the team workflow and visual product path", () => {
     const raw = getRawPublicDocBySlug([]);
 
-    expect(raw.content).toContain("engineers and non-engineers");
-    expect(raw.content).toContain("defaults to team-level workflows");
-    expect(raw.content).toContain("**A shared execution layer:**");
-    expect(raw.content).toContain("**Team-level automation:**");
-    expect(raw.content).toContain("Linear or an API");
-    expect(raw.content).toContain("self-host");
+    expect(raw.content).toContain("runs coding-agent work as a team workflow");
+    expect(raw.content).toContain("<FlowDiagram");
+    expect(raw.content).toContain("Issue, API call, or manual prompt");
+    expect(raw.content).toContain("<Screenshot");
+    expect(raw.content).toContain("docs-session-overview.webp");
+    expect(raw.content).toContain("Start with the shortest path");
     expect(raw.content).not.toContain("**Repo-specific contracts:**");
     expect(raw.content).not.toContain("## Why teams use it");
     expect(raw.content).not.toContain("**Controlled automation:**");

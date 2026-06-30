@@ -1,7 +1,7 @@
 # Design: Preview Secret Bundles
 
-> **Status:** V1 implemented; V2 future | **Last reviewed:** 2026-05-26
->
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
+
 > V1 managed bundle support is implemented: repo config parsing, insert-only repo-scoped bundle storage, encrypted managed values, env/file rendering, preview runtime injection, id-based admin API endpoints including test resolution, repository settings UI, audit events for admin changes and runtime resolution, and runtime log redaction for generated secret files. V2 external secret sources remain future work.
 
 Preview secret bundles let a repo run a realistic preview without committing development credentials to GitHub. The repo declares **what it needs**. An org admin configures **where those values come from** and **how they are delivered**. 143 resolves the bundle at preview start and injects the result into only the services that need it.

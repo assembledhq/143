@@ -1,7 +1,7 @@
 # Design: Agent Runtime Timeouts and Checkpointed Shutdown
 
-> **Status:** Future
->
+> **Status:** Not Started | **Last reviewed:** 2026-06-30
+
 > **Related docs:** [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [overall.md](../overall.md)
 
 ## Summary

@@ -1,5 +1,7 @@
 # Session Attachment Delivery
 
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 ## Problem
 
 Session messages can persist uploaded files as `/api/v1/uploads/files/...` URLs, but coding agents execute inside sandboxes and cannot rely on browser-facing upload routes or authenticated HTTP access. Image-only or attachment-heavy prompts therefore need a server-side handoff path.

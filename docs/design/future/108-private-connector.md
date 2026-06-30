@@ -1,7 +1,6 @@
 # Design: 143 Private Connector
 
-> **Status:** Future
-> **Last reviewed:** 2026-06-06
+> **Status:** Not Started | **Last reviewed:** 2026-06-30
 
 143 needs to help coding agents and previews work with production-adjacent systems that live inside customer private networks: logs, databases, and preview dependencies. The product problem is that those systems are intentionally behind firewalls, private VPCs, VPNs, or office networks, and customers should not have to expose them broadly to the public internet just so 143 can debug issues or run realistic previews.
 

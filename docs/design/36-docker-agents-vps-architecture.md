@@ -1,8 +1,8 @@
-# Design Doc 36: Self-Hosted Docker Infrastructure
+# Design: Self-Hosted Docker Infrastructure
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-04-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 >
-> **Implementation notes:** Multi-node Docker Compose deployment artifacts exist (`docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml`, `docker-compose.logging.yml`), along with `deploy/cloud-init/*` templates and `deploy/scripts/{provision,deploy}.sh`. Later-phase items in this design, including dedicated Redis rollout and autoscaling, remain future work.
+> **Implementation notes:** Single-node and multi-node Docker Compose deployment artifacts exist, including `docker-compose.single-node.yml`, `docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml`, `docker-compose.redis.yml`, `docker-compose.logging.yml`, `deploy/Caddyfile`, `deploy/cloud-init/*`, `deploy/postgres/*`, and deployment/backup scripts under `deploy/scripts`. Later-phase items such as full autoscaling and higher-availability orchestration remain future work.
 
 ## Context
 
@@ -11,6 +11,14 @@ sandboxes can run. This document describes how to set up a self-hosted VPS
 deployment from scratch and scale incrementally. It is organized into four
 phases, each with a clear list of what changes in our code, what infrastructure
 to provision, and what is provider-specific.
+
+If you need the operator path, start with the public self-hosting docs:
+
+- [Self-hosting overview](../public/self-hosting/index.mdx)
+- [Quickstart: single-node](../public/self-hosting/single-node.mdx)
+- [Production deployment checklist](../public/self-hosting/production-deployment-checklist.mdx)
+
+Use this design doc for historical context, scaling rationale, and lower-level operational tradeoffs that are too detailed for public docs.
 
 ### Design Principles
 
@@ -28,20 +36,23 @@ to provision, and what is provider-specific.
    (node provisioning), S3-compatible storage (backups). All open source, all
    work on every provider.
 
-### What Exists in Our Codebase Today
+### Current Repo Artifacts
 
 | Artifact | Path | Notes |
 |---|---|---|
-| Server Dockerfile | `Dockerfile` | Multi-stage Go build, runs as non-root, includes `sops`/`age` |
-| Dev docker-compose | `docker-compose.yml` | Postgres + server (with `air` live reload) + frontend |
-| CI pipeline | `.github/workflows/ci.yml` | Lint, test, build, security scan, Docker image build |
-| Docker sandbox provider | `internal/services/agent/providers/docker.go` | Uses Docker API, supports gVisor (`runsc`) runtime |
-| Environment config | `.env.example` | All env vars documented |
-| Agent sandbox Dockerfile | **Does not exist** | `Dockerfile.agent` — needs to be created (see Step 6) |
-| Production compose | **Does not exist** | Needs to be created |
-| Deploy workflow | **Does not exist** | Needs to be created |
-| Caddy config | **Does not exist** | Needs to be created |
-| Backup scripts | **Does not exist** | Needs to be created |
+| Server image | `Dockerfile` | Multi-stage Go build for the API/worker runtime. |
+| Frontend image | `Dockerfile.frontend` | Next.js standalone runtime image. |
+| Sandbox image | `sandbox/Dockerfile` | Agent sandbox runtime image. |
+| Local compose | `docker-compose.yml` | Development stack. |
+| Single-node compose | `docker-compose.single-node.yml` | Production-shaped single-host quickstart. |
+| Split app/worker/db compose | `docker-compose.app.yml`, `docker-compose.worker.yml`, `docker-compose.db.yml` | Multi-node deployment building blocks. |
+| Redis/logging compose | `docker-compose.redis.yml`, `docker-compose.logging.yml`, `docker-compose.vector.yml` | Optional acceleration and observability services. |
+| Caddy config | `deploy/Caddyfile` | Public app and preview routing. |
+| Cloud-init templates | `deploy/cloud-init/*.yml` | App, worker, DB, Redis, and logging node provisioning. |
+| Deployment scripts | `deploy/scripts/provision.sh`, `deploy/scripts/deploy.sh`, `deploy/scripts/deploy-fleet.sh` | Provider-agnostic SSH deployment flows. |
+| Backup scripts | `deploy/scripts/pg-backup.sh`, `deploy/scripts/restore-test.sh`, `deploy/scripts/install-pg-backups.sh` | Postgres backup and restore-test support. |
+| Postgres config | `deploy/postgres/postgresql.conf`, `deploy/postgres/pg_hba.conf` | Self-hosted Postgres tuning and access policy. |
+| Sandbox runtime scripts | `deploy/scripts/configure-docker-daemon.sh`, `deploy/scripts/sandbox-firewall.sh`, `deploy/scripts/sandbox-resolv-conf.sh` | Host-level sandbox support. |
 
 ---
 
@@ -484,7 +495,9 @@ At this point the VPS is running but serving on a raw IP. Caddy won't issue TLS
 certs until DNS points at it — see [DNS and TLS Setup](#dns-and-tls-setup) below.
 First, create the config files that `docker-compose.prod.yml` references.
 
-### New Files to Create in the Repo
+### Historical Phase 1 File Sketches
+
+The sketches below describe the original Phase 1 shape. The current repo artifacts are listed in [Current Repo Artifacts](#current-repo-artifacts); prefer those files and the public self-hosting docs when operating or changing the deployment.
 
 #### 1. `docker-compose.prod.yml`
 
@@ -986,7 +999,7 @@ These checks are provider-agnostic — they query Postgres directly.
       newest dump into a throwaway Postgres (image pinned to the prod major,
       `postgres:18`); verified manually on 2026-06-27. WAL-G restore still
       pending Layer 3.
-- [ ] Set up monitoring (Datadog, Prometheus, or even just cron + email alerts)
+- [ ] Set up monitoring and alerts through VictoriaLogs/Grafana/vmalert, or an equivalent provider-backed stack.
 
 ### Environment Variables (Backup & Recovery)
 
@@ -1381,7 +1394,7 @@ instead of Postgres directly.
 
 Redis provides shared caching, pub/sub for real-time log streaming, distributed
 rate limiting, and job queue notifications. See
-[52-redis.md](../implemented/52-redis.md) for the full design. Redis is **optional** —
+[52-redis.md](implemented/52-redis.md) for the full design. Redis is **optional** —
 all code paths fall back to current behavior (Postgres polling, per-node rate
 limiting) when Redis is unavailable.
 
@@ -2083,8 +2096,9 @@ multiple regions. And keep the architecture stateless except for Postgres.
 
 ### Observability and SLAs
 
-**The problem:** The doc mentions Datadog and Mezmo in passing but doesn't define
-what to measure or what SLAs to offer. You can't have SLAs without metrics.
+**The problem:** Logs and dashboards are useful only if the platform defines
+what to measure and which symptoms deserve action. You cannot have SLAs without
+clear SLIs.
 
 **SLIs to instrument (in priority order):**
 
@@ -2099,8 +2113,7 @@ what to measure or what SLAs to offer. You can't have SLAs without metrics.
 
 **Distributed tracing.** When a request flows from webhook → API → job queue →
 worker → sandbox → result, you need a trace ID that links all of these. Use
-OpenTelemetry — it's vendor-neutral (works with Datadog, Jaeger, Grafana Tempo)
-and the Go SDK is mature. Add a `trace_id` to the `jobs` table so you can
+OpenTelemetry is the preferred vendor-neutral shape for future tracing. Add a `trace_id` to the `jobs` table so you can
 correlate a job back to the webhook that triggered it.
 
 **Alerting.** Define on-call escalation for:

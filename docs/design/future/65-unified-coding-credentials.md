@@ -1,7 +1,7 @@
 # Design: Unified Coding Credentials
 
-> **Status:** PRs 1–5 landed (complete) | **Last reviewed:** 2026-06-10 (PR 5 cleanup)
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Implementation log (2026-04-27):**
 >
 > **PR 1 — schema & migration tooling (landed):**

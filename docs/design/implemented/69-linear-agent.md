@@ -1,7 +1,7 @@
 # 69 - Linear Agent (inbound assignment / @-mention triggering)
 
-> **Status:** Implemented (phases 1–4) | **Last reviewed:** 2026-05-13
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Depends on:** [./62-linear-session-linking.md](./62-linear-session-linking.md), [./04-ingestion.md](./04-ingestion.md)
 
 ## Summary

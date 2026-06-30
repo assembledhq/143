@@ -1,7 +1,6 @@
 # Design: Preview Settings Page
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-12
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 The Preview settings page is the admin-owned surface for auto-preview policy and preview runtime secrets. Repository pages should link to preview actions, but they should not contain preview secret bundle create/edit controls. Preview-only API token management is deprecated; new integrations should use External API tokens.
 

@@ -1,15 +1,14 @@
-# Fumadocs Engineering Implementation
+# Design: Fumadocs Engineering Implementation
 
-> **Status:** Future design
-> **Last reviewed:** 2026-05-23
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
-This document is the implementation brief for adding public docs to 143.dev with Fumadocs. It is written for the engineer who will build the feature.
+This document records the implemented public docs architecture. It exists so future changes preserve the boundary between public docs, internal design records, and product UI.
 
 ## Architecture
 
-Add docs to the existing `frontend/` Next.js app rather than creating a separate app.
+Docs live inside the existing `frontend/` Next.js app rather than a separate app.
 
-Target route:
+Public routes:
 
 ```text
 https://143.dev/docs
@@ -25,9 +24,9 @@ Target source directory:
 docs/public/
 ```
 
-Fumadocs should read directly from `../docs/public` relative to the `frontend/` package. Public docs should live entirely in `docs/public`; do not sync or copy them into `frontend/content/docs` as a second content tree.
+Fumadocs reads from `../docs/public` relative to the `frontend/` package. Public docs live entirely in `docs/public`; there is no synced copy under `frontend/content/docs`.
 
-## Suggested frontend file shape
+## Implemented Frontend Shape
 
 ```text
 frontend/
@@ -35,42 +34,43 @@ frontend/
 ├── next.config.ts
 ├── src/
 │   ├── app/
-│   │   └── (landing)/
+│   │   ├── (landing)/
+│   │   │   └── docs/
+│   │   │       ├── layout.tsx
+│   │   │       ├── [[...slug]]/
+│   │   │       │   └── page.tsx
+│   │   └── api/
 │   │       └── docs/
-│   │           ├── layout.tsx
-│   │           ├── [[...slug]]/
-│   │           │   └── page.tsx
-│   │           └── [...slug]/
-│   │               └── route.ts        # raw Markdown route
+│   │           └── raw/
+│   │               ├── route.ts        # raw docs home
+│   │               └── [...slug]/
+│   │                   └── route.ts    # raw Markdown pages
 │   ├── components/
 │   │   └── docs/
-│   │       ├── docs-layout.tsx
 │   │       ├── docs-mdx-components.tsx
-│   │       ├── docs-page-tools.tsx
-│   │       ├── config-field.tsx
-│   │       ├── screenshot.tsx
-│   │       └── agent-note.tsx
+│   │       └── docs-theme-switch.tsx
 │   └── lib/
 │       └── docs/
-│           ├── source.ts
-│           ├── navigation.ts
+│           ├── layout.ts
+│           ├── public-docs.ts
 │           ├── raw-markdown.ts
-│           └── llms.ts
+│           ├── raw-docs-route.ts
+│           └── sidebar-labels.ts
 └── public/
-    └── docs/
-        └── ...                         # built/static assets if needed
+    └── product/
+        └── ...                         # docs screenshots
 ```
 
-Exact file names can vary, but keep docs-specific UI under `src/components/docs` so Fumadocs customization does not leak into unrelated product UI.
+Keep docs-specific UI under `src/components/docs` so Fumadocs customization does not leak into unrelated product UI.
 
 ## Package direction
 
-Expected packages:
+Packages:
 
 - `fumadocs-core`
 - `fumadocs-ui`
 - `fumadocs-mdx`
-- Any required Fumadocs Next.js integration package for the current version.
+- `next-mdx-remote-client`
 
 Use versions compatible with the existing stack:
 
@@ -79,8 +79,6 @@ Use versions compatible with the existing stack:
 - Tailwind v4
 - `next-themes`
 - shadcn-style theme tokens
-
-Before implementation, check current Fumadocs installation docs because package names and Next integration details may change.
 
 ## Implementation principles
 
@@ -143,16 +141,13 @@ When copying Fumadocs components:
 
 ### 6. Preserve raw Markdown access
 
-Each public docs page should have a raw Markdown representation for AI agents and power users.
+Each public docs page has a raw Markdown representation for AI agents and power users.
 
-Acceptable implementations:
+Implemented path shape:
 
-- `/docs/guides/repo-config.md`
-- `/docs/guides/repo-config?format=md`
+- `/api/docs/raw/guides/repo-config`
 
-Every page should also include a page-level "Copy Markdown" action backed by the same raw source. URL-based raw Markdown access and copy/download affordances are complementary, not alternatives.
-
-Also generate `/llms.txt` from the docs index. It should list canonical docs URLs, short summaries, and raw Markdown URLs.
+`/llms.txt` is generated from the docs index. It lists canonical docs URLs, short summaries, and raw Markdown URLs.
 
 ### 7. Separate guides from references
 
@@ -165,11 +160,11 @@ This keeps Stripe-like guides scannable while preserving detail for operators.
 
 ### 8. Images are first-class content
 
-Docs pages should support product screenshots and diagrams from the start.
+Docs pages support product screenshots and a small set of reusable diagrams.
 
 Engineering requirements:
 
-- Define one blessed image directory.
+- Use `frontend/public/product` for product screenshots used by public docs.
 - Support stable dimensions/aspect ratios.
 - Use Next image optimization only if it works with the deployment mode and source location.
 - Add a reusable `Screenshot` MDX component with caption and alt text.
@@ -187,7 +182,7 @@ Requirements:
 
 ### 10. Maintain existing frontend quality gates
 
-This is a frontend change. After implementation, run from `frontend/`:
+Docs changes should run from `frontend/`:
 
 ```bash
 npm run typecheck
@@ -203,45 +198,42 @@ Add focused tests for:
 - MDX component mapping renders code blocks, callouts, tables, and images.
 - Raw Markdown or `llms.txt` generation includes expected pages.
 
-## Build plan
+## Delivered Build Plan
 
 ### Phase 1: Skeleton
 
-- Add Fumadocs packages and config.
-- Add `docs/public/index.mdx` and minimal `meta.json`.
-- Add `/docs/[[...slug]]` route.
-- Render page title, content, sidebar, TOC, and next/previous links.
-- Wire existing website nav around the docs layout.
+- Added Fumadocs packages and config.
+- Added `docs/public/index.mdx` and section `meta.json` files.
+- Added `/docs/[[...slug]]` route.
+- Rendered page title, content, sidebar, TOC, and next/previous links.
+- Wired the existing website nav around the docs layout.
 
 ### Phase 2: Styling and components
 
-- Apply shadcn/Fumadocs theme integration.
-- Add `src/components/docs/docs-mdx-components.tsx`.
-- Implement/wrap Callout, Steps, CodeBlock, Screenshot, ConfigField, and AgentNote.
-- Add responsive behavior for mobile sidebar/search/TOC.
+- Applied shadcn/Fumadocs theme integration.
+- Added `src/components/docs/docs-mdx-components.tsx`.
+- Implemented/wrapped Callout, Steps, CodeBlock, Screenshot, ConfigField, FlowDiagram, BoundaryDiagram, and AgentNote.
+- Added responsive behavior for mobile sidebar/search/TOC.
 
 ### Phase 3: Content migration
 
-- Move and rewrite `docs/guides/repo-config.md`.
-- Move and split `docs/guides/previews.md`.
-- Move and rewrite `docs/guides/linear-agent.md`.
-- Move self-hosting docs that are safe for public use.
-- Add the missing getting-started flow.
+- Added getting-started pages.
+- Rewrote repo config, preview, Linear, Autopilot, and coding-agent auth guides for public use.
+- Split task guides from reference pages.
+- Added self-hosting pages safe for public operators.
 
 ### Phase 4: AI-native surfaces
 
-- Generate `/llms.txt`.
-- Add raw Markdown routes and copy/download actions.
-- Add page-level `llm_summary` to all public docs.
-- Add link validation for public docs.
+- Generated `/llms.txt`.
+- Added raw Markdown routes.
+- Added page-level `llm_summary` to public docs.
+- Added docs source tests for public page metadata and raw surfaces.
 
 ### Phase 5: Polish
 
-- Add screenshots and diagrams.
-- Add docs search refinements.
-- Add SEO metadata and Open Graph handling.
-- Add redirects if old public docs URLs exist.
-- Add contribution instructions for public docs authoring.
+- Added real product screenshots for core getting-started and preview pages.
+- Added restrained reusable diagrams for sequence and boundary explanations.
+- Still open: docs search refinements, endpoint-level API polish, and contribution instructions.
 
 ## Risks and mitigations
 
@@ -260,7 +252,7 @@ Add focused tests for:
 - `/docs` should use a docs-specific top nav with the same visual language as the public website.
 - Raw Markdown should be available through stable URL routes and through page-level copy/download actions.
 
-## Open questions
+## Open Questions
 
 - Should docs search be local/static only for v1, or should it use a hosted/indexed search later?
-- Which screenshots should be created before launch, and which guides can ship text-first?
+- Which API/reference pages need generated endpoint examples instead of hand-authored prose?

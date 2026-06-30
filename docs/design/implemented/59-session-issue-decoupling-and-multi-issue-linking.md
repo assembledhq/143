@@ -1,9 +1,7 @@
 # 59 - Session/Issue Decoupling and Multi-Issue Linking
 
-> **Status:** Phase 1 and Phase 2 implemented
->
-> **Last reviewed:** 2026-04-24
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Depends on:** [../overall.md](../overall.md), [29-projects.md](29-projects.md), [../backlog/34-repo-ribbons-nav.md](../backlog/34-repo-ribbons-nav.md), [../implemented/53-session-composer-mentions.md](../implemented/53-session-composer-mentions.md)
 
 ## Summary
