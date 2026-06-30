@@ -783,7 +783,7 @@ deploy-fleet:
 # Shorthand alias for deploy-fleet.
 deploy: deploy-fleet
 
-# Sync SSH public keys from deploy/authorized_keys/*.pub to all fleet nodes.
+# Sync SSH public keys from $(SECRETS_DIR)/deploy/authorized_keys/*.pub to all fleet nodes.
 # Dry-run by default — shows diff without changing anything.
 # Usage: make sync-keys              (dry run)
 #        make sync-keys APPLY=true   (actually push changes)
