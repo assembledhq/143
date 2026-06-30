@@ -101,7 +101,7 @@ The frontend proxies `/api/*` to the Go server automatically.
 | `make deploy-db` | Deploy database node(s) |
 | `make deploy-logging` | Deploy logging node(s) |
 | `make sync-keys` | Dry-run: show what keys would change on all servers |
-| `make sync-keys APPLY=true` | Push SSH public keys from `deploy/authorized_keys/` to all servers |
+| `make sync-keys APPLY=true` | Push SSH public keys from `$SECRETS_DIR/deploy/authorized_keys/` to all servers |
 | `make logs` | Open Grafana via SSH tunnel on localhost:9999 |
 
 After running `make secrets-setup`, add this to your shell profile (`~/.bash_profile` or `~/.zshrc`):
@@ -125,38 +125,7 @@ See the [local development guide](../local-development.md) for step-by-step setu
 
 ## Deployment
 
-To deploy to production servers, you need an SSH key that the servers trust.
-
-### SSH Key Setup
-
-1. Generate a dedicated deploy key (if you don't have one):
-
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/143-deploy -C "your-email@example.com"
-```
-
-2. Add your public key to the repo:
-
-```bash
-cp ~/.ssh/143-deploy.pub deploy/authorized_keys/yourname.pub
-```
-
-3. Open a PR with your key and get it reviewed:
-
-```bash
-git add deploy/authorized_keys/yourname.pub
-git commit -m "Add yourname deploy key"
-# push and open a PR as usual
-```
-
-4. Once the PR is merged, someone with existing server access runs:
-
-```bash
-make sync-keys            # dry run — review the diff
-make sync-keys APPLY=true    # push changes to all servers
-```
-
-This replaces `authorized_keys` on every fleet server with exactly the keys in the repo. You'll have deploy access after the apply step completes.
+Hosted production deployment is internal to Assembled. Production SSH access is managed in the private `143-infra` repo under `$SECRETS_DIR/deploy/authorized_keys/`; do not add deploy keys to this public repo.
 
 ### Deploying
 
