@@ -1,6 +1,6 @@
 # Design: PagerDuty Integration
 
-> **Status:** Implemented V1 | **Last reviewed:** 2026-06-20
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 ## Summary
 

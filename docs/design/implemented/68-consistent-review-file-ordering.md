@@ -1,5 +1,7 @@
 # Consistent Review File Ordering
 
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 ## Problem
 
 The session detail review UI shows the same changed files in two different surfaces:

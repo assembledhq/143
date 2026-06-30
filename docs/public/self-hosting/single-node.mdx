@@ -16,6 +16,11 @@ Single-node is the self-hosting quickstart. It is the smallest supported topolog
 
 It is not high availability. Use it for small teams, evaluation, and low-volume installs where simple operations matter more than independent app, database, and worker failure domains.
 
+<FlowDiagram
+  items={["Caddy and TLS", "Frontend and API/worker", "Postgres and Redis", "Chrome and sandbox DNS", "Docker/gVisor sandboxes"]}
+  caption="Everything runs on one host. That keeps evaluation simple, but restarts and resource pressure affect the whole stack."
+/>
+
 ## What starts
 
 - `caddy`: public TLS reverse proxy for the app and preview wildcard.

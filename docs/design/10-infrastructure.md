@@ -1,6 +1,6 @@
 # Design: Infrastructure & Deployment
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-05-05
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 
 This document describes how 143.dev is packaged, deployed, and scaled.
 
@@ -10,7 +10,7 @@ This document describes how 143.dev is packaged, deployed, and scaled.
 2. **Single container for small teams** — everything in one process for simplicity
 3. **Symmetric nodes** — every node runs the same binary. No special "primary" node. Add API or worker capacity by starting more containers pointed at the same database
 4. **No vendor lock-in** — standard Postgres, standard Docker, no proprietary cloud services required
-5. **Observable by default** — structured logging via Mezmo and monitoring via Datadog built in from day one
+5. **Observable by default** — structured stdout, Vector collection, VictoriaLogs/Grafana, and small actionable alert sets
 
 ## Quick Start (No Docker)
 
@@ -399,8 +399,8 @@ services:
       MODE: worker
       NODE_ID: ${HOSTNAME}
       SANDBOX_IMAGE: 143-sandbox:latest
-      MEZMO_INGESTION_KEY: ${MEZMO_INGESTION_KEY}
-      DD_API_KEY: ${DD_API_KEY}
+      SERVER_ROLE: worker
+      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
@@ -421,8 +421,8 @@ services:
       DATABASE_URL: postgres://onefortythree:pass@db-host:5432/onefortythree
       MODE: api
       NODE_ID: ${HOSTNAME}
-      MEZMO_INGESTION_KEY: ${MEZMO_INGESTION_KEY}
-      DD_API_KEY: ${DD_API_KEY}
+      SERVER_ROLE: app
+      VICTORIALOGS_HOST: ${VICTORIALOGS_HOST}
     restart: unless-stopped
 ```
 
@@ -541,18 +541,12 @@ All configuration via environment variables:
 | **Worker** | | | |
 | `WORKER_POLL_INTERVAL` | No | `1s` | How often workers poll for new jobs |
 | `SHUTDOWN_TIMEOUT` | No | `300` | Seconds to wait for in-progress jobs on shutdown |
-| **Logging (Mezmo)** | | | |
-| `MEZMO_INGESTION_KEY` | No | - | Mezmo ingestion key. If set, logs are shipped to Mezmo. |
-| `MEZMO_HOSTNAME` | No | `NODE_ID` | Hostname tag sent to Mezmo |
-| `MEZMO_APP_NAME` | No | `143-dev` | App name tag in Mezmo |
-| `MEZMO_ENV` | No | `production` | Environment tag (`production`, `staging`, `development`) |
-| **Monitoring (Datadog)** | | | |
-| `DD_API_KEY` | No | - | Datadog API key. If set, metrics are shipped to Datadog. |
-| `DD_APP_KEY` | No | - | Datadog app key (for querying metrics in experiments) |
-| `DD_SITE` | No | `datadoghq.com` | Datadog site (`datadoghq.com`, `datadoghq.eu`, etc.) |
-| `DD_ENV` | No | `production` | Environment tag for Datadog |
-| `DD_SERVICE` | No | `143-dev` | Service name for Datadog APM |
-| `DD_AGENT_HOST` | No | - | Datadog agent host (if using DD agent instead of direct API) |
+| **Observability** | | | |
+| `VICTORIALOGS_HOST` | Yes (prod app/worker/logging roles) | - | Private IP or host for VictoriaLogs ingestion. |
+| `SERVER_ROLE` | Yes (prod) | - | Role tag for Vector/Grafana filtering, such as `app`, `worker`, or `logging`. |
+| `GRAFANA_ADMIN_PASSWORD` | Yes (logging role) | - | Initial Grafana admin password. |
+| `GRAFANA_ALERTS_WARNING_WEBHOOK_URL` | No | disabled sink | Optional warning alert webhook relay target. |
+| `GRAFANA_ALERTS_CRITICAL_WEBHOOK_URL` | No | disabled sink | Optional critical alert webhook relay target. |
 
 ## Health Checks
 
@@ -570,209 +564,31 @@ standalone output places the app entrypoint under `frontend/server.js`; the
 runtime image keeps the traced repo-level files under `/app` and starts from
 `/app/frontend` so the server, `.next/static`, and `public` assets line up.
 
-## Logging: Mezmo
+## Observability
 
-All application logs are structured JSON via zerolog. Mezmo is the primary log aggregation platform.
+Application logs are structured JSON via zerolog and always go to stdout. In production, Vector runs beside app and worker containers, enriches Docker logs, and ships them to VictoriaLogs. Grafana provides dashboards and vmalert-backed alert rules.
 
-### Log Pipeline
-
-```
-Application (zerolog)
-    │
-    ├──▶ stdout (always — for local dev, Docker log drivers)
-    │
-    └──▶ Mezmo (if MEZMO_INGESTION_KEY is set)
-         via HTTPS ingestion API
-```
-
-### Integration
-
-Use a custom zerolog writer that ships logs to Mezmo's ingestion API in batches:
-
-```go
-// internal/logging/mezmo.go
-
-type MezmoWriter struct {
-    ingestionKey string
-    hostname     string
-    appName      string
-    env          string
-    buffer       []LogLine
-    mu           sync.Mutex
-    flushTicker  *time.Ticker
-}
-
-// Write implements io.Writer for zerolog
-func (m *MezmoWriter) Write(p []byte) (n int, err error) {
-    // Parse JSON log line, buffer it
-    // Flush every 250ms or when buffer hits 100 lines
-}
-
-func (m *MezmoWriter) flush() {
-    // POST https://logs.mezmo.com/logs/ingest
-    // Headers: apikey: <ingestion_key>, Content-Type: application/json
-    // Body: { "lines": [...] }
-}
+```text
+Go API / workers / frontend / Caddy
+        |
+        v
+Docker stdout
+        |
+        v
+Vector collector
+        |
+        v
+VictoriaLogs + Grafana + vmalert
 ```
 
-### Log Structure
+Keep the top-level contract small:
 
-Every log line includes:
+- Use structured fields consistently: `service`, `level`, `org_id`, `user_id`, `request_id`, `trace_id`, `agent_run_id`, and job/session identifiers where available.
+- Commit durable state before logging or emitting live updates that imply a state transition.
+- Prefer a small set of symptom-based alerts over paging on every exception.
+- Keep local development simple: stdout is enough.
 
-```json
-{
-  "timestamp": "2025-01-15T10:30:00Z",
-  "level": "info",
-  "message": "agent run completed",
-  "node_id": "worker-2",
-  "mode": "worker",
-  "org_id": "abc-123",
-  "request_id": "req-456",
-  "component": "agent.orchestrator",
-  "agent_run_id": "run-789",
-  "duration_ms": 45000,
-  "env": "production"
-}
-```
-
-### Mezmo Features Used
-
-- **Log views**: Filtered views per node role (all, api, worker), per component (ingestion, agent, validation)
-- **Alerts**: Trigger on error rate spikes, agent run failures, webhook processing errors
-- **Archiving**: Long-term log storage to S3 for compliance
-- **Log-based metrics**: Extract metrics from log patterns (e.g., agent run duration distribution)
-
-### Local Development
-
-In local dev (`LOG_LEVEL=debug`), logs go only to stdout with pretty-printed console output. Set `MEZMO_INGESTION_KEY` in dev if you want to test the Mezmo pipeline.
-
-## Monitoring: Datadog
-
-Datadog is the primary monitoring and APM platform. It provides metrics, traces, dashboards, and alerting.
-
-### Integration Approach
-
-Use the Datadog Go client library (`DataDog/datadog-go` for StatsD metrics, `DataDog/dd-trace-go` for APM) to emit metrics directly. Two modes:
-
-1. **Agent mode** (recommended for production): Run the Datadog Agent as a sidecar container. The app sends metrics to `DD_AGENT_HOST` via UDP (StatsD) and traces via the agent's trace endpoint.
-2. **Agentless mode** (simpler): Ship metrics directly to Datadog's API via `DD_API_KEY`. Higher latency, simpler setup. Good for small deployments.
-
-### Docker Compose with Datadog Agent
-
-```yaml
-# Add to docker-compose.prod.yml
-services:
-  datadog-agent:
-    image: gcr.io/datadoghq/agent:7
-    environment:
-      DD_API_KEY: ${DD_API_KEY}
-      DD_SITE: ${DD_SITE:-datadoghq.com}
-      DD_APM_ENABLED: "true"
-      DD_LOGS_ENABLED: "true"           # optional: also ship logs via DD agent
-      DD_DOGSTATSD_NON_LOCAL_TRAFFIC: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - /proc/:/host/proc/:ro
-      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
-    ports:
-      - "8125:8125/udp"   # StatsD
-      - "8126:8126"       # APM traces
-```
-
-### Metrics Emitted
-
-The application emits the following custom metrics:
-
-#### HTTP Metrics (via middleware)
-
-| Metric | Type | Tags |
-|--------|------|------|
-| `http.request.duration` | histogram | `method`, `route`, `status_code`, `node_id` |
-| `http.request.count` | counter | `method`, `route`, `status_code`, `node_id` |
-| `http.request.active` | gauge | `node_id` |
-
-#### Job Queue Metrics
-
-| Metric | Type | Tags |
-|--------|------|------|
-| `jobs.queue.depth` | gauge | `job_type`, `status` |
-| `jobs.processing.duration` | histogram | `job_type`, `node_id` |
-| `jobs.completed` | counter | `job_type`, `status` (completed/failed), `node_id` |
-| `jobs.retries` | counter | `job_type`, `node_id` |
-
-#### Agent Run Metrics
-
-| Metric | Type | Tags |
-|--------|------|------|
-| `agent_run.duration` | histogram | `agent_type`, `status`, `org_id` |
-| `agent_run.token_usage` | histogram | `agent_type`, `token_type` (input/output) |
-| `agent_run.cost_usd` | counter | `agent_type`, `org_id` |
-| `agent_run.active` | gauge | `node_id` |
-| `sandbox.count` | gauge | `node_id`, `status` (running/creating/destroying) |
-| `sandbox.cpu_usage` | gauge | `node_id`, `container_id` |
-| `sandbox.memory_usage` | gauge | `node_id`, `container_id` |
-
-#### Validation Metrics
-
-| Metric | Type | Tags |
-|--------|------|------|
-| `validation.duration` | histogram | `check_name` |
-| `validation.result` | counter | `check_name`, `result` (pass/fail) |
-
-#### Cluster Metrics
-
-| Metric | Type | Tags |
-|--------|------|------|
-| `cluster.nodes.active` | gauge | `mode` |
-| `cluster.nodes.dead` | gauge | |
-
-### APM Tracing
-
-`dd-trace-go` provides distributed tracing across:
-
-- HTTP requests (auto-instrumented via chi middleware)
-- Database queries (auto-instrumented via pgx integration)
-- Job processing (manual spans)
-- Agent sandbox execution (manual spans)
-- External API calls to Sentry, Linear, GitHub (manual spans)
-
-Traces link API requests to the background jobs they enqueue, providing end-to-end visibility from webhook receipt to PR creation.
-
-### Pre-Built Dashboards
-
-Ship a Datadog dashboard JSON export (`deploy/datadog-dashboard.json`) that teams can import:
-
-- **Overview**: request rate, error rate, p95 latency, active agent runs, queue depth
-- **Agent Runs**: run duration distribution, success/failure rate, token usage, cost
-- **Cluster Health**: node count by role, heartbeat staleness, sandbox utilization per node
-- **Pipeline**: end-to-end funnel (issues ingested -> prioritized -> agent run -> validated -> PR opened -> deployed -> impact measured)
-
-### Alerts
-
-Recommended Datadog monitors (shipped as Terraform or JSON):
-
-| Alert | Condition |
-|-------|-----------|
-| High error rate | `http.request.count{status_code:5xx}` > 5% of total for 5 min |
-| Job queue backing up | `jobs.queue.depth{status:pending}` > 50 for 10 min |
-| Agent run failures | `agent_run.completed{status:failed}` > 3 in 15 min |
-| Node dead | `cluster.nodes.dead` > 0 for 3 min |
-| Sandbox resource exhaustion | `sandbox.memory_usage` > 90% for 5 min |
-
-### Datadog as a Metrics Source for Experiments
-
-Datadog also serves as a source for Step 6 (observability/impact measurement). See [09-observability.md](backlog/09-observability.md) for details on how 143.dev queries Datadog metrics to evaluate experiment outcomes.
-
-## Observability (Fallback)
-
-For teams that don't use Mezmo or Datadog:
-
-- **Logs**: Structured JSON to stdout works with any log aggregator (ELK, Loki, CloudWatch, etc.)
-- **Metrics**: Prometheus-compatible `/metrics` endpoint is always available as a fallback
-  - HTTP request duration, status codes
-  - Job queue depth, processing time
-  - Agent run duration, success rate
-  - Active sandbox count
+Detailed logging setup lives in [implemented/47-logging-victorialogs.md](implemented/47-logging-victorialogs.md). Production alerting policy lives in [backlog/54-production-alerting.md](backlog/54-production-alerting.md).
 
 ## Backup & Recovery
 

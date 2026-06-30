@@ -1,7 +1,6 @@
 # Design: Current-Oriented Preview Index
 
-> **Status:** Future
-> **Last reviewed:** 2026-06-15
+> **Status:** Not Started | **Last reviewed:** 2026-06-30
 
 The `/previews` index should show the thing users are trying to use every day: the current runnable preview for a branch or pull request. Runtime attempts, pinned commits, and older preview targets remain available for debugging and audit, but they should not be the default table row.
 

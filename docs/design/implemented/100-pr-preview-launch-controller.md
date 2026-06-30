@@ -1,7 +1,6 @@
 # Design: PR Preview Launch Controller
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-16
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 ## Summary
 

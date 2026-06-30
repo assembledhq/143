@@ -1,7 +1,6 @@
 # Design: Persistent Sessions Layout
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-18
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 The sessions surface uses a persistent `/sessions` shell that owns the list, selection, and detail pane. The selected session id is derived from the route, not from locally duplicated selection state. Navigating between sessions updates the address and selected id while preserving the mounted shell, sidebar filters, search state, optimistic rows, list pagination, and detail-pane frame.
 

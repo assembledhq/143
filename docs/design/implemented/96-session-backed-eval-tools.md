@@ -1,6 +1,6 @@
 # Design: Session-Backed Eval Tools
 
-> **Status:** Implemented with product hardening | **Last reviewed:** 2026-06-19
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 ## Implementation Status
 

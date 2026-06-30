@@ -1,7 +1,7 @@
 # Non-Disruptive Worker Blue/Green Deploys
 
-> **Status:** Implemented v1 foundation with durable fleet-control primitives | **Last reviewed:** 2026-06-13
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Related docs:** [overall.md](../overall.md), [51-worker-deploy-safety.md](../backlog/51-worker-deploy-safety.md), [82-durable-session-executors.md](../implemented/82-durable-session-executors.md), [88-preview-runtime-ownership-drain.md](88-preview-runtime-ownership-drain.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](60-agent-runtime-timeouts-and-checkpointed-shutdown.md)
 
 Routine deploys must not interrupt accepted coding-agent turns or live

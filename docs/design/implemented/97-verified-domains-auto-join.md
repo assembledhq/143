@@ -1,5 +1,7 @@
 # Verified Domains & Auto-Join (Domain Capture)
 
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 ## Problem
 
 Getting teammates into a workspace required an explicit invitation per

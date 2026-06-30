@@ -1,7 +1,7 @@
 # Design Doc 51: Worker Deploy Safety For Long-Running Sessions
 
-> **Status:** Historical design, mostly implemented | **Last reviewed:** 2026-05-20
->
+> **Status:** Backlog | **Last reviewed:** 2026-06-30
+
 > **Implementation notes:** Job leases, fencing tokens, draining workers, dead-worker recovery, deploy guardrails, bootstrap checkpointing, and durable per-session executors are implemented. Richer intra-turn checkpointing remains future work.
 
 ## Summary
