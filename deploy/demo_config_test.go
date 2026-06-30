@@ -43,6 +43,7 @@ func TestDemoCaddyfileOmitsWildcardPreviewGateway(t *testing.T) {
 	require.Contains(t, text, "{$DOMAIN:demo.143.dev}", "demo Caddyfile should serve the configured demo domain")
 	require.Contains(t, text, "handle /api/*", "demo Caddyfile should route API requests")
 	require.Contains(t, text, "@cli_dist path /install.sh /install/* /download/*", "demo Caddyfile should route CLI distribution")
+	require.NotContains(t, text, "www.{$DOMAIN", "demo Caddyfile should not request certificates for an unconfigured www host")
 	require.NotContains(t, text, "*.preview", "demo Caddyfile must not configure wildcard previews")
 	require.NotContains(t, text, "CLOUDFLARE_API_TOKEN", "demo Caddyfile must not require DNS challenge credentials")
 	require.NotContains(t, text, "port 9090", "demo Caddyfile must not route preview gateway traffic")
@@ -92,12 +93,12 @@ func TestDemoEnvProvidesProductionRequiredSecrets(t *testing.T) {
 	require.Contains(t, scriptText, "GITHUB_WEBHOOK_SECRET=$github_webhook_secret", "demo provision should write webhook secret to .env.demo")
 }
 
-func TestDeployWorkflowBuildsFrontendWithPublicDemoURL(t *testing.T) {
+func TestDeployWorkflowDoesNotBuildLandingWithPublicDemoURL(t *testing.T) {
 	t.Parallel()
 
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read deploy workflow")
 	text := string(workflow)
 
-	require.Contains(t, text, "NEXT_PUBLIC_DEMO_URL=https://demo.143.dev", "production frontend image should bake the public demo CTA URL at Next.js build time")
+	require.NotContains(t, text, "NEXT_PUBLIC_DEMO_URL", "production frontend image should keep the homepage signup CTA as the primary path")
 }

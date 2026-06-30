@@ -16,4 +16,14 @@ describe("HeroSection", () => {
 
     expect(docsLink).toHaveAttribute("href", "/docs");
   });
+
+  it("keeps signup as the homepage CTA instead of linking to the demo", () => {
+    render(<HeroSection isDark={false} />);
+
+    expect(screen.queryByRole("link", { name: /try demo/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /get started/i })).toHaveAttribute(
+      "href",
+      "/login?tab=signup",
+    );
+  });
 });
