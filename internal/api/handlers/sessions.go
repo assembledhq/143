@@ -19,6 +19,7 @@ import (
 	"github.com/assembledhq/143/internal/api/sse"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/gitref"
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
@@ -4641,17 +4642,9 @@ func (h *SessionHandler) UnarchiveSession(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// gitRefPattern validates git ref names. Allows alphanumeric, dots, hyphens,
-// underscores, and forward slashes (for namespaced branches like feature/foo).
-var gitRefPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]*$`)
-
-// isValidGitRef checks whether s is a plausible git branch/ref name.
+// isValidGitRef checks whether s is a plausible git branch/ref name. It
+// delegates to the shared gitref validator so the API, worker, and slackbot
+// paths all enforce identical rules (see internal/gitref).
 func isValidGitRef(s string) bool {
-	if s == "" || len(s) > 255 {
-		return false
-	}
-	if strings.Contains(s, "..") || strings.Contains(s, "~") || strings.Contains(s, "^") || strings.Contains(s, ":") || strings.Contains(s, " ") || strings.Contains(s, "\\") {
-		return false
-	}
-	return gitRefPattern.MatchString(s)
+	return gitref.IsValidRef(s)
 }

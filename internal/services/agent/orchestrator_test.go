@@ -4227,7 +4227,7 @@ func TestRunAgent_RecomputesDiffWhenAdapterLeavesDiffEmpty(t *testing.T) {
 			}
 		case "git rev-parse --is-inside-work-tree":
 			_, _ = io.WriteString(stdout, "true\n")
-		case "git fetch --quiet --no-tags origin 'main'":
+		case "git fetch --quiet --no-tags --end-of-options origin 'main'":
 			return 0, nil
 		case "git merge-base 'origin/main' HEAD":
 			_, _ = io.WriteString(stdout, "base123\n")

@@ -3715,7 +3715,7 @@ func TestIntegrationHandler_ConnectMezmo_Success(t *testing.T) {
 	handler := NewIntegrationHandler(
 		store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000",
 	)
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3786,6 +3786,49 @@ func TestIntegrationHandler_ConnectMezmo_RejectsMalformedBaseURL(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_BASE_URL")
 }
 
+func TestIntegrationHandler_ConnectMezmo_RejectsSSRFBaseURL(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		baseURL string
+	}{
+		{"cloud metadata endpoint", "http://169.254.169.254/latest/meta-data"},
+		{"loopback", "http://127.0.0.1:8080"},
+		{"localhost name as IP literal", "http://0.0.0.0:9000"},
+		{"rfc1918 private", "http://10.0.0.3:5432"},
+		{"rfc1918 192.168", "https://192.168.1.1"},
+		{"non-http scheme", "file:///etc/passwd"},
+		{"gopher scheme", "gopher://169.254.169.254"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err)
+			defer mock.Close()
+
+			store := db.NewIntegrationStore(mock)
+			handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
+			// No HTTP client mock is set: a correct guard rejects before dialing,
+			// so the request must never reach validateMezmoTokenRequest.
+
+			body := `{"api_key":"key","base_url":"` + tc.baseURL + `"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+			w := httptest.NewRecorder()
+
+			handler.ConnectMezmo(w, req)
+
+			require.Equal(t, http.StatusBadRequest, w.Code, "SSRF base_url %q must be rejected", tc.baseURL)
+			require.Contains(t, w.Body.String(), "INVALID_BASE_URL")
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestIntegrationHandler_ConnectMezmo_HonorsCustomBaseURL(t *testing.T) {
 	t.Parallel()
 
@@ -3811,7 +3854,7 @@ func TestIntegrationHandler_ConnectMezmo_HonorsCustomBaseURL(t *testing.T) {
 	})
 
 	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -3853,7 +3896,7 @@ func TestIntegrationHandler_ConnectMezmo_InvalidToken(t *testing.T) {
 	})
 
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	body := `{"api_key":"bad"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
@@ -3929,7 +3972,7 @@ func TestIntegrationHandler_ConnectMezmo_RejectsNotFound(t *testing.T) {
 	})
 
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	body := `{"api_key":"mezmo_key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
@@ -3970,7 +4013,7 @@ func TestIntegrationHandler_ConnectMezmo_AcceptsNonAuth4xx(t *testing.T) {
 	})
 
 	handler := NewIntegrationHandler(store, credentialStore, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	mock.ExpectQuery("INSERT INTO org_credentials").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -4014,7 +4057,7 @@ func TestIntegrationHandler_ConnectMezmo_RejectsServerError(t *testing.T) {
 	})
 
 	handler := NewIntegrationHandler(store, nil, "", "", "http://localhost:8080", "http://localhost:3000")
-	handler.client = &http.Client{Transport: transport}
+	handler.untrustedURLClient = &http.Client{Transport: transport}
 
 	body := `{"api_key":"mezmo_key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/integrations/mezmo/connect", bytes.NewBufferString(body))
