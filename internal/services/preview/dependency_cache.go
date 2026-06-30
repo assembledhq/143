@@ -368,11 +368,21 @@ func (c *SharedDependencyCache) RestorePathCache(ctx context.Context, sb *agent.
 	if cleanExecErr != nil || exitCode != 0 {
 		return fmt.Errorf("dependency cache restore: %w", dependencyCacheExecError("remove existing paths", exitCode, cleanExecErr, cleanErr.String()))
 	}
-	if err := blob.rewind(); err != nil {
-		return fmt.Errorf("dependency cache restore: %w", err)
-	}
-	if exitCode, err := c.extractSandboxArchive(ctx, sb, root, blob.file); err != nil || exitCode != 0 {
-		return fmt.Errorf("dependency cache restore: extract exited %d: %w", exitCode, err)
+	// Retry a transient extract failure (signal kill / momentarily-unavailable
+	// container) once before degrading to a cold launch, matching the cleanup and
+	// save paths. The stderr buffer is declared outside the closure and reset per
+	// attempt so the surfaced error carries tar's own diagnostic, and blob.file is
+	// rewound at the start of each attempt since a partial stream advances it.
+	var extractErr bytes.Buffer
+	extractExit, extractExecErr := c.execWithTransientRetry(ctx, "restore_extract", func() (int, error) {
+		extractErr.Reset()
+		if err := blob.rewind(); err != nil {
+			return -1, fmt.Errorf("rewind blob: %w", err)
+		}
+		return c.extractSandboxArchive(ctx, sb, root, blob.file, &extractErr)
+	})
+	if extractExecErr != nil || extractExit != 0 {
+		return fmt.Errorf("dependency cache restore: %w", dependencyCacheExecError("extract archive", extractExit, extractExecErr, extractErr.String()))
 	}
 	if !blob.fromLocal {
 		c.writeLocalBlobFromFile(ctx, hit, blob.path, blob.sizeBytes, blob.checksum)
@@ -854,7 +864,7 @@ func dependencyCacheArchiveNameMatchesPath(name, allowed string) bool {
 	return false
 }
 
-func (c *SharedDependencyCache) extractSandboxArchive(ctx context.Context, sb *agent.Sandbox, root models.PreviewCacheRoot, reader io.Reader) (int, error) {
+func (c *SharedDependencyCache) extractSandboxArchive(ctx context.Context, sb *agent.Sandbox, root models.PreviewCacheRoot, reader io.Reader, stderr io.Writer) (int, error) {
 	executor, ok := c.executor.(dependencyCacheStdinExecutor)
 	if !ok {
 		return -1, fmt.Errorf("executor does not support streaming dependency cache restore")
@@ -864,7 +874,11 @@ func (c *SharedDependencyCache) extractSandboxArchive(ctx context.Context, sb *a
 		return -1, err
 	}
 	cmd := fmt.Sprintf("tar xzf - -C %s", shellQuote(rootDir))
-	return executor.ExecWithStdin(ctx, sb, cmd, reader, io.Discard, io.Discard)
+	// Capture tar's stderr (the caller passes a buffer) so a genuine extract
+	// failure — "Cannot write: No space left on device", a gzip CRC error, an
+	// OOM kill — is diagnosable. Previously this discarded stderr and the failure
+	// surfaced only as the writer-side "broken pipe", hiding the real cause.
+	return executor.ExecWithStdin(ctx, sb, cmd, reader, io.Discard, stderr)
 }
 
 func (c *SharedDependencyCache) writeLocalBlobFromFile(ctx context.Context, hit *DependencyCacheHit, sourcePath string, sizeBytes int64, checksum string) {

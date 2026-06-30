@@ -2701,6 +2701,53 @@ func TestDockerProvider_ExecWithStdin(t *testing.T) {
 	require.Contains(t, gotConfig.Env, "NODE_ENV=test", "ExecWithStdin should pass sandbox environment variables")
 }
 
+func TestDockerProvider_ExecWithStdin_StdinWriteError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("non-zero exit takes precedence over a broken-pipe write error", func(t *testing.T) {
+		t.Parallel()
+
+		// The process drops stdin and exits non-zero (e.g. tar aborting on a
+		// corrupt archive or OOM kill), so the stdin copy fails with EPIPE. The
+		// real signal is the exit code + stderr, not the writer-side broken pipe.
+		stderrPayload := []byte("\ngzip: stdin: invalid compressed data--crc error\n")
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newFailWriteHijackedResponse(dockerMultiplexed(nil, stderrPayload), errors.New("write: broken pipe")), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 2}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", WorkDir: "/workspace/repo"}
+
+		var stderr bytes.Buffer
+		exitCode, err := p.ExecWithStdin(context.Background(), sb, "tar xzf - -C /workspace/repo", strings.NewReader("archive-bytes"), io.Discard, &stderr)
+		require.NoError(t, err, "a broken-pipe write must not mask a non-zero exit; the exit code is the signal")
+		require.Equal(t, 2, exitCode, "ExecWithStdin should return tar's real exit code, not -1")
+		require.Contains(t, stderr.String(), "crc error", "tar's stderr should be captured for diagnosis")
+	})
+
+	t.Run("write error surfaces when the process exited cleanly", func(t *testing.T) {
+		t.Parallel()
+
+		mock := &mockDockerClient{}
+		mock.containerExecAttachFn = func(ctx context.Context, execID string, config container.ExecAttachOptions) (types.HijackedResponse, error) {
+			return newFailWriteHijackedResponse(dockerMultiplexed(nil, nil), errors.New("write: broken pipe")), nil
+		}
+		mock.containerExecInspectFn = func(ctx context.Context, execID string) (container.ExecInspect, error) {
+			return container.ExecInspect{Running: false, ExitCode: 0}, nil
+		}
+		p := NewDockerProvider(mock, newTestLogger())
+		sb := &agent.Sandbox{ID: "test-container", WorkDir: "/workspace/repo"}
+
+		exitCode, err := p.ExecWithStdin(context.Background(), sb, "tar xzf - -C /workspace/repo", strings.NewReader("archive-bytes"), io.Discard, io.Discard)
+		require.Error(t, err, "a clean exit with a failed stdin copy is a genuine streaming failure")
+		require.Contains(t, err.Error(), "write exec stdin")
+		require.Equal(t, 0, exitCode)
+	})
+}
+
 func TestDockerProvider_Options(t *testing.T) {
 	t.Parallel()
 
