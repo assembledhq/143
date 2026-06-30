@@ -11127,6 +11127,8 @@ func userFacingPRError(err error) string {
 		return ghservice.PushRejectedPRMessage
 	case errors.Is(err, ghservice.ErrPushBranchDiverged):
 		return ghservice.PushBranchDivergedPRMessage
+	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
+		return ghservice.BaseBranchUnrelatedPRMessage
 	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
 		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
@@ -11394,6 +11396,8 @@ func shouldDeadLetterPRError(err error) bool {
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
 	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+		return true
+	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return true
 	default:
 		return false
