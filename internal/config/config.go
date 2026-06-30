@@ -21,7 +21,7 @@ import (
 // login-page banner that advertises credentials that won't actually sign in
 // — LogStatus warns about this at boot.
 const (
-	defaultDemoEmail    = "preview-admin@143.dev"
+	defaultDemoEmail    = "ada.lovelace@143.dev"
 	defaultDemoPassword = "preview"
 )
 
@@ -51,7 +51,7 @@ type Config struct {
 	// login-page banner when DemoMode is on. Defaults must match the seeded
 	// admin in .143/seed/10_identity.sql and the constants below — override via env
 	// only if you also regenerate the bcrypt hash in the seed.
-	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"ada.lovelace@143.dev"`
 	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
 	// CLIDistDir is the directory holding the cross-compiled 143-tools
 	// binaries plus checksums.txt, baked into the server image by the

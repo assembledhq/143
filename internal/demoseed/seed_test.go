@@ -245,7 +245,7 @@ func TestScanSeedSafety(t *testing.T) {
 	}{
 		{
 			name: "allows safe demo data",
-			body: "INSERT INTO users (email) VALUES ('preview-admin@143.dev');\n" +
+			body: "INSERT INTO users (email) VALUES ('ada.lovelace@143.dev');\n" +
 				"INSERT INTO repositories (clone_url) VALUES ('https://github.com/assembledhq/143.git');",
 		},
 		{
