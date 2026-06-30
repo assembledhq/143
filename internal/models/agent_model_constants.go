@@ -129,18 +129,32 @@ const (
 	OpenCodeModelOpenRouterGPT55Pro        = "openrouter/openai/gpt-5.5-pro"
 	OpenCodeModelClaudeOpus48              = "anthropic/claude-opus-4-8"
 	OpenCodeModelClaudeOpus47              = "anthropic/claude-opus-4-7"
-	OpenCodeModelClaudeFable5              = "opencode/claude-fable-5"
-	OpenCodeModelOpenRouterClaudeFable5    = "openrouter/anthropic/claude-fable-5"
+	OpenCodeModelClaudeOpus46              = "anthropic/claude-opus-4-6"
 )
 
 var AvailableOpenCodeModels = []string{
 	OpenCodeModelGLM52,
 	OpenCodeModelOpenRouterGLM52,
+	OpenCodeModelGLM51,
+	OpenCodeModelOpenRouterGLM51,
+	OpenCodeModelGPT55Pro,
+	OpenCodeModelOpenRouterGPT55Pro,
+	OpenCodeModelGPT55,
+	OpenCodeModelOpenRouterGPT55,
+	OpenCodeModelGPT54,
 	OpenCodeModelGPT54Mini,
 	OpenCodeModelGPT53CodexSpark,
+	OpenCodeModelGPT52,
+	OpenCodeModelOpenRouterGPT52,
+	OpenCodeModelClaudeOpus48,
+	OpenCodeModelClaudeOpus47,
+	OpenCodeModelClaudeOpus46,
+	OpenCodeModelClaudeSonnet46,
 	OpenCodeModelClaudeHaiku45,
 	OpenCodeModelGemini35Flash,
 	OpenCodeModelOpenRouterGemini35Flash,
+	OpenCodeModelGemini31Pro,
+	OpenCodeModelOpenRouterGemini31Pro,
 	OpenCodeModelGemini3Flash,
 	OpenCodeModelMiniMaxM27,
 	OpenCodeModelOpenRouterMiniMaxM27,
@@ -150,26 +164,10 @@ var AvailableOpenCodeModels = []string{
 	OpenCodeModelOpenRouterDeepSeekV4Flash,
 	OpenCodeModelDeepSeekV4Pro,
 	OpenCodeModelOpenRouterDeepSeekV4Pro,
-	OpenCodeModelGLM51,
-	OpenCodeModelOpenRouterGLM51,
-	OpenCodeModelKimiK25,
-	OpenCodeModelOpenRouterKimiK25,
-	OpenCodeModelGPT54,
-	OpenCodeModelClaudeSonnet46,
-	OpenCodeModelGemini31Pro,
-	OpenCodeModelOpenRouterGemini31Pro,
 	OpenCodeModelKimiK26,
 	OpenCodeModelOpenRouterKimiK26,
-	OpenCodeModelGPT52,
-	OpenCodeModelOpenRouterGPT52,
-	OpenCodeModelGPT55,
-	OpenCodeModelOpenRouterGPT55,
-	OpenCodeModelGPT55Pro,
-	OpenCodeModelOpenRouterGPT55Pro,
-	OpenCodeModelClaudeOpus48,
-	OpenCodeModelClaudeOpus47,
-	OpenCodeModelClaudeFable5,
-	OpenCodeModelOpenRouterClaudeFable5,
+	OpenCodeModelKimiK25,
+	OpenCodeModelOpenRouterKimiK25,
 }
 
 // CodexRuntimeSpec is the resolved execution spec for a Codex model alias.

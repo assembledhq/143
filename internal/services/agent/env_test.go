@@ -672,7 +672,6 @@ func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProvi
 	t.Parallel()
 
 	expectedProvidersByModelKey := map[string][]string{
-		"~anthropic/claude-fable-5":      {"anthropic", "amazon-bedrock/us", "azure"},
 		"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
 		"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
 		"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
