@@ -485,6 +485,7 @@ func TestValidateSecrets_ProductionAllValid(t *testing.T) {
 		SessionSecret:       strings.Repeat("s", 32),
 		EncryptionMasterKey: strings.Repeat("k", 32),
 		CSRFSigningKey:      strings.Repeat("c", 32),
+		GitHubWebhookSecret: "github-webhook-secret",
 	}
 	require.NoError(t, cfg.ValidateSecrets(), "valid production config should not error")
 }
@@ -513,6 +514,20 @@ func TestValidateSecrets_ProductionMissingCSRFKey(t *testing.T) {
 	err := cfg.ValidateSecrets()
 	require.Error(t, err, "missing CSRF_SIGNING_KEY in production should error")
 	require.Contains(t, err.Error(), "CSRF_SIGNING_KEY")
+}
+
+func TestValidateSecrets_ProductionMissingGitHubWebhookSecret(t *testing.T) {
+	t.Parallel()
+
+	cfg := &Config{
+		Env:                 "production",
+		SessionSecret:       strings.Repeat("s", 32),
+		EncryptionMasterKey: strings.Repeat("k", 32),
+		CSRFSigningKey:      strings.Repeat("c", 32),
+	}
+	err := cfg.ValidateSecrets()
+	require.Error(t, err, "missing GITHUB_WEBHOOK_SECRET in production should error")
+	require.Contains(t, err.Error(), "GITHUB_WEBHOOK_SECRET")
 }
 
 func TestGitHubAppEnabled(t *testing.T) {
