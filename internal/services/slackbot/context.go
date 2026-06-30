@@ -3,6 +3,7 @@ package slackbot
 import (
 	"strings"
 
+	"github.com/assembledhq/143/internal/gitref"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
@@ -156,6 +157,14 @@ func ResolveSlackContext(input SlackContextResolveInput) SlackContextResolveResu
 			}
 			break
 		}
+	}
+	// Drop a branch parsed from Slack text that isn't a safe git ref. It would
+	// otherwise be persisted as the session TargetBranch and forwarded into
+	// `git fetch origin <branch>`; an unsafe value (e.g. a leading '-') could be
+	// parsed by git as an option rather than a refspec. Clearing it falls back
+	// to the repository default, which is the desired behavior for junk input.
+	if result.Branch != "" && !gitref.IsValidRef(result.Branch) {
+		result.Branch = ""
 	}
 	if result.ContextSummary.Branch == "" {
 		result.ContextSummary.Branch = result.Branch

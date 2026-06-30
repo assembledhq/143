@@ -83,7 +83,7 @@ func TestCollect(t *testing.T) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git fetch --quiet --no-tags origin 'main'":
+				case "git fetch --quiet --no-tags --end-of-options origin 'main'":
 					return 0, nil
 				case "git merge-base 'origin/main' HEAD":
 					_, _ = io.WriteString(stdout, "deadbeef\n")
@@ -101,7 +101,7 @@ func TestCollect(t *testing.T) {
 			expected: "merge-base diff\n",
 			expectedCmd: []string{
 				"git rev-parse --is-inside-work-tree",
-				"git fetch --quiet --no-tags origin 'main'",
+				"git fetch --quiet --no-tags --end-of-options origin 'main'",
 				"git merge-base 'origin/main' HEAD",
 				"git diff --find-renames --binary deadbeef -- .",
 				"git ls-files --others --exclude-standard -- .",
@@ -116,7 +116,7 @@ func TestCollect(t *testing.T) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git fetch --quiet --no-tags origin 'main'":
+				case "git fetch --quiet --no-tags --end-of-options origin 'main'":
 					_, _ = io.WriteString(stderr, "fatal: could not read from remote")
 					return 128, nil
 				case "git merge-base 'origin/main' HEAD":
@@ -135,7 +135,7 @@ func TestCollect(t *testing.T) {
 			expected: "fallback diff\n",
 			expectedCmd: []string{
 				"git rev-parse --is-inside-work-tree",
-				"git fetch --quiet --no-tags origin 'main'",
+				"git fetch --quiet --no-tags --end-of-options origin 'main'",
 				"git merge-base 'origin/main' HEAD",
 				"git diff --find-renames --binary abc123 -- .",
 				"git ls-files --others --exclude-standard -- .",
@@ -150,7 +150,7 @@ func TestCollect(t *testing.T) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git fetch --quiet --no-tags origin 'main'":
+				case "git fetch --quiet --no-tags --end-of-options origin 'main'":
 					return 0, nil
 				case "git merge-base 'origin/main' HEAD":
 					_, _ = io.WriteString(stdout, "\n")
@@ -167,7 +167,7 @@ func TestCollect(t *testing.T) {
 			expected: "",
 			expectedCmd: []string{
 				"git rev-parse --is-inside-work-tree",
-				"git fetch --quiet --no-tags origin 'main'",
+				"git fetch --quiet --no-tags --end-of-options origin 'main'",
 				"git merge-base 'origin/main' HEAD",
 				"git diff --find-renames --binary abc123 -- .",
 				"git ls-files --others --exclude-standard -- .",
@@ -182,7 +182,7 @@ func TestCollect(t *testing.T) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git fetch --quiet --no-tags origin 'main'":
+				case "git fetch --quiet --no-tags --end-of-options origin 'main'":
 					_, _ = io.WriteString(stderr, "fatal: network unreachable")
 					return 1, errors.New("exec failure")
 				case "git merge-base 'origin/main' HEAD":
@@ -201,7 +201,7 @@ func TestCollect(t *testing.T) {
 			expected: "stale-base diff\n",
 			expectedCmd: []string{
 				"git rev-parse --is-inside-work-tree",
-				"git fetch --quiet --no-tags origin 'main'",
+				"git fetch --quiet --no-tags --end-of-options origin 'main'",
 				"git merge-base 'origin/main' HEAD",
 				"git diff --find-renames --binary stalebase -- .",
 				"git ls-files --others --exclude-standard -- .",
@@ -216,7 +216,7 @@ func TestCollect(t *testing.T) {
 				switch cmd {
 				case "git rev-parse --is-inside-work-tree":
 					return 0, nil
-				case "git fetch --quiet --no-tags origin 'weird'\\''branch'":
+				case "git fetch --quiet --no-tags --end-of-options origin 'weird'\\''branch'":
 					return 0, nil
 				case "git merge-base 'origin/weird'\\''branch' HEAD":
 					_, _ = io.WriteString(stdout, "mb\n")
@@ -233,7 +233,7 @@ func TestCollect(t *testing.T) {
 			expected: "",
 			expectedCmd: []string{
 				"git rev-parse --is-inside-work-tree",
-				"git fetch --quiet --no-tags origin 'weird'\\''branch'",
+				"git fetch --quiet --no-tags --end-of-options origin 'weird'\\''branch'",
 				"git merge-base 'origin/weird'\\''branch' HEAD",
 				"git diff --find-renames --binary mb -- .",
 				"git ls-files --others --exclude-standard -- .",

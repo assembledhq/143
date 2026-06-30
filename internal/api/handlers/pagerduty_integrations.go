@@ -1131,7 +1131,11 @@ func (h *PagerDutyIntegrationHandler) resolveIncidentSessionRepository(w http.Re
 		if !h.validatePagerDutyRepository(w, r, orgID, *requestedRepoID, "repository_id") {
 			return uuid.Nil, nil, false
 		}
-		return *requestedRepoID, trimOptionalStringPointer(requestedBaseBranch), true
+		baseBranch := trimOptionalStringPointer(requestedBaseBranch)
+		if !validatePagerDutyBaseBranch(w, r, baseBranch) {
+			return uuid.Nil, nil, false
+		}
+		return *requestedRepoID, baseBranch, true
 	}
 	if h.mappings != nil && incident.ServiceID != nil && strings.TrimSpace(*incident.ServiceID) != "" {
 		mapping, err := h.mappings.GetByServiceID(r.Context(), orgID, incident.PagerDutyIntegrationID, strings.TrimSpace(*incident.ServiceID))
@@ -1139,6 +1143,9 @@ func (h *PagerDutyIntegrationHandler) resolveIncidentSessionRepository(w http.Re
 			baseBranch := trimOptionalStringPointer(requestedBaseBranch)
 			if baseBranch == nil {
 				baseBranch = trimOptionalStringPointer(mapping.BaseBranch)
+			}
+			if !validatePagerDutyBaseBranch(w, r, baseBranch) {
+				return uuid.Nil, nil, false
 			}
 			return mapping.RepositoryID, baseBranch, true
 		}
@@ -1150,7 +1157,11 @@ func (h *PagerDutyIntegrationHandler) resolveIncidentSessionRepository(w http.Re
 	if h.pagerDutyIntegrations != nil {
 		integration, err := h.pagerDutyIntegrations.GetByID(r.Context(), orgID, incident.PagerDutyIntegrationID)
 		if err == nil && integration.DefaultRepositoryID != nil && *integration.DefaultRepositoryID != uuid.Nil {
-			return *integration.DefaultRepositoryID, trimOptionalStringPointer(requestedBaseBranch), true
+			baseBranch := trimOptionalStringPointer(requestedBaseBranch)
+			if !validatePagerDutyBaseBranch(w, r, baseBranch) {
+				return uuid.Nil, nil, false
+			}
+			return *integration.DefaultRepositoryID, baseBranch, true
 		}
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusInternalServerError, "INTEGRATION_LOOKUP_FAILED", "failed to resolve PagerDuty integration defaults", err)
@@ -1159,6 +1170,22 @@ func (h *PagerDutyIntegrationHandler) resolveIncidentSessionRepository(w http.Re
 	}
 	writeError(w, r, http.StatusBadRequest, "REPOSITORY_UNMAPPED", "PagerDuty incident service is not mapped to a repository")
 	return uuid.Nil, nil, false
+}
+
+// validatePagerDutyBaseBranch rejects a resolved base branch that isn't a safe
+// git ref before it becomes a session TargetBranch (and reaches `git fetch
+// origin <branch>`). A nil branch is allowed. On rejection it writes a 400 and
+// returns false. Both the request-supplied branch and a stored service-mapping
+// branch flow through here, so neither source can inject a git argument.
+func validatePagerDutyBaseBranch(w http.ResponseWriter, r *http.Request, branch *string) bool {
+	if branch == nil {
+		return true
+	}
+	if !isValidGitRef(*branch) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BASE_BRANCH", "base_branch is not a valid git branch name")
+		return false
+	}
+	return true
 }
 
 func (h *PagerDutyIntegrationHandler) lookupPagerDutyIncident(ctx context.Context, orgID uuid.UUID, integrationID *uuid.UUID, incidentID string) (models.PagerDutyIncident, error) {
