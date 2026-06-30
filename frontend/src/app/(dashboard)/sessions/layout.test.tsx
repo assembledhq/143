@@ -1,6 +1,6 @@
 import React from "react";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, renderWithProviders, screen } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, waitFor } from "@/test/test-utils";
 import SessionsLayout from "./layout";
 
 const sidebarLayoutMock = vi.fn(
@@ -20,6 +20,8 @@ const sidebarLayoutMock = vi.fn(
 let mockPathname = "/sessions";
 let mockSelectedSegment: string | null = null;
 let mockSelectedSegments: string[] = [];
+const mockRouterReplace = vi.hoisted(() => vi.fn());
+const mockAuthUser = vi.hoisted<{ value: { role: string } | null }>(() => ({ value: null }));
 
 function mockSegmentsFromPathname() {
   if (mockSelectedSegments.length > 0) return mockSelectedSegments;
@@ -29,9 +31,23 @@ function mockSegmentsFromPathname() {
 }
 
 vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: mockRouterReplace, back: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => mockPathname,
   useSelectedLayoutSegment: () => mockSelectedSegment,
   useSelectedLayoutSegments: () => mockSegmentsFromPathname(),
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: mockAuthUser.value,
+    isLoading: false,
+    isFetching: false,
+    isAuthenticated: Boolean(mockAuthUser.value),
+    isUnauthorized: false,
+    isTransientError: false,
+    refetchUser: vi.fn(),
+    logout: vi.fn(),
+  }),
 }));
 
 vi.mock("@/components/sidebar-layout", () => ({
@@ -92,6 +108,8 @@ describe("SessionsLayout", () => {
     mockPathname = "/sessions";
     mockSelectedSegment = null;
     mockSelectedSegments = [];
+    mockAuthUser.value = null;
+    mockRouterReplace.mockClear();
     preloadSessionDetailContent.mockClear();
   });
 
@@ -153,6 +171,25 @@ describe("SessionsLayout", () => {
     expect(screen.getByTestId("manual-session-create-page")).toBeInTheDocument();
     expect(screen.queryByText("Select a session")).not.toBeInTheDocument();
     expect(screen.queryByText("Legacy child content")).not.toBeInTheDocument();
+  });
+
+  it("redirects viewers away from create-session content", async () => {
+    mockAuthUser.value = { role: "viewer" };
+    mockPathname = "/sessions/new";
+    mockSelectedSegment = "new";
+    mockSelectedSegments = ["new"];
+
+    renderWithProviders(
+      <SessionsLayout>
+        <div>Legacy child content</div>
+      </SessionsLayout>,
+    );
+
+    expect(screen.getByText("Choose a seeded session")).toBeInTheDocument();
+    expect(screen.queryByTestId("manual-session-create-page")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(mockRouterReplace).toHaveBeenCalledWith("/demo");
+    });
   });
 
   it("owns the create-session content on the /sessions/new route", () => {
