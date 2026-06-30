@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { http, HttpResponse } from 'msw';
+import type { ComponentProps } from 'react';
 import { fireEvent, renderWithProviders, screen } from '@/test/test-utils';
 import { server } from '@/test/mocks/server';
 import { SessionsPageContent } from './sessions-page-content';
@@ -22,6 +23,16 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(),
   usePathname: () => '/sessions',
   useParams: () => ({}),
+}));
+
+vi.mock('next/link', () => ({
+  default: ({ children, href, ...props }: ComponentProps<'a'> & { href: string }) => (
+    <a href={href} {...props}>{children}</a>
+  ),
+}));
+
+vi.mock('@/components/pm/pm-status-banner', () => ({
+  PMStatusBanner: () => <div data-testid="pm-status-banner" />,
 }));
 
 const preloadSessionDetailContent = vi.hoisted(() => vi.fn());

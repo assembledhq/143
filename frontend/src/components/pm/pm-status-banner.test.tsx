@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, type Mock } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
@@ -30,8 +30,11 @@ vi.mock("lucide-react", () => {
   };
 });
 
-vi.mock("@/hooks/use-analyze");
-const mockUseAnalyze = useAnalyze as Mock;
+vi.mock("@/hooks/use-analyze", () => ({
+  useAnalyze: vi.fn(),
+}));
+
+const mockUseAnalyze = vi.mocked(useAnalyze);
 
 function defaultAnalyze(overrides: Partial<ReturnType<typeof useAnalyze>> = {}) {
   return {

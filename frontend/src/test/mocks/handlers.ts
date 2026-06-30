@@ -1,5 +1,5 @@
 import { http, HttpResponse } from 'msw';
-import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink } from '@/lib/types';
+import type { APIClient, APIToken, AuthProviders, CliToken, EvalReleaseGate, Issue, Session, SessionDiff, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, User, PullRequest, PullRequestHealthResponse, PullRequestRepairResponse, ListResponse, SingleResponse, PMStatus, PMDecisionsResponse, Project, ProjectDetail, AutopilotQueueResponse, SessionTranscriptWindowResponse, AgentCapabilityDefinition, AgentCapabilityPolicyResponse, JoinToken, JoinTokenLink, OpenCodeModelInfo } from '@/lib/types';
 
 export const mockIssues: Issue[] = [
   {
@@ -270,6 +270,8 @@ export const mockAutopilotQueue: AutopilotQueueResponse = {
   },
 };
 
+export const mockOpenCodeModels: OpenCodeModelInfo[] = [];
+
 export const mockMembers: User[] = [
   {
     id: 'user-1',
@@ -361,6 +363,12 @@ export const handlers = [
 
   http.get('/api/v1/autopilot/queue', () => {
     return HttpResponse.json(mockAutopilotQueue);
+  }),
+
+  http.get('/api/v1/settings/opencode-models', () => {
+    return HttpResponse.json({
+      data: mockOpenCodeModels,
+    });
   }),
 
   http.get('/api/v1/projects/proposals/summary', () => {
