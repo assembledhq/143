@@ -7565,7 +7565,9 @@ func (o *Orchestrator) resolveWorkspaceDiffBase(ctx context.Context, sandbox *Sa
 
 	escapedBranch := shellEscapeSingleQuote(targetBranch)
 	var fetchErr bytes.Buffer
-	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin '%s'", escapedBranch)
+	// --end-of-options ensures the branch is always parsed as a refspec, never
+	// as a git option, even if upstream ref validation is ever bypassed.
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags --end-of-options origin '%s'", escapedBranch)
 	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
 
 	var mbOut, mbErr bytes.Buffer
