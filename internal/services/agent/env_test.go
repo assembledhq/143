@@ -653,12 +653,12 @@ func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders
 	}
 	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
 	require.Equal(t, []any{"openrouter"}, config["enabled_providers"], "OpenCode should only enable the selected OpenRouter provider")
-	require.Equal(t, "openrouter/~z-ai/glm-5.2", config["model"], "OpenCode should select the custom OpenRouter model id")
+	require.Equal(t, "openrouter/z-ai/glm-5.2", config["model"], "OpenCode should select the upstream OpenRouter model id")
 
 	providers := config["provider"].(map[string]any)
 	openRouterProvider := providers["openrouter"].(map[string]any)
 	modelsConfig := openRouterProvider["models"].(map[string]any)
-	glmConfig := modelsConfig["~z-ai/glm-5.2"].(map[string]any)
+	glmConfig := modelsConfig["z-ai/glm-5.2"].(map[string]any)
 	options := glmConfig["options"].(map[string]any)
 	providerRouting := options["provider"].(map[string]any)
 
@@ -679,12 +679,12 @@ func TestOpenCodeRuntimeConfigContent_DefinesCustomOpenRouterModelKey(t *testing
 		Model:           openCodeCLIModelID("xai/grok-code-fast", models.ProviderOpenRouter),
 	}
 	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
-	require.Equal(t, "openrouter/~xai/grok-code-fast", config["model"], "OpenCode should select the custom OpenRouter model id")
+	require.Equal(t, "openrouter/xai/grok-code-fast", config["model"], "OpenCode should select the upstream OpenRouter model id")
 
 	providers := config["provider"].(map[string]any)
 	openRouterProvider := providers["openrouter"].(map[string]any)
 	modelsConfig := openRouterProvider["models"].(map[string]any)
-	require.Contains(t, modelsConfig, "~xai/grok-code-fast", "OpenCode config should define custom OpenRouter model keys")
+	require.Contains(t, modelsConfig, "xai/grok-code-fast", "OpenCode config should define custom OpenRouter model keys")
 }
 
 func TestOpenCodeCLIModelID(t *testing.T) {
@@ -700,25 +700,25 @@ func TestOpenCodeCLIModelID(t *testing.T) {
 			name:     "curated OpenRouter route",
 			model:    "openrouter/z-ai/glm-5.2",
 			backing:  models.ProviderOpenRouter,
-			expected: "openrouter/~z-ai/glm-5.2",
+			expected: "openrouter/z-ai/glm-5.2",
 		},
 		{
-			name:     "already normalized OpenRouter route",
+			name:     "legacy tilde OpenRouter route is normalized away",
 			model:    "openrouter/~z-ai/glm-5.2",
 			backing:  models.ProviderOpenRouter,
-			expected: "openrouter/~z-ai/glm-5.2",
+			expected: "openrouter/z-ai/glm-5.2",
 		},
 		{
-			name:     "bare custom OpenRouter key",
+			name:     "bare legacy tilde OpenRouter key",
 			model:    "~xai/grok-code-fast",
 			backing:  models.ProviderOpenRouter,
-			expected: "openrouter/~xai/grok-code-fast",
+			expected: "openrouter/xai/grok-code-fast",
 		},
 		{
 			name:     "custom provider model through OpenRouter",
 			model:    "xai/grok-code-fast",
 			backing:  models.ProviderOpenRouter,
-			expected: "openrouter/~xai/grok-code-fast",
+			expected: "openrouter/xai/grok-code-fast",
 		},
 		{
 			name:     "native OpenCode route",
@@ -759,19 +759,19 @@ func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProvi
 	t.Parallel()
 
 	expectedProvidersByModelKey := map[string][]string{
-		"~deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
-		"~deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
-		"~google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
-		"~google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
-		"~minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
-		"~minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
-		"~moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
-		"~moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
-		"~openai/gpt-5.2":                {"openai", "azure"},
-		"~openai/gpt-5.5":                {"openai", "azure"},
-		"~openai/gpt-5.5-pro":            {"openai"},
-		"~z-ai/glm-5.1":                  {"deepinfra", "baseten", "together"},
-		"~z-ai/glm-5.2":                  {"deepinfra", "together", "fireworks"},
+		"deepseek/deepseek-v4-flash":    {"deepinfra", "cloudflare", "fireworks"},
+		"deepseek/deepseek-v4-pro":      {"deepinfra", "together", "fireworks"},
+		"google/gemini-3.1-pro-preview": {"google-ai-studio", "google-vertex/global"},
+		"google/gemini-3.5-flash":       {"google-ai-studio", "google-vertex/global"},
+		"minimax/minimax-m2.5":          {"deepinfra", "digitalocean", "parasail"},
+		"minimax/minimax-m2.7":          {"deepinfra", "fireworks", "together"},
+		"moonshotai/kimi-k2.5":          {"digitalocean", "deepinfra"},
+		"moonshotai/kimi-k2.6":          {"deepinfra", "baseten", "fireworks"},
+		"openai/gpt-5.2":                {"openai", "azure"},
+		"openai/gpt-5.5":                {"openai", "azure"},
+		"openai/gpt-5.5-pro":            {"openai"},
+		"z-ai/glm-5.1":                  {"deepinfra", "baseten", "together"},
+		"z-ai/glm-5.2":                  {"deepinfra", "together", "fireworks"},
 	}
 
 	curatedOpenRouterModels := make([]string, 0, len(expectedProvidersByModelKey))
@@ -798,7 +798,7 @@ func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProvi
 				require.True(t, ok, "curated OpenRouter model should define provider routing options")
 				require.Equal(t, expectedProvidersByModelKey[modelKey], providerRouting["only"], "curated OpenRouter model should restrict provider routing to the audited provider")
 				require.Equal(t, expectedProvidersByModelKey[modelKey], providerRouting["order"], "curated OpenRouter model should prefer the audited provider in deterministic order")
-				if modelKey != "~openai/gpt-5.5-pro" {
+				if modelKey != "openai/gpt-5.5-pro" {
 					require.GreaterOrEqual(t, len(expectedProvidersByModelKey[modelKey]), 2, "curated OpenRouter model should include at least one audited fallback provider when OpenRouter exposes one")
 				}
 				require.Equal(t, false, providerRouting["allow_fallbacks"], "curated OpenRouter model should disable fallback to unaudited providers")
@@ -1764,7 +1764,7 @@ func TestAgentEnvResolveForModel_OpenCodeLogicalPrefersOpenRouter(t *testing.T) 
 	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
 	require.Equal(t, "sk-or-opencode", resolved["OPENROUTER_API_KEY"], "logical glm-5.2 should prefer the OpenRouter route")
 	require.Empty(t, resolved["OPENCODE_API_KEY"], "OpenRouter route should not also inject the native key")
-	require.Equal(t, "openrouter/~z-ai/glm-5.2", resolved["OPENCODE_MODEL"], "resolved model should use OpenCode's OpenRouter custom-model id")
+	require.Equal(t, "openrouter/z-ai/glm-5.2", resolved["OPENCODE_MODEL"], "resolved model should use the upstream OpenRouter model id")
 	require.Contains(t, resolved["OPENCODE_CONFIG_CONTENT"], "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
 }
 
@@ -1846,12 +1846,12 @@ func TestAgentEnvResolveForModel_OpenCodeResolvedRouteDrivesCLIAndConfig(t *test
 		})
 		resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
 
-		require.Equal(t, "openrouter/~z-ai/glm-5.2", resolved["OPENCODE_MODEL"],
-			"--model must receive OpenCode's OpenRouter custom-model id")
+		require.Equal(t, "openrouter/z-ai/glm-5.2", resolved["OPENCODE_MODEL"],
+			"--model must receive the upstream OpenRouter model id")
 		cfg := resolved["OPENCODE_CONFIG_CONTENT"]
 		require.Contains(t, cfg, "OPENROUTER_API_KEY", "runtime config must reference the OpenRouter key env")
 		require.Contains(t, cfg, "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
-		require.Contains(t, cfg, "openrouter/~z-ai/glm-5.2", "runtime config model must be the resolved CLI model")
+		require.Contains(t, cfg, "openrouter/z-ai/glm-5.2", "runtime config model must be the resolved CLI model")
 	})
 
 	t.Run("native route", func(t *testing.T) {
