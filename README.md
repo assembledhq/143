@@ -86,6 +86,12 @@ See the [development setup guide](docs/contributing/development-setup.md) for th
 
 Start with [docs/self-hosting/](docs/self-hosting/README.md). The hosted version at [143.dev](https://www.143.dev) is the managed path; hosted billing is based on container runtime minutes, and 143 does not mark up LLM usage.
 
+## Hosted vs self-hosted
+
+The open-source repo contains the application code, Dockerfiles, migrations, local development setup, single-node self-hosting path, public docs, and the reusable operational scripts needed to run your own 143 deployment.
+
+The production deployment for the managed 143.dev service is Assembled-operated. Workflows and scripts that reference Assembled's private infrastructure, encrypted production env bundles, deploy keys, fleet hosts, or `assembledhq/143-infra` are for the hosted service and are not required for ordinary self-hosting.
+
 ## Contributing
 
 If you want to work on the product, read the [development setup guide](docs/contributing/development-setup.md) and the [design overview](docs/design/overall.md). The design docs are intentionally part of the repo because a lot of the product decisions are architectural, not just UI copy.
