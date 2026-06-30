@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -4090,12 +4092,14 @@ func TestBuildPushScript_Structure(t *testing.T) {
 		"test@example.com",
 		"143/abc123/fix-typo",
 		"main",
+		"abc1234567890abcdef1234567890abcdef12345",
 		"https://github.com/owner/repo.git",
 	)
 
 	// Only the commit-msg file is created by the script; auth comes from
 	// the per-push credential socket, so there's nothing else to clean up.
-	require.Contains(t, script, "cleanup() { rm -f '/home/user/.143-pr-commit-msg'; }")
+	require.Contains(t, script, "cleanup() {\n    rm -f '/home/user/.143-pr-commit-msg'", "push script should clean up the commit message file")
+	require.Contains(t, script, `rm -f "$transplant_patch"`, "push script should clean up any temporary transplant patch")
 	require.Contains(t, script, "trap cleanup EXIT")
 
 	// Author identity is set via git config with quoted values.
@@ -4110,6 +4114,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// and URLs consistently.
 	require.Contains(t, script, "branch='143/abc123/fix-typo'", "push script should assign the branch through shellQuote")
 	require.Contains(t, script, "base_branch='main'", "push script should assign the base branch through shellQuote")
+	require.Contains(t, script, "base_commit='abc1234567890abcdef1234567890abcdef12345'", "push script should assign the recorded base commit through shellQuote")
 	require.Contains(t, script, "push_url='https://github.com/owner/repo.git'", "push script should assign the push URL through shellQuote")
 
 	// Hydrated snapshots may have been captured while the repo was on a stale
@@ -4131,7 +4136,12 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	require.Contains(t, script, `git ls-remote "$push_url" "$base_ref"`, "push script should read the current base branch SHA before pushing")
 	require.Contains(t, script, `if [ -z "$base_sha" ]; then`, "push script should refuse to push when the base branch cannot be resolved")
 	require.Contains(t, script, `git fetch --no-tags --quiet "$push_url" "+${base_ref}:${base_guard_ref}"`, "push script should fetch the current base branch before pushing")
-	require.Contains(t, script, `git merge-base "$base_guard_ref" HEAD`, "push script should refuse unrelated base-branch history before pushing")
+	require.Contains(t, script, `git merge-base "$base_guard_ref" HEAD`, "push script should detect unrelated base-branch history before pushing")
+	require.Contains(t, script, `git diff --binary --full-index "$base_commit" HEAD > "$transplant_patch"`, "push script should capture the session diff before transplanting")
+	require.Contains(t, script, `git checkout -B "$branch" "$base_guard_ref"`, "push script should reset the session branch onto the current base when histories diverge")
+	require.Contains(t, script, `git apply --index --3way "$transplant_patch"`, "push script should replay the session diff onto the current base")
+	require.Contains(t, script, `if [ "$transplanted" = 1 ]; then`, "push script should handle existing stale-history remote branches after transplanting")
+	require.Contains(t, script, `git diff --quiet "$original_head" "$remote_guard_ref"`, "push script should only overwrite a stale-history remote branch when it matches the pre-transplant session tree")
 	require.Contains(t, script, "exit 79", "push script should use the unrelated-base sentinel exit code")
 	require.Contains(t, script, `git ls-remote "$push_url" "$remote_ref"`, "push script should read the current remote SHA before pushing")
 	require.Contains(t, script, `git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"`, "push script should fetch the current PR branch before force pushing")
@@ -4162,6 +4172,7 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"bot@example.com",
 		"143/abc/it's-fine",
 		"release/2026.06",
+		"abc1234567890abcdef1234567890abcdef12345",
 		"https://github.com/o/r.git",
 	)
 	// The branch is assigned through shellQuote once, so the embedded quote
@@ -4170,6 +4181,79 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 	require.Contains(t, script, `base_branch='release/2026.06'`, "push script should quote the base branch in a variable")
 	require.Contains(t, script, `git checkout -B "$branch"`, "push script should use the safely assigned branch variable")
 	require.Contains(t, script, `--force-with-lease="${remote_ref}:${remote_sha}"`, "push script should lease through the safely derived remote ref")
+}
+
+func TestBuildPushScript_TransplantsUnrelatedBaseHistory(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is required for this test: %v", err)
+	}
+
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	runPRTestGit(t, root, "init", "--bare", remote)
+
+	oldRepo := filepath.Join(root, "old")
+	runPRTestGit(t, root, "init", oldRepo)
+	configurePRTestGitIdentity(t, oldRepo)
+	runPRTestGit(t, oldRepo, "checkout", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(oldRepo, "README.md"), []byte("old base\n"), 0o644), "old base file should be written")
+	runPRTestGit(t, oldRepo, "add", "README.md")
+	runPRTestGit(t, oldRepo, "commit", "-m", "old base")
+	oldBase := runPRTestGit(t, oldRepo, "rev-parse", "HEAD")
+	require.NoError(t, os.WriteFile(filepath.Join(oldRepo, "feature.txt"), []byte("session change\n"), 0o644), "session change file should be written")
+	runPRTestGit(t, oldRepo, "add", "feature.txt")
+	runPRTestGit(t, oldRepo, "commit", "-m", "session change")
+	runPRTestGit(t, oldRepo, "push", remote, "HEAD:refs/heads/143/session/replay")
+
+	currentRepo := filepath.Join(root, "current")
+	runPRTestGit(t, root, "init", currentRepo)
+	configurePRTestGitIdentity(t, currentRepo)
+	runPRTestGit(t, currentRepo, "checkout", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(currentRepo, "README.md"), []byte("rewritten base\n"), 0o644), "rewritten base file should be written")
+	runPRTestGit(t, currentRepo, "add", "README.md")
+	runPRTestGit(t, currentRepo, "commit", "-m", "rewritten base")
+	runPRTestGit(t, currentRepo, "push", remote, "main")
+
+	commitMsgPath := filepath.Join(root, "commit-message")
+	require.NoError(t, os.WriteFile(commitMsgPath, []byte("replay session change\n"), 0o644), "commit message file should be written")
+	script := buildPushScript(
+		oldRepo,
+		commitMsgPath,
+		"143 Agent",
+		"noreply@143.dev",
+		"143/session/replay",
+		"main",
+		oldBase,
+		remote,
+	)
+	cmd := exec.Command("sh", "-c", script) // #nosec G204 -- test executes a script generated from fixed test data against temp repos.
+	cmd.Dir = oldRepo
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "push script should replay the old-history session diff onto the rewritten base: %s", string(out))
+
+	runPRTestGit(t, oldRepo, "fetch", remote, "+refs/heads/main:refs/remotes/check/main", "+refs/heads/143/session/replay:refs/remotes/check/session")
+	runPRTestGit(t, oldRepo, "merge-base", "--is-ancestor", "refs/remotes/check/main", "refs/remotes/check/session")
+	require.Equal(t, "session change", runPRTestGit(t, oldRepo, "show", "refs/remotes/check/session:feature.txt"), "replayed branch should preserve the session change")
+	require.Equal(t, runPRTestGit(t, oldRepo, "rev-parse", "refs/remotes/check/main"), runPRTestGit(t, oldRepo, "rev-parse", "refs/remotes/check/session^"), "replayed branch should be based directly on the rewritten main branch")
+}
+
+func configurePRTestGitIdentity(t *testing.T, dir string) {
+	t.Helper()
+	runPRTestGit(t, dir, "config", "user.name", "143 Test")
+	runPRTestGit(t, dir, "config", "user.email", "test@example.com")
+}
+
+func runPRTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...) // #nosec G204 -- test helper executes fixed git invocations against temp repos.
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s should succeed in %s: %v\n%s", strings.Join(args, " "), dir, err, string(out))
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func TestTargetBranchForPR(t *testing.T) {
