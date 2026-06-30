@@ -183,6 +183,81 @@ func TestParseOpenCodeStreamLine(t *testing.T) {
 	require.Equal(t, "bash", logs[2].Metadata["tool"], "OpenCode parser should preserve tool names")
 }
 
+func TestParseOpenCodeStreamLine_OpenCodePartEvents(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 8)
+	summary := []string{}
+	last := ""
+
+	lines := []string{
+		`{"type":"step_start","timestamp":1782800233819,"sessionID":"ses_part","part":{"id":"prt_step_start","messageID":"msg_part","sessionID":"ses_part","snapshot":"abc123","type":"step-start"}}`,
+		`{"type":"tool_use","timestamp":1782800235638,"sessionID":"ses_part","part":{"id":"prt_tool","messageID":"msg_part","sessionID":"ses_part","type":"tool","callID":"call_pwd","tool":"bash","state":{"status":"completed","input":{"command":"pwd"},"output":"/workspace","title":"pwd","metadata":{},"time":{"start":1782800235500,"end":1782800235638}}}}`,
+		`{"type":"step_finish","timestamp":1782800235758,"sessionID":"ses_part","part":{"id":"prt_step_finish","messageID":"msg_part","sessionID":"ses_part","reason":"tool-calls","snapshot":"abc123","type":"step-finish","tokens":{"total":42,"input":30,"output":7,"reasoning":5,"cache":{"write":2,"read":10}},"cost":0.0123}}`,
+		`{"type":"step_finish","timestamp":1782800235900,"sessionID":"ses_part","part":{"id":"prt_step_finish_2","messageID":"msg_part","sessionID":"ses_part","reason":"stop","snapshot":"def456","type":"step-finish","tokens":{"total":18,"input":11,"output":4,"reasoning":3,"cache":{"write":1,"read":2}},"cost":0.0042}}`,
+		`{"type":"text","timestamp":1782800236000,"sessionID":"ses_part","part":{"id":"prt_text","messageID":"msg_part","sessionID":"ses_part","type":"text","text":"Done."}}`,
+	}
+
+	for _, line := range lines {
+		parseOpenCodeStreamLine([]byte(line), result, logCh, &summary, &last)
+	}
+	close(logCh)
+
+	logs := drain(logCh)
+	require.Equal(t, "ses_part", result.AgentSessionID, "OpenCode parser should capture session id from v1.17 event envelopes")
+	require.True(t, result.TokenUsage.Reported, "OpenCode parser should capture step-finish token usage")
+	require.Equal(t, 41, result.TokenUsage.InputTokens, "OpenCode parser should accumulate step-finish input tokens")
+	require.Equal(t, 12, result.TokenUsage.CachedInputTokens, "OpenCode parser should accumulate step-finish cached input tokens")
+	require.Equal(t, 3, result.TokenUsage.CacheCreationTokens, "OpenCode parser should accumulate step-finish cache write tokens")
+	require.Equal(t, 11, result.TokenUsage.OutputTokens, "OpenCode parser should accumulate step-finish output tokens")
+	require.Equal(t, 60, result.TokenUsage.TotalTokens, "OpenCode parser should accumulate step-finish total tokens")
+	require.NotNil(t, result.TokenUsage.Cost, "OpenCode parser should capture step-finish reported cost")
+	require.Equal(t, agent.TokenCostSourceDirect, result.TokenUsage.Cost.Source, "OpenCode parser should mark step-finish reported cost as direct")
+	require.InDelta(t, 0.0165, result.TokenUsage.TotalCostUSD, 0.0000001, "OpenCode parser should accumulate step-finish total cost")
+	require.InDelta(t, 0.0165, result.TokenUsage.Cost.Amount, 0.0000001, "OpenCode parser should accumulate step-finish direct cost")
+	require.Equal(t, "Done.", last, "OpenCode parser should track v1.17 text parts as assistant output")
+	require.Contains(t, strings.Join(summary, "\n"), "Done.", "OpenCode parser should add v1.17 text parts to the summary")
+	require.Len(t, logs, 6, "OpenCode parser should expand v1.17 tool parts into use/result logs while preserving step debug logs")
+	require.Equal(t, "debug", logs[0].Level, "step-start events should remain debug logs")
+	require.Equal(t, "tool_use", logs[1].Level, "completed tool parts should emit a tool_use log")
+	require.Equal(t, "bash", logs[1].Metadata["tool"], "completed tool parts should preserve the nested tool name")
+	require.Equal(t, "call_pwd", logs[1].Metadata["call_id"], "completed tool parts should preserve the nested call id")
+	require.Equal(t, map[string]interface{}{"command": "pwd"}, logs[1].Metadata["input"], "completed tool parts should preserve the nested input")
+	require.Equal(t, "output", logs[2].Level, "completed tool parts should emit a paired tool_result log")
+	require.Equal(t, "tool_result", logs[2].Metadata["type"], "paired tool result should be tagged for timeline grouping")
+	require.Equal(t, "bash", logs[2].Metadata["tool"], "paired tool result should preserve the tool name")
+	require.Equal(t, "call_pwd", logs[2].Metadata["call_id"], "paired tool result should preserve the call id")
+	require.Equal(t, "/workspace", logs[2].Message, "paired tool result should preserve tool output")
+	require.Equal(t, "debug", logs[3].Level, "step-finish events should remain debug logs")
+	require.Equal(t, "debug", logs[4].Level, "additional step-finish events should remain debug logs")
+	require.Equal(t, "output", logs[5].Level, "text parts should emit assistant output logs")
+}
+
+func TestParseOpenCodeStreamLine_OpenCodeErroredToolPart(t *testing.T) {
+	t.Parallel()
+
+	result := &agent.AgentResult{}
+	logCh := make(chan agent.LogEntry, 4)
+	summary := []string{}
+	last := ""
+
+	line := `{"type":"tool_use","timestamp":1782800235638,"sessionID":"ses_part","part":{"id":"prt_tool","messageID":"msg_part","sessionID":"ses_part","type":"tool","callID":"call_test","tool":"bash","state":{"status":"error","input":{"command":"go test ./..."},"error":"exit status 1","metadata":{},"time":{"start":1782800235500,"end":1782800235638}}}}`
+	parseOpenCodeStreamLine([]byte(line), result, logCh, &summary, &last)
+	close(logCh)
+
+	logs := drain(logCh)
+	require.Equal(t, "ses_part", result.AgentSessionID, "OpenCode parser should capture session id from errored tool events")
+	require.Len(t, logs, 2, "errored tool parts should still emit use/result logs for timeline grouping")
+	require.Equal(t, "tool_use", logs[0].Level, "errored tool parts should emit the tool use first")
+	require.Equal(t, "bash", logs[0].Metadata["tool"], "errored tool use should preserve the tool name")
+	require.Equal(t, map[string]interface{}{"command": "go test ./..."}, logs[0].Metadata["input"], "errored tool use should preserve input")
+	require.Equal(t, "output", logs[1].Level, "errored tool parts should emit a paired result log")
+	require.Equal(t, "tool_result", logs[1].Metadata["type"], "errored tool result should be tagged for timeline grouping")
+	require.Equal(t, "error", logs[1].Metadata["status"], "errored tool result should preserve status")
+	require.Equal(t, "exit status 1", logs[1].Message, "errored tool result should preserve the error message")
+}
+
 func TestParseOpenCodeStreamLine_ErrorAndPermissionEvents(t *testing.T) {
 	t.Parallel()
 

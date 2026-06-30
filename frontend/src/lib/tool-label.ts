@@ -106,8 +106,8 @@ function asRecord(v: unknown): Record<string, unknown> | undefined {
  */
 export function deriveToolDisplay(toolUse: SessionLog): ToolDisplay {
   const metadata = toolUse.metadata ?? {};
-  const rawTool = asString(metadata.tool) ?? "unknown";
-  const canonical = canonicalize(rawTool);
+  const rawTool = asString(metadata.tool);
+  const canonical = canonicalize(rawTool ?? "unknown");
   const input = asRecord(metadata.input);
 
   // 1. Model-supplied description (Claude Bash) — most specific, use as-is.
@@ -116,6 +116,10 @@ export function deriveToolDisplay(toolUse: SessionLog): ToolDisplay {
   const description = input && asString(input.description);
   if (description && canonical !== "agent") {
     return { label: `Ran ${description}`, canonical };
+  }
+
+  if (!rawTool) {
+    return { label: "Ran tool", canonical: "unknown" };
   }
 
   // 2. Per-canonical-tool templates.
