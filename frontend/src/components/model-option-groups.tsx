@@ -10,6 +10,7 @@ interface ModelGroup {
 
 interface ModelOptionGroupsProps {
   modelGroups: readonly ModelGroup[];
+  getOptionValue?: (group: ModelGroup, model: string) => string;
   // openCodeAvailability maps an OpenCode model id to its route availability.
   // When absent (registry still loading / API failed) OpenCode models render
   // as normal, enabled options with no transport badge.
@@ -57,11 +58,13 @@ function openCodeModelItemDecor(
 }
 
 function ModelSelectItem({
+  value,
   model,
   isOpenCode,
   availabilityById,
   selectedModel,
 }: {
+  value: string;
   model: string;
   isOpenCode: boolean;
   availabilityById?: Map<string, OpenCodeModelAvailability>;
@@ -70,7 +73,7 @@ function ModelSelectItem({
   if (!isModelOptionVisible(model, isOpenCode, availabilityById, selectedModel)) return null;
   const { disabled, trailing } = openCodeModelItemDecor(model, isOpenCode, availabilityById);
   return (
-    <SelectItem value={model} disabled={disabled}>
+    <SelectItem value={value} disabled={disabled}>
       <span className="flex items-center gap-1.5">
         <span>{modelOptionLabel(model)}</span>
         {trailing ? <span className="text-xs text-muted-foreground">· {trailing}</span> : null}
@@ -83,8 +86,13 @@ function ModelSelectItem({
 // pickers. For OpenCode models it adds a "· OpenRouter" transport badge (the
 // route that would run given current keys) and hides models with no runnable
 // transport, except the current selection which always stays visible.
-// Centralized so the three pickers stay consistent.
-export function ModelOptionGroups({ modelGroups, openCodeAvailability, selectedModel }: ModelOptionGroupsProps) {
+// Centralized so the model pickers stay consistent.
+export function ModelOptionGroups({
+  modelGroups,
+  getOptionValue,
+  openCodeAvailability,
+  selectedModel,
+}: ModelOptionGroupsProps) {
   return (
     <>
       {modelGroups.map((group) => {
@@ -99,6 +107,7 @@ export function ModelOptionGroups({ modelGroups, openCodeAvailability, selectedM
             {models.map((model) => (
               <ModelSelectItem
                 key={model}
+                value={getOptionValue ? getOptionValue(group, model) : model}
                 model={model}
                 isOpenCode={isOpenCode}
                 availabilityById={openCodeAvailability}
@@ -134,6 +143,7 @@ export function FlatModelOptions({
         .map((model) => (
           <ModelSelectItem
             key={model}
+            value={model}
             model={model}
             isOpenCode={isOpenCode}
             availabilityById={openCodeAvailability}
