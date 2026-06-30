@@ -7087,34 +7087,6 @@ func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, ses
 	return false, nil
 }
 
-func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
-	if o == nil || o.provider == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
-		return nil
-	}
-	workDir := strings.TrimSpace(sandbox.WorkDir)
-	if workDir == "" {
-		workDir = "."
-	}
-	patchPath := path.Join(workDir, ".143-read-only-review-revert.patch")
-	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(diff)); err != nil {
-		return fmt.Errorf("write revert patch: %w", err)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd := fmt.Sprintf("cd '%s' && git apply -R --whitespace=nowarn '%s'; status=$?; rm -f '%s'; exit $status",
-		shellEscapeSingleQuote(workDir),
-		shellEscapeSingleQuote(patchPath),
-		shellEscapeSingleQuote(patchPath),
-	)
-	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
-	if err != nil {
-		return fmt.Errorf("reverse apply read-only diff: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("reverse apply read-only diff exited %d: %s", exitCode, strings.TrimSpace(stderr.String()))
-	}
-	return nil
-}
-
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the
 // "normal completion" paths (RunAgent / ContinueSession success branches)
 // need: skip the snapshot when result.ExitCode != 0. That's the signal that
