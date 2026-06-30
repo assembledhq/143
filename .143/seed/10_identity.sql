@@ -13,8 +13,8 @@ VALUES
   (
     '00000000-0000-4000-a000-000000000002'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
-    'preview-admin@143.dev',
-    'Preview Admin',
+    'ada.lovelace@143.dev',
+    'Ada Lovelace',
     'admin',
     -- bcrypt hash of "preview" (cost 10)
     '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
@@ -23,8 +23,8 @@ VALUES
   (
     '00000000-0000-4000-a000-000000000003'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
-    'preview-member@143.dev',
-    'Preview Member',
+    'grace.hopper@143.dev',
+    'Grace Hopper',
     'member',
     -- bcrypt hash of "preview" (cost 10)
     '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
@@ -33,8 +33,8 @@ VALUES
   (
     '00000000-0000-4000-a000-000000000004'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
-    'preview-builder@143.dev',
-    'Preview Builder',
+    'alan.turing@143.dev',
+    'Alan Turing',
     'builder',
     -- bcrypt hash of "preview" (cost 10)
     '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
@@ -43,8 +43,8 @@ VALUES
   (
     '00000000-0000-4000-a000-000000000005'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
-    'preview-viewer@143.dev',
-    'Preview Viewer',
+    'dennis.ritchie@143.dev',
+    'Dennis Ritchie',
     'viewer',
     -- bcrypt hash of "preview" (cost 10)
     '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',

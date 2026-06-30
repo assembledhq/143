@@ -18,16 +18,16 @@ This guide covers how to add preview support to a repo. For the underlying archi
 
 **Demo credentials** (the admin login is shown on the login page when `DEMO_MODE=true`):
 
-- Email: `preview-admin@143.dev`
+- Email: `ada.lovelace@143.dev`
 - Password: `preview`
 
 Additional seeded users use the same password:
 
 | Email | Role |
 |---|---|
-| `preview-member@143.dev` | `member` |
-| `preview-builder@143.dev` | `builder` |
-| `preview-viewer@143.dev` | `viewer` |
+| `grace.hopper@143.dev` | `member` |
+| `alan.turing@143.dev` | `builder` |
+| `dennis.ritchie@143.dev` | `viewer` |
 
 The banner renders whatever `DEMO_EMAIL` / `DEMO_PASSWORD` the server was started with (defaults match the values above and the seeded admin in `.143/seed/10_identity.sql`). If you override those env vars, regenerate the bcrypt hash in the seed in lockstep or the banner will point at credentials that don't log in.
 
