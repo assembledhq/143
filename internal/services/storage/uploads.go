@@ -135,13 +135,14 @@ func (s *S3UploadStore) Serve(w http.ResponseWriter, r *http.Request, key string
 	if out.ContentLength != nil {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", *out.ContentLength))
 	}
-	// Images display inline; other file types download as attachments.
+	// Safe raster images display inline; SVG and other file types download as attachments.
 	fileName := path.Base(cleanKey)
-	if out.ContentType != nil && strings.HasPrefix(*out.ContentType, "image/") {
+	if out.ContentType != nil && inlineUploadContentType(*out.ContentType) {
 		w.Header().Set("Content-Disposition", "inline")
 	} else {
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fileName))
 	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "private, max-age=86400")
 	if _, err := io.Copy(w, out.Body); err != nil {
 		log.Printf("upload serve: streaming %s: %v", key, err)
@@ -197,6 +198,13 @@ func (f *FileUploadStore) Serve(w http.ResponseWriter, r *http.Request, key stri
 		return
 	}
 	filePath := filepath.Join(f.baseDir, filepath.FromSlash(cleanKey))
+	// http.ServeFile derives Content-Type from the (attacker-controlled) file
+	// extension, so anything that isn't a known-safe inline image — SVG, HTML,
+	// etc. — must download as an attachment to avoid stored XSS in this origin.
+	if !inlineUploadContentType(mime.TypeByExtension(path.Ext(cleanKey))) {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", path.Base(cleanKey)))
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeFile(w, r, filePath)
 }
 
@@ -235,4 +243,9 @@ func validateUploadKey(key string) (string, error) {
 		}
 	}
 	return path.Clean(key), nil
+}
+
+func inlineUploadContentType(contentType string) bool {
+	baseType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	return strings.HasPrefix(baseType, "image/") && baseType != "image/svg+xml"
 }

@@ -42,6 +42,14 @@ func setupWebhookHandler(t *testing.T, mock pgxmock.PgxPoolIface, secret string)
 	return NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, nil)
 }
 
+func TestWebhook_VerifySignature_ProductionRequiresConfiguredSecret(t *testing.T) {
+	t.Parallel()
+
+	handler := &WebhookHandler{cfg: &config.Config{Env: "production"}}
+
+	require.False(t, handler.verifySignature([]byte(`{"ok":true}`), ""), "production webhooks should fail closed when no secret is configured")
+}
+
 func TestWebhook_HandleGitHub(t *testing.T) {
 	t.Parallel()
 
