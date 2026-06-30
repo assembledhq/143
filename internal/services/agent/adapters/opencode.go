@@ -3,9 +3,13 @@
 package adapters
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -65,7 +69,11 @@ func (a *OpenCodeAdapter) PreparePrompt(ctx context.Context, input *agent.AgentI
 
 // Execute runs the OpenCode CLI inside the sandbox and streams output.
 func (a *OpenCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-	return runStreamingAgent(ctx, openCodeStreamingConfig, a.logger, sandbox, prompt, logCh)
+	result, err := runStreamingAgent(ctx, openCodeStreamingConfig, a.logger, sandbox, prompt, logCh)
+	if err != nil || (result != nil && (result.ExitCode != 0 || result.Error != "")) {
+		captureOpenCodeFailureLogs(ctx, sandbox, a.logger, logCh)
+	}
+	return result, err
 }
 
 var openCodeStreamingConfig = streamingAgentConfig{
@@ -106,7 +114,7 @@ type openCodeStreamEvent struct {
 	Input          json.RawMessage `json:"input,omitempty"`
 	Output         string          `json:"output,omitempty"`
 	Result         json.RawMessage `json:"result,omitempty"`
-	Error          string          `json:"error,omitempty"`
+	Error          json.RawMessage `json:"error,omitempty"`
 	ID             string          `json:"id,omitempty"`
 	SessionID      string          `json:"session_id,omitempty"`
 	SessionIDCamel string          `json:"sessionID,omitempty"`
@@ -188,7 +196,10 @@ func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<
 		}
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "info", Message: firstNonEmpty(event.Content, event.Message)}
 	case "error":
-		result.Error = firstNonEmpty(event.Error, event.Message, event.Content, "unknown error")
+		if sessionID := firstNonEmpty(event.SessionID, event.SessionIDCamel, event.ID); sessionID != "" {
+			result.AgentSessionID = sessionID
+		}
+		result.Error = firstNonEmpty(openCodeEventErrorMessage(event), event.Message, event.Content, "unknown error")
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "error", Message: result.Error}
 	case "permission", "permission_request":
 		result.Error = openCodePermissionError(event)
@@ -199,7 +210,7 @@ func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<
 }
 
 func openCodePermissionError(event openCodeStreamEvent) string {
-	message := firstNonEmpty(event.Error, event.Message, event.Content)
+	message := firstNonEmpty(openCodeEventErrorMessage(event), event.Message, event.Content)
 	if message != "" {
 		return "OpenCode requested interactive permission: " + message
 	}
@@ -207,4 +218,194 @@ func openCodePermissionError(event openCodeStreamEvent) string {
 		return "OpenCode requested interactive permission for " + tool
 	}
 	return "OpenCode requested interactive permission"
+}
+
+type openCodeErrorPayload struct {
+	Name    string `json:"name"`
+	Message string `json:"message"`
+	Ref     string `json:"ref"`
+	Data    struct {
+		Message string `json:"message"`
+		Ref     string `json:"ref"`
+	} `json:"data"`
+}
+
+func openCodeEventErrorMessage(event openCodeStreamEvent) string {
+	raw := bytes.TrimSpace(event.Error)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+
+	var payload openCodeErrorPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return string(raw)
+	}
+
+	name := strings.TrimSpace(payload.Name)
+	message := strings.TrimSpace(firstNonEmpty(payload.Message, payload.Data.Message))
+	ref := strings.TrimSpace(firstNonEmpty(payload.Ref, payload.Data.Ref))
+
+	switch {
+	case name != "" && message != "":
+		text = name + ": " + message
+	case message != "":
+		text = message
+	case name != "":
+		text = name
+	default:
+		text = string(raw)
+	}
+	if ref != "" {
+		text += " (ref: " + ref + ")"
+	}
+	return text
+}
+
+const (
+	openCodeFailureLogMaxFiles = 3
+	openCodeFailureLogMaxBytes = 64 * 1024
+)
+
+var (
+	openCodeBearerSecretPattern         = regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+`)
+	openCodeQuotedSecretPattern         = regexp.MustCompile(`(?i)(["'])([A-Za-z0-9_.-]*(?:api[_-]?key|authorization|token|secret|password)[A-Za-z0-9_.-]*)(["']\s*:\s*["'])[^"']*(["'])`)
+	openCodeAssignedQuotedSecretPattern = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|authorization|token|secret|password)[A-Za-z0-9_.-]*)(\s*[:=]\s*["'])[^"']*(["'])`)
+	openCodeNamedSecretPattern          = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|authorization|token|secret|password)[A-Za-z0-9_.-]*)(\s*[:=]\s*)[^"'\s,}]+`)
+	openCodeSecretPatterns              = []*regexp.Regexp{
+		regexp.MustCompile(`sk-or-v1-[A-Za-z0-9_-]+`),
+		regexp.MustCompile(`sk-or-[A-Za-z0-9_-]+`),
+		regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]+`),
+		regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`),
+		regexp.MustCompile(`AIza[0-9A-Za-z_-]{20,}`),
+		regexp.MustCompile(`ghp_[A-Za-z0-9_]{20,}`),
+		regexp.MustCompile(`github_pat_[A-Za-z0-9_]+`),
+		regexp.MustCompile(`xai-[A-Za-z0-9_-]{20,}`),
+	}
+)
+
+func captureOpenCodeFailureLogs(ctx context.Context, sandbox *agent.Sandbox, logger zerolog.Logger, logCh chan<- agent.LogEntry) {
+	provider := agent.SandboxProviderFromContext(ctx)
+	if provider == nil || sandbox == nil || strings.TrimSpace(sandbox.HomeDir) == "" {
+		return
+	}
+
+	logPaths, err := listOpenCodeFailureLogPaths(ctx, provider, sandbox)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to list OpenCode failure logs")
+		return
+	}
+	for _, logPath := range logPaths {
+		raw, originalBytes, truncated, err := readOpenCodeFailureLogTail(ctx, provider, sandbox, logPath)
+		if err != nil {
+			logger.Warn().Err(err).Str("path", logPath).Msg("failed to read OpenCode failure log")
+			continue
+		}
+
+		content := strings.TrimSpace(redactOpenCodeDiagnosticLog(string(raw)))
+		if content == "" {
+			content = "<empty OpenCode log file>"
+		}
+
+		scope := "full"
+		if truncated {
+			scope = fmt.Sprintf("last %d bytes", openCodeFailureLogMaxBytes)
+		}
+
+		logCh <- agent.LogEntry{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   fmt.Sprintf("OpenCode failure log (%s, %s):\n%s", logPath, scope, content),
+			Metadata: map[string]interface{}{
+				"source":         "opencode_log",
+				"diagnostic":     "opencode_failure_log",
+				"path":           logPath,
+				"truncated":      truncated,
+				"original_bytes": originalBytes,
+			},
+		}
+	}
+}
+
+func readOpenCodeFailureLogTail(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox, logPath string) ([]byte, int, bool, error) {
+	escapedLogPath := shellEscapeSingle(logPath)
+
+	var sizeStdout, sizeStderr bytes.Buffer
+	sizeCmd := fmt.Sprintf("wc -c < '%s'", escapedLogPath)
+	sizeExit, err := provider.Exec(ctx, sandbox, sizeCmd, &sizeStdout, &sizeStderr)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("stat OpenCode log file: %w", err)
+	}
+	if sizeExit != 0 {
+		return nil, 0, false, fmt.Errorf("stat OpenCode log file exited with code %d: %s", sizeExit, strings.TrimSpace(sizeStderr.String()))
+	}
+
+	originalBytes, err := strconv.Atoi(strings.TrimSpace(sizeStdout.String()))
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("parse OpenCode log file size %q: %w", strings.TrimSpace(sizeStdout.String()), err)
+	}
+
+	var tailStdout, tailStderr bytes.Buffer
+	tailCmd := fmt.Sprintf("tail -c %d '%s'", openCodeFailureLogMaxBytes, escapedLogPath)
+	tailExit, err := provider.Exec(ctx, sandbox, tailCmd, &tailStdout, &tailStderr)
+	if err != nil {
+		return nil, originalBytes, false, fmt.Errorf("tail OpenCode log file: %w", err)
+	}
+	if tailExit != 0 {
+		return nil, originalBytes, false, fmt.Errorf("tail OpenCode log file exited with code %d: %s", tailExit, strings.TrimSpace(tailStderr.String()))
+	}
+
+	return tailStdout.Bytes(), originalBytes, originalBytes > openCodeFailureLogMaxBytes, nil
+}
+
+func listOpenCodeFailureLogPaths(ctx context.Context, provider agent.SandboxProvider, sandbox *agent.Sandbox) ([]string, error) {
+	logDir := strings.TrimRight(sandbox.HomeDir, "/") + "/.local/share/opencode/log"
+	escapedLogDir := shellEscapeSingle(logDir)
+	cmd := fmt.Sprintf(
+		"if [ -d '%s' ]; then find '%s' -maxdepth 1 -type f -printf '%%T@ %%p\\n' 2>/dev/null | sort -nr | head -n %d | cut -d' ' -f2-; fi",
+		escapedLogDir,
+		escapedLogDir,
+		openCodeFailureLogMaxFiles,
+	)
+
+	var stdout, stderr bytes.Buffer
+	exitCode, err := provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return nil, fmt.Errorf("discover OpenCode log files: %w", err)
+	}
+	if exitCode != 0 {
+		return nil, fmt.Errorf("discover OpenCode log files exited with code %d: %s", exitCode, strings.TrimSpace(stderr.String()))
+	}
+
+	var paths []string
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		path := strings.TrimSpace(line)
+		if path == "" {
+			continue
+		}
+		if path != logDir && !strings.HasPrefix(path, logDir+"/") {
+			continue
+		}
+		paths = append(paths, path)
+		if len(paths) >= openCodeFailureLogMaxFiles {
+			break
+		}
+	}
+	return paths, nil
+}
+
+func redactOpenCodeDiagnosticLog(input string) string {
+	output := strings.ReplaceAll(input, "\x00", "")
+	output = openCodeBearerSecretPattern.ReplaceAllString(output, "Bearer [REDACTED]")
+	output = openCodeQuotedSecretPattern.ReplaceAllString(output, "${1}${2}${3}[REDACTED]${4}")
+	output = openCodeAssignedQuotedSecretPattern.ReplaceAllString(output, "${1}${2}[REDACTED]${3}")
+	output = openCodeNamedSecretPattern.ReplaceAllString(output, "${1}${2}[REDACTED]")
+	for _, pattern := range openCodeSecretPatterns {
+		output = pattern.ReplaceAllString(output, "[REDACTED]")
+	}
+	return output
 }
