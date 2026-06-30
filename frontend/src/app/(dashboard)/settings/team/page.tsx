@@ -528,34 +528,13 @@ export default function TeamSettingsPage() {
                 }}
               >
                 <TabsList className="w-full">
-                  <TabsTrigger value="email" className="flex-1">
-                    Email
-                  </TabsTrigger>
                   <TabsTrigger value="github" className="flex-1">
                     GitHub username
                   </TabsTrigger>
+                  <TabsTrigger value="email" className="flex-1">
+                    Email
+                  </TabsTrigger>
                 </TabsList>
-                <TabsContent value="email" className="mt-3">
-                  <div className="space-y-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="invite-email">Email</Label>
-                      <Input
-                        id="invite-email"
-                        type="email"
-                        placeholder="colleague@company.com"
-                        value={inviteEmail}
-                        onChange={(e) => {
-                          setInviteEmail(e.target.value);
-                          setInviteError("");
-                        }}
-                        className="h-9"
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        The invitee will accept with this email address.
-                      </p>
-                    </div>
-                  </div>
-                </TabsContent>
                 <TabsContent value="github" className="mt-3">
                   <div className="space-y-3">
                     <div className="space-y-1.5">
@@ -660,6 +639,27 @@ export default function TeamSettingsPage() {
                       />
                       <p className="text-xs text-muted-foreground">
                         We&apos;ll send the invite link here, but acceptance still requires the matching GitHub account.
+                      </p>
+                    </div>
+                  </div>
+                </TabsContent>
+                <TabsContent value="email" className="mt-3">
+                  <div className="space-y-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="invite-email">Email</Label>
+                      <Input
+                        id="invite-email"
+                        type="email"
+                        placeholder="colleague@company.com"
+                        value={inviteEmail}
+                        onChange={(e) => {
+                          setInviteEmail(e.target.value);
+                          setInviteError("");
+                        }}
+                        className="h-9"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        The invitee will accept with this email address.
                       </p>
                     </div>
                   </div>
