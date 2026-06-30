@@ -931,6 +931,90 @@ func TestValidateConfig_RejectsReservedPreviewModeEnv(t *testing.T) {
 	}
 }
 
+// TestValidateConfig_RejectsInvalidEnvKeyNames covers the env-var KEY validation:
+// the key (not just the value) is interpolated into the preview build/run shell
+// command, so a key containing shell metacharacters or '=' would be a command
+// injection. Keys must match isValidSecretEnvName, mirroring the secrets[].Env
+// check.
+func TestValidateConfig_RejectsInvalidEnvKeyNames(t *testing.T) {
+	t.Parallel()
+
+	base := func() models.PreviewConfig {
+		return models.PreviewConfig{
+			Primary: "web",
+			Services: map[string]models.ServiceConfig{
+				"web": {
+					Command: []string{"npm", "start"},
+					Port:    3000,
+					Ready:   models.ReadinessProbe{HTTPPath: "/"},
+				},
+			},
+			Infrastructure: map[string]models.InfrastructureConfig{},
+			Credentials:    models.CredentialConfig{Mode: "none"},
+			Network:        models.NetworkConfig{Mode: "managed"},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*models.PreviewConfig)
+		wantErrSub string
+	}{
+		{
+			name: "service env key with command substitution",
+			mutate: func(cfg *models.PreviewConfig) {
+				svc := cfg.Services["web"]
+				svc.Env = map[string]string{"X=$(id) Y": "v"}
+				cfg.Services["web"] = svc
+			},
+			wantErrSub: `service "web": env "X=$(id) Y" is not a valid environment variable name`,
+		},
+		{
+			name: "service env key with space",
+			mutate: func(cfg *models.PreviewConfig) {
+				svc := cfg.Services["web"]
+				svc.Env = map[string]string{"BAD KEY": "v"}
+				cfg.Services["web"] = svc
+			},
+			wantErrSub: `service "web": env "BAD KEY" is not a valid environment variable name`,
+		},
+		{
+			name: "infrastructure inject_env key with metacharacters",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Infrastructure["db"] = models.InfrastructureConfig{
+					Template:  "postgres-17",
+					InjectEnv: map[string]string{"FOO;rm -rf /": "v"},
+				}
+			},
+			wantErrSub: `infrastructure "db": inject_env "FOO;rm -rf /" is not a valid environment variable name`,
+		},
+		{
+			name: "credential env key invalid",
+			mutate: func(cfg *models.PreviewConfig) {
+				cfg.Credentials = models.CredentialConfig{
+					Mode: "managed_env",
+					Env:  []string{"1INVALID"},
+				}
+			},
+			wantErrSub: `credentials: env "1INVALID" is not a valid environment variable name`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := base()
+			tt.mutate(&cfg)
+
+			errs := ValidateConfig(&cfg)
+
+			require.NotEmpty(t, errs, "invalid env key names should fail preview config validation")
+			require.Contains(t, strings.Join(errs, "\n"), tt.wantErrSub, "validation error should identify the invalid env key")
+		})
+	}
+}
+
 func TestValidateConfig_Resources(t *testing.T) {
 	t.Parallel()
 
