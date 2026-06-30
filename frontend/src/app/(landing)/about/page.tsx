@@ -62,25 +62,31 @@ export default function AboutPage() {
 
           <div className={bodyClass}>
             <p>
-              I hate when people say &ldquo;X% of our code is written by
-              AI.&rdquo; Code volume, especially these days, is a bad metric.
-              What I care about when I&apos;m on a team is whether we&apos;re building a better
-              product that is genuinely useful to our customers. That is a much
-              harder thing to measure, but I think it is the right one.
+              The best person to understand a problem really deeply usually isn&apos;t an
+              engineer, it&apos;s usually someone who&apos;s using the product day in and day out
+              with customers. Or it&apos;s the customer support person who sees questions all day
+              about why a particular feature isn&apos;t working. While engineers have historically
+              been the only people who could fix things, that&apos;s not true anymore.
             </p>
-
             <p>
-              I don&apos;t want to write AI slop. But I do want and need our team to move faster
-              and compete in the market. So we set out to build a system that
-              speeds up how quickly we can ship code meant for
-              production while keeping the codebase healthy.
+              Now with coding agents, non-engineers can fix things too and tend to be closer to the
+              problems that users run into on a daily basis. Except the tools built on top of these
+              agents weren&apos;t made for that person. They&apos;re built for engineers: a terminal
+              setup that assumes you already know what a repo is. And the companies selling them have
+              no reason to change that: their business is getting your engineers onto their models
+              and billing you by the token. That&apos;s why we built 143.
             </p>
 
             <section className="space-y-3 pt-2">
               <h2 className={headingClass}>Where it started</h2>
               <div className="space-y-6">
                 <p>
-                  143.dev is the internal tool we built at{" "}
+                  At Assembled, we saw this firsthand: our support and product teams kept surfacing
+                  fixes that engineers never had time for. Coding agents could have handled many of
+                  them, if the tooling didn&apos;t assume you lived in a terminal.
+                </p>
+                <p>
+                  143.dev is the internal coding agent infrastructure we built at{" "}
                   <a
                     href="https://www.assembled.com"
                     target="_blank"
@@ -89,19 +95,9 @@ export default function AboutPage() {
                   >
                     Assembled
                   </a>{" "}
-                  to help ourselves build better software. We wanted coding
+                  to help our non-engineers with this problem (while also helping our engineers build better software). We wanted coding
                   agents to help with real product work, not just demos and
-                  internal tools. But even heading into 2026, we weren&apos;t
-                  seeing the velocity gains we expected. Other teams seemed to be
-                  getting huge leverage from fresh repos, while we were still
-                  losing time to setup, context, CI, review, and handoff.
-                </p>
-
-                <p>
-                  We kept asking what we were doing wrong. After talking to a lot
-                  of other teams, the answer got much clearer: this was a shared
-                  infrastructure problem, not just an individual prompting
-                  problem.
+                  internal tools. 
                 </p>
               </div>
             </section>
@@ -110,34 +106,37 @@ export default function AboutPage() {
               <h2 className={headingClass}>What we built</h2>
               <div className="space-y-6">
                 <p>
-                  So we started with a small tiger team. We cleaned up our
+                  We started with a small tiger team that cleaned up our
                   instructions, invested more in CI/CD, built agent hooks, and
                   made the agent environment less fragile. All of that helped,
                   but it also made the bigger issue obvious: we needed a system
                   that made this work shared across the team as opposed to being
-                  trapped inside one engineer&apos;s terminal.
+                  trapped inside each engineer&apos;s terminal.
                 </p>
 
                 <p>
-                  That is why we built 143.dev. We were inspired by internal
+                  We were inspired by internal
                   systems like Stripe Minions and Ramp Inspect, but those were
                   never available to the public. We wanted something open source
                   that other teams could use, adapt, and improve.
                 </p>
 
-                <p>We built around a few convictions:</p>
+                <p>
+                  We built 143 so the person who spots the bug doesn&apos;t need to become an
+                  engineer to fix it. That meant:
+                </p>
 
                 <ul className="list-disc space-y-2 pl-5">
                   <li>
-                    Automations should be visible to the team, not hidden on one
-                    person&apos;s laptop.
+                    Automations shouldn&apos;t be hidden on one engineer&apos;s laptop, so anyone on
+                    the team can see what&apos;s running and what changed.
                   </li>
                   <li>
                     Teams should be able to swap out intelligence and harnesses
                     as coding agents and models improve.
                   </li>
                   <li>
-                    Hooks should make it natural to start work automatically from
+                    Shared context should make it natural to start work automatically from
                     Sentry issues, Linear assignments, PR comments, or scheduled
                     checks.
                   </li>
@@ -157,6 +156,10 @@ export default function AboutPage() {
 
             <section className="space-y-3 pt-2">
               <h2 className={headingClass}>Open source from day one</h2>
+              <p>
+                The same idea that you shouldn&apos;t have to be an insider to contribute is why we
+                open-sourced 143.
+              </p>
               <p>
                 I owe a lot of my career to early open-source work on Ruby on
                 Rails. That is where I learned software fundamentals from people
