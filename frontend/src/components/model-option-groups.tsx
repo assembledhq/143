@@ -46,7 +46,7 @@ function ModelSelectItem({
     <SelectItem value={model} disabled={disabled}>
       <span className="flex items-center gap-1.5">
         <span>{modelOptionLabel(model)}</span>
-        {trailing ? <span className="text-[0.7rem] text-muted-foreground">· {trailing}</span> : null}
+        {trailing ? <span className="text-xs text-muted-foreground">· {trailing}</span> : null}
       </span>
     </SelectItem>
   );
