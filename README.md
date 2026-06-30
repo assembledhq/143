@@ -7,7 +7,7 @@ The open-source platform where your whole team builds software together.
 [143.dev](https://www.143.dev) · [Getting started](#getting-started) · [Docs](docs/public/index.mdx) · [Architecture](docs/design/overall.md) · [Self-hosting](docs/self-hosting/README.md)
 
 <p align="center">
-  <img src="frontend/public/product/product-session-overview.png" alt="A 143 session: an agent working from an issue, with the diff and PR status alongside the conversation" width="900">
+  <img src="frontend/public/product/product-review-diff.png" alt="Reviewing an agent's change in 143: a code diff with the changed-files list and review controls" width="900">
 </p>
 
 ## What is this?
