@@ -148,6 +148,7 @@ type SidebarBodyProps = {
   pathname: string;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
+  canCreateSession: boolean;
   onNavigate?: () => void;
   onLogout: () => void;
 };
@@ -158,6 +159,7 @@ function SidebarBody({
   pathname,
   onPaletteOpen,
   onCreateSession,
+  canCreateSession,
   onNavigate,
   onLogout,
 }: SidebarBodyProps) {
@@ -214,23 +216,25 @@ function SidebarBody({
                   Search <Kbd variant="inverted">⌘K</Kbd>
                 </TooltipContent>
               </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={onCreateSession}
-                    className={cn(
-                      iconBtnClasses,
-                      "rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
-                    )}
-                    aria-label="New session"
-                  >
-                    <PenSquare className={iconSize} />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" sideOffset={4}>New session</TooltipContent>
-              </Tooltip>
+              {canCreateSession && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={onCreateSession}
+                      className={cn(
+                        iconBtnClasses,
+                        "rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+                      )}
+                      aria-label="New session"
+                    >
+                      <PenSquare className={iconSize} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" sideOffset={4}>New session</TooltipContent>
+                </Tooltip>
+              )}
             </div>
           </TooltipProvider>
         )}
@@ -332,6 +336,7 @@ type CompactSidebarRailProps = {
   pathname: string;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
+  canCreateSession: boolean;
   onLogout: () => void;
 };
 
@@ -340,6 +345,7 @@ function CompactSidebarRail({
   pathname,
   onPaletteOpen,
   onCreateSession,
+  canCreateSession,
   onLogout,
 }: CompactSidebarRailProps) {
   return (
@@ -366,20 +372,22 @@ function CompactSidebarRail({
               Search <Kbd variant="inverted">⌘K</Kbd>
             </TooltipContent>
           </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onCreateSession}
-                className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
-                aria-label="New session"
-              >
-                <PenSquare className="h-4 w-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={8}>New session</TooltipContent>
-          </Tooltip>
+          {canCreateSession && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={onCreateSession}
+                  className="h-7 w-10 rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"
+                  aria-label="New session"
+                >
+                  <PenSquare className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={8}>New session</TooltipContent>
+            </Tooltip>
+          )}
         </div>
 
         <nav className="mt-2 flex flex-1 flex-col items-center gap-0.5">
@@ -493,6 +501,7 @@ type MobileTopBarProps = {
   onOpenMenu: () => void;
   onPaletteOpen: () => void;
   onCreateSession: () => void;
+  canCreateSession: boolean;
   menuOpen: boolean;
 };
 
@@ -521,6 +530,7 @@ function MobileTopBar({
   onOpenMenu,
   onPaletteOpen,
   onCreateSession,
+  canCreateSession,
   menuOpen,
 }: MobileTopBarProps) {
   return (
@@ -545,15 +555,17 @@ function MobileTopBar({
       >
         <Search className="h-5 w-5" />
       </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        onClick={onCreateSession}
-        aria-label="New session"
-        className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
-      >
-        <PenSquare className="h-5 w-5" />
-      </Button>
+      {canCreateSession && (
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onCreateSession}
+          aria-label="New session"
+          className="h-11 w-11 rounded-md text-muted-foreground hover:text-foreground hover:bg-sidebar-accent"
+        >
+          <PenSquare className="h-5 w-5" />
+        </Button>
+      )}
     </header>
   );
 }
@@ -618,9 +630,10 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     setMobileMenuOpen(false);
   }, []);
   const handleCreateSessionOpen = useCallback(() => {
+    if (user?.role === "viewer") return;
     setCreateOpen(true);
     setMobileMenuOpen(false);
-  }, []);
+  }, [user?.role]);
   const handleOpenMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
   const handleCloseMobileMenu = useCallback(() => setMobileMenuOpen(false), []);
 
@@ -760,6 +773,8 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     return null;
   }
 
+  const canCreateSession = user.role !== "viewer";
+
   return (
     <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
       {/* Desktop sidebar (md and up) */}
@@ -768,6 +783,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         pathname={pathname}
         onPaletteOpen={handlePaletteOpen}
         onCreateSession={handleCreateSessionOpen}
+        canCreateSession={canCreateSession}
         onLogout={logout}
       />
       <aside
@@ -783,6 +799,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           pathname={pathname}
           onPaletteOpen={handlePaletteOpen}
           onCreateSession={handleCreateSessionOpen}
+          canCreateSession={canCreateSession}
           onLogout={logout}
         />
       </aside>
@@ -805,6 +822,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             pathname={pathname}
             onPaletteOpen={handlePaletteOpen}
             onCreateSession={handleCreateSessionOpen}
+            canCreateSession={canCreateSession}
             onNavigate={handleCloseMobileMenu}
             onLogout={logout}
           />
@@ -818,6 +836,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
             onOpenMenu={handleOpenMobileMenu}
             onPaletteOpen={handlePaletteOpen}
             onCreateSession={handleCreateSessionOpen}
+            canCreateSession={canCreateSession}
           />
         ) : null}
         <main className="flex-1 overflow-auto overscroll-contain bg-background relative flex flex-col">
@@ -835,7 +854,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           logout={logout}
         />
       )}
-      <CreateSessionDialog open={createOpen} onOpenChange={setCreateOpen} />
+      {canCreateSession && <CreateSessionDialog open={createOpen} onOpenChange={setCreateOpen} />}
     </div>
   );
 }

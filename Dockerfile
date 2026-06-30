@@ -13,6 +13,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
     CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
+    CGO_ENABLED=0 go build -o /bin/demo-seed ./cmd/demo-seed && \
     CGO_ENABLED=0 go build -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
     CGO_ENABLED=0 go build -o /bin/worker-deployctl ./cmd/worker-deployctl
 
@@ -50,9 +51,11 @@ RUN apt-get update && apt-get install -y ca-certificates wget libheif-examples &
 COPY --from=go-builder /bin/server /bin/server
 COPY --from=go-builder /bin/session-executor /bin/session-executor
 COPY --from=go-builder /bin/migrate /bin/migrate
+COPY --from=go-builder /bin/demo-seed /bin/demo-seed
 COPY --from=go-builder /bin/deploy-guardrail /bin/deploy-guardrail
 COPY --from=go-builder /bin/worker-deployctl /bin/worker-deployctl
 COPY --from=go-builder /app/migrations /migrations
+COPY --from=go-builder /app/.143/seed /demo-seed
 COPY --from=go-builder /opt/143/cli /opt/143/cli
 
 # Copy entrypoint. The encrypted production env bundle is NOT baked into

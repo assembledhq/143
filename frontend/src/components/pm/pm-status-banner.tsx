@@ -11,9 +11,10 @@ import { AgentStatusBar, deriveAgentStatus } from "@/components/autopilot/agent-
 
 interface PMStatusBannerProps {
   hasActivePlanSession: boolean;
+  canMutate?: boolean;
 }
 
-export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
+export function PMStatusBanner({ hasActivePlanSession, canMutate = true }: PMStatusBannerProps) {
   const { data: statusData } = useQuery({
     queryKey: ["pm", "status"],
     queryFn: () => api.pm.status(),
@@ -32,22 +33,26 @@ export function PMStatusBanner({ hasActivePlanSession }: PMStatusBannerProps) {
         pmStatus={pmStatus}
         agentStatus={agentStatus}
       >
-        <Button size="sm" variant="outline" className="h-7 text-xs" asChild>
-          <Link href="/sessions/new">
-            <Plus className="mr-1 h-3 w-3" />
-            Manual Session
-          </Link>
-        </Button>
-        <Button
-          size="sm"
-          className="h-7 text-xs"
-          onClick={handleAnalyze}
-          disabled={isPending || isAnalyzing}
-          title="Run the PM agent now without waiting for the next scheduled run"
-        >
-          <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-          {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
-        </Button>
+        {canMutate && (
+          <>
+            <Button size="sm" variant="outline" className="h-7 text-xs" asChild>
+              <Link href="/sessions/new">
+                <Plus className="mr-1 h-3 w-3" />
+                Manual Session
+              </Link>
+            </Button>
+            <Button
+              size="sm"
+              className="h-7 text-xs"
+              onClick={handleAnalyze}
+              disabled={isPending || isAnalyzing}
+              title="Run the PM agent now without waiting for the next scheduled run"
+            >
+              <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
+              {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
+            </Button>
+          </>
+        )}
       </AgentStatusBar>
 
       {analyzeError && (

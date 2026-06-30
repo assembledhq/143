@@ -29,6 +29,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runCheck(ctx, args[1:], stdout, stderr)
 	case "apply":
 		return runApply(ctx, args[1:], stdout, stderr)
+	case "prune":
+		return runPrune(ctx, args[1:], stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, "unknown subcommand")
 		fmt.Fprintln(stderr)
@@ -96,11 +98,43 @@ func runApply(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
+func runPrune(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	databaseURL := fs.String("database-url", os.Getenv("DEMO_SEED_DATABASE_URL"), "demo database URL to prune")
+	maxAge := fs.Duration("max-age", 24*time.Hour, "delete volatile demo auth sessions older than this duration")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *databaseURL == "" {
+		fmt.Fprintln(stderr, "DEMO_SEED_DATABASE_URL or --database-url is required for demo-seed prune")
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "Pruning volatile demo state...")
+	pruned, err := demoseed.Prune(ctx, demoseed.PruneOptions{
+		DatabaseURL: *databaseURL,
+		MaxAge:      *maxAge,
+		Env: demoseed.Environment(
+			"ALLOW_DEMO_SEED_APPLY",
+			"DEMO_MODE",
+			"DEMO_SEED_ALLOW_PRODUCTION_URL",
+		),
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "demo seed prune failed: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Pruned %d volatile demo row(s).\n", pruned)
+	return 0
+}
+
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: demo-seed [check|apply]")
+	fmt.Fprintln(w, "Usage: demo-seed [check|apply|prune]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  check  creates a temporary database, runs migrations, applies .143/seed twice, and verifies safety/idempotency")
 	fmt.Fprintln(w, "  apply  migrates and applies .143/seed to an explicit demo database target")
+	fmt.Fprintln(w, "  prune  deletes old volatile state from an explicit demo database target")
 }
 
 func firstNonEmpty(values ...string) string {

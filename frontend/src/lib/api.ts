@@ -199,6 +199,8 @@ export const api = {
     },
     loginEmail: (email: string, password: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/login', { email, password }),
+    enterDemo: () =>
+      post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/demo'),
     register: (email: string, password: string, name: string, invitation?: string) =>
       post<import('./types').SingleResponse<import('./types').User>>('/api/v1/auth/register', { email, password, name, ...(invitation && { invitation }) }),
     claimInvitation: (token: string) =>
@@ -217,6 +219,9 @@ export const api = {
         '/api/v1/auth/email-verifications/confirm',
         { token },
       ),
+  },
+  demo: {
+    manifest: () => get<import('./types').SingleResponse<import('./types').DemoManifest>>('/api/v1/demo/manifest'),
   },
   organizations: {
     create: (name: string) =>

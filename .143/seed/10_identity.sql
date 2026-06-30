@@ -16,8 +16,7 @@ VALUES
     'preview-admin@143.dev',
     'Preview Admin',
     'admin',
-    -- bcrypt hash of "preview" (cost 10)
-    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    NULL,
     now()
   ),
   (
@@ -26,8 +25,7 @@ VALUES
     'preview-member@143.dev',
     'Preview Member',
     'member',
-    -- bcrypt hash of "preview" (cost 10)
-    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    NULL,
     now()
   ),
   (
@@ -36,8 +34,7 @@ VALUES
     'preview-builder@143.dev',
     'Preview Builder',
     'builder',
-    -- bcrypt hash of "preview" (cost 10)
-    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    NULL,
     now()
   ),
   (
@@ -46,8 +43,7 @@ VALUES
     'preview-viewer@143.dev',
     'Preview Viewer',
     'viewer',
-    -- bcrypt hash of "preview" (cost 10)
-    '$2y$10$MtyCwm3KVYgmLvAinVwMHO3c65omeHXqqyIqwlz9JXJ30.5V2fyAe',
+    NULL,
     now()
   )
 ON CONFLICT (id) DO UPDATE

@@ -52,8 +52,9 @@ export function ManualSessionCreatePageContent() {
   const togglePlanes = useCallback(() => {
     const next = !planesHidden;
     setPlanesHiddenOverride(next);
+    if (user?.role === "viewer") return;
     persistPlanesHidden(next);
-  }, [persistPlanesHidden, planesHidden]);
+  }, [persistPlanesHidden, planesHidden, user?.role]);
 
   return (
     <div className="relative flex h-full flex-col">

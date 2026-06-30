@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -184,6 +185,27 @@ func TestApplyPreflightsTargetBeforeMigrations(t *testing.T) {
 
 	require.ErrorIs(t, err, errUnsafeTarget, "Apply should return the target-safety preflight error")
 	require.Equal(t, []string{"read", "validate", "connect", "preflight"}, calls, "Apply should preflight the target before migrations or seed writes")
+}
+
+func TestPruneDeletesOldDemoAuthSessions(t *testing.T) {
+	t.Parallel()
+
+	db := &pruneSeedDB{}
+	rows, err := prune(context.Background(), PruneOptions{
+		DatabaseURL: "postgres://user:pass@localhost/demo",
+		MaxAge:      24 * time.Hour,
+		Env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
+	}, func(ctx context.Context, databaseURL string) (seedDB, error) {
+		require.Equal(t, "postgres://user:pass@localhost/demo", databaseURL, "Prune should connect to requested database")
+		return db, nil
+	})
+
+	require.NoError(t, err, "Prune should delete volatile demo rows")
+	require.Equal(t, int64(7), rows, "Prune should return deleted row count")
+	require.True(t, db.closed, "Prune should close the database connection")
+	require.Contains(t, db.execSQL, "DELETE FROM auth_sessions", "Prune should delete old auth sessions")
+	require.Equal(t, DemoOrgID, db.execArgs[0], "Prune should scope deletes to demo org")
+	require.IsType(t, time.Time{}, db.execArgs[1], "Prune should pass a cutoff timestamp")
 }
 
 func TestEnsureApplyTargetSafe(t *testing.T) {
@@ -423,4 +445,24 @@ type fakeRow struct{}
 
 func (fakeRow) Scan(...any) error {
 	return nil
+}
+
+type pruneSeedDB struct {
+	execSQL  string
+	execArgs []any
+	closed   bool
+}
+
+func (p *pruneSeedDB) Close() {
+	p.closed = true
+}
+
+func (p *pruneSeedDB) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	p.execSQL = sql
+	p.execArgs = args
+	return pgconn.NewCommandTag("DELETE 7"), nil
+}
+
+func (p *pruneSeedDB) QueryRow(context.Context, string, ...any) pgx.Row {
+	return fakeRow{}
 }
