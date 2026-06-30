@@ -7080,63 +7080,11 @@ func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, ses
 		return false, nil
 	}
 
-	message := "read-only review thread produced workspace changes"
-	if revertErr := o.revertReadOnlyReviewDiff(ctx, sandbox, diff); revertErr != nil {
-		message += "; automatic revert failed: " + revertErr.Error()
-		log.Warn().Err(revertErr).Str("thread_id", thread.ID.String()).Msg("failed to reverse read-only review thread diff")
-	}
-	category := "read_only_violation"
-	summary := "Read-only review blocked workspace changes"
-	threadResult := &models.SessionResult{
-		ResultSummary:   &summary,
-		Diff:            &diff,
-		Error:           &message,
-		FailureCategory: &category,
-	}
-	if o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateResult(ctx, session.OrgID, thread.ID, models.ThreadStatusFailed, threadResult); err != nil {
-			return true, fmt.Errorf("mark read-only review thread failed: %w", err)
-		}
-	}
-	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
-		fallbackStatus = models.SessionStatusIdle
-	}
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); err != nil {
-		return true, fmt.Errorf("restore session after read-only review violation: %w", err)
-	}
 	log.Warn().
 		Str("thread_id", thread.ID.String()).
 		Int("diff_bytes", len(diff)).
-		Msg("blocked read-only review thread workspace changes")
-	return true, nil
-}
-
-func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
-	if o == nil || o.provider == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
-		return nil
-	}
-	workDir := strings.TrimSpace(sandbox.WorkDir)
-	if workDir == "" {
-		workDir = "."
-	}
-	patchPath := path.Join(workDir, ".143-read-only-review-revert.patch")
-	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(diff)); err != nil {
-		return fmt.Errorf("write revert patch: %w", err)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd := fmt.Sprintf("cd '%s' && git apply -R --whitespace=nowarn '%s'; status=$?; rm -f '%s'; exit $status",
-		shellEscapeSingleQuote(workDir),
-		shellEscapeSingleQuote(patchPath),
-		shellEscapeSingleQuote(patchPath),
-	)
-	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
-	if err != nil {
-		return fmt.Errorf("reverse apply read-only diff: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("reverse apply read-only diff exited %d: %s", exitCode, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+		Msg("read-only review thread produced workspace changes; continuing")
+	return false, nil
 }
 
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the

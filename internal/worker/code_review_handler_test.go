@@ -305,12 +305,13 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	t.Parallel()
 
-	prompt := "Review PR #42 against policy version 3."
+	prompt := "/review"
 
-	require.Equal(t, "/review "+prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review")
+	require.Equal(t, "/review", codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil), "code review reviewer prompt should stay as the bare native review command")
+	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke only native /review")
 	require.Len(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), 1, "native reviewer command metadata should be persisted")
-	require.Equal(t, prompt, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)[0].Arguments, "native reviewer command should carry the review prompt as arguments")
-	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
+	require.Equal(t, "", codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)[0].Arguments, "native reviewer command should not carry extra review arguments")
+	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
@@ -394,6 +395,186 @@ func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *test
 
 	require.NoError(t, err, "read-only workspace changes should not invalidate a completed reviewer output")
 	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should parse output and mark the result completed")
+}
+
+func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	rawDiff := "diff --git a/internal/db/users.go b/internal/db/users.go"
+	failure := "read-only review thread produced workspace changes; automatic revert failed"
+	state := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:   codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReviewerIndex: 0,
+		ThreadID:      threadID.String(),
+		ReadOnly:      true,
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusIdle,
+				nil, 1, &now, nil, &rawDiff, &failure, stringPtr("read_only_violation"),
+				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleUser, "review this PR", nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusCompleted, &failure, state, now))
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policy := codeReviewPolicyRecordForTest(cfg)
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+
+	require.NoError(t, err, "idle read-only violations without assistant output should not fail reviewer results")
+	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should keep code review moving after a read-only violation")
+}
+
+func TestFailCodeReviewIfParentSessionTerminalFailsMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	failure := "This session was unable to start within the expected time."
+	reason := "parent code review session is terminal: failed: " + failure
+	decision := models.CodeReviewDecisionBlocked
+	acceptable := false
+	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusFailed, 0, nil, nil)
+	for i, col := range workerSessionColumns {
+		if col == "failure_explanation" {
+			sessionRow[i] = &failure
+			break
+		}
+	}
+
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+
+	terminal, err := failCodeReviewIfParentSessionTerminal(context.Background(), &Stores{
+		Sessions:    db.NewSessionStore(mock),
+		CodeReviews: db.NewCodeReviewStore(mock),
+	}, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, models.PullRequest{})
+
+	require.NoError(t, err, "terminal parent session should not return an error")
+	require.True(t, terminal, "terminal parent session should stop the code review job")
+	require.NoError(t, mock.ExpectationsWereMet(), "terminal parent guard should fail the code review metadata")
+}
+
+func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	findingID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := `Synthesis found one issue.
+::code-comment{title="[P2] Missing regression coverage" body="The parser behavior changed without a direct regression test." file="internal/worker/code_review_handler.go" start=42 priority=2}
+
+` + "```json" + `
+{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","risk_notes":["tests needed"]}
+` + "```"
+	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+		ThreadID: threadID.String(),
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
+				nil, 1, &now, nil, nil, nil, nil,
+				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, rawReview, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("INSERT INTO code_review_findings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(newCodeReviewFindingRows().
+			AddRow(findingID, orgID, sessionID, &resultID, "internal/worker/code_review_handler.go:42:42:missing regression coverage",
+				models.CodeReviewFindingSeverityMedium, models.CodeReviewFindingConfidenceHigh,
+				stringPtr("internal/worker/code_review_handler.go"), intPtr(42), intPtr(42), "Missing regression coverage",
+				"The parser behavior changed without a direct regression test.", false, nil, now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusCompleted, &rawReview, state, now))
+
+	policy := codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig())
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}})
+
+	require.NoError(t, err, "orchestrator harvest should persist directive-backed findings")
+	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should parse findings and mark the result completed")
 }
 
 type codeReviewDescriptionLLMStub struct {
@@ -608,6 +789,45 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "reviewer quorum 1 is below policy requirement 2",
+		},
+		{
+			name: "withholds approval when completed read-only reviewer has no usable output",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude", Status: models.CodeReviewAgentResultStatusCompleted},
+					{
+						Role:          models.CodeReviewAgentRoleReviewer,
+						AgentProvider: "codex",
+						Status:        models.CodeReviewAgentResultStatusCompleted,
+						StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+							ReadOnlyViolation: true,
+							Error:             "reviewer thread produced workspace changes without persisted assistant output",
+						}),
+					},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected:     models.CodeReviewDecisionNeedsHumanReview,
+			reason:       "reviewer quorum 1 is below policy requirement 2",
+			bodyContains: "codex produced no usable review output",
 		},
 		{
 			name: "withholds approval for fork pull requests when policy disallows forks",
@@ -935,6 +1155,15 @@ func newCodeReviewFindingRows() *pgxmock.Rows {
 		"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
 		"confidence", "path", "start_line", "end_line", "summary", "body",
 		"selected_for_inline", "github_comment_id", "created_at",
+	})
+}
+
+func newCodeReviewMetadataRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+		"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable",
+		"stale", "superseded_by_session_id", "review_output_key", "prompt_artifact_key",
+		"github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 	})
 }
 
