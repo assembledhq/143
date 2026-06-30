@@ -2,12 +2,14 @@
 
 import Image from "next/image";
 import { ShieldAlert } from "lucide-react";
+import { ReleaseStageBadge, type ReleaseStage } from "@/components/release-stage-badge";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 export interface CodingAuthProviderOption<T extends string> {
   key: T;
   label: string;
+  badge?: ReleaseStage;
   iconSrc?: string;
 }
 
@@ -53,7 +55,12 @@ export function CodingAuthProviderCards<T extends string>({
               <ShieldAlert className="h-4 w-4" aria-hidden="true" />
             )}
           </span>
-          <span className="font-medium text-sm">{option.label}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="font-medium text-sm">{option.label}</span>
+            {option.badge ? (
+              <ReleaseStageBadge stage={option.badge} decorative />
+            ) : null}
+          </span>
         </Label>
       ))}
     </RadioGroup>
