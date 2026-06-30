@@ -29,9 +29,9 @@ type OpenCodeRoute struct {
 	// NormalizedBackingProvider() equals this value.
 	Backing ProviderName
 	// PhysicalModelID is the route ID tracked by 143 (e.g.
-	// "openrouter/z-ai/glm-5.2" or "opencode/glm-5.2"). OpenRouter routes are
-	// converted to OpenCode's custom-model CLI form ("openrouter/~...") when
-	// building the sandbox runtime config.
+	// "openrouter/z-ai/glm-5.2" or "opencode/glm-5.2"). It is also the id passed
+	// to `opencode run --model`; for OpenRouter routes OpenCode forwards the
+	// "vendor/model" slug to OpenRouter as the API model id unchanged.
 	PhysicalModelID string
 	// USProviderList is the audited US-only OpenRouter inference-provider
 	// allowlist (only/order) pinned in the runtime config. Empty for non-OpenRouter

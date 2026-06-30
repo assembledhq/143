@@ -1372,8 +1372,9 @@ func openCodeRuntimeConfigContent(cfg models.OpenCodeConfig) string {
 // allowlist for an OpenRouter route. The allowlist is sourced from the logical
 // model registry (models.OpenCodeUSProviderList), the single source of truth;
 // see docs/design/implemented/95-opencode-agent-adapter.md and
-// docs/design/115-logical-models-and-route-resolution.md. The config key uses
-// OpenCode's "~upstream/provider-model" custom-model-key format.
+// docs/design/115-logical-models-and-route-resolution.md. The config key is the
+// upstream OpenRouter model slug (e.g. "z-ai/glm-5.2"); OpenCode forwards it to
+// OpenRouter as the API model id unchanged.
 func openCodeOpenRouterModelConfigs(model string) map[string]openCodeModelConfig {
 	modelKey, ok := openCodeOpenRouterModelKey(model)
 	if !ok {
@@ -1406,31 +1407,36 @@ func openCodeOpenRouterModelKey(model string) (string, bool) {
 	if !ok || !strings.Contains(upstreamModel, "/") {
 		return "", false
 	}
-	if strings.HasPrefix(upstreamModel, "~") {
-		return upstreamModel, true
-	}
-	return "~" + upstreamModel, true
+	// OpenCode sends this config-model key verbatim as the OpenRouter API model
+	// id (it resolves `model.id ?? existingModel.api.id ?? key`), so the key must
+	// be the real upstream slug — e.g. "z-ai/glm-5.2". Strip any legacy "~"
+	// prefix (briefly emitted by #1771), which OpenRouter rejects as an invalid
+	// model id.
+	return strings.TrimPrefix(upstreamModel, "~"), true
 }
 
+// openCodeCLIModelID returns the id passed to `opencode run --model` for a
+// resolved route. For OpenRouter routes it ensures the "openrouter/" provider
+// prefix on bare "vendor/model" slugs and strips any legacy "~" so the model
+// part matches the upstream OpenRouter id (and the runtime config model key).
+// OpenCode forwards that model part to OpenRouter unchanged, so a "~"-prefixed
+// id is rejected upstream as invalid.
 func openCodeCLIModelID(model string, backing models.ProviderName) string {
 	if backing != models.ProviderOpenRouter {
 		return model
 	}
 	model = strings.TrimSpace(model)
 	const prefix = "openrouter/"
-	if upstreamModel, ok := strings.CutPrefix(model, prefix); ok {
-		if strings.HasPrefix(upstreamModel, "~") {
-			return model
-		}
-		return prefix + "~" + upstreamModel
+	upstreamModel, ok := strings.CutPrefix(model, prefix)
+	if !ok {
+		upstreamModel = model
 	}
-	if strings.HasPrefix(model, "~") {
-		return prefix + model
+	upstreamModel = strings.TrimPrefix(upstreamModel, "~")
+	if !strings.Contains(upstreamModel, "/") {
+		// Bare logical/first-party id (no "vendor/model" slug): leave unchanged.
+		return model
 	}
-	if strings.Contains(model, "/") {
-		return prefix + "~" + model
-	}
-	return model
+	return prefix + upstreamModel
 }
 
 func openCodeProviderConfigIDAndKey(provider models.ProviderName) (string, string) {
