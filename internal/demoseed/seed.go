@@ -322,7 +322,7 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		},
 		{
 			name:     "demo users exist",
-			query:    `SELECT count(*) FROM users WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND email IN ('preview-admin@143.dev', 'preview-member@143.dev', 'preview-builder@143.dev', 'preview-viewer@143.dev')`,
+			query:    `SELECT count(*) FROM users WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND email IN ('ada.lovelace@143.dev', 'grace.hopper@143.dev', 'alan.turing@143.dev', 'dennis.ritchie@143.dev')`,
 			expected: 4,
 		},
 		{

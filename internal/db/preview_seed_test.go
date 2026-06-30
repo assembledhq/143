@@ -24,10 +24,10 @@ func TestPreviewSeedUsers(t *testing.T) {
 		displayName string
 		role        string
 	}{
-		{name: "admin", id: "00000000-0000-4000-a000-000000000002", email: "preview-admin@143.dev", displayName: "Preview Admin", role: "admin"},
-		{name: "member", id: "00000000-0000-4000-a000-000000000003", email: "preview-member@143.dev", displayName: "Preview Member", role: "member"},
-		{name: "builder", id: "00000000-0000-4000-a000-000000000004", email: "preview-builder@143.dev", displayName: "Preview Builder", role: "builder"},
-		{name: "viewer", id: "00000000-0000-4000-a000-000000000005", email: "preview-viewer@143.dev", displayName: "Preview Viewer", role: "viewer"},
+		{name: "admin", id: "00000000-0000-4000-a000-000000000002", email: "ada.lovelace@143.dev", displayName: "Ada Lovelace", role: "admin"},
+		{name: "member", id: "00000000-0000-4000-a000-000000000003", email: "grace.hopper@143.dev", displayName: "Grace Hopper", role: "member"},
+		{name: "builder", id: "00000000-0000-4000-a000-000000000004", email: "alan.turing@143.dev", displayName: "Alan Turing", role: "builder"},
+		{name: "viewer", id: "00000000-0000-4000-a000-000000000005", email: "dennis.ritchie@143.dev", displayName: "Dennis Ritchie", role: "viewer"},
 	}
 
 	for _, tt := range tests {
