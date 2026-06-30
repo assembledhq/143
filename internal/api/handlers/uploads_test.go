@@ -154,6 +154,20 @@ func TestUploadHandler_InvalidFileType(t *testing.T) {
 	require.Contains(t, w.Body.String(), "INVALID_FILE_TYPE")
 }
 
+func TestUploadHandler_RejectsSVG(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewFileUploadStore(t.TempDir(), "/uploads")
+	h := NewUploadHandler(store)
+	req := newUploadRequest(t, "file", "diagram.svg", "image/svg+xml", []byte(`<svg onload="alert(1)"></svg>`))
+	w := httptest.NewRecorder()
+
+	h.Upload(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, "SVG uploads should be rejected")
+	require.Contains(t, w.Body.String(), "INVALID_FILE_TYPE", "SVG rejection should use the invalid file type response")
+}
+
 func TestUploadHandler_Success(t *testing.T) {
 	t.Parallel()
 
@@ -459,7 +473,6 @@ func TestExtensionFromMIME(t *testing.T) {
 		{"image/heif", ".heif"},
 		{"image/heic-sequence", ".heic"},
 		{"image/heif-sequence", ".heif"},
-		{"image/svg+xml", ".svg"},
 		{"application/pdf", ".pdf"},
 		{"text/plain", ".txt"},
 		{"text/markdown", ".md"},

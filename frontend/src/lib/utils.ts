@@ -26,7 +26,7 @@ export function sessionTitle(session: Session): string {
 export function isImageURL(url: string): boolean {
   if (url.startsWith("data:image/")) return true;
   const pathname = url.split("?")[0].split("#")[0];
-  return /\.(png|jpe?g|gif|webp|svg)$/i.test(pathname);
+  return /\.(png|jpe?g|gif|webp)$/i.test(pathname);
 }
 
 /**
