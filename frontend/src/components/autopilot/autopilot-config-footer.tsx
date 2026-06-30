@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -58,6 +58,36 @@ function ConfigRow({
   );
 }
 
+function ConfigPill({
+  children,
+  canEdit,
+  onClick,
+}: {
+  children: ReactNode;
+  canEdit: boolean;
+  onClick: () => void;
+}) {
+  if (!canEdit) {
+    return (
+      <Badge variant="secondary" className="text-xs">
+        {children}
+      </Badge>
+    );
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      size="xs"
+      className="h-5 rounded-full border border-border/50 px-2 py-0.5 text-xs"
+      onClick={onClick}
+    >
+      {children}
+    </Button>
+  );
+}
+
 export function AutopilotConfigFooter({
   directionSummary,
   focusAreas,
@@ -105,34 +135,18 @@ export function AutopilotConfigFooter({
         {/* Pill bar — always visible */}
         <div className="flex items-center gap-2 py-2.5">
           <div className="flex flex-1 flex-wrap items-center gap-1.5 min-w-0">
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onEditDirection : undefined}
-            >
+            <ConfigPill canEdit={canEdit} onClick={onEditDirection}>
               {directionPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onEditDirection : undefined}
-            >
+            </ConfigPill>
+            <ConfigPill canEdit={canEdit} onClick={onEditDirection}>
               {focusPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onManageDocuments : undefined}
-            >
+            </ConfigPill>
+            <ConfigPill canEdit={canEdit} onClick={onManageDocuments}>
               {docsPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onOpenSettings : undefined}
-            >
+            </ConfigPill>
+            <ConfigPill canEdit={canEdit} onClick={onOpenSettings}>
               {weightsPill}
-            </Badge>
+            </ConfigPill>
           </div>
           <CollapsibleTrigger asChild>
             <Button
