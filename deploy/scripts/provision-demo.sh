@@ -100,7 +100,6 @@ DOMAIN=demo.143.dev
 BASE_URL=https://demo.143.dev
 FRONTEND_URL=https://demo.143.dev
 CORS_ALLOWED_ORIGINS=https://demo.143.dev
-NEXT_PUBLIC_DEMO_URL=https://demo.143.dev
 DB_PASSWORD=$db_password
 SESSION_SECRET=$session_secret
 CSRF_SIGNING_KEY=$csrf_key

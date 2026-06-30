@@ -13,8 +13,6 @@ interface HeroSectionProps {
 }
 
 export default function HeroSection({ isDark }: HeroSectionProps) {
-  const demoURL = process.env.NEXT_PUBLIC_DEMO_URL;
-
   return (
     <div
       className="relative min-h-screen"
@@ -40,19 +38,6 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
         </Link>
 
         <div className="flex items-center gap-4">
-          {demoURL && (
-            <Button
-              asChild
-              variant="ghost"
-              className={`hidden ${type.button} px-3 sm:inline-flex ${
-                isDark
-                  ? "text-white/60 hover:bg-white/5 hover:text-white"
-                  : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
-              }`}
-            >
-              <a href={demoURL}>Try demo</a>
-            </Button>
-          )}
           <Button
             asChild
             variant="ghost"
@@ -110,32 +95,12 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           </p>
 
           <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">
-            {demoURL && (
-              <Button
-                asChild
-                className={`${type.button} rounded-full transition-all ${
-                  isDark
-                    ? "bg-white text-[#08080f] hover:bg-white/90"
-                    : "bg-slate-900 text-white hover:bg-slate-800"
-                }`}
-              >
-                <a href={demoURL}>
-                  Try demo
-                  <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
-                </a>
-              </Button>
-            )}
             <Button
               asChild
-              variant={demoURL ? "outline" : "default"}
-              className={`${type.button} ${demoURL ? "rounded-md shadow-sm" : "rounded-full"} transition-all ${
+              className={`${type.button} rounded-full transition-all ${
                 isDark
-                  ? demoURL
-                    ? "border-white/15 bg-white/[0.04] text-white/80 hover:border-white/35 hover:bg-white/[0.08] hover:text-white"
-                    : "bg-white text-[#08080f] hover:bg-white/90"
-                  : demoURL
-                    ? "border-slate-300 bg-white text-slate-900 hover:border-slate-500 hover:bg-slate-50"
-                    : "bg-slate-900 text-white hover:bg-slate-800"
+                  ? "bg-white text-[#08080f] hover:bg-white/90"
+                  : "bg-slate-900 text-white hover:bg-slate-800"
               }`}
             >
               <Link href="/login?tab=signup">

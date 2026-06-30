@@ -19,10 +19,6 @@
 	}
 }
 
-www.{$DOMAIN:demo.143.dev} {
-	redir https://{$DOMAIN:demo.143.dev}{uri} permanent
-}
-
 {$DOMAIN:demo.143.dev} {
 	@safe method GET HEAD OPTIONS
 
