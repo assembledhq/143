@@ -16,12 +16,12 @@ describe("AboutPage", () => {
   it("explains why 143 was built for production teams", () => {
     renderWithProviders(<AboutPage />);
 
-    expect(screen.getByText(/Code volume, especially these days, is a bad metric/i)).toBeInTheDocument();
-    expect(screen.getByText(/keeping the codebase healthy/i)).toBeInTheDocument();
+    expect(screen.getByText(/non-engineers can fix things too/i)).toBeInTheDocument();
+    expect(screen.getByText(/built for engineers by engineers/i)).toBeInTheDocument();
     expect(screen.getByText(/real product work, not just demos and internal tools/i)).toBeInTheDocument();
-    expect(screen.getByText(/velocity gains we expected/i)).toBeInTheDocument();
-    expect(screen.getByText(/shared infrastructure problem/i)).toBeInTheDocument();
-    expect(screen.getByText(/That is why we built 143.dev/i)).toBeInTheDocument();
+    expect(screen.getByText(/shared across the team/i)).toBeInTheDocument();
+    expect(screen.getByText(/Stripe Minions and Ramp Inspect/i)).toBeInTheDocument();
+    expect(screen.getByText(/That's why we built 143\./i)).toBeInTheDocument();
     expect(screen.queryByText(/We had real FOMO/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/Also, vibe coding/i)).not.toBeInTheDocument();
   });
@@ -31,7 +31,7 @@ describe("AboutPage", () => {
 
     expect(screen.getByRole("heading", { name: "Where it started" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "What we built" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Open source from day one" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Open source for everyone" })).toBeInTheDocument();
   });
 
   it("describes team-visible agent infrastructure", () => {
@@ -45,7 +45,7 @@ describe("AboutPage", () => {
   it("covers the team-level product choices behind 143", () => {
     renderWithProviders(<AboutPage />);
 
-    expect(screen.getByText(/automations should be visible to the team/i)).toBeInTheDocument();
+    expect(screen.getByText(/Automations shouldn't be hidden/i)).toBeInTheDocument();
     expect(screen.getByText(/swap out intelligence/i)).toBeInTheDocument();
     expect(screen.getByText(/set up a great environment once/i)).toBeInTheDocument();
   });
