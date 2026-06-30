@@ -55,6 +55,7 @@ jobs:
             ${{ matrix.image }}:${{ github.sha }}
           build-args: |
             BUILD_SHA=${{ github.sha }}
+            NEXT_PUBLIC_DEMO_URL=https://demo.143.dev
           # Registry cache instead of type=gha. The 10 GB GHA cache ceiling
           # was constantly evicting our ~200 MB-per-image layer blobs across
           # the three matrix builds, busting the apt-install layer in

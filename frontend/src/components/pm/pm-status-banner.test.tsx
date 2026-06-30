@@ -250,4 +250,16 @@ describe("PMStatusBanner", () => {
     expect(link).toBeInTheDocument();
     expect(link).toHaveAttribute("href", "/sessions/new");
   });
+
+  it("hides mutating actions when disabled", async () => {
+    mockUseAnalyze.mockReturnValue(defaultAnalyze());
+
+    renderWithProviders(<PMStatusBanner hasActivePlanSession={false} canMutate={false} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("PM Agent")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: /Manual Session/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run now" })).not.toBeInTheDocument();
+  });
 });

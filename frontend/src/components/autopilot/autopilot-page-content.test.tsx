@@ -4,6 +4,9 @@ import { AutopilotPageContent } from "./autopilot-page-content";
 import type { AutopilotQueueRow } from "@/lib/types";
 
 const replaceMock = vi.fn();
+const authState = vi.hoisted(() => ({
+  role: "admin",
+}));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({
@@ -22,7 +25,7 @@ vi.mock("@/hooks/use-analyze", () => ({
 
 vi.mock("@/hooks/use-auth", () => ({
   useAuth: () => ({
-    user: { id: "user-1", role: "admin" },
+    user: { id: "user-1", role: authState.role },
     isLoading: false,
   }),
 }));
@@ -81,11 +84,15 @@ vi.mock("./use-autopilot-page-data", () => ({
 }));
 
 vi.mock("./autopilot-steering-sheet", () => ({
-  AutopilotSteeringSheet: () => null,
+  AutopilotSteeringSheet: ({ open }: { open: boolean }) => (
+    open ? <div role="dialog" aria-label="Autopilot steering" /> : null
+  ),
 }));
 
 vi.mock("./autopilot-documents-sheet", () => ({
-  AutopilotDocumentsSheet: () => null,
+  AutopilotDocumentsSheet: ({ open }: { open: boolean }) => (
+    open ? <div role="dialog" aria-label="Autopilot documents" /> : null
+  ),
 }));
 
 vi.mock("@/components/autopilot-proposal-card", () => ({
@@ -94,6 +101,7 @@ vi.mock("@/components/autopilot-proposal-card", () => ({
 
 describe("AutopilotPageContent", () => {
   beforeEach(() => {
+    authState.role = "admin";
     queueRows = [queueRow];
   });
 
@@ -139,6 +147,22 @@ describe("AutopilotPageContent", () => {
 
     expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
+  });
+
+  it("hides mutating actions for viewers", async () => {
+    authState.role = "viewer";
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByText("Autopilot")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run analysis" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText("No direction set"));
+    await userEvent.click(screen.getByText("No documents"));
+
+    expect(screen.queryByRole("dialog", { name: "Autopilot steering" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Autopilot documents" })).not.toBeInTheDocument();
   });
 
   it("lets admins start a blocked queue issue and attach session notes", async () => {
@@ -256,6 +280,30 @@ describe("AutopilotPageContent", () => {
     expect(await screen.findByRole("button", { name: "Update to latest" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+  });
+
+  it("keeps stale previews openable for viewers without update controls", async () => {
+    authState.role = "viewer";
+    queueRows = [
+      {
+        ...queueRow,
+        available_action: "open_pr",
+        latest_pr: { id: "pr-1", number: 42, url: "https://github.com/acme/web/pull/42", status: "open" },
+        latest_preview: {
+          target_id: "target-1",
+          preview_id: "preview-1",
+          status: "ready",
+          commit_sha: "abc123",
+          latest_commit_sha: "def456",
+          new_commits_available: true,
+        },
+      },
+    ];
+
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Update to latest" })).not.toBeInTheDocument();
   });
 
   it("shows Retry preview instead of generic Open for failed preview rows", async () => {

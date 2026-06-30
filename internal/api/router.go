@@ -206,6 +206,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
+	demoHandler := handlers.NewDemoHandler(cfg)
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
 	userCLITokenStore := db.NewUserCLITokenStore(pool)
@@ -984,6 +985,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		uploadAPIPath: uploadMaxRequestBodyBytes,
 	})) // 1MB default request body limit; uploads allow a 10MB file plus multipart overhead.
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
+	apiRoutes.Use(middleware.DemoReadOnly(cfg.DemoReadOnly))
 
 	apiRoutes.Group(func(r chi.Router) {
 		// CLI distribution routes (no auth — fetched by `curl | sh` and the
@@ -1074,6 +1076,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
+			r.With(middleware.DemoEntryRateLimit(10)).Post("/api/v1/auth/demo", authHandler.DemoLogin)
 			// Public: the verification link may be opened on a device with
 			// no session; the single-use token is the credential. Shares the
 			// claim endpoints' rate limit — same token-guessing surface.
@@ -1124,6 +1127,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// `143-tools logout` must work for them.
 			r.Get("/api/v1/auth/cli-tokens", authHandler.ListCLITokens)
 			r.Delete("/api/v1/auth/cli-tokens/{id}", authHandler.RevokeCLIToken)
+			r.Get("/api/v1/demo/manifest", demoHandler.Manifest)
 			// GitHub App setup callbacks are validated against a signed setup
 			// intent inside the handler. Keep them outside OrgContext so a
 			// stale active org in another tab cannot block linking to the

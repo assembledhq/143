@@ -17,6 +17,7 @@ interface AutopilotConfigFooterProps {
   focusAreas: string[];
   documentsSummary: string;
   weightsSummary: string;
+  canEdit?: boolean;
   onEditDirection: () => void;
   onManageDocuments: () => void;
   onOpenSettings: () => void;
@@ -27,11 +28,13 @@ function ConfigRow({
   value,
   actionLabel,
   onAction,
+  canEdit,
 }: {
   label: string;
   value: React.ReactNode;
   actionLabel: string;
   onAction: () => void;
+  canEdit: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-4 py-3">
@@ -41,14 +44,16 @@ function ConfigRow({
           {value}
         </div>
       </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="shrink-0 text-muted-foreground"
-        onClick={onAction}
-      >
-        {actionLabel}
-      </Button>
+      {canEdit ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="shrink-0 text-muted-foreground"
+          onClick={onAction}
+        >
+          {actionLabel}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -58,6 +63,7 @@ export function AutopilotConfigFooter({
   focusAreas,
   documentsSummary,
   weightsSummary,
+  canEdit = true,
   onEditDirection,
   onManageDocuments,
   onOpenSettings,
@@ -101,29 +107,29 @@ export function AutopilotConfigFooter({
           <div className="flex flex-1 flex-wrap items-center gap-1.5 min-w-0">
             <Badge
               variant="secondary"
-              className="cursor-pointer text-xs hover:bg-secondary/80"
-              onClick={onEditDirection}
+              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
+              onClick={canEdit ? onEditDirection : undefined}
             >
               {directionPill}
             </Badge>
             <Badge
               variant="secondary"
-              className="cursor-pointer text-xs hover:bg-secondary/80"
-              onClick={onEditDirection}
+              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
+              onClick={canEdit ? onEditDirection : undefined}
             >
               {focusPill}
             </Badge>
             <Badge
               variant="secondary"
-              className="cursor-pointer text-xs hover:bg-secondary/80"
-              onClick={onManageDocuments}
+              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
+              onClick={canEdit ? onManageDocuments : undefined}
             >
               {docsPill}
             </Badge>
             <Badge
               variant="secondary"
-              className="cursor-pointer text-xs hover:bg-secondary/80"
-              onClick={onOpenSettings}
+              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
+              onClick={canEdit ? onOpenSettings : undefined}
             >
               {weightsPill}
             </Badge>
@@ -153,24 +159,28 @@ export function AutopilotConfigFooter({
                 value={directionSummary || "Set a direction to guide analysis"}
                 actionLabel="Edit"
                 onAction={onEditDirection}
+                canEdit={canEdit}
               />
               <ConfigRow
                 label="Focus"
                 value={focusDisplay}
                 actionLabel="Edit"
                 onAction={onEditDirection}
+                canEdit={canEdit}
               />
               <ConfigRow
                 label="Documents"
                 value={documentsSummary}
                 actionLabel="Manage"
                 onAction={onManageDocuments}
+                canEdit={canEdit}
               />
               <ConfigRow
                 label="Weights & more"
                 value={weightsSummary || "Using defaults"}
                 actionLabel="Settings"
                 onAction={onOpenSettings}
+                canEdit={canEdit}
               />
             </div>
           </div>

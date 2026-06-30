@@ -79,6 +79,16 @@ describe("CommandPalette", () => {
     expect(screen.getAllByText("Autopilot")).toHaveLength(1);
   });
 
+  it("excludes write quick actions for viewers", async () => {
+    renderPalette({ userRole: "viewer" });
+    await screen.findByText("Sessions");
+
+    expect(screen.queryByText("New session")).not.toBeInTheDocument();
+    expect(screen.queryByText("Create preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("New project")).not.toBeInTheDocument();
+    expect(screen.getByText("Log out")).toBeInTheDocument();
+  });
+
   it("includes admin-only items for admin users", async () => {
     renderPalette({ userRole: "admin" });
     expect(await screen.findByText("Audit log")).toBeInTheDocument();
@@ -233,6 +243,32 @@ describe("CommandPalette", () => {
     expect(pushMock).toHaveBeenCalledWith(
       "/sessions/new?prompt=nonexistent-thing-xyz"
     );
+  });
+
+  it("does not offer the manual-session fallback to viewers", async () => {
+    const user = userEvent.setup();
+    server.use(
+      http.get("/api/v1/sessions", () =>
+        HttpResponse.json({ data: [], meta: {} })
+      ),
+      http.get("/api/v1/projects", () =>
+        HttpResponse.json({ data: [], meta: {} })
+      )
+    );
+
+    renderPalette({ userRole: "viewer" });
+
+    const input = screen.getByPlaceholderText("Type a command or search...");
+    await user.type(input, "nonexistent-thing-xyz");
+
+    await waitFor(() => {
+      expect(screen.getByText("No results found.")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Start manual session/i)).not.toBeInTheDocument();
+
+    await user.keyboard("[Enter]");
+
+    expect(pushMock).not.toHaveBeenCalled();
   });
 
   it("clears the query when the palette is reopened", async () => {

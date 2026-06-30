@@ -46,6 +46,7 @@ function CommandPaletteContent({
   const { displayItems, addRecent } = useRecentPaletteItems();
 
   const actions = useMemo(() => getFilteredActions(userRole), [userRole]);
+  const canStartManualSession = userRole !== "viewer";
   const { sessions, projects, isLoading } = useCommandPaletteSearch(query, repo);
 
   const { data: repoSummaries } = useQuery({
@@ -143,13 +144,16 @@ function CommandPaletteContent({
   );
 
   const handleStartSession = useCallback(() => {
+    if (!canStartManualSession) {
+      return;
+    }
     const params = new URLSearchParams();
     if (query) {
       params.set("prompt", query);
     }
     const qs = params.toString();
     navigate(`/sessions/new${qs ? `?${qs}` : ""}`);
-  }, [navigate, query]);
+  }, [canStartManualSession, navigate, query]);
 
   const normalizedQuery = query.trim().toLowerCase();
   const navigationActions = useMemo(() => actions.filter((action) => action.group === "navigation"), [actions]);
@@ -171,6 +175,7 @@ function CommandPaletteContent({
     return labels.some((label) => label.toLowerCase().includes(normalizedQuery));
   }, [actions, displayItems, normalizedQuery, repos]);
   const canStartSessionFromKeyboard =
+    canStartManualSession &&
     normalizedQuery.length > 0 &&
     !isLoading &&
     !hasDynamicResults &&
@@ -341,7 +346,7 @@ function CommandPaletteContent({
         </CommandGroup>
 
         <CommandEmpty>
-          {query.length > 0 ? (
+          {canStartManualSession && query.length > 0 ? (
             <Button
               variant="ghost"
               onClick={handleStartSession}

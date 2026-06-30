@@ -194,6 +194,7 @@ export function SessionsPageContent() {
     setPeopleFilter,
   } = usePeopleFilter();
   const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
+  const canCreateSession = currentUser?.role !== "viewer";
   const [activeFilter, setActiveFilter] = useQueryState("status", parseAsString);
   const [repo] = useQueryState("repo");
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -324,7 +325,7 @@ export function SessionsPageContent() {
         description="Each agent execution creates a session."
       />
 
-      <PMStatusBanner hasActivePlanSession={workingCount > 0} />
+      <PMStatusBanner hasActivePlanSession={workingCount > 0} canMutate={canCreateSession} />
 
       {/* ── Tab filters ────────────────────────────────────────────── */}
       <div className="relative flex items-center border-b border-border">
@@ -402,14 +403,16 @@ export function SessionsPageContent() {
             <p className="mt-1 max-w-sm text-center text-xs text-muted-foreground">
               The PM agent runs automatically on a schedule. Click <span className="font-medium text-foreground">Run now</span> above to start it immediately, or create a <span className="font-medium text-foreground">manual session</span> for a specific issue.
             </p>
-            <div className="flex items-center gap-2 mt-4">
-              <Button variant="outline" size="sm" asChild>
-                <Link href="/sessions/new">
-                  <Plus className="mr-1.5 h-3.5 w-3.5" />
-                  Manual session
-                </Link>
-              </Button>
-            </div>
+            {canCreateSession && (
+              <div className="flex items-center gap-2 mt-4">
+                <Button variant="outline" size="sm" asChild>
+                  <Link href="/sessions/new">
+                    <Plus className="mr-1.5 h-3.5 w-3.5" />
+                    Manual session
+                  </Link>
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}

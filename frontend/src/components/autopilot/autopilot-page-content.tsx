@@ -106,6 +106,7 @@ export function AutopilotPageContent() {
   });
   const { handleAnalyze, isAnalyzing, isPending } = useAnalyze(pmStatus.is_running);
   const isAdmin = user?.role === "admin";
+  const canMutate = user?.role !== "viewer";
 
   useEffect(() => {
     if (!isLoading && !isSetupComplete) {
@@ -147,11 +148,11 @@ export function AutopilotPageContent() {
         <PageHeader
           title="Autopilot"
           subtitle={statusLine}
-          action={
+          action={isAdmin ? (
             <Button onClick={handleAnalyze} disabled={isAnalyzing || isPending}>
               {isAnalyzing || isPending ? "Running..." : "Run analysis"}
             </Button>
-          }
+          ) : undefined}
         />
 
         <SummaryStrip summary={summary} />
@@ -177,6 +178,7 @@ export function AutopilotPageContent() {
           onLoadMore={() => void fetchNextQueuePage()}
           onStartRun={setSelectedIssue}
           canOverrideBlocked={isAdmin}
+          canMutate={canMutate}
         />
 
         <AutopilotProposalCard />
@@ -186,6 +188,7 @@ export function AutopilotPageContent() {
           focusAreas={viewModel.focusAreas}
           documentsSummary={viewModel.documentsSummary}
           weightsSummary={viewModel.weightsSummary}
+          canEdit={canMutate}
           onEditDirection={() => setShowDirectionEditor(true)}
           onManageDocuments={() => setShowDocumentsEditor(true)}
           onOpenSettings={() => router.push("/settings/autopilot")}
@@ -336,6 +339,7 @@ function QueueTable({
   onLoadMore,
   onStartRun,
   canOverrideBlocked,
+  canMutate,
 }: {
   rows: AutopilotQueueRow[];
   loading: boolean;
@@ -344,6 +348,7 @@ function QueueTable({
   onLoadMore: () => void;
   onStartRun: (row: AutopilotQueueRow) => void;
   canOverrideBlocked: boolean;
+  canMutate: boolean;
 }) {
   if (loading) {
     return <Card><CardContent className="py-8 text-sm text-muted-foreground">Loading ranked issues...</CardContent></Card>;
@@ -405,7 +410,7 @@ function QueueTable({
                   </Tooltip>
                 </TableCell>
                 <TableCell><RunState row={row} /></TableCell>
-                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} /></TableCell>
+                <TableCell className="text-right"><RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} canMutate={canMutate} /></TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -475,12 +480,12 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
   );
 }
 
-function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void; canOverrideBlocked: boolean }) {
+function RowAction({ row, onStartRun, canOverrideBlocked, canMutate }: { row: AutopilotQueueRow; onStartRun: (row: AutopilotQueueRow) => void; canOverrideBlocked: boolean; canMutate: boolean }) {
   if (hasPreviewAction(row)) {
-    return <PreviewRowAction row={row} />;
+    return <PreviewRowAction row={row} canMutate={canMutate} />;
   }
 
-  if (canStartSession(row, canOverrideBlocked)) {
+  if (canMutate && canStartSession(row, canOverrideBlocked)) {
     return <Button size="sm" onClick={() => onStartRun(row)}><Play className="h-3.5 w-3.5" />Start run</Button>;
   }
   if ((row.available_action === "view_run" || row.available_action === "review") && row.latest_session) {
@@ -502,7 +507,7 @@ function RowAction({ row, onStartRun, canOverrideBlocked }: { row: AutopilotQueu
   );
 }
 
-function PreviewRowAction({ row }: { row: AutopilotQueueRow }) {
+function PreviewRowAction({ row, canMutate }: { row: AutopilotQueueRow; canMutate: boolean }) {
   const queryClient = useQueryClient();
   const preview = row.latest_preview;
   const refreshQueue = () => {
@@ -546,10 +551,12 @@ function PreviewRowAction({ row }: { row: AutopilotQueueRow }) {
             size="sm"
           />
         ) : null}
-        <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
-          <Play className="h-3.5 w-3.5" />
-          {startLatest.isPending ? "Updating..." : "Update to latest"}
-        </Button>
+        {canMutate && (
+          <Button size="sm" onClick={() => startLatest.mutate()} disabled={startLatest.isPending}>
+            <Play className="h-3.5 w-3.5" />
+            {startLatest.isPending ? "Updating..." : "Update to latest"}
+          </Button>
+        )}
       </div>
     );
   }
@@ -563,6 +570,10 @@ function PreviewRowAction({ row }: { row: AutopilotQueueRow }) {
         size="sm"
       />
     );
+  }
+
+  if (!canMutate) {
+    return null;
   }
 
   if (preview.status === "failed" || preview.status === "unavailable") {

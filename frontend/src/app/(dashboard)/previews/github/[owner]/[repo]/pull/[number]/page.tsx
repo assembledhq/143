@@ -7,6 +7,7 @@ import { useSearchParams } from "next/navigation";
 
 import { OpenPreviewButton, usePreviewLauncher } from "@/components/preview/open-preview-button";
 import { PreviewDetailSurface, type PreviewCommandOverride } from "@/components/preview/preview-detail-surface";
+import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
@@ -35,8 +36,10 @@ export function PullRequestPreviewContent({
 }) {
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
+  const { user } = useAuth();
+  const canMutate = user ? user.role !== "viewer" : false;
   const launchRequested = searchParams.get("launch") === "1";
-  const intent = launchRequested ? "open" : "status";
+  const intent = launchRequested && canMutate ? "open" : "status";
   const queryKey = useMemo(() => ["branch-preview-pr", owner, repo, number, intent], [intent, number, owner, repo]);
   const [launchSessionActive, setLaunchSessionActive] = useState(false);
   const autoLaunchKeyRef = useRef<string | null>(null);
@@ -76,7 +79,7 @@ export function PullRequestPreviewContent({
   const targetId = previewTargetId(preview?.target_id);
   const launch = preview?.launch;
   const launchState = launchStateCopy(preview);
-  const launchSessionShouldOpen = launchRequested || launchSessionActive;
+  const launchSessionShouldOpen = canMutate && (launchRequested || launchSessionActive);
   const retryAllowed =
     Boolean(preview?.preview_id) &&
     launch?.action !== "closed" &&
@@ -97,6 +100,7 @@ export function PullRequestPreviewContent({
     </div>
   ) : null;
   const stalePreviewAction =
+    canMutate &&
     preview?.new_commits_available &&
     safeExternalUrl(launch?.stale_preview_url ?? preview.preview_url) &&
     preview.preview_id ? (
@@ -110,7 +114,7 @@ export function PullRequestPreviewContent({
     ) : null;
 
   useEffect(() => {
-    if (!preview || !launchSessionShouldOpen || !launch?.auto_open) return;
+    if (!canMutate || !preview || !launchSessionShouldOpen || !launch?.auto_open) return;
     if (startLatest.isPending || startPullRequest.isPending || restart.isPending) return;
 
     if (launch.action === "start" || launch.action === "start_latest" || launch.action === "resume") {
@@ -136,6 +140,7 @@ export function PullRequestPreviewContent({
     launch?.action,
     launch?.auto_open,
     launchSessionShouldOpen,
+    canMutate,
     preview,
     restart,
     startLatest,
@@ -143,7 +148,7 @@ export function PullRequestPreviewContent({
   ]);
 
   useEffect(() => {
-    if (!preview || !launchSessionShouldOpen || !launch?.auto_open || launch.action !== "open") return;
+    if (!canMutate || !preview || !launchSessionShouldOpen || !launch?.auto_open || launch.action !== "open") return;
     if (!preview.preview_id || !safePreviewURL || isOpening || launch.represents_latest === false) return;
 
     const key = `${preview.preview_id}:${safePreviewURL}`;
@@ -161,11 +166,13 @@ export function PullRequestPreviewContent({
     launch?.represents_latest,
     launchPreview,
     launchSessionShouldOpen,
+    canMutate,
     preview,
     safePreviewURL,
   ]);
 
   const handleStartLatest = () => {
+    if (!canMutate) return;
     setLaunchSessionActive(true);
     const startTargetId = previewTargetId(preview?.target_id);
     if (startTargetId) {
@@ -178,7 +185,7 @@ export function PullRequestPreviewContent({
   };
 
   const handleRetry = () => {
-    if (!preview?.preview_id) return;
+    if (!canMutate || !preview?.preview_id) return;
     setLaunchSessionActive(true);
     restart.mutate(preview.preview_id);
   };
@@ -193,6 +200,7 @@ export function PullRequestPreviewContent({
       launchMode={launchSessionShouldOpen}
       launchError={launchError?.message ?? null}
       startPending={startLatest.isPending || startPullRequest.isPending || restart.isPending}
+      canMutate={canMutate}
       hidePrimaryStart={Boolean(
         (launch?.action === "blocked" && preview?.status !== "failed") ||
           launch?.action === "closed" ||

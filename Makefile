@@ -2,7 +2,7 @@
 SANDBOX_STAMP := sandbox/.build-stamp
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr test-coverage-diff test-main test-integration migrate-up migrate-down demo-seed-check demo-seed-apply build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-demo deploy-demo demo-reset demo-logs public-demo-smoke provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -273,6 +273,39 @@ single-node-up:
 
 single-node-down:
 	docker compose --env-file .env.single-node -f docker-compose.single-node.yml down
+
+DEMO_URL ?= https://demo.143.dev
+
+provision-demo:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make provision-demo HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/provision-demo.sh $(HOST) $(SSH_KEY)
+
+deploy-demo:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make deploy-demo HOST=<ip> TAG=<sha> [SSH_KEY=<path>]"; exit 1; }
+	@test -n "$(TAG)" || { echo "TAG is required. Usage: make deploy-demo HOST=<ip> TAG=<sha> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/deploy-demo.sh $(HOST) $(SSH_KEY) $(TAG)
+	$(MAKE) public-demo-smoke HOST=$(HOST) SSH_KEY=$(SSH_KEY)
+
+demo-reset:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make demo-reset HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	./deploy/scripts/demo-reset.sh $(HOST) $(SSH_KEY)
+
+demo-logs:
+	@test -n "$(HOST)" || { echo "HOST is required. Usage: make demo-logs HOST=<ip> [SSH_KEY=<path>]"; exit 1; }
+	$(check-ssh-key)
+	ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'cd /opt/143-demo && docker compose --env-file .env.demo -f docker-compose.demo.yml logs -f --tail=200 api frontend caddy demo-seed'
+
+public-demo-smoke:
+	@if [ -n "$(HOST)" ]; then \
+	  test -n "$(SSH_KEY)" || { echo "SSH_KEY could not be auto-detected. Set SSH_KEY=<path>."; exit 1; }; \
+	  URL="$$(ssh -i $(SSH_KEY) -o BatchMode=yes -o StrictHostKeyChecking=accept-new deploy@$(HOST) 'cd /opt/143-demo && set -a && . ./.env.demo && set +a && printf "%s" "$${BASE_URL:-https://$${DOMAIN}}"')"; \
+	  ./deploy/scripts/public-demo-smoke.sh "$$URL"; \
+	else \
+	  ./deploy/scripts/public-demo-smoke.sh "$(DEMO_URL)"; \
+	fi
 
 # ── Secrets management (SOPS + age) ─────────────────────────────────
 # Optional — only needed if you want encrypted secrets kept in a private

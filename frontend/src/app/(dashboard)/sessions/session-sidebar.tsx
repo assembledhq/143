@@ -352,6 +352,7 @@ export function SessionSidebar() {
     setPeopleFilter,
   } = usePeopleFilter();
   const canListTeamMembers = currentUser?.role === "admin" || currentUser?.role === "member";
+  const canCreateSession = currentUser?.role !== "viewer";
   const selectedId = routeState.selectedSessionId ?? undefined;
   const [searchParam, setSearchParam] = useQueryState("search", parseAsString);
   const [search, setSearch] = useState(searchParam ?? "");
@@ -908,7 +909,7 @@ export function SessionSidebar() {
       } else if (event.key === "/") {
         event.preventDefault();
         focusSearch();
-      } else if (event.key === "n") {
+      } else if (event.key === "n" && canCreateSession) {
         event.preventDefault();
         router.push(`/sessions/new${newSessionFilterSuffix}`);
       }
@@ -916,7 +917,7 @@ export function SessionSidebar() {
 
     document.addEventListener("keydown", handleDocumentKeyDown);
     return () => document.removeEventListener("keydown", handleDocumentKeyDown);
-  }, [focusSearch, moveActiveSession, newSessionFilterSuffix, router]);
+  }, [canCreateSession, focusSearch, moveActiveSession, newSessionFilterSuffix, router]);
 
   const renderSavedSessionRow = (session: SessionListItem, renderKey: string) => {
     const isSelected = selectedId === session.id;
@@ -1094,17 +1095,18 @@ export function SessionSidebar() {
           />
         </div>
 
-        {/* New session button */}
-        <Link
-          href={`/sessions/new${newSessionFilterSuffix}`}
-          onMouseEnter={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
-          onFocus={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
-          className="relative flex items-center justify-center gap-2 w-full h-9 rounded-md bg-primary bg-[image:var(--gradient-primary)] text-xs font-medium text-white shadow-sm hover:bg-[image:var(--gradient-primary-hover)] hover:shadow-[var(--glow-primary-sm)] transition-all"
-        >
-          <Plus className="h-4 w-4" />
-          New session
-          <Kbd variant="primary" className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">N</Kbd>
-        </Link>
+        {canCreateSession && (
+          <Link
+            href={`/sessions/new${newSessionFilterSuffix}`}
+            onMouseEnter={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
+            onFocus={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
+            className="relative flex items-center justify-center gap-2 w-full h-9 rounded-md bg-primary bg-[image:var(--gradient-primary)] text-xs font-medium text-white shadow-sm hover:bg-[image:var(--gradient-primary-hover)] hover:shadow-[var(--glow-primary-sm)] transition-all"
+          >
+            <Plus className="h-4 w-4" />
+            New session
+            <Kbd variant="primary" className="absolute right-2 top-1/2 hidden -translate-y-1/2 md:inline-flex">N</Kbd>
+          </Link>
+        )}
 
         {/* Filter tabs */}
         <Tabs
@@ -1154,7 +1156,7 @@ export function SessionSidebar() {
         onPointerLeave={() => setIsListHovered(false)}
       >
         {/* Ghost "New session" entry when creating */}
-        {isNewSession && (
+        {isNewSession && canCreateSession && (
           <div className="mb-2 border-b border-border/60 pb-2">
             <SessionSidebarOptionFrame
               id={`session-sidebar-option-${newSessionOptionId}`}

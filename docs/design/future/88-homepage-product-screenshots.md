@@ -21,7 +21,7 @@ Prefer screenshots from the dogfood preview seed in `.143/seed/`, or a dedicated
 Capture from the product itself rather than recreating UI in a design tool:
 
 1. Boot the dogfood/demo app with `DEMO_MODE=true`.
-2. Sign in as `ada.lovelace@143.dev`.
+2. Enter the demo directly as the seeded viewer.
 3. Capture desktop screenshots at 1440x960 or 1600x1000.
 4. Capture one narrow/mobile state only if it clarifies that the product works away from desktop.
 5. Store final web assets under `frontend/public/product/` as `.webp` plus a source `.png` when useful.

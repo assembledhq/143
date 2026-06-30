@@ -27,6 +27,18 @@ const (
 	DefaultDatabaseURL = "postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable" // #nosec G101 -- dev-only default.
 	DefaultSeedPath    = ".143/seed"
 	DemoOrgID          = "00000000-0000-4000-a000-000000000001"
+	DemoOrgName        = "143 Dogfood"
+	DemoAdminEmail     = "preview-admin@143.dev"
+	DemoMemberEmail    = "preview-member@143.dev"
+	DemoBuilderEmail   = "preview-builder@143.dev"
+	DemoViewerEmail    = "preview-viewer@143.dev"
+	PrimarySessionID   = "00000000-0000-4000-a000-000000000300"
+	PreviewGroupID     = "00000000-0000-4000-a000-000000000430"
+	PreviewTargetID    = "00000000-0000-4000-a000-000000000431"
+	DemoPullRequestID  = "00000000-0000-4000-a000-000000000501"
+	DemoPullRequestURL = "https://github.com/assembledhq/143/pull/42"
+	DemoRepository     = "assembledhq/143"
+	DemoPRNumber       = 42
 )
 
 var (
@@ -65,6 +77,12 @@ type ApplyOptions struct {
 	SkipMigrations   bool
 	AllowNonDemoOrgs bool
 	Env              map[string]string
+}
+
+type PruneOptions struct {
+	DatabaseURL string
+	MaxAge      time.Duration
+	Env         map[string]string
 }
 
 type seedDB interface {
@@ -234,6 +252,56 @@ func Apply(ctx context.Context, opts ApplyOptions) error {
 	return apply(ctx, opts, defaultApplyDeps())
 }
 
+func Prune(ctx context.Context, opts PruneOptions) (int64, error) {
+	return prune(ctx, opts, func(ctx context.Context, databaseURL string) (seedDB, error) {
+		return connectPool(ctx, databaseURL)
+	})
+}
+
+func prune(ctx context.Context, opts PruneOptions, connect func(context.Context, string) (seedDB, error)) (int64, error) {
+	if opts.DatabaseURL == "" {
+		return 0, fmt.Errorf("DEMO_SEED_DATABASE_URL or --database-url is required for demo-seed prune")
+	}
+	if opts.MaxAge <= 0 {
+		return 0, fmt.Errorf("--max-age must be greater than zero")
+	}
+	if err := ValidateApplyEnvironment(opts.Env, opts.DatabaseURL); err != nil {
+		return 0, err
+	}
+	pool, err := connect(ctx, opts.DatabaseURL)
+	if err != nil {
+		return 0, err
+	}
+	defer pool.Close()
+
+	cutoff := time.Now().Add(-opts.MaxAge)
+	tag, err := pool.Exec(ctx, `
+		DELETE FROM auth_sessions
+		WHERE org_id = $1::uuid
+		  AND created_at < $2`, DemoOrgID, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("prune old demo auth sessions: %w", err)
+	}
+
+	var auditRows int64
+	if err := pool.QueryRow(ctx, `SELECT delete_expired_audit_logs($1::uuid, $2)`, DemoOrgID, retentionDaysForMaxAge(opts.MaxAge)).Scan(&auditRows); err != nil {
+		return 0, fmt.Errorf("prune old demo audit logs: %w", err)
+	}
+
+	return tag.RowsAffected() + auditRows, nil
+}
+
+func retentionDaysForMaxAge(maxAge time.Duration) int {
+	retentionDays := int(maxAge / (24 * time.Hour))
+	if maxAge%(24*time.Hour) != 0 {
+		retentionDays++
+	}
+	if retentionDays < 1 {
+		retentionDays = 1
+	}
+	return retentionDays
+}
+
 func apply(ctx context.Context, opts ApplyOptions, deps applyDeps) error {
 	if opts.DatabaseURL == "" {
 		return fmt.Errorf("DEMO_SEED_DATABASE_URL or --database-url is required for demo-seed apply")
@@ -322,7 +390,12 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		},
 		{
 			name:     "demo users exist",
-			query:    `SELECT count(*) FROM users WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND email IN ('ada.lovelace@143.dev', 'grace.hopper@143.dev', 'alan.turing@143.dev', 'dennis.ritchie@143.dev')`,
+			query:    `SELECT count(*) FROM users WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND email IN ('preview-admin@143.dev', 'preview-member@143.dev', 'preview-builder@143.dev', 'preview-viewer@143.dev')`,
+			expected: 4,
+		},
+		{
+			name:     "demo users are passwordless",
+			query:    `SELECT count(*) FROM users WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND email IN ('preview-admin@143.dev', 'preview-member@143.dev', 'preview-builder@143.dev', 'preview-viewer@143.dev') AND password_hash IS NULL`,
 			expected: 4,
 		},
 		{

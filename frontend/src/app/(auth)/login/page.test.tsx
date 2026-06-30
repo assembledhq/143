@@ -28,6 +28,7 @@ function createLocationMock() {
 const loginMock = vi.hoisted(() => vi.fn());
 const loginGoogleMock = vi.hoisted(() => vi.fn());
 const loginEmailMock = vi.hoisted(() => vi.fn());
+const enterDemoMock = vi.hoisted(() => vi.fn());
 const registerMock = vi.hoisted(() => vi.fn());
 
 const useAuthMock = vi.hoisted(() => vi.fn());
@@ -40,6 +41,7 @@ vi.mock('@/lib/api', () => ({
       login: loginMock,
       loginGoogle: loginGoogleMock,
       loginEmail: loginEmailMock,
+      enterDemo: enterDemoMock,
       register: registerMock,
     },
   },
@@ -65,6 +67,7 @@ describe('LoginPage', () => {
     loginMock.mockReset();
     loginGoogleMock.mockReset();
     loginEmailMock.mockReset();
+    enterDemoMock.mockReset();
     registerMock.mockReset();
     pushMock.mockReset();
     replaceMock.mockReset();
@@ -158,63 +161,56 @@ describe('LoginPage', () => {
     expect(screen.queryByRole('button', { name: 'Continue with Google' })).not.toBeInTheDocument();
   });
 
-  it('shows demo banner with credentials from /providers when demo mode is on', () => {
+  it('shows direct demo entry when demo mode is on', () => {
     useAuthProvidersMock.mockReturnValue({
       providers: {
         github: false,
         google: false,
-        email: true,
+        email: false,
         demo: true,
-        demo_email: 'ada.lovelace@143.dev',
-        demo_password: 'preview',
+        demo_read_only: true,
       },
       isLoading: false,
     });
 
     renderWithProviders(<LoginPage />);
 
-    const banner = screen.getByTestId('demo-banner');
-    expect(banner).toHaveTextContent('Demo environment');
-    expect(banner).toHaveTextContent('ada.lovelace@143.dev');
-    expect(banner).toHaveTextContent('preview');
+    const entry = screen.getByTestId('demo-entry');
+    expect(entry).toHaveTextContent('Public demo');
+    expect(screen.getByRole('button', { name: 'Enter demo' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Continue with GitHub' })).not.toBeInTheDocument();
+    expect(screen.queryByText('preview-admin@143.dev')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
   });
 
-  it('renders banner text returned by /providers verbatim (server is source of truth)', () => {
+  it('enters demo directly without credentials', async () => {
+    enterDemoMock.mockResolvedValue({ data: { id: 'viewer' } });
     useAuthProvidersMock.mockReturnValue({
       providers: {
         github: false,
         google: false,
-        email: true,
+        email: false,
         demo: true,
-        demo_email: 'override@example.com',
-        demo_password: 'override-pw',
+        demo_read_only: true,
       },
       isLoading: false,
     });
 
+    const user = userEvent.setup();
     renderWithProviders(<LoginPage />);
+    const locationMock = window.location as unknown as ReturnType<typeof createLocationMock>;
 
-    const banner = screen.getByTestId('demo-banner');
-    expect(banner).toHaveTextContent('override@example.com');
-    expect(banner).toHaveTextContent('override-pw');
-    expect(banner).not.toHaveTextContent('ada.lovelace@143.dev');
+    await user.click(screen.getByRole('button', { name: 'Enter demo' }));
+
+    expect(enterDemoMock).toHaveBeenCalledTimes(1);
+    expect(new URL(locationMock.href).pathname).toBe('/demo');
   });
 
-  it('hides demo banner when demo mode is off', () => {
+  it('hides direct demo entry when demo mode is off', () => {
     renderWithProviders(<LoginPage />);
 
-    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
-  });
-
-  it('hides demo banner when demo is on but credentials are missing', () => {
-    useAuthProvidersMock.mockReturnValue({
-      providers: { github: false, google: false, email: true, demo: true },
-      isLoading: false,
-    });
-
-    renderWithProviders(<LoginPage />);
-
-    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('demo-entry')).not.toBeInTheDocument();
   });
 
   it('calls login on GitHub button click', async () => {

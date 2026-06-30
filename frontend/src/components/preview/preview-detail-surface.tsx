@@ -62,6 +62,7 @@ export interface PreviewDetailSurfaceProps {
   stopPending?: boolean;
   restartPending?: boolean;
   canRestart?: boolean;
+  canMutate?: boolean;
   hidePrimaryStart?: boolean;
   primaryStartLabel?: string;
   commandOverride?: PreviewCommandOverride | null;
@@ -88,6 +89,7 @@ export function PreviewDetailSurface({
   stopPending = false,
   restartPending = false,
   canRestart,
+  canMutate = true,
   hidePrimaryStart = false,
   primaryStartLabel,
   commandOverride,
@@ -139,6 +141,7 @@ export function PreviewDetailSurface({
                   isActive={isActive}
                   isStarting={isStarting}
                   canRestart={canRestart ?? Boolean(preview.preview_id)}
+                  canMutate={canMutate}
                   stopPending={stopPending}
                   restartPending={restartPending}
                   onStop={onStop}
@@ -178,6 +181,7 @@ export function PreviewDetailSurface({
                   stoppedAtText={stoppedAtText}
                   startLatest={onStartLatest}
                   startPending={isStarting}
+                  canMutate={canMutate}
                   hidePrimaryStart={hidePrimaryStart}
                   primaryStartLabel={primaryStartLabel}
                   override={commandOverride}
@@ -236,6 +240,7 @@ function PreviewCommandState({
   stoppedAtText,
   startLatest,
   startPending,
+  canMutate,
   hidePrimaryStart,
   primaryStartLabel,
   override,
@@ -251,6 +256,7 @@ function PreviewCommandState({
   stoppedAtText: string | null;
   startLatest: () => void;
   startPending: boolean;
+  canMutate: boolean;
   hidePrimaryStart: boolean;
   primaryStartLabel?: string;
   override?: PreviewCommandOverride | null;
@@ -259,9 +265,10 @@ function PreviewCommandState({
   const previewUrl = safeExternalUrl(preview.preview_url);
   const title = override?.title ?? getCommandTitle({ launchMode, isReady, isStarting, isFailed, isExpired });
   const description =
-    override?.description ?? getCommandDescription({ launchMode, isReady, isStarting, isFailed, isExpired, stoppedAtText });
-  const showOpen = isReady && previewUrl && !isFailed && !preview.new_commits_available;
-  const showStart = !showOpen && !hidePrimaryStart;
+    override?.description ??
+    getCommandDescription({ launchMode, isReady, isStarting, isFailed, isExpired, stoppedAtText, canMutate });
+  const showOpen = canMutate && isReady && previewUrl && !isFailed && !preview.new_commits_available;
+  const showStart = canMutate && !showOpen && !hidePrimaryStart;
 
   return (
     <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-start">
@@ -401,6 +408,7 @@ function PreviewActions({
   isActive,
   isStarting,
   canRestart,
+  canMutate,
   stopPending,
   restartPending,
   onStop,
@@ -412,6 +420,7 @@ function PreviewActions({
   isActive: boolean;
   isStarting: boolean;
   canRestart: boolean;
+  canMutate: boolean;
   stopPending: boolean;
   restartPending: boolean;
   onStop?: () => void;
@@ -438,17 +447,19 @@ function PreviewActions({
             Refresh status
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem onSelect={onStartLatest} disabled={restartPending || isStarting}>
-          <GitBranch className="h-4 w-4" />
-          Start latest preview
-        </DropdownMenuItem>
-        {canRestart && onRestart ? (
+        {canMutate ? (
+          <DropdownMenuItem onSelect={onStartLatest} disabled={restartPending || isStarting}>
+            <GitBranch className="h-4 w-4" />
+            Start latest preview
+          </DropdownMenuItem>
+        ) : null}
+        {canMutate && canRestart && onRestart ? (
           <DropdownMenuItem onSelect={onRestart} disabled={restartPending}>
             <RotateCw className="h-4 w-4" />
             Restart runtime
           </DropdownMenuItem>
         ) : null}
-        {isActive && onStop ? (
+        {canMutate && isActive && onStop ? (
           <DropdownMenuItem variant="destructive" onSelect={onStop} disabled={stopPending}>
             <Square className="h-4 w-4" />
             Stop runtime
@@ -637,6 +648,7 @@ function getCommandDescription({
   isFailed,
   isExpired,
   stoppedAtText,
+  canMutate,
 }: {
   launchMode: boolean;
   isReady: boolean;
@@ -644,7 +656,15 @@ function getCommandDescription({
   isFailed: boolean;
   isExpired: boolean;
   stoppedAtText: string | null;
+  canMutate: boolean;
 }) {
+  if (!canMutate && isReady) return "Inspect the running branch preview status and details in read-only mode.";
+  if (!canMutate && isStarting) return "The branch runtime is being prepared. Status updates will appear here.";
+  if (!canMutate && isFailed) return "This preview failed. Details are available for inspection in read-only mode.";
+  if (!canMutate && isExpired) {
+    return stoppedAtText ? `Last stopped at ${stoppedAtText}.` : "This preview is not running.";
+  }
+  if (!canMutate) return stoppedAtText ? `Last stopped at ${stoppedAtText}.` : "Preview lifecycle controls are unavailable.";
   if (launchMode && isFailed) return "This preview failed to start. Retry to try opening it again.";
   if (launchMode && isReady) return "Connecting this browser to the running preview.";
   if (launchMode && isStarting) return "This preview will open automatically when it is ready.";

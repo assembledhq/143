@@ -10,6 +10,7 @@ import {
 } from "@/lib/preview-bootstrap";
 
 const searchParamsMock = vi.hoisted(() => ({ value: new URLSearchParams() }));
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", async () => {
   const actual = await vi.importActual<typeof import("next/navigation")>("next/navigation");
@@ -19,10 +20,18 @@ vi.mock("next/navigation", async () => {
   };
 });
 
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { id: "user-1", role: currentUserRole.value },
+    isLoading: false,
+  }),
+}));
+
 import { PullRequestPreviewContent } from "./page";
 
 afterEach(() => {
   searchParamsMock.value = new URLSearchParams();
+  currentUserRole.value = "member";
   vi.restoreAllMocks();
 });
 
@@ -104,6 +113,64 @@ describe("PullRequestPreviewPage", () => {
     await waitFor(() => {
       expect(openSpy).toHaveBeenCalledWith("https://prev-1.preview.143.dev", "_self");
     });
+  });
+
+  it("keeps launch routes read-only for viewers", async () => {
+    searchParamsMock.value = new URLSearchParams("launch=1");
+    currentUserRole.value = "viewer";
+    const user = userEvent.setup();
+    let requestedIntent: string | null = null;
+    let bootstrapCalls = 0;
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    server.use(
+      http.get("*/api/v1/previews/github/acme/web/pull/42", ({ request }) => {
+        requestedIntent = new URL(request.url).searchParams.get("intent");
+        return HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "pull_request",
+            status: "ready",
+            current_phase: "ready",
+            stable_url: "https://143.dev/previews/github/acme/web/pull/42",
+            preview_url: "https://prev-1.preview.143.dev",
+            pull_request_url: "https://github.com/acme/web/pull/42",
+            launch: {
+              action: "open",
+              auto_open: true,
+              represents_latest: true,
+              primary_label: "Open preview",
+            },
+          },
+        });
+      }),
+      http.post("*/api/v1/previews/prev-1/bootstrap", () => {
+        bootstrapCalls += 1;
+        return HttpResponse.json({ data: { token: "bootstrap-token", preview_id: "prev-1" } });
+      }),
+    );
+
+    renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
+
+    expect(await screen.findByText("Preview is ready")).toBeInTheDocument();
+    expect(requestedIntent).toBe("status");
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(bootstrapCalls).toBe(0);
+    expect(screen.queryByTitle("Preview bootstrap")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start preview" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+
+    expect(await screen.findByText("Refresh status")).toBeInTheDocument();
+    expect(screen.queryByText("Start latest preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Restart runtime")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stop runtime")).not.toBeInTheDocument();
   });
 
   it("starts latest and opens the new preview when launch session lands on a stale PR", async () => {

@@ -299,6 +299,55 @@ func TestClaimRateLimit(t *testing.T) {
 	})
 }
 
+func TestDemoEntryRateLimit(t *testing.T) {
+	t.Parallel()
+
+	okHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("separates clients by X-Forwarded-For behind a proxy", func(t *testing.T) {
+		t.Parallel()
+
+		handler := DemoEntryRateLimit(1)(okHandler)
+
+		first := httptest.NewRequest(http.MethodPost, "/api/v1/auth/demo", nil)
+		first.RemoteAddr = "172.18.0.2:1234"
+		first.Header.Set("X-Forwarded-For", "203.0.113.10")
+		firstRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(firstRecorder, first)
+		require.Equal(t, http.StatusOK, firstRecorder.Code, "first forwarded client should enter the demo")
+
+		second := httptest.NewRequest(http.MethodPost, "/api/v1/auth/demo", nil)
+		second.RemoteAddr = "172.18.0.2:5678"
+		second.Header.Set("X-Forwarded-For", "203.0.113.11")
+		secondRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(secondRecorder, second)
+		require.Equal(t, http.StatusOK, secondRecorder.Code, "different forwarded client should have its own demo entry bucket")
+	})
+
+	t.Run("blocks repeated entries from the same forwarded client", func(t *testing.T) {
+		t.Parallel()
+
+		handler := DemoEntryRateLimit(1)(okHandler)
+
+		first := httptest.NewRequest(http.MethodPost, "/api/v1/auth/demo", nil)
+		first.RemoteAddr = "172.18.0.2:1234"
+		first.Header.Set("X-Forwarded-For", "203.0.113.20")
+		firstRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(firstRecorder, first)
+		require.Equal(t, http.StatusOK, firstRecorder.Code, "first demo entry attempt should be allowed")
+
+		second := httptest.NewRequest(http.MethodPost, "/api/v1/auth/demo", nil)
+		second.RemoteAddr = "172.18.0.2:5678"
+		second.Header.Set("X-Forwarded-For", "203.0.113.20")
+		secondRecorder := httptest.NewRecorder()
+		handler.ServeHTTP(secondRecorder, second)
+		require.Equal(t, http.StatusTooManyRequests, secondRecorder.Code, "same forwarded client should be rate limited after the bucket empties")
+		require.Contains(t, secondRecorder.Body.String(), "DEMO_ENTRY_RATE_LIMITED", "demo entry limiter should return a specific error code")
+	})
+}
+
 func TestCreateOrgRateLimit(t *testing.T) {
 	t.Parallel()
 

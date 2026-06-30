@@ -7,6 +7,7 @@ import { AlertTriangle } from "lucide-react";
 
 import { PreviewDetailSurface } from "@/components/preview/preview-detail-surface";
 import { ErrorNotice } from "@/components/ui/error-notice";
+import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import { pollMs } from "@/lib/poll-intervals";
 import { ACTIVE_PREVIEW_STATUSES, type PreviewStatus } from "@/lib/preview-types";
@@ -34,8 +35,10 @@ export default function PreviewLandingPage({
 export function PreviewLandingContent({ id }: { id: string }) {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const launchMode = searchParams.get("launch") === "1";
   const popupMode = launchMode && searchParams.get("popup") === "1";
+  const canMutate = user ? user.role !== "viewer" : false;
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const bootstrappedPreviewIdRef = useRef<string | null>(null);
   const launchStartAttemptedRef = useRef<string | null>(null);
@@ -86,6 +89,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
   }, [previewUrl]);
   const launchTargetId = preview?.preview_id ?? preview?.target_id;
   const shouldStartForLaunch =
+    canMutate &&
     launchMode &&
     preview &&
     launchTargetId &&
@@ -107,7 +111,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
   }, [id, launchTargetId, restartPreview, shouldStartForLaunch]);
 
   useEffect(() => {
-    if (!launchMode || !previewOrigin || !previewUrl || !preview?.preview_id || !isReady) return;
+    if (!canMutate || !launchMode || !previewOrigin || !previewUrl || !preview?.preview_id || !isReady) return;
     const activePreviewId = preview.preview_id;
     let completed = false;
     let timedOut = false;
@@ -161,10 +165,10 @@ export function PreviewLandingContent({ id }: { id: string }) {
       window.clearTimeout(timeout);
       window.removeEventListener("message", handleMessage);
     };
-  }, [bootstrapPreview, isReady, launchMode, popupMode, preview?.preview_id, previewOrigin, previewUrl]);
+  }, [bootstrapPreview, canMutate, isReady, launchMode, popupMode, preview?.preview_id, previewOrigin, previewUrl]);
 
   const startLatest = () => {
-    if (!launchTargetId) return;
+    if (!canMutate || !launchTargetId) return;
     launchStartAttemptedRef.current = id;
     restartPreview.mutate({ previewId: launchTargetId, latest: true });
   };
@@ -193,9 +197,12 @@ export function PreviewLandingContent({ id }: { id: string }) {
       startPending={restartPreview.isPending}
       stopPending={stopPreview.isPending}
       restartPending={restartPreview.isPending}
+      canMutate={canMutate}
       onStartLatest={startLatest}
-      onStop={() => preview?.preview_id && stopPreview.mutate(preview.preview_id)}
-      onRestart={() => preview?.preview_id && restartPreview.mutate({ previewId: preview.preview_id, latest: false })}
+      onStop={() => canMutate && preview?.preview_id && stopPreview.mutate(preview.preview_id)}
+      onRestart={() =>
+        canMutate && preview?.preview_id && restartPreview.mutate({ previewId: preview.preview_id, latest: false })
+      }
       onRefresh={() => previewQuery.refetch()}
       topContent={
         <>
@@ -219,7 +226,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
         </>
       }
       footerContent={
-        isReady && launchMode && previewUrl ? (
+        canMutate && isReady && launchMode && previewUrl ? (
           <iframe
             ref={iframeRef}
             src={`${previewUrl.replace(/\/$/, "")}/bootstrap`}

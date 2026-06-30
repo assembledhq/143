@@ -7,7 +7,6 @@ import (
 
 	"github.com/assembledhq/143/internal/demoseed"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/bcrypt"
 )
 
 func TestPreviewSeedUsers(t *testing.T) {
@@ -24,10 +23,10 @@ func TestPreviewSeedUsers(t *testing.T) {
 		displayName string
 		role        string
 	}{
-		{name: "admin", id: "00000000-0000-4000-a000-000000000002", email: "ada.lovelace@143.dev", displayName: "Ada Lovelace", role: "admin"},
-		{name: "member", id: "00000000-0000-4000-a000-000000000003", email: "grace.hopper@143.dev", displayName: "Grace Hopper", role: "member"},
-		{name: "builder", id: "00000000-0000-4000-a000-000000000004", email: "alan.turing@143.dev", displayName: "Alan Turing", role: "builder"},
-		{name: "viewer", id: "00000000-0000-4000-a000-000000000005", email: "dennis.ritchie@143.dev", displayName: "Dennis Ritchie", role: "viewer"},
+		{name: "admin", id: "00000000-0000-4000-a000-000000000002", email: "preview-admin@143.dev", displayName: "Ada Lovelace", role: "admin"},
+		{name: "member", id: "00000000-0000-4000-a000-000000000003", email: "preview-member@143.dev", displayName: "Grace Hopper", role: "member"},
+		{name: "builder", id: "00000000-0000-4000-a000-000000000004", email: "preview-builder@143.dev", displayName: "Alan Turing", role: "builder"},
+		{name: "viewer", id: "00000000-0000-4000-a000-000000000005", email: "preview-viewer@143.dev", displayName: "Dennis Ritchie", role: "viewer"},
 	}
 
 	for _, tt := range tests {
@@ -37,13 +36,12 @@ func TestPreviewSeedUsers(t *testing.T) {
 			require.Contains(t, sql, "'"+tt.email+"'", "preview seed should include the expected login email")
 			userPattern := regexp.MustCompile(`(?s)'` + regexp.QuoteMeta(tt.email) + `'.*'` + regexp.QuoteMeta(tt.displayName) + `'.*'` + regexp.QuoteMeta(tt.role) + `'`)
 			require.True(t, userPattern.MatchString(sql), "preview seed should assign the expected legacy role")
+			passwordlessPattern := regexp.MustCompile(`(?s)'` + regexp.QuoteMeta(tt.email) + `'.*'` + regexp.QuoteMeta(tt.displayName) + `'.*'` + regexp.QuoteMeta(tt.role) + `',\s+NULL,`)
+			require.True(t, passwordlessPattern.MatchString(sql), "preview seed should make demo users passwordless")
 			require.Contains(t, sql, "'"+tt.id+"'::uuid,\n    '00000000-0000-4000-a000-000000000001'::uuid,\n    '"+tt.role+"'", "preview seed should assign the expected membership role")
 		})
 	}
 
 	hashes := regexp.MustCompile(`\$2[ayb]\$10\$[A-Za-z0-9./]{53}`).FindAllString(sql, -1)
-	require.NotEmpty(t, hashes, "preview seed should include bcrypt password hashes")
-	for _, hash := range hashes {
-		require.NoError(t, bcrypt.CompareHashAndPassword([]byte(hash), []byte("preview")), "every preview seed password hash should match the shared preview password")
-	}
+	require.Empty(t, hashes, "preview seed should not include shared demo password hashes")
 }

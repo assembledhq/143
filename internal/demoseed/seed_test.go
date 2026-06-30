@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -186,6 +187,30 @@ func TestApplyPreflightsTargetBeforeMigrations(t *testing.T) {
 	require.Equal(t, []string{"read", "validate", "connect", "preflight"}, calls, "Apply should preflight the target before migrations or seed writes")
 }
 
+func TestPruneDeletesOldDemoVolatileState(t *testing.T) {
+	t.Parallel()
+
+	db := &pruneSeedDB{auditRows: 5}
+	rows, err := prune(context.Background(), PruneOptions{
+		DatabaseURL: "postgres://user:pass@localhost/demo",
+		MaxAge:      24 * time.Hour,
+		Env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
+	}, func(ctx context.Context, databaseURL string) (seedDB, error) {
+		require.Equal(t, "postgres://user:pass@localhost/demo", databaseURL, "Prune should connect to requested database")
+		return db, nil
+	})
+
+	require.NoError(t, err, "Prune should delete volatile demo rows")
+	require.Equal(t, int64(12), rows, "Prune should return total deleted row count")
+	require.True(t, db.closed, "Prune should close the database connection")
+	require.Contains(t, db.execSQL, "DELETE FROM auth_sessions", "Prune should delete old auth sessions")
+	require.Equal(t, DemoOrgID, db.execArgs[0], "Prune should scope deletes to demo org")
+	require.IsType(t, time.Time{}, db.execArgs[1], "Prune should pass a cutoff timestamp")
+	require.Contains(t, db.querySQL, "delete_expired_audit_logs", "Prune should call audit log retention")
+	require.Equal(t, DemoOrgID, db.queryArgs[0], "Prune should scope audit retention to demo org")
+	require.Equal(t, 1, db.queryArgs[1], "Prune should retain at least one day of audit logs")
+}
+
 func TestEnsureApplyTargetSafe(t *testing.T) {
 	t.Parallel()
 
@@ -245,7 +270,7 @@ func TestScanSeedSafety(t *testing.T) {
 	}{
 		{
 			name: "allows safe demo data",
-			body: "INSERT INTO users (email) VALUES ('ada.lovelace@143.dev');\n" +
+			body: "INSERT INTO users (email) VALUES ('preview-admin@143.dev');\n" +
 				"INSERT INTO repositories (clone_url) VALUES ('https://github.com/assembledhq/143.git');",
 		},
 		{
@@ -448,4 +473,49 @@ type fakeRow struct{}
 
 func (fakeRow) Scan(...any) error {
 	return nil
+}
+
+type pruneAuditRow struct {
+	rows int64
+	err  error
+}
+
+func (r pruneAuditRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	if len(dest) == 0 {
+		return nil
+	}
+	target, ok := dest[0].(*int64)
+	if !ok {
+		return fmt.Errorf("expected first scan target to be *int64")
+	}
+	*target = r.rows
+	return nil
+}
+
+type pruneSeedDB struct {
+	execSQL   string
+	execArgs  []any
+	querySQL  string
+	queryArgs []any
+	auditRows int64
+	closed    bool
+}
+
+func (p *pruneSeedDB) Close() {
+	p.closed = true
+}
+
+func (p *pruneSeedDB) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	p.execSQL = sql
+	p.execArgs = args
+	return pgconn.NewCommandTag("DELETE 7"), nil
+}
+
+func (p *pruneSeedDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	p.querySQL = sql
+	p.queryArgs = args
+	return pruneAuditRow{rows: p.auditRows}
 }

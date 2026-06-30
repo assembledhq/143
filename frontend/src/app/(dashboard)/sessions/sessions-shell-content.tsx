@@ -1,9 +1,12 @@
 "use client";
 
+import { useEffect } from "react";
 import { MessageSquareText } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { EmptyState } from "@/components/empty-state";
 import { ManualSessionCreatePageContent } from "./new/manual-session-create-page-content";
 import { SessionDetailPageClient } from "./[id]/session-detail-page-client";
+import { useAuth } from "@/hooks/use-auth";
 import type { SessionsRouteState } from "./sessions-route-state";
 
 // When nothing is selected we don't show a "Select a session" placeholder; we
@@ -11,6 +14,16 @@ import type { SessionsRouteState } from "./sessions-route-state";
 // always actionable.
 
 export function SessionsShellContent({ routeState }: { routeState: SessionsRouteState }) {
+  const router = useRouter();
+  const { user } = useAuth();
+  const isViewer = user?.role === "viewer";
+
+  useEffect(() => {
+    if (isViewer && routeState.mode === "create") {
+      router.replace("/demo");
+    }
+  }, [isViewer, routeState.mode, router]);
+
   if (routeState.isUnsupportedRoute) {
     return (
       <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-10">
@@ -27,6 +40,20 @@ export function SessionsShellContent({ routeState }: { routeState: SessionsRoute
 
   if (routeState.selectedSessionId) {
     return <SessionDetailPageClient id={routeState.selectedSessionId} />;
+  }
+
+  if (isViewer) {
+    return (
+      <div className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4 py-10">
+        <EmptyState
+          variant="inline"
+          icon={MessageSquareText}
+          title="Choose a seeded session"
+          description="The public demo is read-only. Pick a session from the list, or open the guided demo replay."
+          action={{ label: "Open demo", href: "/demo" }}
+        />
+      </div>
+    );
   }
 
   // Both the explicit create route (/sessions/new) and the bare index

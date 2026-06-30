@@ -300,7 +300,7 @@ func TestNewRouter_PublicAuthRoutesWarmAndRequireCSRF(t *testing.T) {
 	require.NotNil(t, csrfCookie, "public auth provider lookup should warm a CSRF cookie for the login form")
 	require.False(t, csrfCookie.HttpOnly, "CSRF cookie must be readable by the frontend login form")
 
-	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"ada.lovelace@143.dev","password":"preview"}`))
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"email":"preview-admin@143.dev","password":"preview"}`))
 	loginReq.Header.Set("Content-Type", "application/json")
 	loginRR := httptest.NewRecorder()
 	router.ServeHTTP(loginRR, loginReq)

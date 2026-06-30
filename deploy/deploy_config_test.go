@@ -1440,7 +1440,7 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 
 	deployJob := workflowText[deployIndex:]
 	require.Contains(t, deployJob, "needs: [build, predeploy-latest]", "deploy job should wait for both image builds and freshness gate")
-	require.Contains(t, deployJob, "if: needs.predeploy-latest.outputs.should_deploy == 'true'", "deploy job should skip stale SHAs")
+	require.Contains(t, deployJob, "needs.predeploy-latest.outputs.should_deploy == 'true'", "deploy job should skip stale SHAs")
 	require.Contains(t, deployJob, "group: deploy-fleet", "deploy job should serialize fleet deploys")
 	require.Contains(t, deployJob, "cancel-in-progress: false", "deploy job should never cancel an active production deploy")
 	require.Contains(t, deployJob, "id: deploy_latest", "deploy job should re-check freshness after acquiring the deploy lock")
