@@ -132,10 +132,10 @@ func (a AgentType) SupportsReasoningEffortLevel(level ReasoningEffort) bool {
 type OrgSize string
 
 const (
-	OrgSizeSmall      OrgSize = "small"      // <50 open issues, ≤3 concurrent runs
-	OrgSizeMedium     OrgSize = "medium"     // 50–200 open issues, ≤5 concurrent runs
-	OrgSizeLarge      OrgSize = "large"      // 200–1000 open issues, ≤10 concurrent runs
-	OrgSizeEnterprise OrgSize = "enterprise" // 1000+ open issues, ≤20 concurrent runs
+	OrgSizeSmall      OrgSize = "small"      // <50 open issues, ≤2 concurrent runs
+	OrgSizeMedium     OrgSize = "medium"     // 50–200 open issues, ≤3 concurrent runs (default tier)
+	OrgSizeLarge      OrgSize = "large"      // 200–1000 open issues, ≤15 concurrent runs
+	OrgSizeEnterprise OrgSize = "enterprise" // 1000+ open issues, ≤25 concurrent runs
 )
 
 // Validate returns an error if the org size is not a recognized value.
@@ -654,17 +654,21 @@ type PriorityWeights struct {
 
 // Default values for org settings.
 const (
-	DefaultAutonomyLevel              AutonomyLevel = AutonomyLevelAutoSimple
-	DefaultAggressiveness                           = 5
-	DefaultMaxConcurrentRuns                        = 10
-	DefaultAgentAutonomy                            = AgentAutonomyAggressive
-	DefaultMinPriorityThreshold                     = 30.0
-	DefaultDefaultAgentType           AgentType     = AgentTypeCodex
-	DefaultPMScheduleHours                          = 24
-	DefaultPMModel                                  = DefaultCodexModel
-	DefaultAuditRetentionDays                       = 90
-	DefaultContextRefreshIntervalDays               = 14
-	DefaultOrgSize                    OrgSize       = OrgSizeMedium
+	DefaultAutonomyLevel  AutonomyLevel = AutonomyLevelAutoSimple
+	DefaultAggressiveness               = 5
+	// DefaultMaxConcurrentRuns is the fallback concurrency cap when an org has
+	// no size-derived value. Kept deliberately low so a freshly created org
+	// (and, on an open-signup deployment, an anonymous one) cannot saturate
+	// shared capacity; admins raise it per-org in settings for trusted teams.
+	DefaultMaxConcurrentRuns                    = 3
+	DefaultAgentAutonomy                        = AgentAutonomyAggressive
+	DefaultMinPriorityThreshold                 = 30.0
+	DefaultDefaultAgentType           AgentType = AgentTypeCodex
+	DefaultPMScheduleHours                      = 24
+	DefaultPMModel                              = DefaultCodexModel
+	DefaultAuditRetentionDays                   = 90
+	DefaultContextRefreshIntervalDays           = 14
+	DefaultOrgSize                    OrgSize   = OrgSizeMedium
 
 	DefaultWeightCustomerImpact = 0.35
 	DefaultWeightSeverity       = 0.25
@@ -672,9 +676,11 @@ const (
 	DefaultWeightRevenueRisk    = 0.20
 
 	// DefaultMaxSessionDurationSeconds is the default per-session wall-clock
-	// timeout (60 minutes). Long enough for non-trivial agent runs, short
-	// enough that stuck sessions don't silently eat capacity.
-	DefaultMaxSessionDurationSeconds = 60 * 60
+	// timeout (20 minutes). Long enough for a focused agent run, short enough
+	// that an untrusted open-signup session can't burn an hour of compute and
+	// tokens before timing out. Trusted orgs raise this per-org (up to
+	// MaxMaxSessionDurationSeconds) in settings.
+	DefaultMaxSessionDurationSeconds = 20 * 60
 
 	// MinMaxSessionDurationSeconds is the smallest sensible per-org timeout.
 	// Values below this produce very short runs that are unlikely to complete
@@ -812,16 +818,20 @@ func (s OrgSize) PMScheduleHours() int {
 }
 
 // MaxConcurrentRuns returns the recommended concurrency limit for this org size.
+// The small/medium tiers are intentionally conservative: every new org defaults
+// to medium, and on an open-signup deployment those are untrusted accounts, so
+// the default must not let any single org saturate shared capacity. Large and
+// enterprise are admin-selected tiers for trusted teams and stay generous.
 func (s OrgSize) MaxConcurrentRuns() int {
 	switch s {
 	case OrgSizeSmall:
-		return 5
+		return 2
 	case OrgSizeLarge:
 		return 15
 	case OrgSizeEnterprise:
 		return 25
 	default: // medium
-		return 10
+		return 3
 	}
 }
 

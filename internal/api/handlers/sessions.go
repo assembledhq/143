@@ -25,6 +25,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
+	"github.com/assembledhq/143/internal/services/budget"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	humaninputsvc "github.com/assembledhq/143/internal/services/humaninput"
 	"github.com/assembledhq/143/internal/services/linear"
@@ -98,11 +99,15 @@ type SessionHandler struct {
 	prAuthChecker    interface {
 		HasValidCredential(ctx context.Context, orgID, userID uuid.UUID) (bool, error)
 	}
-	snapshotStore    storage.SnapshotStore // optional — enables snapshot cleanup on archive
-	llmClient        llm.Client            // optional, used for generating manual session titles
-	logger           zerolog.Logger
-	audit            *db.AuditEmitter
-	canceller        SessionCanceller // optional — enables cancelling running sessions
+	snapshotStore storage.SnapshotStore // optional — enables snapshot cleanup on archive
+	llmClient     llm.Client            // optional, used for generating manual session titles
+	logger        zerolog.Logger
+	audit         *db.AuditEmitter
+	canceller     SessionCanceller // optional — enables cancelling running sessions
+	// tokenBudget is the deployment-wide daily-spend kill switch. Optional and
+	// nil when GLOBAL_DAILY_TOKEN_BUDGET is unset; *budget.Guard.Check is a
+	// no-op on nil, so the create path calls it unconditionally.
+	tokenBudget      *budget.Guard
 	workerSelector   sessionWorkerSelector
 	workerClient     sessionWorkerCancelClient
 	localNodeID      string
@@ -406,6 +411,12 @@ func (h *SessionHandler) SetAttributionStore(store *db.SessionAttributionStore) 
 // SetCanceller injects the session canceller for stopping running agent sessions.
 func (h *SessionHandler) SetCanceller(c SessionCanceller) {
 	h.canceller = c
+}
+
+// SetTokenBudgetGuard wires the deployment-wide daily-spend kill switch. Pass
+// nil (or a guard built from a zero budget) to leave it disabled.
+func (h *SessionHandler) SetTokenBudgetGuard(g *budget.Guard) {
+	h.tokenBudget = g
 }
 
 func (h *SessionHandler) SetWorkerRuntime(selector sessionWorkerSelector, client sessionWorkerCancelClient, localNodeID string) {
@@ -4282,6 +4293,27 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	if runningCount >= maxConcurrent {
 		writeError(w, r, http.StatusTooManyRequests, "CONCURRENCY_LIMIT",
 			fmt.Sprintf("Too many sessions running (%d/%d). Please wait for a session to finish before starting a new one.", runningCount, maxConcurrent))
+		return
+	}
+
+	// Deployment-wide daily-spend kill switch. Independent of the per-org
+	// concurrency cap above: that bounds how many sessions one org runs in
+	// parallel, this bounds total LLM token spend across every org per UTC day
+	// so a flood of open-signup accounts can't run up an unbounded bill.
+	// In-flight sessions keep running; only new work is paused until the next
+	// UTC day. The guard is nil (and Check a no-op) when the kill switch is
+	// disabled, so this is free in the common case.
+	if decision, budgetErr := h.tokenBudget.Check(r.Context()); budgetErr != nil {
+		// Fail open: a transient error reading the daily total must not wedge
+		// all session creation. Log and let the session proceed.
+		h.logger.Warn().Err(budgetErr).Msg("global token budget check failed; allowing session (fail-open)")
+	} else if !decision.Allowed {
+		h.logger.Warn().
+			Int64("tokens_used", decision.Used).
+			Int64("daily_budget", decision.Budget).
+			Msg("global daily token budget exhausted; rejecting new session")
+		writeError(w, r, http.StatusTooManyRequests, "GLOBAL_BUDGET_EXCEEDED",
+			"This deployment has hit its daily usage limit, so new sessions are paused until it resets at 00:00 UTC. Sessions already running aren't affected — please try again after the reset.")
 		return
 	}
 

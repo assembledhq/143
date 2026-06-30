@@ -267,6 +267,16 @@ type Config struct {
 	// lower value and logs a warning.
 	SessionMaxRunningAge time.Duration `env:"SESSION_MAX_RUNNING_AGE" envDefault:"150m"`
 
+	// GlobalDailyTokenBudget is a deployment-wide kill switch on LLM spend:
+	// the maximum number of LLM tokens (input + output, summed across every
+	// org) that may be consumed per UTC day. Once the running daily total
+	// reaches this ceiling, new session creation is refused with HTTP 429
+	// until the next UTC day; sessions already running are unaffected. This
+	// bounds the blast radius of open signup (a flood of accounts can't run up
+	// an unbounded bill) and is NOT a per-user quota. 0 (the default) disables
+	// the kill switch entirely.
+	GlobalDailyTokenBudget int64 `env:"GLOBAL_DAILY_TOKEN_BUDGET" envDefault:"0"`
+
 	// SessionFilesCacheDir is where the file-context API stages extracted
 	// session workspace snapshots when a session's sandbox container has
 	// already been torn down. The first read for a given snapshot pays a

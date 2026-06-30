@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,30 @@ type SessionMessageStore struct {
 
 func NewSessionMessageStore(db DBTX) *SessionMessageStore {
 	return &SessionMessageStore{db: db}
+}
+
+// SumTokensSince returns the total LLM tokens (input + output) recorded across
+// every session message created at or after `since`, summed over all orgs. It
+// backs the deployment-wide daily-spend kill switch (see config
+// GlobalDailyTokenBudget). session_messages is range-partitioned by created_at
+// (migration 39), so a since=UTC-midnight bound prunes to the current day's
+// partition(s) instead of scanning history. Messages without recorded usage
+// (token_usage IS NULL, e.g. the user's turn-0 prompt) contribute zero.
+// lint:allow-no-orgid reason="deployment-wide kill switch: the daily token total is deliberately summed across every org, not scoped to one"
+func (s *SessionMessageStore) SumTokensSince(ctx context.Context, since time.Time) (int64, error) {
+	var total int64
+	err := s.db.QueryRow(ctx, `
+		SELECT COALESCE(SUM(
+			COALESCE((token_usage->>'input_tokens')::bigint, 0) +
+			COALESCE((token_usage->>'output_tokens')::bigint, 0)
+		), 0)
+		FROM session_messages
+		WHERE created_at >= $1
+		  AND token_usage IS NOT NULL`, since).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("sum session tokens since %s: %w", since.Format(time.RFC3339), err)
+	}
+	return total, nil
 }
 
 const sessionMessageSelectColumns = `id, session_id, org_id, thread_id, user_id, turn_number, role, content, attachments, "references", commands, token_usage, source, created_at`
