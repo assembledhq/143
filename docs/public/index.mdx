@@ -8,7 +8,7 @@ audience: engineer
 tags:
   - overview
   - docs
-llm_summary: Start here for public 143.dev documentation, including setup guides, repo configuration, previews, Linear, self-hosting, and reference material.
+llm_summary: Start here for public 143.dev documentation, including setup guides, repo configuration, previews, Linear, Slack, self-hosting, and reference material.
 ---
 
 143 is where your whole team builds software together — engineers and non-engineers running coding agents as shared execution infrastructure. It defaults to team-level workflows: shared context, sandboxed runs, visible diffs, live previews, pull requests, and a clear link back to the issue, error, or automation that started the work.
@@ -17,7 +17,7 @@ The core idea is simple: keep agent work close to the systems engineers already 
 
 - **A shared execution layer:** Sessions are visible to the team, not trapped in one developer's terminal. The transcript, sandbox, diff, validation output, preview, and PR state all live together.
 - **Live previews:** Run frontend or full-stack changes from inside the session so reviewers can click through the result before a PR is opened.
-- **Useful integrations:** Start work from GitHub, Linear or an API, and let agents query connected systems such as Sentry, logs, Slack, Notion, GitHub, and CI through `143-tools`.
+- **Useful integrations:** Start work from GitHub, Linear, Slack, or an API, and let agents query connected systems such as Sentry, logs, Slack, Notion, GitHub, and CI through `143-tools`.
 - **Team-level automation:** Autopilot can pick up eligible work when the repo, issue complexity, autonomy settings, and concurrency limits say it is safe. Manual kickoff stays available for anything risky or underspecified.
 - **Credential and provider control:** Configure personal and organization coding-agent auth without pasting provider keys into prompts, issues, or repo config.
 - **Self-hostable operations:** Run 143 on your own infrastructure with your GitHub App, Postgres, Redis, workers, logs, and LLM provider settings.
@@ -26,7 +26,7 @@ Start with the shortest path to a reviewable change, then add repo configuration
 
 <Cards>
   <Card title="Get started" href="/docs/getting-started" description="Connect GitHub, start a session, inspect the diff, and open the first PR." />
-  <Card title="Guides" href="/docs/guides" description="Configure repo setup, previews, Linear, Autopilot, and coding-agent auth." />
+  <Card title="Guides" href="/docs/guides" description="Configure repo setup, previews, Linear, Slack, Autopilot, and coding-agent auth." />
   <Card title="Self-hosting quickstart" href="/docs/self-hosting/single-node" description="Run the production-shaped stack on one Linux host." />
   <Card title="Reference" href="/docs/reference" description="Look up repo config, preview config, environment variables, API auth, and agent tools." />
 </Cards>
@@ -42,6 +42,7 @@ Start with the shortest path to a reviewable change, then add repo configuration
 - [Repo config](/docs/guides/repo-config): define deterministic setup, validation, and preview behavior in `.143/config.json`.
 - [Preview environments](/docs/guides/previews): run session and branch previews for UI and full-stack review.
 - [Linear agent](/docs/guides/linear-agent): assign or mention `@143` in Linear and keep progress tied to the issue.
+- [Slack agent](/docs/guides/slack-agent): mention `@143`, DM the bot, or start from Slack App Home and keep progress tied to the conversation.
 - [Autopilot](/docs/guides/autopilot): let eligible work run automatically behind visible gates.
 - [Coding-agent auth](/docs/guides/coding-agent-auth): configure personal and organization credentials for reliable agent execution.
 - [External API](/docs/reference/external-api): start sessions and automations from internal systems using scoped service-account tokens.
