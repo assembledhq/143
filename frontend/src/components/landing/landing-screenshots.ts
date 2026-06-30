@@ -13,7 +13,7 @@ export const landingScreenshots = {
   },
   preview: {
     src: "/product/product-session-preview.webp",
-    alt: "143 preview tab showing a session preview environment and open preview action",
+    alt: "143 Previews page showing running, resumable, and recent cloud previews with status and open actions",
   },
   workspace: {
     src: "/product/product-sessions-list.webp",
