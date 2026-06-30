@@ -37,10 +37,10 @@ Encrypted bundles (`.env*.enc`) and `.sops.yaml` are **never committed to this r
 
 ```
 github.com/<your-org>/143         # this repo (public)
-github.com/<your-org>/143-infra   # private: .sops.yaml + .env*.enc
+github.com/<your-org>/143-infra   # private: .sops.yaml + .env*.enc + deploy access keys
 ```
 
-All `make secrets-*` targets, the deploy scripts, and `setup.sh` resolve the bundles from `SECRETS_DIR`. The default is a `143-infra` clone next to the **main** checkout — resolved via the shared git dir (`git rev-parse --git-common-dir`), so it works identically from linked worktrees (Claude Code, Codex, Conductor) without any per-worktree setup. Override with `make secrets-edit SECRETS_DIR=/path/to/checkout` if you keep it elsewhere.
+All `make secrets-*` targets, the deploy scripts, and `setup.sh` resolve the bundles from `SECRETS_DIR`. The default is a `143-infra` clone next to the **main** checkout — resolved via the shared git dir (`git rev-parse --git-common-dir`), so it works identically from linked worktrees (Claude Code, Codex, Conductor) without any per-worktree setup. Override with `make secrets-edit SECRETS_DIR=/path/to/checkout` if you keep it elsewhere. Production deploy key sync also reads from `$SECRETS_DIR/deploy/authorized_keys/`.
 
 Unlike the code repo, `143-infra` never needs worktrees or branches: agent sessions only read (decrypt) from it, concurrent reads are safe, and the occasional secret edit lands on its `main`. Just remember to push it after edits — CI deploys read the GitHub copy while local make targets read your clone.
 
@@ -197,6 +197,8 @@ cd ../143-infra && git add .env.enc && git commit -m "Update secrets"
   .env.enc              # encrypted dev secrets
   .env.staging.enc      # encrypted staging secrets
   .env.production.enc   # encrypted production secrets
+  deploy/authorized_keys/
+    *.pub               # production SSH public keys synced by make sync-keys
 ```
 
 ### How it works
