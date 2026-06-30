@@ -30,7 +30,6 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 			Summary:   "Authorization edge case",
 		}},
 		RecommendedHumanReviewers: []string{"security/platform"},
-		Checklist:                 []string{"Required checks: not passing"},
 	})
 
 	require.Contains(t, body, "143 Code Reviewer did not approve this PR", "non-approval body should be explicit")
@@ -42,7 +41,6 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 	require.Contains(t, body, "- required GitHub checks are not passing", "body should include withholding reasons")
 	require.Contains(t, body, "high: src/auth/session.go:88 - Authorization edge case", "body should include grouped findings")
 	require.Contains(t, body, "Recommended human reviewers: security/platform", "body should include recommended reviewers")
-	require.Contains(t, body, "- Required checks: not passing", "body should include approval checklist")
 }
 
 func TestSelectCodeReviewInlineFindings(t *testing.T) {

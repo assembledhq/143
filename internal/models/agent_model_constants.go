@@ -226,6 +226,13 @@ func AgentTypeForModel(model string) AgentType {
 			return AgentTypeOpenCode
 		}
 	}
+	// OpenCode logical model ids (e.g. "glm-5.2") route to OpenCode. Checked
+	// after the curated physical lists so bare names a first-party agent owns
+	// (e.g. "gpt-5.5" → Codex, "claude-fable-5" → Claude Code) keep their
+	// existing owner; only ids no other agent claims fall through to here.
+	if IsOpenCodeLogicalModel(model) {
+		return AgentTypeOpenCode
+	}
 	for _, m := range AvailablePiModels {
 		if m == model {
 			return AgentTypePi
@@ -372,8 +379,10 @@ func ValidateModelForAgentType(agentType AgentType, model string) error {
 		if model == "" {
 			return fmt.Errorf("model must be non-empty for agent type %s", AgentTypeOpenCode)
 		}
-		if !strings.Contains(model, "/") {
-			return fmt.Errorf("opencode model %q must be in the form \"provider/model\" (e.g. %s)", model, OpenCodeModelGPT54Mini)
+		// A logical model id (e.g. "glm-5.2") auto-routes at launch; a
+		// "provider/model" id pins an explicit transport (curated or custom slug).
+		if !IsOpenCodeLogicalModel(model) && !strings.Contains(model, "/") {
+			return fmt.Errorf("opencode model %q must be a known model id (e.g. %s) or a \"provider/model\" override", model, DefaultOpenCodeModel)
 		}
 	default:
 		return fmt.Errorf("unknown agent type: %s", agentType)
@@ -621,8 +630,11 @@ func ValidateSettingsModels(settings OrgSettings) error {
 				continue
 			}
 			model := envVars["OPENCODE_MODEL"]
-			if model != "" && !IsSupportedOpenCodeModel(model) {
-				return fmt.Errorf("agent_config.opencode.OPENCODE_MODEL must be one of: %v (or set OPENCODE_MODEL_CUSTOM)", AvailableOpenCodeModels)
+			// Accept a logical model id (auto-routed) or a curated physical id
+			// (pinned transport); OPENCODE_MODEL_CUSTOM is the escape hatch for
+			// uncurated "provider/model" slugs.
+			if model != "" && !IsOpenCodeLogicalModel(model) && !IsSupportedOpenCodeModel(model) {
+				return fmt.Errorf("agent_config.opencode.OPENCODE_MODEL must be a known model id (e.g. %s) or set OPENCODE_MODEL_CUSTOM", DefaultOpenCodeModel)
 			}
 		}
 	}

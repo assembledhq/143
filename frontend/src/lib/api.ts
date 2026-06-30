@@ -765,6 +765,8 @@ export const api = {
     getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
+    getOpenCodeModels: () =>
+      get<{ data: import('./types').OpenCodeModelInfo[] }>('/api/v1/settings/opencode-models'),
     getPRReadinessPolicy: (repositoryId?: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResolvedPolicy>>(
         `/api/v1/pr-readiness-policies${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,

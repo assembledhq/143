@@ -535,6 +535,16 @@ func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.Co
 	if cred.UserID != nil {
 		scope = models.CodingCredentialScopePersonal
 	}
+	// OpenCode rows are always stored under ProviderOpenCode; the backing
+	// provider (openrouter/opencode/openai/...) that decides which logical-model
+	// routes are runnable lives inside the OpenCodeConfig. Surface the backing as
+	// the summary provider so the model picker (runnableOpenCodeBackings on the
+	// frontend) can light up OpenRouter-backed models instead of treating every
+	// OpenCode credential as native.
+	provider := cred.Provider
+	if oc, ok := cred.Config.(models.OpenCodeConfig); ok {
+		provider = oc.NormalizedBackingProvider()
+	}
 	return models.CodingCredentialSummary{
 		ID:               cred.ID,
 		OrgID:            cred.OrgID,
@@ -543,7 +553,7 @@ func summaryFromDecryptedCoding(cred models.DecryptedCodingCredential) models.Co
 		Priority:         cred.Priority,
 		Agent:            agent,
 		AuthType:         authType,
-		Provider:         cred.Provider,
+		Provider:         provider,
 		Label:            coalesce(cred.Label, defaultLabelFor(agent, authType)),
 		Status:           codingStatusFor(cred),
 		UsageNote:        usageNoteFor(cred),

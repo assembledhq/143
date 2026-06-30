@@ -2973,7 +2973,7 @@ func TestContinueSession_PRRepairReconstructsFromExpectedHead(t *testing.T) {
 	})
 	require.NoError(t, err, "ContinueSession should reconstruct PR repairs even while a post-PR snapshot upload is pending")
 	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should start from the repository target branch before fetching the PR head")
-	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/acme/backend.git' 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
 	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head into the session working branch")
 	require.NotContains(t, d.provider.ExecCalls, "git checkout -b '143/00000000/nullpointerexception-in-handler'", "PR repair reconstruction should not create a branch from the target branch tip")
 }
@@ -3040,7 +3040,7 @@ func TestContinueSession_PRRepairReconstructionClearsRecordedContainer(t *testin
 	require.Equal(t, containerID, clearedContainer, "PR repair reconstruction should clear the recorded container before creating a fresh workspace")
 	require.Equal(t, containerID, destroyedContainer, "PR repair reconstruction should destroy the unheld recorded container after clearing it from the session row")
 	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should clone from the repository target branch")
-	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/acme/backend.git' 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
 	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head in the fresh workspace")
 }
 
@@ -10041,9 +10041,9 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	cache := agent.NewOrgSettingsCache(time.Minute)
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
@@ -10135,9 +10135,9 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	// Prime the cache with a value distinct from the org store so a cache hit
 	// is observable in the captured sandbox env. The Set timestamp uses the
 	// current (base) clock, so the entry expires at base + 1 minute.
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp

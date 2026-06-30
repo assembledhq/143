@@ -81,6 +81,7 @@ import {
   clearAutomationDraft,
   defaultAutomationFormState,
   loadAutomationDraft,
+  parseAutomationIntervalInput,
   saveAutomationDraft,
   type AutomationFormState,
 } from "@/lib/automation-draft";
@@ -221,6 +222,9 @@ export default function NewAutomationPage() {
       scheduleEnabled: initialTemplate?.scheduleEnabled ?? true,
       timezone: detectedTimezone,
     }),
+  );
+  const [intervalValueInput, setIntervalValueInput] = useState(
+    String(initialTemplate?.defaultInterval ?? 1),
   );
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
@@ -378,6 +382,10 @@ export default function NewAutomationPage() {
   }, [form]);
 
   useEffect(() => {
+    setIntervalValueInput(String(intervalValue));
+  }, [intervalValue]);
+
+  useEffect(() => {
     draftHydratedRef.current = draftHydrated;
   }, [draftHydrated]);
 
@@ -449,6 +457,7 @@ export default function NewAutomationPage() {
   );
 
   const applyTemplate = (template: AutomationTemplate) => {
+    setIntervalValueInput(String(template.defaultInterval));
     patchForm({
       name: template.name,
       goal: template.goal,
@@ -647,6 +656,7 @@ export default function NewAutomationPage() {
     repoId.length > 0 &&
     pagerDutyTriggerValid &&
     linearTriggerValid &&
+    (!scheduleEnabled || intervalValueInput.trim().length > 0) &&
     (scheduleEnabled || hasEventTriggers);
   const submitDisabledReason = createMutation.isPending || redirecting
     ? undefined
@@ -658,6 +668,7 @@ export default function NewAutomationPage() {
         pagerDutyTriggerValid,
         linearTriggerValid,
         scheduleEnabled,
+        intervalValueValid: intervalValueInput.trim().length > 0,
         hasEventTriggers,
       });
 
@@ -755,13 +766,22 @@ export default function NewAutomationPage() {
                         type="number"
                         min={1}
                         max={365}
-                        value={intervalValue}
+                        value={intervalValueInput}
                         onChange={(e) => {
-                          const parsed = parseInt(e.target.value, 10);
-                          setFormField(
-                            "intervalValue",
-                            Number.isNaN(parsed) ? 1 : Math.max(1, parsed),
-                          );
+                          const nextValue = e.target.value;
+                          setIntervalValueInput(nextValue);
+                          if (nextValue.trim().length > 0) {
+                            setFormField(
+                              "intervalValue",
+                              parseAutomationIntervalInput(nextValue),
+                            );
+                          }
+                        }}
+                        onBlur={() => {
+                          const normalized =
+                            parseAutomationIntervalInput(intervalValueInput);
+                          setIntervalValueInput(String(normalized));
+                          setFormField("intervalValue", normalized);
                         }}
                         className="h-8 w-20 px-2 text-base sm:text-xs"
                       />
@@ -1502,6 +1522,7 @@ function getCreateDisabledReason({
   pagerDutyTriggerValid,
   linearTriggerValid,
   scheduleEnabled,
+  intervalValueValid,
   hasEventTriggers,
 }: {
   name: string;
@@ -1511,6 +1532,7 @@ function getCreateDisabledReason({
   pagerDutyTriggerValid: boolean;
   linearTriggerValid: boolean;
   scheduleEnabled: boolean;
+  intervalValueValid: boolean;
   hasEventTriggers: boolean;
 }): string | undefined {
   if (!name && !goal) {
@@ -1530,6 +1552,9 @@ function getCreateDisabledReason({
   }
   if (!scheduleEnabled && !hasEventTriggers) {
     return "Select at least one trigger before creating the automation.";
+  }
+  if (scheduleEnabled && !intervalValueValid) {
+    return "Add a schedule interval before creating the automation.";
   }
   if (!pagerDutyTriggerValid) {
     return "Add at least one PagerDuty service ID before creating the automation.";

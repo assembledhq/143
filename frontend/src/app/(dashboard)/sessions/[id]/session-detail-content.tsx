@@ -141,7 +141,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -152,6 +152,8 @@ import { useSessionScopedReset } from "@/hooks/use-session-scoped-reset";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
+import { FlatModelOptions } from "@/components/model-option-groups";
+import { useOpenCodeAvailability } from "@/hooks/use-opencode-models";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
 import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
@@ -1138,6 +1140,15 @@ function SessionComposer({
   const showCommandPicker = activeCommand !== null && !triggerDismissed;
   const pickerOpen = showMentionPicker || showCommandPicker;
 
+  // Resolve the OpenCode transport ("· OpenRouter") for the selected model so
+  // the in-session picker shows the route that runs given current keys. Shares
+  // the resolved coding-credential cache with the rest of the page.
+  const { data: composerResolvedCredsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
+  const openCodeAvailability = useOpenCodeAvailability(composerResolvedCredsResponse?.data ?? []);
+
   const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
     queryKey: queryKeys.sessions.composerFiles(sessionId, deferredMentionQuery),
     queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
@@ -1448,11 +1459,11 @@ function SessionComposer({
               <SelectValue placeholder="Default model" />
             </SelectTrigger>
             <SelectContent>
-              {availableModels.map((model) => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
+              <FlatModelOptions
+                models={availableModels}
+                agentType={agentType}
+                openCodeAvailability={openCodeAvailability}
+              />
             </SelectContent>
           </Select>
         </div>
@@ -1837,11 +1848,11 @@ function SessionComposer({
                       <SelectValue placeholder="Default model" />
                     </SelectTrigger>
                     <SelectContent>
-                      {availableModels.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
+                      <FlatModelOptions
+                        models={availableModels}
+                        agentType={agentType}
+                        openCodeAvailability={openCodeAvailability}
+                      />
                     </SelectContent>
                   </Select>
                 )}

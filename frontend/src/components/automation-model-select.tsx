@@ -3,6 +3,8 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { availableAgentModelGroups, pmUsableResolvedCredentials } from "@/lib/agents";
+import { ModelOptionGroups } from "@/components/model-option-groups";
+import { useOpenCodeAvailability } from "@/hooks/use-opencode-models";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import type {
@@ -88,6 +90,10 @@ export function AutomationModelSelect({
     () => !value || modelGroups.some((group) => group.models.includes(value)),
     [modelGroups, value],
   );
+  const openCodeAvailability = useOpenCodeAvailability(
+    orgCodingCredentials,
+    settings.opencode_routing?.require_openrouter ?? false,
+  );
 
   return (
     <Select
@@ -107,16 +113,7 @@ export function AutomationModelSelect({
             <SelectItem value={value}>{value}</SelectItem>
           </SelectGroup>
         ) : null}
-        {modelGroups.map((group) => (
-          <SelectGroup key={group.key}>
-            <SelectLabel>{group.label}</SelectLabel>
-            {group.models.map((model) => (
-              <SelectItem key={model} value={model}>
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        ))}
+        <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} />
       </SelectContent>
     </Select>
   );

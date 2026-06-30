@@ -185,6 +185,14 @@ describe("agentTypeForModel", () => {
     expect(agentTypeForModel("xai/grok-code-fast")).toBeUndefined();
   });
 
+  it("routes OpenCode logical ids to OpenCode but leaves bare first-party names with their owner", () => {
+    expect(agentTypeForModel("glm-5.2")).toBe("opencode");
+    expect(agentTypeForModel("kimi-k2.6")).toBe("opencode");
+    // Bare names owned by a first-party agent keep that owner.
+    expect(agentTypeForModel("gpt-5.5")).toBe("codex");
+    expect(agentTypeForModel("claude-fable-5")).toBe("claude_code");
+  });
+
   it("exposes explicit OpenCode custom model metadata", () => {
     expect(AGENTS_BY_KEY.opencode.envVars).toEqual(
       expect.arrayContaining([

@@ -101,8 +101,6 @@ type DescriptionApplicability = NonNullable<DescriptionRequirement["applies_when
 const QUALITY_GATE_DESCRIPTIONS = {
   requirePassingChecks:
     "Blocks approval until the PR's required GitHub checks are passing. The reviewer can still leave comments, but it will not approve failing or pending builds.",
-  requireMergeable:
-    "Blocks approval when GitHub reports merge conflicts or an unknown mergeable state. This keeps approvals from landing on PRs that cannot merge cleanly.",
   excludeSensitivePaths:
     "Treats changes matching sensitive paths as blocking approval. Use this for migrations, auth, billing, and other areas that need a human review.",
   requireUpToDate:
@@ -734,13 +732,6 @@ export default function CodeReviewsPage() {
                         checked={config?.risk_policy.require_passing_checks ?? false}
                         disabled={!config}
                         onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_passing_checks = checked; })}
-                      />
-                      <PolicyToggle
-                        label="Require mergeable PR"
-                        description={QUALITY_GATE_DESCRIPTIONS.requireMergeable}
-                        checked={config?.risk_policy.require_mergeable ?? false}
-                        disabled={!config}
-                        onCheckedChange={(checked) => commitPolicy((next) => { next.risk_policy.require_mergeable = checked; })}
                       />
                       <PolicyToggle
                         label="Enforce sensitive paths"

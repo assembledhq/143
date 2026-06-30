@@ -98,6 +98,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"OrganizationsHandler.Create":          "creates a new org; runs outside OrgContext, no pre-existing org to scope against",
 		"SettingsHandler.GetLLMDefaults":       "returns static server config",
 		"SettingsHandler.GetLLMModels":         "returns static server config",
+		"SettingsHandler.GetOpenCodeModels":    "returns the static OpenCode model registry",
 		"AgentCapabilitiesHandler.Catalog":     "returns static capability catalog",
 		"ProjectGenerateHandler.Generate":      "calls LLM only, no org-scoped data",
 		"GitHubStatusHandler.StartConnect":     "OAuth redirect only, no store calls",
