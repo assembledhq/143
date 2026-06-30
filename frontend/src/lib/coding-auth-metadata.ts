@@ -4,6 +4,7 @@ import {
   OPENCODE_MODEL_OPENROUTER_GLM_5_2,
   OPENCODE_MODEL_GPT_5_4_MINI,
 } from "@/lib/model-constants";
+import type { ReleaseStage } from "@/components/release-stage-badge";
 
 export type StackAgent = "codex" | "claude_code" | "amp" | "pi" | "opencode";
 export type ModalProvider = StackAgent;
@@ -33,6 +34,7 @@ export function personalProviderToAgent(provider: PersonalProvider): StackAgent 
 export const ORG_PROVIDER_OPTIONS: Array<{
   key: ModalProvider;
   label: string;
+  badge?: ReleaseStage;
   iconSrc?: string;
   supportsSubscription: boolean;
   supportsStackOrder: boolean;
@@ -61,6 +63,7 @@ export const ORG_PROVIDER_OPTIONS: Array<{
   {
     key: "amp",
     label: "Amp",
+    badge: "beta",
     iconSrc: "/agents/amp.svg",
     supportsSubscription: false,
     supportsStackOrder: true,
@@ -68,6 +71,7 @@ export const ORG_PROVIDER_OPTIONS: Array<{
   {
     key: "pi",
     label: "Pi",
+    badge: "beta",
     iconSrc: "/agents/pi.svg",
     supportsSubscription: false,
     supportsStackOrder: true,
@@ -77,6 +81,7 @@ export const ORG_PROVIDER_OPTIONS: Array<{
 export const PERSONAL_PROVIDER_OPTIONS: Array<{
   key: PersonalProvider;
   label: string;
+  badge?: ReleaseStage;
   iconSrc?: string;
   // Mirrors ORG_PROVIDER_OPTIONS.supportsSubscription. When true the
   // personal Add-auth modal exposes the subscription radio so users can
@@ -88,8 +93,8 @@ export const PERSONAL_PROVIDER_OPTIONS: Array<{
   { key: "openai", label: "Codex", iconSrc: "/agents/codex.svg", supportsSubscription: true },
   { key: "anthropic", label: "Claude Code", iconSrc: "/agents/claude_code.svg", supportsSubscription: true },
   { key: "opencode", label: "OpenCode", iconSrc: "/agents/opencode.svg", supportsSubscription: false },
-  { key: "amp", label: "Amp", iconSrc: "/agents/amp.svg", supportsSubscription: false },
-  { key: "pi", label: "Pi", iconSrc: "/agents/pi.svg", supportsSubscription: false },
+  { key: "amp", label: "Amp", badge: "beta", iconSrc: "/agents/amp.svg", supportsSubscription: false },
+  { key: "pi", label: "Pi", badge: "beta", iconSrc: "/agents/pi.svg", supportsSubscription: false },
 ];
 
 export function apiKeyHelp(provider: ApiKeyProvider | PersonalProvider) {

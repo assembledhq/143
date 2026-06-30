@@ -28,6 +28,17 @@ describe("OpenCode backing provider model helpers", () => {
     ]);
   });
 
+  it("marks Amp and Pi provider auth choices as beta", () => {
+    expect(ORG_PROVIDER_OPTIONS.filter((option) => option.badge === "beta").map((option) => option.key)).toEqual([
+      "amp",
+      "pi",
+    ]);
+    expect(PERSONAL_PROVIDER_OPTIONS.filter((option) => option.badge === "beta").map((option) => option.key)).toEqual([
+      "amp",
+      "pi",
+    ]);
+  });
+
   it("defaults new OpenCode auths to OpenRouter", () => {
     expect(DEFAULT_OPENCODE_BACKING_PROVIDER).toBe("openrouter");
     expect(openCodeDefaultModelForBackingProvider(DEFAULT_OPENCODE_BACKING_PROVIDER)).toBe(OPENCODE_MODEL_OPENROUTER_GLM_5_2);
