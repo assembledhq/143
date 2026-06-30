@@ -49,6 +49,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { DurationInput } from "@/components/duration-input";
+import { ModelOptionGroups } from "@/components/model-option-groups";
 import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
@@ -59,9 +60,10 @@ import { pollMs } from "@/lib/poll-intervals";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
+import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
-import { AGENTS_BY_KEY, availableAgentModelGroups, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
+import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
   CodingCredentialSummary,
   CodeReviewApprovalMode,
@@ -331,6 +333,10 @@ export default function CodeReviewsPage() {
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsQuery.data?.data ?? [],
+    [orgCodingCredentialsQuery.data?.data],
+  );
   const codeReviewResolvedCredentials = useMemo(
     () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
     [resolvedCredentialsQuery.data?.data],
@@ -340,17 +346,21 @@ export default function CodeReviewsPage() {
       availableAgentModelGroups(
         codeReviewResolvedCredentials,
         codexAuthQuery.data?.data,
-        orgCodingCredentialsQuery.data?.data ?? [],
+        orgCodingCredentials,
         orgSettings.default_agent_type || "codex",
         { orgAgentConfig: orgSettings.agent_config },
       ),
     [
       codeReviewResolvedCredentials,
       codexAuthQuery.data?.data,
-      orgCodingCredentialsQuery.data?.data,
+      orgCodingCredentials,
       orgSettings.default_agent_type,
       orgSettings.agent_config,
     ],
+  );
+  const codeReviewOpenCodeAvailability = useOpenCodeAvailability(
+    orgCodingCredentials,
+    orgSettings.opencode_routing?.require_openrouter ?? false,
   );
   const editingRequirementIndex = useMemo(
     () =>
@@ -839,6 +849,7 @@ export default function CodeReviewsPage() {
                       config={config}
                       disabled={!config}
                       modelGroups={codeReviewModelGroups}
+                      openCodeAvailability={codeReviewOpenCodeAvailability}
                       commitPolicy={commitPolicy}
                     />
                   </FineTuningSection>
@@ -1439,11 +1450,13 @@ function AgentRosterControls({
   config,
   disabled,
   modelGroups,
+  openCodeAvailability,
   commitPolicy,
 }: {
   config: CodeReviewPolicyConfig | null;
   disabled?: boolean;
   modelGroups: AgentModelGroup[];
+  openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
 }) {
   const reviewers = config?.agent_roster.reviewers ?? [];
@@ -1491,6 +1504,7 @@ function AgentRosterControls({
                 ariaLabel={`Reviewer ${index + 1} model`}
                 value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
                 modelGroups={modelGroups}
+                openCodeAvailability={openCodeAvailability}
                 currentAgent={agent}
                 currentModel={reviewerModels[index]}
                 disabled={disabled}
@@ -1540,6 +1554,7 @@ function AgentRosterControls({
           ariaLabel="Orchestrator model"
           value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
           modelGroups={modelGroups}
+          openCodeAvailability={openCodeAvailability}
           currentAgent={config?.agent_roster.orchestrator}
           currentModel={orchestratorModel}
           disabled={disabled}
@@ -1559,6 +1574,7 @@ function AgentRosterControls({
 function AgentModelSelect({
   value,
   modelGroups,
+  openCodeAvailability,
   currentAgent,
   currentModel,
   disabled,
@@ -1567,6 +1583,7 @@ function AgentModelSelect({
 }: {
   value: string;
   modelGroups: AgentModelGroup[];
+  openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
   currentAgent?: string;
   currentModel?: string;
   disabled?: boolean;
@@ -1587,20 +1604,15 @@ function AgentModelSelect({
           <SelectGroup>
             <SelectLabel>Current selection</SelectLabel>
             <SelectItem value={selectionValue(currentAgent, currentModel)}>
-              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {currentModel}
+              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {modelOptionLabel(currentModel)}
             </SelectItem>
           </SelectGroup>
         ) : null}
-        {modelGroups.map((group) => (
-          <SelectGroup key={group.key}>
-            <SelectLabel>{group.label}</SelectLabel>
-            {group.models.map((model) => (
-              <SelectItem key={`${group.key}-${model}`} value={selectionValue(group.key, model)}>
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        ))}
+        <ModelOptionGroups
+          modelGroups={modelGroups}
+          getOptionValue={(group, model) => selectionValue(group.key, model)}
+          openCodeAvailability={openCodeAvailability}
+        />
       </SelectContent>
     </Select>
   );
