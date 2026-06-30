@@ -2183,7 +2183,7 @@ func (h *SessionHandler) CreateReadinessBypass(w http.ResponseWriter, r *http.Re
 		writeError(w, r, http.StatusConflict, "READINESS_RUNNING", "Readiness is still running and cannot be bypassed")
 		return
 	}
-	if run.EvaluatedWorkspaceRevision != session.WorkspaceGeneration || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
+	if run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
 		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Stale readiness cannot be bypassed; re-run checks first")
 		return
 	}
@@ -2473,7 +2473,7 @@ func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *
 		writeError(w, r, http.StatusConflict, "READINESS_RUNNING", "PR readiness checks are still running")
 		return false
 	}
-	if run.EvaluatedWorkspaceRevision != session.WorkspaceGeneration || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
+	if run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
 		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Readiness is stale after the latest file changes; re-run readiness checks")
 		return false
 	}
@@ -2682,7 +2682,7 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 		latest == nil ||
 		latest.Status == models.PRReadinessRunStatusQueued ||
 		latest.Status == models.PRReadinessRunStatusRunning ||
-		latest.EvaluatedWorkspaceRevision != session.WorkspaceGeneration ||
+		latest.EvaluatedWorkspaceRevision != session.WorkspaceRevision ||
 		stringPtrValue(latest.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey)
 	if !needsRun {
 		return false

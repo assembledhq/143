@@ -2372,11 +2372,11 @@ func TestFormatPRBody_AppendsReadinessFooter(t *testing.T) {
 	svc.SetReadinessStore(db.NewPRReadinessStore(mock))
 	summary := "Updated migration"
 	body := svc.formatPRBody(context.Background(), &models.Session{
-		ID:                  sessionID,
-		OrgID:               orgID,
-		WorkspaceGeneration: 3,
-		SnapshotKey:         &snapshotKey,
-		ResultSummary:       &summary,
+		ID:                sessionID,
+		OrgID:             orgID,
+		WorkspaceRevision: 3,
+		SnapshotKey:       &snapshotKey,
+		ResultSummary:     &summary,
 	}, nil)
 
 	require.Contains(t, body, "143 readiness", "PR body should include the readiness footer heading")

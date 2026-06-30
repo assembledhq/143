@@ -104,11 +104,11 @@ func (e *Evaluator) checkBase(checkType models.PRReadinessCheckType, status mode
 }
 
 func (e *Evaluator) freshnessCheck(input EvaluationInput) models.PRReadinessCheck {
-	if input.Session.WorkspaceGeneration == input.EvaluatedWorkspaceRevision && stringValue(input.Session.SnapshotKey) == input.EvaluatedSnapshotKey {
+	if input.Session.WorkspaceRevision == input.EvaluatedWorkspaceRevision && stringValue(input.Session.SnapshotKey) == input.EvaluatedSnapshotKey {
 		return e.checkBase(models.PRReadinessCheckTypeFreshness, models.PRReadinessCheckStatusPassed, "Readiness is fresh", "Checked against the latest workspace revision.", "Re-run", nil)
 	}
 	return e.checkBase(models.PRReadinessCheckTypeFreshness, models.PRReadinessCheckStatusFailed, "Readiness is stale", "Workspace files changed after this readiness result was produced.", "Re-run", map[string]any{
-		"current_workspace_revision":   input.Session.WorkspaceGeneration,
+		"current_workspace_revision":   input.Session.WorkspaceRevision,
 		"evaluated_workspace_revision": input.EvaluatedWorkspaceRevision,
 	})
 }
