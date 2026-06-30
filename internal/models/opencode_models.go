@@ -19,17 +19,19 @@ import "strings"
 // OpenCode-native gateway.
 
 // OpenCodeRoute is one physical way to reach a logical model: a backing
-// provider (which credential serves it), the physical model ID passed to
-// `opencode run --model`, and — for OpenRouter routes — the audited US-only
-// inference-provider allowlist pinned into the runtime config.
+// provider (which credential serves it), the registry route ID, and — for
+// OpenRouter routes — the audited US-only inference-provider allowlist pinned
+// into the runtime config.
 type OpenCodeRoute struct {
 	// Backing is the credential's backing provider. OpenCode credentials are
 	// all stored under ProviderOpenCode with a backing_provider discriminator;
 	// resolution matches a route to a credential whose
 	// NormalizedBackingProvider() equals this value.
 	Backing ProviderName
-	// PhysicalModelID is the OpenCode CLI model ID (e.g. "openrouter/z-ai/glm-5.2"
-	// or "opencode/glm-5.2"). It is what flows to OPENCODE_MODEL once resolved.
+	// PhysicalModelID is the route ID tracked by 143 (e.g.
+	// "openrouter/z-ai/glm-5.2" or "opencode/glm-5.2"). OpenRouter routes are
+	// converted to OpenCode's custom-model CLI form ("openrouter/~...") when
+	// building the sandbox runtime config.
 	PhysicalModelID string
 	// USProviderList is the audited US-only OpenRouter inference-provider
 	// allowlist (only/order) pinned in the runtime config. Empty for non-OpenRouter
@@ -252,7 +254,7 @@ func IsOpenCodeLogicalModel(id string) bool {
 // IsKnownOpenCodePhysicalModel reports whether id is a curated physical route
 // ID (used to recognize pinned selections that predate logical models).
 func IsKnownOpenCodePhysicalModel(id string) bool {
-	_, ok := openCodePhysicalModelIDSet[strings.TrimSpace(id)]
+	_, ok := openCodePhysicalModelIDSet[normalizeOpenCodePhysicalModelID(id)]
 	return ok
 }
 
@@ -260,7 +262,7 @@ func IsKnownOpenCodePhysicalModel(id string) bool {
 // model for a physical model ID. Used to resolve pinned selections and to look
 // up the audited US-provider allowlist for a resolved route.
 func OpenCodeRouteForPhysicalModel(physicalID string) (OpenCodeModel, OpenCodeRoute, bool) {
-	id := strings.TrimSpace(physicalID)
+	id := normalizeOpenCodePhysicalModelID(physicalID)
 	route, ok := openCodeRouteByPhysicalID[id]
 	if !ok {
 		return OpenCodeModel{}, OpenCodeRoute{}, false
@@ -272,7 +274,7 @@ func OpenCodeRouteForPhysicalModel(physicalID string) (OpenCodeModel, OpenCodeRo
 // allowlist for a physical model ID, or nil when the model has none (native or
 // first-party routes, or uncurated custom slugs).
 func OpenCodeUSProviderList(physicalID string) []string {
-	route, ok := openCodeRouteByPhysicalID[strings.TrimSpace(physicalID)]
+	route, ok := openCodeRouteByPhysicalID[normalizeOpenCodePhysicalModelID(physicalID)]
 	if !ok {
 		return nil
 	}
@@ -367,8 +369,17 @@ func OpenCodeDisplayName(idOrPhysical string) string {
 	if m, ok := openCodeModelsByID[id]; ok {
 		return m.DisplayName
 	}
-	if m, ok := openCodeModelByPhysicalID[id]; ok {
+	if m, ok := openCodeModelByPhysicalID[normalizeOpenCodePhysicalModelID(id)]; ok {
 		return m.DisplayName
+	}
+	return id
+}
+
+func normalizeOpenCodePhysicalModelID(id string) string {
+	id = strings.TrimSpace(id)
+	const openRouterCustomPrefix = "openrouter/~"
+	if upstreamModel, ok := strings.CutPrefix(id, openRouterCustomPrefix); ok {
+		return "openrouter/" + upstreamModel
 	}
 	return id
 }

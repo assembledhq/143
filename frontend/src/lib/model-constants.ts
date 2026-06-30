@@ -267,12 +267,19 @@ export function isOpenCodeLogicalModel(model: string): boolean {
 // openCodeModelLabel returns a friendly display name for an OpenCode logical or
 // physical model id, falling back to the raw id for uncurated custom slugs.
 export function openCodeModelLabel(model: string): string {
-  return OPENCODE_MODEL_LABELS[model] ?? model;
+  return OPENCODE_MODEL_LABELS[normalizeOpenCodeModelLabelID(model)] ?? model;
+}
+
+function normalizeOpenCodeModelLabelID(model: string): string {
+  if (model.startsWith("openrouter/~")) {
+    return `openrouter/${model.slice("openrouter/~".length)}`;
+  }
+  return model;
 }
 
 // openCodeTransportLabelForModel derives the human transport name from a
 // resolved physical OpenCode model id by its prefix (e.g.
-// "openrouter/z-ai/glm-5.2" → "OpenRouter"). Returns null for a logical id or
+// "openrouter/~z-ai/glm-5.2" → "OpenRouter"). Returns null for a logical id or
 // an uncurated slug whose transport can't be determined from the id alone.
 // Mirror of OpenCodeTransportLabel in internal/models/opencode_models.go.
 export function openCodeTransportLabelForModel(model: string): string | null {

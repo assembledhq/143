@@ -649,10 +649,11 @@ func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders
 	cfg := models.OpenCodeConfig{
 		APIKey:          "or-key",
 		BackingProvider: models.ProviderOpenRouter,
-		Model:           models.OpenCodeModelOpenRouterGLM52,
+		Model:           openCodeCLIModelID(models.OpenCodeModelOpenRouterGLM52, models.ProviderOpenRouter),
 	}
 	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
 	require.Equal(t, []any{"openrouter"}, config["enabled_providers"], "OpenCode should only enable the selected OpenRouter provider")
+	require.Equal(t, "openrouter/~z-ai/glm-5.2", config["model"], "OpenCode should select the custom OpenRouter model id")
 
 	providers := config["provider"].(map[string]any)
 	openRouterProvider := providers["openrouter"].(map[string]any)
@@ -666,6 +667,92 @@ func TestOpenCodeRuntimeConfigContent_RestrictsOpenRouterGLMToAuditedUSProviders
 	require.Equal(t, false, providerRouting["allow_fallbacks"], "OpenRouter GLM should not fall back to unaudited providers")
 	require.Equal(t, "deny", providerRouting["data_collection"], "OpenRouter GLM should deny providers that may collect data")
 	require.Equal(t, true, providerRouting["require_parameters"], "OpenRouter GLM should require full parameter support")
+}
+
+func TestOpenCodeRuntimeConfigContent_DefinesCustomOpenRouterModelKey(t *testing.T) {
+	t.Parallel()
+
+	var config map[string]any
+	cfg := models.OpenCodeConfig{
+		APIKey:          "or-key",
+		BackingProvider: models.ProviderOpenRouter,
+		Model:           openCodeCLIModelID("xai/grok-code-fast", models.ProviderOpenRouter),
+	}
+	require.NoError(t, json.Unmarshal([]byte(openCodeRuntimeConfigContent(cfg)), &config), "OpenCode runtime config should be valid JSON")
+	require.Equal(t, "openrouter/~xai/grok-code-fast", config["model"], "OpenCode should select the custom OpenRouter model id")
+
+	providers := config["provider"].(map[string]any)
+	openRouterProvider := providers["openrouter"].(map[string]any)
+	modelsConfig := openRouterProvider["models"].(map[string]any)
+	require.Contains(t, modelsConfig, "~xai/grok-code-fast", "OpenCode config should define custom OpenRouter model keys")
+}
+
+func TestOpenCodeCLIModelID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		model    string
+		backing  models.ProviderName
+		expected string
+	}{
+		{
+			name:     "curated OpenRouter route",
+			model:    "openrouter/z-ai/glm-5.2",
+			backing:  models.ProviderOpenRouter,
+			expected: "openrouter/~z-ai/glm-5.2",
+		},
+		{
+			name:     "already normalized OpenRouter route",
+			model:    "openrouter/~z-ai/glm-5.2",
+			backing:  models.ProviderOpenRouter,
+			expected: "openrouter/~z-ai/glm-5.2",
+		},
+		{
+			name:     "bare custom OpenRouter key",
+			model:    "~xai/grok-code-fast",
+			backing:  models.ProviderOpenRouter,
+			expected: "openrouter/~xai/grok-code-fast",
+		},
+		{
+			name:     "custom provider model through OpenRouter",
+			model:    "xai/grok-code-fast",
+			backing:  models.ProviderOpenRouter,
+			expected: "openrouter/~xai/grok-code-fast",
+		},
+		{
+			name:     "native OpenCode route",
+			model:    models.OpenCodeModelGLM52,
+			backing:  models.ProviderOpenCode,
+			expected: models.OpenCodeModelGLM52,
+		},
+		{
+			name:     "OpenAI first-party route",
+			model:    models.OpenCodeModelGPT54Mini,
+			backing:  models.ProviderOpenAI,
+			expected: models.OpenCodeModelGPT54Mini,
+		},
+		{
+			name:     "Anthropic first-party route",
+			model:    models.OpenCodeModelClaudeHaiku45,
+			backing:  models.ProviderAnthropic,
+			expected: models.OpenCodeModelClaudeHaiku45,
+		},
+		{
+			name:     "Gemini first-party route",
+			model:    models.OpenCodeModelGemini3Flash,
+			backing:  models.ProviderGemini,
+			expected: models.OpenCodeModelGemini3Flash,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, openCodeCLIModelID(tt.model, tt.backing), "OpenCode CLI model id should match the backing provider")
+		})
+	}
 }
 
 func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProviderRouting(t *testing.T) {
@@ -703,6 +790,9 @@ func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProvi
 
 			configs := openCodeOpenRouterModelConfigs(model)
 			require.NotEmpty(t, configs, "curated OpenRouter model should define audited provider routing")
+			runtimeModel := openCodeCLIModelID(model, models.ProviderOpenRouter)
+			runtimeConfigs := openCodeOpenRouterModelConfigs(runtimeModel)
+			require.Equal(t, configs, runtimeConfigs, "curated OpenRouter model should define the same routing for the CLI custom-model id")
 			for modelKey, config := range configs {
 				require.NotEmpty(t, modelKey, "curated OpenRouter model should define a model config key")
 				providerRouting, ok := config.Options["provider"].(map[string]any)
@@ -717,6 +807,44 @@ func TestOpenCodeRuntimeConfigContent_AllCuratedOpenRouterModelsHaveAuditedProvi
 				require.Equal(t, true, providerRouting["require_parameters"], "curated OpenRouter model should require full parameter support")
 			}
 		})
+	}
+}
+
+func TestAgentEnvResolveForModel_AllCuratedOpenRouterRoutesUseCustomModelIDs(t *testing.T) {
+	t.Parallel()
+
+	for _, logical := range models.OpenCodeModelRegistry {
+		for _, route := range logical.Routes {
+			if route.Backing != models.ProviderOpenRouter {
+				continue
+			}
+			logicalID := logical.ID
+			route := route
+			t.Run(route.PhysicalModelID, func(t *testing.T) {
+				t.Parallel()
+
+				orgID, userID := uuid.New(), uuid.New()
+				env := openCodeRoutingEnv(t, orgID, nil, []models.DecryptedCodingCredential{
+					openCodeCred(orgID, &userID, 0, "sk-or-opencode", models.ProviderOpenRouter),
+				})
+				resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, route.PhysicalModelID)
+				expectedModel := openCodeCLIModelID(route.PhysicalModelID, models.ProviderOpenRouter)
+
+				require.Equal(t, "sk-or-opencode", resolved["OPENROUTER_API_KEY"], "OpenRouter route should use the OpenRouter-backed key")
+				require.Empty(t, resolved["OPENCODE_API_KEY"], "OpenRouter route should not inject the native OpenCode key")
+				require.Equal(t, expectedModel, resolved["OPENCODE_MODEL"], "OpenRouter route should use OpenCode's custom-model CLI id")
+
+				var config map[string]any
+				require.NoError(t, json.Unmarshal([]byte(resolved["OPENCODE_CONFIG_CONTENT"]), &config), "runtime config for %s should be valid JSON", logicalID)
+				require.Equal(t, expectedModel, config["model"], "runtime config should select the same CLI model")
+				providers := config["provider"].(map[string]any)
+				openRouterProvider := providers["openrouter"].(map[string]any)
+				modelsConfig := openRouterProvider["models"].(map[string]any)
+				modelKey, ok := openCodeOpenRouterModelKey(expectedModel)
+				require.True(t, ok, "resolved OpenRouter CLI model should have a custom model key")
+				require.Contains(t, modelsConfig, modelKey, "runtime config should define the selected OpenRouter custom model key")
+			})
+		}
 	}
 }
 
@@ -1637,7 +1765,7 @@ func TestAgentEnvResolveForModel_OpenCodeLogicalPrefersOpenRouter(t *testing.T) 
 	resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
 	require.Equal(t, "sk-or-opencode", resolved["OPENROUTER_API_KEY"], "logical glm-5.2 should prefer the OpenRouter route")
 	require.Empty(t, resolved["OPENCODE_API_KEY"], "OpenRouter route should not also inject the native key")
-	require.Equal(t, models.OpenCodeModelOpenRouterGLM52, resolved["OPENCODE_MODEL"], "resolved physical model should be the OpenRouter route id")
+	require.Equal(t, "openrouter/~z-ai/glm-5.2", resolved["OPENCODE_MODEL"], "resolved model should use OpenCode's OpenRouter custom-model id")
 	require.Contains(t, resolved["OPENCODE_CONFIG_CONTENT"], "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
 }
 
@@ -1719,12 +1847,12 @@ func TestAgentEnvResolveForModel_OpenCodeResolvedRouteDrivesCLIAndConfig(t *test
 		})
 		resolved := env.ResolveForModel(context.Background(), orgID, models.AgentTypeOpenCode, &userID, "glm-5.2")
 
-		require.Equal(t, models.OpenCodeModelOpenRouterGLM52, resolved["OPENCODE_MODEL"],
-			"--model must receive the OpenRouter route's physical id")
+		require.Equal(t, "openrouter/~z-ai/glm-5.2", resolved["OPENCODE_MODEL"],
+			"--model must receive OpenCode's OpenRouter custom-model id")
 		cfg := resolved["OPENCODE_CONFIG_CONTENT"]
 		require.Contains(t, cfg, "OPENROUTER_API_KEY", "runtime config must reference the OpenRouter key env")
 		require.Contains(t, cfg, "deepinfra", "OpenRouter route must pin the audited US provider allowlist")
-		require.Contains(t, cfg, models.OpenCodeModelOpenRouterGLM52, "runtime config model must be the resolved physical id")
+		require.Contains(t, cfg, "openrouter/~z-ai/glm-5.2", "runtime config model must be the resolved CLI model")
 	})
 
 	t.Run("native route", func(t *testing.T) {
