@@ -286,7 +286,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
     expect(screen.getByText("2 reviewers")).toBeInTheDocument();
     expect(screen.getByText("quorum 2")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Comment only/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Comment only/i })).toBeInTheDocument();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
@@ -376,18 +376,18 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
-    await user.click(await screen.findByRole("button", { name: /^Comment only/i }));
+    await user.click(await screen.findByRole("radio", { name: /^Comment only/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });
     expect(state.getCurrentConfig().approval_mode).toBe("comment_only");
 
-    await user.click(screen.getByRole("button", { name: /^Disabled/i }));
+    await user.click(screen.getByRole("radio", { name: /^Disabled/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(false);
     });
 
-    await user.click(screen.getByRole("button", { name: /^Approve acceptable PRs/i }));
+    await user.click(screen.getByRole("radio", { name: /^Approve acceptable PRs/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });
