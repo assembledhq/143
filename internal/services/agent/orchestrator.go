@@ -1758,6 +1758,8 @@ func shouldRetryResumeFromSnapshot(session *models.Session, prompt *AgentPrompt,
 		return true
 	case models.AgentTypeCodex:
 		return isCodexMissingRolloutError(result.Error)
+	case models.AgentTypeOpenCode:
+		return isOpenCodeMissingSessionError(result.Error)
 	default:
 		return false
 	}
@@ -1766,6 +1768,10 @@ func shouldRetryResumeFromSnapshot(session *models.Session, prompt *AgentPrompt,
 func isCodexMissingRolloutError(message string) bool {
 	return strings.Contains(message, "thread/resume failed") &&
 		strings.Contains(message, "no rollout found for thread id")
+}
+
+func isOpenCodeMissingSessionError(message string) bool {
+	return strings.Contains(strings.ToLower(message), "session not found")
 }
 
 func isRetryableSnapshotSaveError(err error) bool {

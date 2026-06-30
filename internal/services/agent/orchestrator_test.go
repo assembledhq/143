@@ -4956,6 +4956,127 @@ func TestContinueSession_FallsBackToFreshCodexExecWhenSnapshotRolloutIsMissing(t
 	require.Equal(t, "finished", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
 }
 
+func TestContinueSession_FallsBackToFreshOpenCodeExecWhenSnapshotSessionIsMissing(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.AgentType = models.AgentTypeOpenCode
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.ModelOverride = strPtr(models.OpenCodeModelGLM52)
+	snapshotKey := "existing-opencode-snapshot"
+	session.SnapshotKey = &snapshotKey
+	session.AgentSessionID = strPtr("ses_missing_opencode")
+
+	d := defaultDeps()
+	d.adapter = &mockAgentAdapter{
+		name:       models.AgentTypeOpenCode,
+		resumeMode: agent.ResumeBySessionID,
+	}
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenCode: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenCode,
+					Config: models.OpenCodeConfig{
+						APIKey:          "opencode-key",
+						BackingProvider: models.ProviderOpenCode,
+						Model:           models.OpenCodeModelGLM52,
+					},
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+				},
+			},
+		},
+	}
+	d.issues.issue = issue
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleUser,
+			Content:    "Please review the card layout.",
+		},
+		{
+			ID:         2,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 1,
+			Role:       models.MessageRoleAssistant,
+			Content:    "The cards need tighter information density and clearer grouping.",
+		},
+		{
+			ID:         3,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "please make a quick wireframe",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader([]byte("next-opencode-snapshot"))), nil
+	}
+	d.snapshots.data = map[string][]byte{snapshotKey: []byte("restored-opencode-snapshot")}
+
+	var prompts []*agent.AgentPrompt
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		prompts = append(prompts, prompt)
+		if len(prompts) == 1 {
+			return &agent.AgentResult{
+				ExitCode: 1,
+				Error:    "opencode CLI exited with code 1: Error: Session not found",
+			}, nil
+		}
+		return &agent.AgentResult{
+			Summary:        "wireframe ready",
+			ExitCode:       0,
+			AgentSessionID: "fresh-opencode-session",
+		}, nil
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, nil)
+	require.NoError(t, err, "ContinueSession should recover from a missing OpenCode session by retrying with reconstructed context")
+	require.Len(t, prompts, 2, "the OpenCode adapter should be executed once for the stale resume and once for the fresh-exec fallback")
+	require.True(t, prompts[0].Continuation, "the first attempt should use deterministic OpenCode resume")
+	require.Equal(t, "ses_missing_opencode", prompts[0].ResumeSessionID, "the first attempt should use the persisted OpenCode session id")
+	require.False(t, prompts[1].Continuation, "the fallback should run a fresh exec against the restored workspace")
+	require.Empty(t, prompts[1].ResumeSessionID, "the fallback must not retry the same missing OpenCode session id")
+	require.Contains(t, prompts[1].UserPrompt, "Previous conversation history", "the fallback should reconstruct prior conversation context")
+	require.Contains(t, prompts[1].UserPrompt, "Please review the card layout.", "the fallback should include the earlier user turn")
+	require.Contains(t, prompts[1].UserPrompt, "tighter information density", "the fallback should include the earlier assistant summary")
+	require.Contains(t, prompts[1].UserPrompt, "please make a quick wireframe", "the fallback should end with the new user message")
+
+	updates := d.sessions.getTurnUpdates()
+	require.Len(t, updates, 1, "ContinueSession should still persist a single completed turn")
+	require.Equal(t, "fresh-opencode-session", updates[0].agentSessionID, "successful fallback should advance the stored OpenCode session id")
+	require.NotEmpty(t, updates[0].snapshotKey, "successful fallback should refresh the snapshot")
+
+	messages := d.messages.getMessages()
+	var assistantMessages []models.SessionMessage
+	for _, msg := range messages {
+		if msg.Role == models.MessageRoleAssistant {
+			assistantMessages = append(assistantMessages, msg)
+		}
+	}
+	require.Len(t, assistantMessages, 2, "only the original assistant message and the successful fallback reply should exist")
+	require.Equal(t, "wireframe ready", assistantMessages[len(assistantMessages)-1].Content, "the session timeline should record only the successful fallback output")
+}
+
 func TestContinueSession_FallsBackToFreshClaudeExecWhenSnapshotResumeStateIsStale_ScopesHistoryToRequestedThread(t *testing.T) {
 	t.Parallel()
 

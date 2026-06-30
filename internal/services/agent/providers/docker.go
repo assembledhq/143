@@ -1362,9 +1362,11 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 		Msg("snapshotting sandbox")
 
 	// Tar workspace + agent state. --ignore-failed-read handles missing paths gracefully.
-	// Agent state dirs (.claude/, .codex/, .gemini/) and Claude Code's top-level
-	// .claude.json live under HomeDir, not WorkDir; HOME is set to the sandbox
-	// user's home so CLI configs resolve there.
+	// Agent state dirs (.claude/, .codex/, .gemini/, .local/share/opencode/)
+	// and Claude Code's top-level .claude.json live under HomeDir, not WorkDir;
+	// HOME is set to the sandbox user's home so CLI configs resolve there.
+	// OpenCode's data dir holds the session database and snapshot metadata used
+	// by --session resume; auth, logs, and repo caches are excluded below.
 	//
 	// Stderr is intentionally NOT redirected to /dev/null inside the shell so
 	// diagnostic messages from a failing tar reach our caller via the docker
@@ -1374,10 +1376,15 @@ func (d *DockerProvider) Snapshot(ctx context.Context, sb *agent.Sandbox) (io.Re
 	// excludeGit=false because a session checkpoint must retain .git for resume.
 	workDirRel := strings.TrimPrefix(sb.WorkDir, "/")
 	homeDirRel := strings.TrimPrefix(sb.HomeDir, "/")
+	openCodeDataRel := path.Join(homeDirRel, ".local/share/opencode")
+	openCodeExcludeFlags := fmt.Sprintf(
+		"--exclude='%s/auth.json' --exclude='%s/account.json' --exclude='%s/mcp-auth.json' --exclude='%s/log' --exclude='%s/log/*' --exclude='%s/repos' --exclude='%s/repos/*'",
+		openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel, openCodeDataRel,
+	)
 	cmd := fmt.Sprintf(
-		"tar -c %s -f - --ignore-failed-read %s -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini'",
-		agent.SnapshotTarCompressFlag, agent.SnapshotTarExcludeFlags(false),
-		workDirRel, homeDirRel, homeDirRel, homeDirRel, homeDirRel,
+		"tar -c %s -f - --ignore-failed-read %s %s -C / '%s' '%s/.claude' '%s/.claude.json' '%s/.codex' '%s/.gemini' '%s'",
+		agent.SnapshotTarCompressFlag, agent.SnapshotTarExcludeFlags(false), openCodeExcludeFlags,
+		workDirRel, homeDirRel, homeDirRel, homeDirRel, homeDirRel, openCodeDataRel,
 	)
 
 	execCfg := container.ExecOptions{
