@@ -259,18 +259,23 @@ export const OPENCODE_MODEL_LABELS: Readonly<Record<string, string>> = {
 };
 
 const OPENCODE_LOGICAL_MODEL_SET: ReadonlySet<string> = new Set(OPENCODE_LOGICAL_MODELS);
+const OPENCODE_PHYSICAL_MODEL_SET: ReadonlySet<string> = new Set(AVAILABLE_OPENCODE_MODELS);
 
 export function isOpenCodeLogicalModel(model: string): boolean {
   return OPENCODE_LOGICAL_MODEL_SET.has(model);
 }
 
+export function isKnownOpenCodePhysicalModel(model: string): boolean {
+  return OPENCODE_PHYSICAL_MODEL_SET.has(normalizeOpenCodePhysicalModelID(model));
+}
+
 // openCodeModelLabel returns a friendly display name for an OpenCode logical or
 // physical model id, falling back to the raw id for uncurated custom slugs.
 export function openCodeModelLabel(model: string): string {
-  return OPENCODE_MODEL_LABELS[normalizeOpenCodeModelLabelID(model)] ?? model;
+  return OPENCODE_MODEL_LABELS[normalizeOpenCodePhysicalModelID(model)] ?? model;
 }
 
-function normalizeOpenCodeModelLabelID(model: string): string {
+function normalizeOpenCodePhysicalModelID(model: string): string {
   if (model.startsWith("openrouter/~")) {
     return `openrouter/${model.slice("openrouter/~".length)}`;
   }
