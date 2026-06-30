@@ -318,21 +318,6 @@ export default function Why143Page() {
                 we&rsquo;re called 143, and it&rsquo;s how we think about the
                 product we&rsquo;re building.
               </p>
-              <p
-                className="mt-6 text-sm"
-                style={{
-                  color: isDark ? "rgba(255,255,255,0.35)" : "rgba(0,0,0,0.4)",
-                }}
-              >
-                Want the longer story of how 143 came to be?{" "}
-                <Link
-                  href="/about"
-                  className={`underline underline-offset-2 ${isDark ? "hover:text-white/70" : "hover:text-slate-800"} transition-colors`}
-                >
-                  Read about the project
-                </Link>
-                .
-              </p>
             </div>
           </Reveal>
         </div>
