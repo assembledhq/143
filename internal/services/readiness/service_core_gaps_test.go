@@ -19,7 +19,7 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	session := models.Session{
 		ID:                         uuid.New(),
 		OrgID:                      uuid.New(),
-		WorkspaceGeneration:        12,
+		WorkspaceRevision:          12,
 		WorkspaceRevisionUpdatedAt: revisionUpdatedAt,
 		SnapshotKey:                &snapshotKey,
 		DiffStats:                  json.RawMessage(`{"files_changed":42,"additions":450,"deletions":100}`),
@@ -35,7 +35,7 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 
 	result, err := NewEvaluator(policy.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		LatestReviewLoop:           loop,
 		Logs: []models.SessionLog{
@@ -79,7 +79,7 @@ func TestEvaluator_IgnoresStaleTestEvidence(t *testing.T) {
 	session := models.Session{
 		ID:                         uuid.New(),
 		OrgID:                      uuid.New(),
-		WorkspaceGeneration:        12,
+		WorkspaceRevision:          12,
 		WorkspaceRevisionUpdatedAt: revisionUpdatedAt,
 		SnapshotKey:                &snapshotKey,
 		DiffStats:                  json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
@@ -87,7 +87,7 @@ func TestEvaluator_IgnoresStaleTestEvidence(t *testing.T) {
 
 	result, err := NewEvaluator(models.DefaultPRReadinessPolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		Logs: []models.SessionLog{
 			{ID: 1, Timestamp: revisionUpdatedAt.Add(-time.Minute), Message: "go test ./... passed exit code 0"},
@@ -107,11 +107,11 @@ func TestEvaluator_LargeDiffUsesPersistedAddedRemovedStats(t *testing.T) {
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":1,"added":400,"removed":200}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":1,"added":400,"removed":200}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	cfg.LargeDiffFileThreshold = 25
@@ -119,7 +119,7 @@ func TestEvaluator_LargeDiffUsesPersistedAddedRemovedStats(t *testing.T) {
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles:               []string{"internal/api/session.go"},
 		LinkedIssueCount:           1,
@@ -137,18 +137,18 @@ func TestEvaluator_GeneratedFileChurnHonorsAllowedPaths(t *testing.T) {
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":2,"additions":4,"deletions":1}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":2,"additions":4,"deletions":1}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	cfg.GeneratedFileAllowedPaths = []string{"frontend/build/**"}
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles: []string{
 			"frontend/build/asset-manifest.json",
@@ -169,11 +169,11 @@ func TestEvaluator_SkipsChecksThatAreOffForAllRoles(t *testing.T) {
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	check := cfg.Checks[models.PRReadinessCheckTypeGeneratedFileChurn]
@@ -186,7 +186,7 @@ func TestEvaluator_SkipsChecksThatAreOffForAllRoles(t *testing.T) {
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles:               []string{"internal/generated/client.pb.go"},
 		LinkedIssueCount:           1,

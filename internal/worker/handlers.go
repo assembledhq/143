@@ -10427,7 +10427,7 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if readinessRun.Status == models.PRReadinessRunStatusQueued || readinessRun.Status == models.PRReadinessRunStatusRunning {
 		return fmt.Errorf("PR readiness is still running")
 	}
-	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
+	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
 		return fmt.Errorf("PR readiness is stale for current workspace revision")
 	}
 	if readinessRun.Status == models.PRReadinessRunStatusFailed {
@@ -10734,7 +10734,7 @@ func renderCustomReadinessUserPrompt(check models.PRReadinessCustomCheck, sessio
 		"CheckName":         check.Name,
 		"ChangedFiles":      limitStrings(changedFiles, 100),
 		"DiffStats":         string(session.DiffStats),
-		"WorkspaceRevision": session.WorkspaceGeneration,
+		"WorkspaceRevision": session.WorkspaceRevision,
 		"Logs":              boundedReadinessLogs(logs, 20, 4000),
 	}
 	tmpl, err := template.New("custom_readiness_prompt").Parse(check.Prompt)

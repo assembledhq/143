@@ -72,7 +72,7 @@ func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context
 		SessionID:                  sessionID,
 		RepositoryID:               req.Session.RepositoryID,
 		Status:                     models.PRReadinessRunStatusQueued,
-		EvaluatedWorkspaceRevision: req.Session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: req.Session.WorkspaceRevision,
 		Summary:                    "Queued",
 		TriggeredByUserID:          req.TriggeredByUserID,
 	}

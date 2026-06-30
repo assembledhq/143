@@ -1325,7 +1325,24 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if run.RepositoryID == nil || strings.TrimSpace(snapshotKey) == "" || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
 		return
 	}
-	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
+	current, err := o.sessions.GetByID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to reload session before completion PR readiness auto-run")
+		return
+	}
+	currentSnapshotKey := derefString(current.SnapshotKey)
+	if current.RepositoryID == nil || strings.TrimSpace(currentSnapshotKey) == "" {
+		return
+	}
+	if currentSnapshotKey != snapshotKey {
+		log.Warn().
+			Str("session_id", run.ID.String()).
+			Str("expected_snapshot_key", snapshotKey).
+			Str("current_snapshot_key", currentSnapshotKey).
+			Msg("skipping completion PR readiness auto-run because persisted session snapshot is not current")
+		return
+	}
+	resolved, err := o.prReadiness.ResolvePolicy(ctx, current.OrgID, current.RepositoryID)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to resolve PR readiness policy for completion auto-run")
 		return
@@ -1333,37 +1350,37 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if !resolved.Config.AutoRun.AfterSessionCompletion {
 		return
 	}
-	latest, err := o.prReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	latest, err := o.prReadiness.GetLatestBySession(ctx, current.OrgID, current.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load latest PR readiness before completion auto-run")
 		return
 	}
 	if err == nil && latest != nil &&
-		latest.EvaluatedWorkspaceRevision == run.WorkspaceGeneration &&
-		derefString(latest.EvaluatedSnapshotKey) == snapshotKey {
+		latest.EvaluatedWorkspaceRevision == current.WorkspaceRevision &&
+		derefString(latest.EvaluatedSnapshotKey) == currentSnapshotKey {
 		return
 	}
 	readinessRun := &models.PRReadinessRun{
-		OrgID:                      run.OrgID,
-		SessionID:                  run.ID,
-		RepositoryID:               run.RepositoryID,
+		OrgID:                      current.OrgID,
+		SessionID:                  current.ID,
+		RepositoryID:               current.RepositoryID,
 		Status:                     models.PRReadinessRunStatusQueued,
-		EvaluatedWorkspaceRevision: run.WorkspaceGeneration,
-		EvaluatedSnapshotKey:       &snapshotKey,
+		EvaluatedWorkspaceRevision: current.WorkspaceRevision,
+		EvaluatedSnapshotKey:       &currentSnapshotKey,
 		Summary:                    "Queued",
-		TriggeredByUserID:          run.TriggeredByUserID,
+		TriggeredByUserID:          current.TriggeredByUserID,
 	}
 	if err := o.prReadiness.CreateRun(ctx, readinessRun); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to create completion PR readiness run")
 		return
 	}
 	payload := map[string]string{
-		"org_id":       run.OrgID.String(),
-		"session_id":   run.ID.String(),
+		"org_id":       current.OrgID.String(),
+		"session_id":   current.ID.String(),
 		"readiness_id": readinessRun.ID.String(),
 	}
-	dedupeKey := "pr_readiness:" + run.ID.String()
-	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
+	dedupeKey := "pr_readiness:" + current.ID.String()
+	if _, err := o.jobs.Enqueue(ctx, current.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Str("readiness_id", readinessRun.ID.String()).Msg("failed to enqueue completion PR readiness run")
 	}
 }
