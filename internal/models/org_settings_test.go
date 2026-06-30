@@ -431,8 +431,8 @@ func TestOrgSize_PMScheduleHours(t *testing.T) {
 func TestOrgSize_MaxConcurrentRuns(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, 5, OrgSizeSmall.MaxConcurrentRuns())
-	require.Equal(t, 10, OrgSizeMedium.MaxConcurrentRuns())
+	require.Equal(t, 2, OrgSizeSmall.MaxConcurrentRuns())
+	require.Equal(t, 3, OrgSizeMedium.MaxConcurrentRuns())
 	require.Equal(t, 15, OrgSizeLarge.MaxConcurrentRuns())
 	require.Equal(t, 25, OrgSizeEnterprise.MaxConcurrentRuns())
 }
@@ -516,7 +516,7 @@ func TestParseOrgSettings_DefaultOrgSizeIsMedium(t *testing.T) {
 	require.NoError(t, err)
 
 	// With no org_size set, defaults should match medium profile (backward compatible)
-	require.Equal(t, 10, s.MaxConcurrentRuns, "default should match medium concurrent runs")
+	require.Equal(t, 3, s.MaxConcurrentRuns, "default should match medium concurrent runs")
 	require.Equal(t, 24, s.PMScheduleHours, "default should match medium PM schedule")
 	require.Equal(t, 100, s.ContextLimits.MaxOpenIssues, "default should match medium open issues")
 	require.Equal(t, 50_000, s.ContextLimits.PMMaxTokens, "default should match medium PM tokens")
@@ -558,7 +558,7 @@ func TestParseOrgSettings_MaxSessionDuration_Default(t *testing.T) {
 	s, err := ParseOrgSettings(nil)
 	require.NoError(t, err)
 	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "unset should default")
-	require.Equal(t, 60*60, s.MaxSessionDurationSeconds, "unset max session duration should default to one hour")
+	require.Equal(t, 20*60, s.MaxSessionDurationSeconds, "unset max session duration should default to twenty minutes")
 }
 
 func TestParseOrgSettings_MaxSessionDuration_Zero(t *testing.T) {
@@ -567,7 +567,7 @@ func TestParseOrgSettings_MaxSessionDuration_Zero(t *testing.T) {
 	s, err := ParseOrgSettings(json.RawMessage(`{"max_session_duration_seconds":0}`))
 	require.NoError(t, err)
 	require.Equal(t, DefaultMaxSessionDurationSeconds, s.MaxSessionDurationSeconds, "zero should default")
-	require.Equal(t, 60*60, s.MaxSessionDurationSeconds, "zero max session duration should default to one hour")
+	require.Equal(t, 20*60, s.MaxSessionDurationSeconds, "zero max session duration should default to twenty minutes")
 }
 
 func TestParseOrgSettings_MaxSessionDuration_ClampsBelowMin(t *testing.T) {
