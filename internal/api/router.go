@@ -33,7 +33,6 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	"github.com/assembledhq/143/internal/services/automations"
-	"github.com/assembledhq/143/internal/services/budget"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
@@ -400,10 +399,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetThreadInboxStore(threadInboxStore)
 	sessionHandler.SetSessionSandboxHolderStore(sessionSandboxHolderStore)
 	sessionHandler.SetTxStarter(pool)
-	// Deployment-wide daily-spend kill switch (disabled unless
-	// GLOBAL_DAILY_TOKEN_BUDGET is set). budget.New returns nil for a zero
-	// budget, leaving session creation ungated.
-	sessionHandler.SetTokenBudgetGuard(budget.New(cfg.GlobalDailyTokenBudget, sessionMessageStore))
 
 	// Inbound-agent metrics. Constructed once and shared between the
 	// linear.Service (so HandleAgentMilestone records milestone emits)

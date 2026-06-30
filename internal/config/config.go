@@ -267,26 +267,6 @@ type Config struct {
 	// lower value and logs a warning.
 	SessionMaxRunningAge time.Duration `env:"SESSION_MAX_RUNNING_AGE" envDefault:"150m"`
 
-	// GlobalDailyTokenBudget is a deployment-wide kill switch on LLM spend: the
-	// maximum number of LLM tokens (input + output) recorded on session
-	// messages per UTC day, summed across every org. Once the running daily
-	// total reaches this ceiling, new user-initiated session creation is
-	// refused with HTTP 429 until the next UTC day; sessions already running
-	// are unaffected.
-	//
-	// What this measures: agent-turn tokens recorded on session_messages. On
-	// the hosted deployment the coding agent runs on our own OpenAI token (no
-	// per-user coding-agent credentials), so that recorded usage is what bills
-	// to us. It does NOT count small platform helper calls (title generation,
-	// PM context) — those bill to the same token but aren't persisted, and are
-	// negligible next to agent-turn spend. Autonomous runs (PM, automations)
-	// are counted in the total but not blocked by the gate (see createManual).
-	//
-	// This bounds the blast radius of open signup (a flood of accounts can't
-	// run up an unbounded bill) and is NOT a per-user quota. 0 (the default)
-	// disables the kill switch entirely.
-	GlobalDailyTokenBudget int64 `env:"GLOBAL_DAILY_TOKEN_BUDGET" envDefault:"0"`
-
 	// SessionFilesCacheDir is where the file-context API stages extracted
 	// session workspace snapshots when a session's sandbox container has
 	// already been torn down. The first read for a given snapshot pays a
