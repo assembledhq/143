@@ -1,9 +1,8 @@
-# Public Docs Product and Visual Design
+# Design: Public Docs Product and Visual Design
 
-> **Status:** Future design
-> **Last reviewed:** 2026-05-23
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
-The docs should feel like part of 143.dev, not a separate documentation vendor theme. The user should land in a calm, dense, modern technical reference that helps them complete real setup and review workflows.
+The docs should feel like part of 143.dev, not a separate documentation vendor theme. Readers should land in a calm, dense, modern technical reference that helps them complete real setup and review workflows.
 
 ## Experience principles
 
@@ -15,7 +14,7 @@ The docs should feel like part of 143.dev, not a separate documentation vendor t
 
 ## Layout
 
-Desktop docs pages should use a three-column reading layout:
+Desktop docs pages use a three-column reading layout:
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -26,7 +25,7 @@ Desktop docs pages should use a three-column reading layout:
 └───────────────┴───────────────────────────────────────┴─────────────┘
 ```
 
-Mobile should collapse to:
+Mobile collapses to:
 
 - Docs-specific top nav with the same visual language as the public website.
 - Docs section selector / search.
@@ -34,7 +33,7 @@ Mobile should collapse to:
 - Inline page tools.
 - Previous/next links.
 
-Use Fumadocs layout primitives initially, but customize enough that the surface follows the 143 product design:
+Use Fumadocs layout primitives where they fit, but keep enough 143-owned component styling that the surface follows the product design:
 
 - Neutral-first background.
 - Subtle borders/separators instead of heavy cards.
@@ -52,11 +51,11 @@ Top-level docs groups:
 - Self-hosting
 - Reference
 
-The sidebar should show only public docs pages. Internal design docs should never appear in this tree.
+The sidebar shows only public docs pages. Internal design docs must never appear in this tree.
 
-The sidebar should keep the top-level docs groups visible while browsing inside a group. Section folders should stay in a single Fumadocs tree instead of using separate root navigation scopes.
+The sidebar keeps the top-level docs groups visible while browsing inside a group. Section folders stay in a single Fumadocs tree instead of using separate root navigation scopes.
 
-The docs home page should be a functional index, not a marketing page. It should show:
+The docs home page is a functional index, not a marketing page. It shows:
 
 - A short description of what the docs cover.
 - Four entry cards for Get started, Guides, Self-hosting, and Reference.
@@ -65,17 +64,18 @@ The docs home page should be a functional index, not a marketing page. It should
 
 ## Page components
 
-The first implementation should support these MDX components:
+The current MDX component set supports:
 
 - `Callout`: info, warning, success, danger.
 - `Steps`: numbered workflow steps.
 - `CodeBlock`: syntax highlighted, filename/title, copy action.
 - `Tabs`: package-manager or platform variants.
 - `Cards`: compact links to related pages.
-- `Screenshot`: responsive image with caption and optional lightbox.
+- `Screenshot`: responsive image with caption.
 - `ConfigField`: field name, type, required flag, default, description.
-- `Endpoint`: method/path summary for future API docs.
 - `AgentNote`: special note for AI/automation readers, visually subtle.
+- `FlowDiagram`: reserved for a small number of sequence explanations.
+- `BoundaryDiagram`: two-column comparison for ownership, trust, or responsibility boundaries.
 
 Prefer Fumadocs-provided components where they are close enough. Wrap or replace them when the visual treatment does not match 143.
 
@@ -111,7 +111,7 @@ Do not deeply target undocumented DOM structure. Fumadocs explicitly warns that 
 
 ## Search
 
-Docs search should be present in the first public release. It does not need to search authenticated product data.
+Docs search should stay separate from authenticated product search. It does not need to search product data.
 
 Search requirements:
 
@@ -125,12 +125,12 @@ Implementation can start with Fumadocs search defaults and evolve to a custom se
 
 ## Images and media
 
-Store docs images under `docs/public/images` or `frontend/public/docs` after final implementation choice. The selected path should be documented in the contribution guide.
+Store public docs product screenshots under `frontend/public/product`.
 
 Image requirements:
 
 - Use real product screenshots where the user needs to recognize UI.
-- Use diagrams for architecture only when they clarify setup or operator decisions.
+- Use diagrams only when they clarify setup, operator decisions, or a real sequence. Do not use a diagram as a default page opener.
 - Avoid stock/atmospheric imagery.
 - Captions should explain the action/state shown.
 - Every image needs useful alt text.
@@ -140,7 +140,7 @@ Image requirements:
 "Similar to Stripe's guides" means the following for 143:
 
 - Guides are task-based, not feature dumps.
-- Each guide starts with prerequisites and the expected final state.
+- Each guide starts with the user outcome and the expected final state.
 - Code/config examples are copyable and realistic.
 - Deep explanation exists, but after the path to success.
 - Reference pages are separated from narrative guides.

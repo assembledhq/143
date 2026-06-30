@@ -1,7 +1,6 @@
 # Design: Sandbox GitHub-Auth Socket Ownership
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-22
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 ## Implementation status
 

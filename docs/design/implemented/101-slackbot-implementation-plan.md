@@ -1,6 +1,7 @@
 # 101 - Slackbot Implementation Plan
 
-> **Status:** Phases 1-8 implemented, including per-Slack-user org
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > retargeting for multi-org Slack workspaces.
 > **Last reviewed:** 2026-06-16
 >

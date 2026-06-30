@@ -1,6 +1,6 @@
 # Design: Audit Log Feed Pagination
 
-> **Status:** Proposed | **Last reviewed:** 2026-05-01
+> **Status:** Not Started | **Last reviewed:** 2026-06-30
 
 ## 1. Problem
 
