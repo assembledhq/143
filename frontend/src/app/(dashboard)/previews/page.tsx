@@ -56,7 +56,7 @@ import { safeExternalUrl } from "@/lib/utils";
 
 type PreviewScope = "running" | "resumable" | "recent";
 
-const RESTART_LATEST_LABEL = "Start latest preview";
+const RESTART_LATEST_LABEL = "Start latest";
 const RESTART_LATEST_TOOLTIP = "Start a new preview from the latest source state";
 
 const SECTIONS: {
@@ -325,15 +325,20 @@ function PreviewActions({
   const previewHref = safeExternalUrl(preview.preview_url);
 
   return (
-    <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
       {previewHref ? (
-        <Button asChild size="sm">
+        <Button
+          asChild
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
+        >
           <a
             href={previewHref}
             target="_blank"
             rel="noreferrer"
           >
-            <ExternalLink className="h-4 w-4" />
+            <ExternalLink className="h-3.5 w-3.5" />
             Open
           </a>
         </Button>
@@ -341,10 +346,11 @@ function PreviewActions({
       {canMutate && scope === "running" && preview.current_preview_id ? (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
           onClick={() => onStop(preview)}
         >
-          <Square className="h-4 w-4" />
+          <Square className="h-3.5 w-3.5" />
           Stop
         </Button>
       ) : null}
@@ -357,11 +363,12 @@ function PreviewActions({
       {canMutate && scope === "resumable" ? (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
           loading={isRestartPending(preview)}
           onClick={() => onRestart(preview)}
         >
-          <Play className="h-4 w-4" />
+          <Play className="h-3.5 w-3.5" />
           Resume
         </Button>
       ) : null}
@@ -433,8 +440,8 @@ function previewColumns(
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
-      className: "w-[20%] text-right",
-      cellClassName: "text-right",
+      className: "w-[20%] min-w-[13rem] text-right",
+      cellClassName: "text-right align-middle",
       render: (preview) => <PreviewActions preview={preview} {...props} />,
     },
   ];
@@ -540,10 +547,11 @@ function RestartLatestButton({
             size="sm"
             variant="ghost"
             aria-label={RESTART_LATEST_TOOLTIP}
+            className="h-7 px-2 text-muted-foreground hover:text-foreground"
             loading={loading}
             onClick={onClick}
           >
-            <RotateCw className="h-4 w-4" />
+            <RotateCw className="h-3.5 w-3.5" />
             {RESTART_LATEST_LABEL}
           </Button>
         </TooltipTrigger>
