@@ -9794,9 +9794,9 @@ func TestRunAgent_OpenCodeLogicalModelOverrideReachesSandboxAsResolvedRoute(t *t
 	err := buildOrchestrator(d).RunAgent(context.Background(), run)
 	require.NoError(t, err, "RunAgent should execute with an OpenRouter-backed OpenCode credential")
 	require.Equal(t, "sk-or-opencode", capturedCfg.Env["OPENROUTER_API_KEY"], "OpenCode should use the OpenRouter-backed credential")
-	require.Equal(t, models.OpenCodeModelOpenRouterGLM52, capturedCfg.Env["OPENCODE_MODEL"], "logical OpenCode overrides should resolve to the physical OpenRouter route before reaching the sandbox")
+	require.Equal(t, "openrouter/~z-ai/glm-5.2", capturedCfg.Env["OPENCODE_MODEL"], "logical OpenCode overrides should resolve to OpenCode's OpenRouter custom-model id before reaching the sandbox")
 	require.NotEqual(t, models.DefaultOpenCodeModel, capturedCfg.Env["OPENCODE_MODEL"], "the sandbox must not receive a bare logical OpenCode model id")
-	require.Contains(t, capturedCfg.Env["OPENCODE_CONFIG_CONTENT"], models.OpenCodeModelOpenRouterGLM52, "OpenCode runtime config should match the resolved physical model")
+	require.Contains(t, capturedCfg.Env["OPENCODE_CONFIG_CONTENT"], "openrouter/~z-ai/glm-5.2", "OpenCode runtime config should match the resolved CLI model")
 }
 
 // --- Amp/Pi agent env resolution ---

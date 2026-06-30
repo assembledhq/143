@@ -425,7 +425,7 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 		},
 		{
 			name:     "demo session issue links exist",
-			query:    `SELECT count(*) FROM session_issue_links WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND session_id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
+			query:    `SELECT count(*) FROM session_issue_links WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND role = 'primary' AND session_id IN ('00000000-0000-4000-a000-000000000300'::uuid, '00000000-0000-4000-a000-000000000301'::uuid, '00000000-0000-4000-a000-000000000302'::uuid, '00000000-0000-4000-a000-000000000303'::uuid, '00000000-0000-4000-a000-000000000304'::uuid)`,
 			expected: 5,
 		},
 		{
@@ -502,6 +502,161 @@ func AssertDemoSeedState(ctx context.Context, pool seedDB) error {
 			name:     "demo repository PR template exists",
 			query:    `SELECT count(*) FROM repository_pr_templates WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000120'::uuid`,
 			expected: 1,
+		},
+		{
+			name:     "demo high-impact provider integrations exist",
+			query:    `SELECT count(*) FROM integrations WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000012'::uuid, '00000000-0000-4000-a000-000000000013'::uuid, '00000000-0000-4000-a000-000000000014'::uuid) AND provider IN ('sentry', 'slack', 'pagerduty')`,
+			expected: 3,
+		},
+		{
+			name:     "demo provider issues exist",
+			query:    `SELECT count(*) FROM issues WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000605'::uuid, '00000000-0000-4000-a000-000000000606'::uuid, '00000000-0000-4000-a000-000000000607'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo high-impact sessions exist",
+			query:    `SELECT count(*) FROM sessions WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000305'::uuid, '00000000-0000-4000-a000-000000000306'::uuid, '00000000-0000-4000-a000-000000000307'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo high-impact session threads exist",
+			query:    `SELECT count(*) FROM session_threads WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000705'::uuid, '00000000-0000-4000-a000-000000000706'::uuid, '00000000-0000-4000-a000-000000000707'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo high-impact session issue links exist",
+			query:    `SELECT count(*) FROM session_issue_links WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000635'::uuid, '00000000-0000-4000-a000-000000000636'::uuid, '00000000-0000-4000-a000-000000000637'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo automations exist",
+			query:    `SELECT count(*) FROM automations WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000830'::uuid, '00000000-0000-4000-a000-000000000831'::uuid, '00000000-0000-4000-a000-000000000832'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo automation runs exist",
+			query:    `SELECT count(*) FROM automation_runs WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000836'::uuid, '00000000-0000-4000-a000-000000000837'::uuid, '00000000-0000-4000-a000-000000000838'::uuid, '00000000-0000-4000-a000-000000000839'::uuid, '00000000-0000-4000-a000-000000000840'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo automation event triggers exist",
+			query:    `SELECT count(*) FROM automation_event_triggers WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000833'::uuid, '00000000-0000-4000-a000-000000000834'::uuid, '00000000-0000-4000-a000-000000000835'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo automation capability policies exist",
+			query:    `SELECT count(*) FROM agent_capability_policies WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000841'::uuid, '00000000-0000-4000-a000-000000000842'::uuid, '00000000-0000-4000-a000-000000000843'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo automation capability grants exist",
+			query:    `SELECT count(*) FROM agent_capability_policy_grants WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000844'::uuid, '00000000-0000-4000-a000-000000000845'::uuid, '00000000-0000-4000-a000-000000000846'::uuid, '00000000-0000-4000-a000-000000000847'::uuid, '00000000-0000-4000-a000-000000000848'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo automation goal improvement exists",
+			query:    `SELECT count(*) FROM automation_goal_improvements WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000849'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo PM documents exist",
+			query:    `SELECT count(*) FROM pm_documents WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000860'::uuid, '00000000-0000-4000-a000-000000000862'::uuid) AND active = true`,
+			expected: 2,
+		},
+		{
+			name:     "demo PM plan exists",
+			query:    `SELECT count(*) FROM pm_plans WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000870'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo PM decisions exist",
+			query:    `SELECT count(*) FROM pm_decision_log WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000871'::uuid, '00000000-0000-4000-a000-000000000872'::uuid, '00000000-0000-4000-a000-000000000873'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo project tasks exist",
+			query:    `SELECT count(*) FROM project_tasks WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000880'::uuid, '00000000-0000-4000-a000-000000000881'::uuid, '00000000-0000-4000-a000-000000000882'::uuid, '00000000-0000-4000-a000-000000000883'::uuid, '00000000-0000-4000-a000-000000000884'::uuid, '00000000-0000-4000-a000-000000000885'::uuid, '00000000-0000-4000-a000-000000000886'::uuid)`,
+			expected: 7,
+		},
+		{
+			name:     "demo project task dependencies exist",
+			query:    `SELECT count(*) FROM project_task_dependencies WHERE task_id IN ('00000000-0000-4000-a000-000000000881'::uuid, '00000000-0000-4000-a000-000000000882'::uuid, '00000000-0000-4000-a000-000000000883'::uuid, '00000000-0000-4000-a000-000000000885'::uuid, '00000000-0000-4000-a000-000000000886'::uuid)`,
+			expected: 5,
+		},
+		{
+			name:     "demo project specs exist",
+			query:    `SELECT count(*) FROM project_specs WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000890'::uuid, '00000000-0000-4000-a000-000000000891'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo project attachments exist",
+			query:    `SELECT count(*) FROM project_attachments WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000892'::uuid, '00000000-0000-4000-a000-000000000893'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo project cycles exist",
+			query:    `SELECT count(*) FROM project_cycles WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000894'::uuid, '00000000-0000-4000-a000-000000000895'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo project source issues exist",
+			query:    `SELECT count(*) FROM project_source_issues WHERE project_id IN ('00000000-0000-4000-a000-000000000200'::uuid, '00000000-0000-4000-a000-000000000201'::uuid) AND issue_id IN ('00000000-0000-4000-a000-000000000601'::uuid, '00000000-0000-4000-a000-000000000602'::uuid, '00000000-0000-4000-a000-000000000604'::uuid, '00000000-0000-4000-a000-000000000605'::uuid, '00000000-0000-4000-a000-000000000606'::uuid, '00000000-0000-4000-a000-000000000607'::uuid)`,
+			expected: 6,
+		},
+		{
+			name:     "demo Slack provider rows exist",
+			query:    `SELECT count(*) FROM slack_installations WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000800'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo Slack channel settings exist",
+			query:    `SELECT count(*) FROM slack_channel_settings WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000802'::uuid, '00000000-0000-4000-a000-000000000803'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo PagerDuty provider rows exist",
+			query:    `SELECT count(*) FROM pagerduty_integrations WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000810'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo PagerDuty incident exists",
+			query:    `SELECT count(*) FROM pagerduty_incidents WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id = '00000000-0000-4000-a000-000000000812'::uuid`,
+			expected: 1,
+		},
+		{
+			name:     "demo Linear provider rows exist",
+			query:    `SELECT count(*) FROM linear_team_repo_mappings WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000820'::uuid, '00000000-0000-4000-a000-000000000821'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo code review metadata exists",
+			query:    `SELECT count(*) FROM code_review_session_metadata WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000902'::uuid, '00000000-0000-4000-a000-000000000903'::uuid)`,
+			expected: 2,
+		},
+		{
+			name:     "demo code review agent results exist",
+			query:    `SELECT count(*) FROM code_review_agent_results WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000904'::uuid, '00000000-0000-4000-a000-000000000905'::uuid, '00000000-0000-4000-a000-000000000906'::uuid)`,
+			expected: 3,
+		},
+		{
+			name:     "demo code review findings exist",
+			query:    `SELECT count(*) FROM code_review_findings WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000907'::uuid, '00000000-0000-4000-a000-000000000908'::uuid, '00000000-0000-4000-a000-000000000909'::uuid, '00000000-0000-4000-a000-000000000910'::uuid)`,
+			expected: 4,
+		},
+		{
+			name:     "demo code review prompt artifacts exist",
+			query:    `SELECT count(*) FROM code_review_prompt_artifacts WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND id IN ('00000000-0000-4000-a000-000000000911'::uuid, '00000000-0000-4000-a000-000000000912'::uuid, '00000000-0000-4000-a000-000000000913'::uuid, '00000000-0000-4000-a000-000000000914'::uuid)`,
+			expected: 4,
+		},
+		{
+			name:     "demo usage hourly rows exist",
+			query:    `SELECT count(*) FROM usage_hourly WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND hour_utc >= date_trunc('day', now()) - interval '13 days' AND hour_utc < date_trunc('day', now()) + interval '1 day' AND (user_id IS NULL OR user_id IN ('00000000-0000-4000-a000-000000000002'::uuid, '00000000-0000-4000-a000-000000000004'::uuid)) AND (capacity_tier IS NULL OR capacity_tier IN ('2cpu_4096mb_10240diskmb', '4cpu_8192mb_20480diskmb'))`,
+			expected: 42,
+		},
+		{
+			name:     "demo usage hourly execution rows exist",
+			query:    `SELECT count(*) FROM usage_hourly_execution WHERE org_id = '00000000-0000-4000-a000-000000000001'::uuid AND hour_utc >= date_trunc('day', now()) - interval '13 days' AND hour_utc < date_trunc('day', now()) + interval '1 day' AND agent_type IN ('codex', 'claude_code', 'opencode') AND capacity_key IN ('2cpu_4096mb_10240diskmb', '4cpu_8192mb_20480diskmb')`,
+			expected: 42,
 		},
 	}
 	for _, assertion := range assertions {

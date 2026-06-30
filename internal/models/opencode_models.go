@@ -19,17 +19,19 @@ import "strings"
 // OpenCode-native gateway.
 
 // OpenCodeRoute is one physical way to reach a logical model: a backing
-// provider (which credential serves it), the physical model ID passed to
-// `opencode run --model`, and — for OpenRouter routes — the audited US-only
-// inference-provider allowlist pinned into the runtime config.
+// provider (which credential serves it), the registry route ID, and — for
+// OpenRouter routes — the audited US-only inference-provider allowlist pinned
+// into the runtime config.
 type OpenCodeRoute struct {
 	// Backing is the credential's backing provider. OpenCode credentials are
 	// all stored under ProviderOpenCode with a backing_provider discriminator;
 	// resolution matches a route to a credential whose
 	// NormalizedBackingProvider() equals this value.
 	Backing ProviderName
-	// PhysicalModelID is the OpenCode CLI model ID (e.g. "openrouter/z-ai/glm-5.2"
-	// or "opencode/glm-5.2"). It is what flows to OPENCODE_MODEL once resolved.
+	// PhysicalModelID is the route ID tracked by 143 (e.g.
+	// "openrouter/z-ai/glm-5.2" or "opencode/glm-5.2"). OpenRouter routes are
+	// converted to OpenCode's custom-model CLI form ("openrouter/~...") when
+	// building the sandbox runtime config.
 	PhysicalModelID string
 	// USProviderList is the audited US-only OpenRouter inference-provider
 	// allowlist (only/order) pinned in the runtime config. Empty for non-OpenRouter
@@ -85,6 +87,14 @@ type OpenCodeModel struct {
 // configured. GLM 5.2 is the cost-first default and leads the picker.
 const DefaultOpenCodeModel = "glm-5.2"
 
+var defaultOpenCodePhysicalModelByBacking = map[ProviderName]string{
+	ProviderOpenRouter: OpenCodeModelOpenRouterGLM52,
+	ProviderOpenCode:   OpenCodeModelGLM52,
+	ProviderOpenAI:     OpenCodeModelGPT54Mini,
+	ProviderAnthropic:  OpenCodeModelClaudeHaiku45,
+	ProviderGemini:     OpenCodeModelGemini3Flash,
+}
+
 // Audited US-only OpenRouter inference-provider allowlists, audited against
 // OpenRouter's endpoint list and provider-company locations on 2026-06-26.
 // Keep docs/design/implemented/95-opencode-agent-adapter.md in sync. These
@@ -103,7 +113,6 @@ var (
 	usGPT52        = []string{"openai", "azure"}
 	usGPT55        = []string{"openai", "azure"}
 	usGPT55Pro     = []string{"openai"} // OpenRouter currently exposes only OpenAI.
-	usFable5       = []string{"anthropic", "amazon-bedrock/us", "azure"}
 )
 
 // openRouterRoute builds an OpenRouter-backed route.
@@ -123,12 +132,34 @@ func firstPartyRoute(backing ProviderName, physicalID string) OpenCodeRoute {
 }
 
 // OpenCodeModelRegistry is the ordered set of logical models the picker offers.
-// Order mirrors the legacy AvailableOpenCodeModels ordering (cost-first), with
-// the OpenRouter/native pairs collapsed into one entry each.
+// GLM 5.2 stays first as the default; after that, model families are grouped
+// with newer versions before older versions. OpenRouter/native pairs collapse
+// into one entry each.
 var OpenCodeModelRegistry = []OpenCodeModel{
 	{ID: "glm-5.2", DisplayName: "GLM 5.2", Routes: []OpenCodeRoute{
 		openRouterRoute(OpenCodeModelOpenRouterGLM52, usGLM52),
 		nativeRoute(OpenCodeModelGLM52),
+	}},
+	{ID: "glm-5.1", DisplayName: "GLM 5.1", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterGLM51, usGLM51),
+		nativeRoute(OpenCodeModelGLM51),
+	}},
+	// GPT-5.5 is NOT collapsed under a bare logical id: that name belongs to the
+	// Codex agent (CodexModelGPT55), so a bare "gpt-5.5" must stay invalid for
+	// OpenCode. It is offered as explicit physical (pinned) routes instead,
+	// which keeps the audited US allowlist in the registry.
+	{ID: "gpt-5.5-pro", DisplayName: "GPT-5.5 Pro", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterGPT55Pro, usGPT55Pro),
+		nativeRoute(OpenCodeModelGPT55Pro),
+	}},
+	{ID: OpenCodeModelOpenRouterGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterGPT55, usGPT55),
+	}},
+	{ID: OpenCodeModelGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
+		nativeRoute(OpenCodeModelGPT55),
+	}},
+	{ID: OpenCodeModelGPT54, DisplayName: "GPT-5.4", Routes: []OpenCodeRoute{
+		firstPartyRoute(ProviderOpenAI, OpenCodeModelGPT54),
 	}},
 	{ID: OpenCodeModelGPT54Mini, DisplayName: "GPT-5.4 Mini", Routes: []OpenCodeRoute{
 		firstPartyRoute(ProviderOpenAI, OpenCodeModelGPT54Mini),
@@ -136,12 +167,32 @@ var OpenCodeModelRegistry = []OpenCodeModel{
 	{ID: OpenCodeModelGPT53CodexSpark, DisplayName: "GPT-5.3 Codex Spark", Routes: []OpenCodeRoute{
 		firstPartyRoute(ProviderOpenAI, OpenCodeModelGPT53CodexSpark),
 	}},
+	{ID: "gpt-5.2", DisplayName: "GPT-5.2", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterGPT52, usGPT52),
+		nativeRoute(OpenCodeModelGPT52),
+	}},
+	{ID: OpenCodeModelClaudeOpus48, DisplayName: "Claude Opus 4.8", Routes: []OpenCodeRoute{
+		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus48),
+	}},
+	{ID: OpenCodeModelClaudeOpus47, DisplayName: "Claude Opus 4.7", Routes: []OpenCodeRoute{
+		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus47),
+	}},
+	{ID: OpenCodeModelClaudeOpus46, DisplayName: "Claude Opus 4.6", Routes: []OpenCodeRoute{
+		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus46),
+	}},
+	{ID: OpenCodeModelClaudeSonnet46, DisplayName: "Claude Sonnet 4.6", Routes: []OpenCodeRoute{
+		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeSonnet46),
+	}},
 	{ID: OpenCodeModelClaudeHaiku45, DisplayName: "Claude Haiku 4.5", Routes: []OpenCodeRoute{
 		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeHaiku45),
 	}},
 	{ID: "gemini-3.5-flash", DisplayName: "Gemini 3.5 Flash", Routes: []OpenCodeRoute{
 		openRouterRoute(OpenCodeModelOpenRouterGemini35Flash, usGemini35Fl),
 		nativeRoute(OpenCodeModelGemini35Flash),
+	}},
+	{ID: "gemini-3.1-pro", DisplayName: "Gemini 3.1 Pro", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterGemini31Pro, usGemini31Pro),
+		nativeRoute(OpenCodeModelGemini31Pro),
 	}},
 	{ID: OpenCodeModelGemini3Flash, DisplayName: "Gemini 3 Flash", Routes: []OpenCodeRoute{
 		firstPartyRoute(ProviderGemini, OpenCodeModelGemini3Flash),
@@ -162,58 +213,13 @@ var OpenCodeModelRegistry = []OpenCodeModel{
 		openRouterRoute(OpenCodeModelOpenRouterDeepSeekV4Pro, usDeepSeekV4Pr),
 		nativeRoute(OpenCodeModelDeepSeekV4Pro),
 	}},
-	{ID: "glm-5.1", DisplayName: "GLM 5.1", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterGLM51, usGLM51),
-		nativeRoute(OpenCodeModelGLM51),
-	}},
-	{ID: "kimi-k2.5", DisplayName: "Kimi K2.5", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterKimiK25, usKimiK25),
-		nativeRoute(OpenCodeModelKimiK25),
-	}},
-	{ID: OpenCodeModelGPT54, DisplayName: "GPT-5.4", Routes: []OpenCodeRoute{
-		firstPartyRoute(ProviderOpenAI, OpenCodeModelGPT54),
-	}},
-	{ID: OpenCodeModelClaudeSonnet46, DisplayName: "Claude Sonnet 4.6", Routes: []OpenCodeRoute{
-		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeSonnet46),
-	}},
-	{ID: "gemini-3.1-pro", DisplayName: "Gemini 3.1 Pro", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterGemini31Pro, usGemini31Pro),
-		nativeRoute(OpenCodeModelGemini31Pro),
-	}},
 	{ID: "kimi-k2.6", DisplayName: "Kimi K2.6", Routes: []OpenCodeRoute{
 		openRouterRoute(OpenCodeModelOpenRouterKimiK26, usKimiK26),
 		nativeRoute(OpenCodeModelKimiK26),
 	}},
-	{ID: "gpt-5.2", DisplayName: "GPT-5.2", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterGPT52, usGPT52),
-		nativeRoute(OpenCodeModelGPT52),
-	}},
-	// GPT-5.5 and Claude Fable 5 are NOT collapsed under a bare logical id: those
-	// names belong to the Codex / Claude Code agents (CodexModelGPT55,
-	// ClaudeCodeModelFable5), so a bare "gpt-5.5" / "claude-fable-5" must stay
-	// invalid for OpenCode. They are offered as explicit physical (pinned)
-	// routes instead, which keeps their audited US allowlists in the registry.
-	{ID: OpenCodeModelOpenRouterGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterGPT55, usGPT55),
-	}},
-	{ID: OpenCodeModelGPT55, DisplayName: "GPT-5.5", Routes: []OpenCodeRoute{
-		nativeRoute(OpenCodeModelGPT55),
-	}},
-	{ID: "gpt-5.5-pro", DisplayName: "GPT-5.5 Pro", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterGPT55Pro, usGPT55Pro),
-		nativeRoute(OpenCodeModelGPT55Pro),
-	}},
-	{ID: OpenCodeModelClaudeOpus48, DisplayName: "Claude Opus 4.8", Routes: []OpenCodeRoute{
-		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus48),
-	}},
-	{ID: OpenCodeModelClaudeOpus47, DisplayName: "Claude Opus 4.7", Routes: []OpenCodeRoute{
-		firstPartyRoute(ProviderAnthropic, OpenCodeModelClaudeOpus47),
-	}},
-	{ID: OpenCodeModelOpenRouterClaudeFable5, DisplayName: "Claude Fable 5", Routes: []OpenCodeRoute{
-		openRouterRoute(OpenCodeModelOpenRouterClaudeFable5, usFable5),
-	}},
-	{ID: OpenCodeModelClaudeFable5, DisplayName: "Claude Fable 5", Routes: []OpenCodeRoute{
-		nativeRoute(OpenCodeModelClaudeFable5),
+	{ID: "kimi-k2.5", DisplayName: "Kimi K2.5", Routes: []OpenCodeRoute{
+		openRouterRoute(OpenCodeModelOpenRouterKimiK25, usKimiK25),
+		nativeRoute(OpenCodeModelKimiK25),
 	}},
 }
 
@@ -252,7 +258,7 @@ func IsOpenCodeLogicalModel(id string) bool {
 // IsKnownOpenCodePhysicalModel reports whether id is a curated physical route
 // ID (used to recognize pinned selections that predate logical models).
 func IsKnownOpenCodePhysicalModel(id string) bool {
-	_, ok := openCodePhysicalModelIDSet[strings.TrimSpace(id)]
+	_, ok := openCodePhysicalModelIDSet[normalizeOpenCodePhysicalModelID(id)]
 	return ok
 }
 
@@ -260,7 +266,7 @@ func IsKnownOpenCodePhysicalModel(id string) bool {
 // model for a physical model ID. Used to resolve pinned selections and to look
 // up the audited US-provider allowlist for a resolved route.
 func OpenCodeRouteForPhysicalModel(physicalID string) (OpenCodeModel, OpenCodeRoute, bool) {
-	id := strings.TrimSpace(physicalID)
+	id := normalizeOpenCodePhysicalModelID(physicalID)
 	route, ok := openCodeRouteByPhysicalID[id]
 	if !ok {
 		return OpenCodeModel{}, OpenCodeRoute{}, false
@@ -272,7 +278,7 @@ func OpenCodeRouteForPhysicalModel(physicalID string) (OpenCodeModel, OpenCodeRo
 // allowlist for a physical model ID, or nil when the model has none (native or
 // first-party routes, or uncurated custom slugs).
 func OpenCodeUSProviderList(physicalID string) []string {
-	route, ok := openCodeRouteByPhysicalID[strings.TrimSpace(physicalID)]
+	route, ok := openCodeRouteByPhysicalID[normalizeOpenCodePhysicalModelID(physicalID)]
 	if !ok {
 		return nil
 	}
@@ -336,16 +342,12 @@ func OpenCodeModelsForAPI() []OpenCodeModelAPI {
 }
 
 // DefaultOpenCodePhysicalModelForBacking returns a physical CLI model id for a
-// backing when no model is configured. It prefers the product default model's
-// route for the backing, then the first registry model that has a route for the
-// backing, and finally the default model's first route.
+// backing when no model is configured. These fallbacks are explicit so picker
+// ordering changes do not silently alter the model used by existing orgs with
+// backing-specific OpenCode credentials.
 func DefaultOpenCodePhysicalModelForBacking(backing ProviderName) string {
-	if def, ok := openCodeModelsByID[DefaultOpenCodeModel]; ok {
-		for _, route := range def.Routes {
-			if route.Backing == backing {
-				return route.PhysicalModelID
-			}
-		}
+	if model, ok := defaultOpenCodePhysicalModelByBacking[backing]; ok {
+		return model
 	}
 	for _, m := range OpenCodeModelRegistry {
 		for _, route := range m.Routes {
@@ -367,8 +369,17 @@ func OpenCodeDisplayName(idOrPhysical string) string {
 	if m, ok := openCodeModelsByID[id]; ok {
 		return m.DisplayName
 	}
-	if m, ok := openCodeModelByPhysicalID[id]; ok {
+	if m, ok := openCodeModelByPhysicalID[normalizeOpenCodePhysicalModelID(id)]; ok {
 		return m.DisplayName
+	}
+	return id
+}
+
+func normalizeOpenCodePhysicalModelID(id string) string {
+	id = strings.TrimSpace(id)
+	const openRouterCustomPrefix = "openrouter/~"
+	if upstreamModel, ok := strings.CutPrefix(id, openRouterCustomPrefix); ok {
+		return "openrouter/" + upstreamModel
 	}
 	return id
 }

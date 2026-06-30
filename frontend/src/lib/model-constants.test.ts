@@ -57,11 +57,26 @@ describe("model constants", () => {
     expect(AVAILABLE_OPENCODE_MODELS).toEqual([
       "opencode/glm-5.2",
       "openrouter/z-ai/glm-5.2",
+      "opencode/glm-5.1",
+      "openrouter/z-ai/glm-5.1",
+      "opencode/gpt-5.5-pro",
+      "openrouter/openai/gpt-5.5-pro",
+      "opencode/gpt-5.5",
+      "openrouter/openai/gpt-5.5",
+      "openai/gpt-5.4",
       "openai/gpt-5.4-mini",
       "openai/gpt-5.3-codex-spark",
+      "opencode/gpt-5.2",
+      "openrouter/openai/gpt-5.2",
+      "anthropic/claude-opus-4-8",
+      "anthropic/claude-opus-4-7",
+      "anthropic/claude-opus-4-6",
+      "anthropic/claude-sonnet-4-6",
       "anthropic/claude-haiku-4-5",
       "opencode/gemini-3.5-flash",
       "openrouter/google/gemini-3.5-flash",
+      "opencode/gemini-3.1-pro",
+      "openrouter/google/gemini-3.1-pro-preview",
       "google/gemini-3-flash",
       "opencode/minimax-m2.7",
       "openrouter/minimax/minimax-m2.7",
@@ -71,26 +86,10 @@ describe("model constants", () => {
       "openrouter/deepseek/deepseek-v4-flash",
       "opencode/deepseek-v4-pro",
       "openrouter/deepseek/deepseek-v4-pro",
-      "opencode/glm-5.1",
-      "openrouter/z-ai/glm-5.1",
-      "opencode/kimi-k2.5",
-      "openrouter/moonshotai/kimi-k2.5",
-      "openai/gpt-5.4",
-      "anthropic/claude-sonnet-4-6",
-      "opencode/gemini-3.1-pro",
-      "openrouter/google/gemini-3.1-pro-preview",
       "opencode/kimi-k2.6",
       "openrouter/moonshotai/kimi-k2.6",
-      "opencode/gpt-5.2",
-      "openrouter/openai/gpt-5.2",
-      "opencode/gpt-5.5",
-      "openrouter/openai/gpt-5.5",
-      "opencode/gpt-5.5-pro",
-      "openrouter/openai/gpt-5.5-pro",
-      "anthropic/claude-opus-4-8",
-      "anthropic/claude-opus-4-7",
-      "opencode/claude-fable-5",
-      "openrouter/anthropic/claude-fable-5",
+      "opencode/kimi-k2.5",
+      "openrouter/moonshotai/kimi-k2.5",
     ]);
   });
 
@@ -109,7 +108,6 @@ describe("model constants", () => {
       ["opencode/gpt-5.2", "openrouter/openai/gpt-5.2"],
       ["opencode/gpt-5.5", "openrouter/openai/gpt-5.5"],
       ["opencode/gpt-5.5-pro", "openrouter/openai/gpt-5.5-pro"],
-      ["opencode/claude-fable-5", "openrouter/anthropic/claude-fable-5"],
     ];
 
     for (const [nativeModel, openRouterModel] of counterparts) {
@@ -256,8 +254,8 @@ describe("OpenCode logical models", () => {
       expect(id.startsWith("openrouter/")).toBe(false);
       expect(id.startsWith("opencode/")).toBe(false);
     }
-    // GPT-5.5 / Claude Fable 5 stay as explicit physical ids (their bare names
-    // belong to Codex / Claude Code) — the only intentional physical entries.
+    // GPT-5.5 stays as explicit physical ids because its bare name belongs to
+    // Codex.
     expect(OPENCODE_LOGICAL_MODELS).toContain("openrouter/openai/gpt-5.5");
     expect(OPENCODE_LOGICAL_MODELS).not.toContain("gpt-5.5");
     // Collapsed: far fewer entries than the physical route list.
@@ -267,6 +265,7 @@ describe("OpenCode logical models", () => {
   it("labels logical and physical ids with a friendly name and passes through custom slugs", () => {
     expect(openCodeModelLabel("glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("openrouter/z-ai/glm-5.2")).toBe("GLM 5.2");
+    expect(openCodeModelLabel("openrouter/~z-ai/glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("opencode/glm-5.2")).toBe("GLM 5.2");
     expect(openCodeModelLabel("xai/grok-code-fast")).toBe("xai/grok-code-fast");
   });

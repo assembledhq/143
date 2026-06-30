@@ -80,6 +80,15 @@ func TestOpenCodeModelsForAPI_MirrorsRegistry(t *testing.T) {
 	require.Equal(t, "glm-5.2", api[0].ID)
 	require.Equal(t, "OpenRouter", api[0].Routes[0].TransportLabel)
 	require.Equal(t, "openrouter", api[0].Routes[0].Backing)
+
+	indexByID := map[string]int{}
+	for i, m := range api {
+		indexByID[m.ID] = i
+	}
+	require.Less(t, indexByID["kimi-k2.6"], indexByID["kimi-k2.5"], "newer Kimi models should appear before older Kimi models")
+	require.Less(t, indexByID[OpenCodeModelClaudeOpus48], indexByID[OpenCodeModelClaudeOpus47], "newer Claude Opus models should appear before older Claude Opus models")
+	require.Less(t, indexByID[OpenCodeModelClaudeOpus47], indexByID[OpenCodeModelClaudeOpus46], "Claude Opus 4.7 should appear before Claude Opus 4.6")
+	require.NotContains(t, indexByID, "claude-fable-5", "OpenCode API models should not include Claude Fable")
 }
 
 func TestOpenCodeTransportLabel(t *testing.T) {
@@ -95,6 +104,32 @@ func TestOpenCodeModelRegistry_DefaultModelResolves(t *testing.T) {
 	m, ok := LookupOpenCodeModel(DefaultOpenCodeModel)
 	require.True(t, ok, "DefaultOpenCodeModel must be a registry logical model")
 	require.Equal(t, ProviderOpenRouter, m.Routes[0].Backing, "default model should prefer OpenRouter")
+}
+
+func TestDefaultOpenCodePhysicalModelForBacking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		backing  ProviderName
+		expected string
+	}{
+		{name: "openrouter uses product default", backing: ProviderOpenRouter, expected: OpenCodeModelOpenRouterGLM52},
+		{name: "native uses product default", backing: ProviderOpenCode, expected: OpenCodeModelGLM52},
+		{name: "openai uses inexpensive first-party default", backing: ProviderOpenAI, expected: OpenCodeModelGPT54Mini},
+		{name: "anthropic uses inexpensive first-party default", backing: ProviderAnthropic, expected: OpenCodeModelClaudeHaiku45},
+		{name: "gemini uses first-party default", backing: ProviderGemini, expected: OpenCodeModelGemini3Flash},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := DefaultOpenCodePhysicalModelForBacking(tt.backing)
+			require.Equal(t, tt.expected, actual, "fallback default should be independent of picker ordering")
+			require.True(t, IsKnownOpenCodePhysicalModel(actual), "fallback default should be a curated physical model")
+		})
+	}
 }
 
 func TestOpenCodePhysicalModelForBacking(t *testing.T) {
@@ -120,8 +155,16 @@ func TestOpenCodeRouteForPhysicalModelAndDisplayName(t *testing.T) {
 	require.Equal(t, "glm-5.2", logical.ID)
 	require.Equal(t, ProviderOpenRouter, route.Backing)
 
+	logical, route, ok = OpenCodeRouteForPhysicalModel("openrouter/~z-ai/glm-5.2")
+	require.True(t, ok, "OpenCode CLI custom-model ids should resolve to their registry route")
+	require.Equal(t, "glm-5.2", logical.ID)
+	require.Equal(t, ProviderOpenRouter, route.Backing)
+	require.True(t, IsKnownOpenCodePhysicalModel("openrouter/~z-ai/glm-5.2"), "OpenCode CLI custom-model ids should be recognized")
+	require.Equal(t, []string{"deepinfra", "together", "fireworks"}, OpenCodeUSProviderList("openrouter/~z-ai/glm-5.2"), "CLI custom-model id should retain audited routing")
+
 	require.Equal(t, "GLM 5.2", OpenCodeDisplayName("glm-5.2"), "logical id should resolve to its display name")
 	require.Equal(t, "GLM 5.2", OpenCodeDisplayName(OpenCodeModelGLM52), "physical id should resolve to the owning model's display name")
+	require.Equal(t, "GLM 5.2", OpenCodeDisplayName("openrouter/~z-ai/glm-5.2"), "CLI custom-model id should resolve to the owning model's display name")
 	require.Equal(t, "vendor/custom", OpenCodeDisplayName("vendor/custom"), "uncurated slug should pass through")
 }
 
@@ -132,6 +175,7 @@ func TestAgentTypeForModel_OpenCodeLogicalIDs(t *testing.T) {
 
 	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("glm-5.2"), "open-weight logical id routes to OpenCode")
 	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("kimi-k2.6"))
+	require.Equal(t, AgentTypeOpenCode, AgentTypeForModel("openrouter/~z-ai/glm-5.2"), "OpenCode CLI custom-model id routes to OpenCode")
 	require.Equal(t, AgentTypeCodex, AgentTypeForModel("gpt-5.5"), "bare gpt-5.5 stays owned by Codex")
 	require.Equal(t, AgentTypeClaudeCode, AgentTypeForModel("claude-fable-5"), "bare claude-fable-5 stays owned by Claude Code")
 }
