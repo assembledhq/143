@@ -134,7 +134,7 @@ function slackPresetLabel(value?: SlackNotificationPreset): string {
 
 function slackNotificationEvents(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
   const events = settings?.notification_subscriptions?.events;
-  const allowedEvents = new Set(SLACK_NOTIFICATION_EVENTS.map((event) => event.value));
+  const allowedEvents = new Set<string>(SLACK_NOTIFICATION_EVENTS.map((event) => event.value));
   return Array.isArray(events) ? events.filter((event): event is string => typeof event === "string" && allowedEvents.has(event)) : [];
 }
 
