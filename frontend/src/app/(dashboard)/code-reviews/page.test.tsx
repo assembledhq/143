@@ -24,6 +24,7 @@ vi.mock("@/lib/use-resource-sse", async () => {
   };
 });
 import type {
+  CodingCredentialSummary,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -32,6 +33,7 @@ import type {
   CodeReviewResolvedPolicy,
   CodeReviewTemplateOption,
   ListResponse,
+  OpenCodeModelInfo,
   Repository,
   SingleResponse,
 } from "@/lib/types";
@@ -223,6 +225,7 @@ function mockCodeReviewBaseHandlers(
     http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
     http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
     http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
+    http.get("/api/v1/settings/opencode-models", () => HttpResponse.json({ data: [] } satisfies SingleResponse<OpenCodeModelInfo[]>)),
     http.get("/api/v1/code-review-policies", () =>
       HttpResponse.json({ data: { ...policy, config: currentConfig } } satisfies SingleResponse<CodeReviewResolvedPolicy>),
     ),
@@ -496,6 +499,65 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => {
       expect(state.getCurrentConfig().agent_roster.timeout_seconds).toBe(30 * 60 * 60);
     });
+  });
+
+  it("uses shared model option badges in reviewer model pickers", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    const opencodeCredential: CodingCredentialSummary = {
+      id: "cred-openrouter",
+      org_id: "org-1",
+      scope: "org",
+      priority: 1,
+      agent: "opencode",
+      auth_type: "api_key",
+      provider: "openrouter",
+      label: "OpenRouter",
+      status: "healthy",
+      is_default: true,
+      created_at: "2026-06-26T12:00:00Z",
+      updated_at: "2026-06-26T12:00:00Z",
+    };
+    const opencodeModels: OpenCodeModelInfo[] = [
+      {
+        id: "glm-5.2",
+        display_name: "GLM 5.2",
+        routes: [
+          { backing: "openrouter", transport_label: "OpenRouter", physical_model_id: "openrouter/z-ai/glm-5.2" },
+          { backing: "opencode", transport_label: "OpenCode native", physical_model_id: "opencode/glm-5.2" },
+        ],
+      },
+      {
+        id: "glm-5.1",
+        display_name: "GLM 5.1",
+        routes: [
+          { backing: "opencode", transport_label: "OpenCode native", physical_model_id: "opencode/glm-5.1" },
+        ],
+      },
+    ];
+    server.use(
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        return HttpResponse.json({
+          data: scope === "org" ? [opencodeCredential] : [],
+          meta: {},
+        } satisfies ListResponse<CodingCredentialSummary>);
+      }),
+      http.get("/api/v1/settings/opencode-models", () =>
+        HttpResponse.json({ data: opencodeModels } satisfies SingleResponse<OpenCodeModelInfo[]>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Reviewers & agents/i }));
+    await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 model" }));
+
+    expect(await screen.findByRole("option", { name: /GLM 5\.2.*OpenRouter/ })).toBeInTheDocument();
+    // GLM 5.1 has no runnable route given the configured keys, so the shared
+    // picker hides it (rather than showing a disabled option).
+    expect(screen.queryByRole("option", { name: /GLM 5\.1/ })).not.toBeInTheDocument();
   });
 
   it("renders GitHub trigger account-required state", async () => {
