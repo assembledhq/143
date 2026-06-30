@@ -354,14 +354,18 @@ func runStreamingAgent(
 	}
 
 	if exitCode != 0 {
+		parsedError := strings.TrimSpace(result.Error)
 		result.Error = fmt.Sprintf("%s CLI exited with code %d", cfg.CLIName, exitCode)
 		errorDetail := strings.TrimSpace(string(stderr))
 		if errorDetail == "" {
+			if parsedError != "" {
+				errorDetail = parsedError
+			}
 			// TTY transports merge stderr into the visible output stream, so
 			// preserve the last visible line as the best-effort failure detail.
-			if len(summaryParts) > 0 {
+			if errorDetail == "" && len(summaryParts) > 0 {
 				errorDetail = strings.TrimSpace(summaryParts[len(summaryParts)-1])
-			} else if lastAssistantContent != "" {
+			} else if errorDetail == "" && lastAssistantContent != "" {
 				errorDetail = strings.TrimSpace(lastAssistantContent)
 			}
 		}
