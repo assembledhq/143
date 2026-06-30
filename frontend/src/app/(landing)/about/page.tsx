@@ -70,11 +70,9 @@ export default function AboutPage() {
             </p>
             <p>
               Now with coding agents, non-engineers can fix things too and tend to be closer to the
-              problems that users run into on a daily basis. Except the tools built on top of these
-              agents weren&apos;t made for that person. They&apos;re built for engineers: a terminal
-              setup that assumes you already know what a repo is. And the companies selling them have
-              no reason to change that: their business is getting your engineers onto their models
-              and billing you by the token. That&apos;s why we built 143.
+              problems that users run into on a daily basis. The problem is that the tools built on top of these
+              agents weren&apos;t made for that person, they were built for engineers by engineers.
+              That&apos;s why we built 143.
             </p>
 
             <section className="space-y-3 pt-2">
@@ -155,7 +153,7 @@ export default function AboutPage() {
             </section>
 
             <section className="space-y-3 pt-2">
-              <h2 className={headingClass}>Open source from day one</h2>
+              <h2 className={headingClass}>Open source for everyone</h2>
               <p>
                 The same idea that you shouldn&apos;t have to be an insider to contribute is why we
                 open-sourced 143.
