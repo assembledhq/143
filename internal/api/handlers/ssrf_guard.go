@@ -77,7 +77,7 @@ func validatePublicHTTPURL(raw string) error {
 		return fmt.Errorf("URL must include a host")
 	}
 	if ip := net.ParseIP(host); ip != nil && isBlockedIP(ip) {
-		return fmt.Errorf("URL host resolves to a non-public address")
+		return fmt.Errorf("URL host is a non-public address")
 	}
 	return nil
 }
@@ -100,6 +100,19 @@ func ssrfSafeDialControl(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
+// ssrfSafeCheckRedirect re-validates the scheme of each redirect hop and caps
+// the chain. The dial-time control already blocks redirects to private targets;
+// this additionally refuses a redirect that switches to a non-http(s) scheme.
+func ssrfSafeCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("ssrf guard: stopped after 10 redirects")
+	}
+	if s := strings.ToLower(req.URL.Scheme); s != "http" && s != "https" {
+		return fmt.Errorf("ssrf guard: refusing redirect to scheme %q", req.URL.Scheme)
+	}
+	return nil
+}
+
 // newSSRFSafeHTTPClient returns an *http.Client for fetching user-supplied URLs.
 // It blocks connections to private/loopback/link-local/metadata addresses at
 // dial time (DNS-rebind safe), re-validates each redirect hop's scheme, and
@@ -111,7 +124,12 @@ func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 		Control:   ssrfSafeDialControl,
 	}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Proxy is deliberately nil. An HTTP(S)_PROXY would make the dialer
+		// connect to the proxy (a public address that passes the dial-time
+		// control) while the real, possibly-private target host is sent to the
+		// proxy in the request — bypassing the SSRF guard entirely. We must dial
+		// the target directly so ssrfSafeDialControl inspects its actual IP.
+		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          10,
@@ -120,16 +138,8 @@ func newSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	return &http.Client{
-		Timeout:   timeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("ssrf guard: stopped after 10 redirects")
-			}
-			if s := strings.ToLower(req.URL.Scheme); s != "http" && s != "https" {
-				return fmt.Errorf("ssrf guard: refusing redirect to scheme %q", req.URL.Scheme)
-			}
-			return nil
-		},
+		Timeout:       timeout,
+		Transport:     transport,
+		CheckRedirect: ssrfSafeCheckRedirect,
 	}
 }
