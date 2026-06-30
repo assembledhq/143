@@ -204,6 +204,11 @@ type IntegrationHandler struct {
 	frontendURL      string
 	client           *http.Client
 
+	// untrustedURLClient fetches user-supplied URLs (e.g. a custom Mezmo
+	// base_url). It blocks private/loopback/metadata addresses at dial time;
+	// never use h.client for caller-controlled hosts. See ssrf_guard.go.
+	untrustedURLClient *http.Client
+
 	// Linear OAuth
 	linearClientID string
 	linearSecret   string
@@ -315,13 +320,14 @@ func NewIntegrationHandler(
 	opts ...IntegrationHandlerOption,
 ) *IntegrationHandler {
 	h := &IntegrationHandler{
-		integrationStore: integrationStore,
-		credentialStore:  credentialStore,
-		linearClientID:   linearClientID,
-		linearSecret:     linearSecret,
-		baseURL:          baseURL,
-		frontendURL:      frontendURL,
-		client:           http.DefaultClient,
+		integrationStore:   integrationStore,
+		credentialStore:    credentialStore,
+		linearClientID:     linearClientID,
+		linearSecret:       linearSecret,
+		baseURL:            baseURL,
+		frontendURL:        frontendURL,
+		client:             http.DefaultClient,
+		untrustedURLClient: newSSRFSafeHTTPClient(30 * time.Second),
 		slackUserInfoClient: ingestion.NewSlackAPIClient(
 			zerolog.Nop(),
 		),
@@ -4212,8 +4218,8 @@ func (h *IntegrationHandler) ConnectMezmo(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if req.BaseURL != "" {
-		if u, err := url.Parse(req.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
-			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_URL", "base_url must be an absolute URL (e.g. https://api.mezmo.com)")
+		if err := validatePublicHTTPURL(req.BaseURL); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BASE_URL", "base_url must be a public http(s) URL (e.g. https://api.mezmo.com)")
 			return
 		}
 	}
@@ -4306,7 +4312,9 @@ func (h *IntegrationHandler) validateMezmoTokenRequest(ctx context.Context, base
 	}
 	req.Header.Set(authHeader, authValue)
 
-	resp, err := h.client.Do(req)
+	// base_url is user-supplied, so use the SSRF-safe client (private/loopback/
+	// metadata addresses are blocked at dial time and across redirects).
+	resp, err := h.untrustedURLClient.Do(req)
 	if err != nil {
 		return 0, err
 	}

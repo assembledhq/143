@@ -1,7 +1,6 @@
 # Design: Session Preview Prewarm Policy
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-19
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 ## Summary
 

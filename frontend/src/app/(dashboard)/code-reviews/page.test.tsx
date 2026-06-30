@@ -24,6 +24,7 @@ vi.mock("@/lib/use-resource-sse", async () => {
   };
 });
 import type {
+  CodingCredentialSummary,
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
@@ -32,6 +33,7 @@ import type {
   CodeReviewResolvedPolicy,
   CodeReviewTemplateOption,
   ListResponse,
+  OpenCodeModelInfo,
   Repository,
   SingleResponse,
 } from "@/lib/types";
@@ -223,6 +225,7 @@ function mockCodeReviewBaseHandlers(
     http.get("/api/v1/code-reviews", () => HttpResponse.json({ data: [review], meta: {} } satisfies ListResponse<CodeReviewListItem>)),
     http.get("/api/v1/code-reviews/session-1/evidence", () => HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>)),
     http.get("/api/v1/code-reviews/templates", () => HttpResponse.json({ data: [template], meta: {} } satisfies ListResponse<CodeReviewTemplateOption>)),
+    http.get("/api/v1/settings/opencode-models", () => HttpResponse.json({ data: [] } satisfies SingleResponse<OpenCodeModelInfo[]>)),
     http.get("/api/v1/code-review-policies", () =>
       HttpResponse.json({ data: { ...policy, config: currentConfig } } satisfies SingleResponse<CodeReviewResolvedPolicy>),
     ),
@@ -273,9 +276,17 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
-    // Essentials and the GitHub trigger are visible without expanding anything.
+    // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
+    expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
+    expect(screen.getByText("Uses organization default")).toBeInTheDocument();
+    expect(screen.getByText("Current behavior")).toBeInTheDocument();
+    expect(screen.getByText("Comment-only reviews")).toBeInTheDocument();
+    expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
+    expect(screen.getByText("2 reviewers")).toBeInTheDocument();
+    expect(screen.getByText("quorum 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Comment only/i })).toBeInTheDocument();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
@@ -335,7 +346,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
 
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(await screen.findByRole("button", { name: /Description requirements/i }));
     await user.click(await screen.findByRole("button", { name: "Edit Testing evidence" }));
 
@@ -357,6 +368,32 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
   });
 
+  it("saves outcome choices to the existing policy fields", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+
+    await user.click(await screen.findByRole("button", { name: /^Comment only/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(true);
+    });
+    expect(state.getCurrentConfig().approval_mode).toBe("comment_only");
+
+    await user.click(screen.getByRole("button", { name: /^Disabled/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(false);
+    });
+
+    await user.click(screen.getByRole("button", { name: /^Approve acceptable PRs/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(true);
+    });
+    expect(state.getCurrentConfig().approval_mode).toBe("approve_acceptable");
+  });
+
   it("edits paths, authors, and checks as compact autosaved lists", async () => {
     const user = userEvent.setup();
     const policyUpdates = vi.fn();
@@ -366,7 +403,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const sensitivePathsInput = await screen.findByRole("textbox", { name: "Sensitive paths" });
@@ -436,7 +473,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
 
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
     await user.click(screen.getByRole("button", { name: /Apply template/i }));
@@ -452,7 +489,7 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
 
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
 
     expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
@@ -462,6 +499,65 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => {
       expect(state.getCurrentConfig().agent_roster.timeout_seconds).toBe(30 * 60 * 60);
     });
+  });
+
+  it("uses shared model option badges in reviewer model pickers", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    const opencodeCredential: CodingCredentialSummary = {
+      id: "cred-openrouter",
+      org_id: "org-1",
+      scope: "org",
+      priority: 1,
+      agent: "opencode",
+      auth_type: "api_key",
+      provider: "openrouter",
+      label: "OpenRouter",
+      status: "healthy",
+      is_default: true,
+      created_at: "2026-06-26T12:00:00Z",
+      updated_at: "2026-06-26T12:00:00Z",
+    };
+    const opencodeModels: OpenCodeModelInfo[] = [
+      {
+        id: "glm-5.2",
+        display_name: "GLM 5.2",
+        routes: [
+          { backing: "openrouter", transport_label: "OpenRouter", physical_model_id: "openrouter/z-ai/glm-5.2" },
+          { backing: "opencode", transport_label: "OpenCode native", physical_model_id: "opencode/glm-5.2" },
+        ],
+      },
+      {
+        id: "glm-5.1",
+        display_name: "GLM 5.1",
+        routes: [
+          { backing: "opencode", transport_label: "OpenCode native", physical_model_id: "opencode/glm-5.1" },
+        ],
+      },
+    ];
+    server.use(
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        return HttpResponse.json({
+          data: scope === "org" ? [opencodeCredential] : [],
+          meta: {},
+        } satisfies ListResponse<CodingCredentialSummary>);
+      }),
+      http.get("/api/v1/settings/opencode-models", () =>
+        HttpResponse.json({ data: opencodeModels } satisfies SingleResponse<OpenCodeModelInfo[]>),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Reviewers & agents/i }));
+    await user.click(await screen.findByRole("combobox", { name: "Reviewer 1 model" }));
+
+    expect(await screen.findByRole("option", { name: /GLM 5\.2.*OpenRouter/ })).toBeInTheDocument();
+    // GLM 5.1 has no runnable route given the configured keys, so the shared
+    // picker hides it (rather than showing a disabled option).
+    expect(screen.queryByRole("option", { name: /GLM 5\.1/ })).not.toBeInTheDocument();
   });
 
   it("renders GitHub trigger account-required state", async () => {
@@ -482,7 +578,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
     expect(await screen.findByText("Needs GitHub account")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
@@ -506,7 +602,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
     const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
     expect(setupButton).toBeDisabled();
@@ -547,7 +643,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     await user.click(await screen.findByRole("button", { name: /Set up GitHub reviewer/i }));
 
     await waitFor(() => {

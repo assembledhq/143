@@ -608,6 +608,10 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 		logger.Warn().Msg("CSRF_SIGNING_KEY is empty — CSRF protection will be ineffective")
 	}
 
+	if c.Env == "production" && c.PreviewSecretBundleKEK == "" {
+		logger.Warn().Msg("PREVIEW_SECRET_BUNDLE_KEK is not set — preview secret bundles fall back to ENCRYPTION_MASTER_KEY rather than a dedicated key-encryption key. Set PREVIEW_SECRET_BUNDLE_KEK for key separation so a leaked master key does not also expose preview bundle secrets.")
+	}
+
 	if c.Env == "production" && previewOriginHostIsLocal(c.PreviewOriginTemplate) {
 		logger.Warn().Str("preview_origin_template", c.PreviewOriginTemplate).Msg("PREVIEW_ORIGIN_TEMPLATE points at localhost in production — preview URLs in PR comments and the gateway will not resolve. Set PREVIEW_ORIGIN_TEMPLATE to e.g. https://{id}.preview.example.com.")
 	}
@@ -663,6 +667,10 @@ func (c *Config) ValidateSecrets() error {
 
 	if c.CSRFSigningKey == "" || len(c.CSRFSigningKey) < 32 {
 		return errors.New("CSRF_SIGNING_KEY must be set to a strong random value in production (min 32 characters)")
+	}
+
+	if c.GitHubWebhookSecret == "" {
+		return errors.New("GITHUB_WEBHOOK_SECRET must be set in production")
 	}
 
 	return nil

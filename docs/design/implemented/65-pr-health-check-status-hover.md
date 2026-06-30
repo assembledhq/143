@@ -1,7 +1,6 @@
 # PR Health Check Status Hover
 
-> Status: Implemented
-> Last reviewed: 2026-04-28
+> **Status:** Implemented | **Last reviewed:** 2026-04-28
 
 ## Summary
 

@@ -1,10 +1,10 @@
 # 37 - PM Context Bootstrap: Agent-Driven Self-Injection
 
-> A coding agent session that explores all connected integrations (GitHub, Linear, Notion, Slack, Sentry) via `143-tools` CLI calls, reads the codebase, and writes a structured, human-readable PM context file. Runs once at setup and refreshes every 1-2 weeks with suggested updates.
-
 > **Status:** Backlog | **Last reviewed:** 2026-05-06
 >
 > **Implementation notes:** PMDocument model, store, handler, and migration exist. Missing: automated bootstrap agent session, context file writing automation, refresh scheduling, markdown CONTEXT.md processing.
+
+> A coding agent session that explores all connected integrations (GitHub, Linear, Notion, Slack, Sentry) via `143-tools` CLI calls, reads the codebase, and writes a structured, human-readable PM context file. Runs once at setup and refreshes every 1-2 weeks with suggested updates.
 
 ---
 

@@ -49,6 +49,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { DurationInput } from "@/components/duration-input";
+import { ModelOptionGroups } from "@/components/model-option-groups";
 import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
@@ -59,9 +60,10 @@ import { pollMs } from "@/lib/poll-intervals";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
+import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
-import { AGENTS_BY_KEY, availableAgentModelGroups, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
+import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
   CodingCredentialSummary,
   CodeReviewApprovalMode,
@@ -328,9 +330,14 @@ export default function CodeReviewsPage() {
     [reviews, selectedEvidenceSessionId],
   );
   const repositories = repositoriesQuery.data?.data ?? [];
+  const selectedRepository = repositories.find((repo) => repo.id === repositoryId);
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
+  const orgCodingCredentials = useMemo(
+    () => orgCodingCredentialsQuery.data?.data ?? [],
+    [orgCodingCredentialsQuery.data?.data],
+  );
   const codeReviewResolvedCredentials = useMemo(
     () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
     [resolvedCredentialsQuery.data?.data],
@@ -340,17 +347,21 @@ export default function CodeReviewsPage() {
       availableAgentModelGroups(
         codeReviewResolvedCredentials,
         codexAuthQuery.data?.data,
-        orgCodingCredentialsQuery.data?.data ?? [],
+        orgCodingCredentials,
         orgSettings.default_agent_type || "codex",
         { orgAgentConfig: orgSettings.agent_config },
       ),
     [
       codeReviewResolvedCredentials,
       codexAuthQuery.data?.data,
-      orgCodingCredentialsQuery.data?.data,
+      orgCodingCredentials,
       orgSettings.default_agent_type,
       orgSettings.agent_config,
     ],
+  );
+  const codeReviewOpenCodeAvailability = useOpenCodeAvailability(
+    orgCodingCredentials,
+    orgSettings.opencode_routing?.require_openrouter ?? false,
   );
   const editingRequirementIndex = useMemo(
     () =>
@@ -467,7 +478,7 @@ export default function CodeReviewsPage() {
             </TabsTrigger>
             <TabsTrigger value="config">
               <Settings2 className="h-4 w-4" />
-              Configurations
+              Policy
             </TabsTrigger>
           </TabsList>
 
@@ -571,18 +582,22 @@ export default function CodeReviewsPage() {
             <Card>
               <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
-                  <CardTitle>Bot behavior</CardTitle>
+                  <CardTitle>Review policy</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
-                <p className="text-xs text-muted-foreground">
-                  {repositoryId
-                    ? policyQuery.data?.data.source === "repository"
-                      ? "This repository has review policy overrides and inherits organization defaults where fields are unset."
-                      : "This repository uses the organization default review policy."
-                    : "Organization defaults apply to repositories without their own review policy override."}
-                </p>
+                <PolicyScopeHeader
+                  repositoryName={selectedRepository?.full_name}
+                  repositorySelected={Boolean(repositoryId)}
+                  source={policyQuery.data?.data.source}
+                />
               </CardHeader>
               <CardContent className="space-y-5">
+                <PolicySummary
+                  config={config}
+                  repositorySelected={Boolean(repositoryId)}
+                  githubTriggerStatus={githubTriggerQuery.data?.data?.status}
+                />
+
                 <GitHubTriggerPanel
                   repositorySelected={Boolean(repositoryId)}
                   trigger={githubTriggerQuery.data?.data}
@@ -602,39 +617,22 @@ export default function CodeReviewsPage() {
                 />
 
                 <div className="space-y-3">
-                  <div className="text-sm font-medium text-foreground">Essentials</div>
+                  <div className="text-sm font-medium text-foreground">Outcome</div>
 
-                  <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-foreground">Enable 143 Code Reviewer</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        When off, reviewer requests are acknowledged but no review session is started.
-                      </div>
-                    </div>
-                    <Switch
-                      checked={config?.enabled ?? false}
-                      disabled={!config}
-                      onCheckedChange={(checked) => commitPolicy((next) => { next.enabled = checked; })}
-                    />
-                  </div>
-
-                  <div className="flex flex-col gap-3 rounded-md border border-border p-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <div className="text-sm font-medium text-foreground">Approve acceptable PRs</div>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        When off, the bot always submits comment-only GitHub reviews.
-                      </div>
-                    </div>
-                    <Switch
-                      checked={config?.approval_mode === "approve_acceptable"}
-                      disabled={!config}
-                      onCheckedChange={(checked) =>
-                        commitPolicy((next) => {
-                          next.approval_mode = (checked ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
-                        })
-                      }
-                    />
-                  </div>
+                  <OutcomeControl
+                    config={config}
+                    disabled={!config}
+                    onChange={(outcome) =>
+                      commitPolicy((next) => {
+                        if (outcome === "disabled") {
+                          next.enabled = false;
+                          return;
+                        }
+                        next.enabled = true;
+                        next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
+                      })
+                    }
+                  />
 
                   <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
                     <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
@@ -839,6 +837,7 @@ export default function CodeReviewsPage() {
                       config={config}
                       disabled={!config}
                       modelGroups={codeReviewModelGroups}
+                      openCodeAvailability={codeReviewOpenCodeAvailability}
                       commitPolicy={commitPolicy}
                     />
                   </FineTuningSection>
@@ -898,6 +897,145 @@ export default function CodeReviewsPage() {
         </Tabs>
       </div>
     </main>
+  );
+}
+
+function PolicyScopeHeader({
+  repositoryName,
+  repositorySelected,
+  source,
+}: {
+  repositoryName?: string;
+  repositorySelected: boolean;
+  source?: CodeReviewResolvedPolicy["source"];
+}) {
+  if (!repositorySelected) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Editing organization default. Repositories without an override inherit this policy.
+      </p>
+    );
+  }
+
+  const inherited = source !== "repository";
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>
+        Editing {repositoryName ?? "selected repository"} {inherited ? "inherited policy" : "override"}.
+      </span>
+      <Badge variant={inherited ? "outline" : "secondary"}>{inherited ? "Uses organization default" : "Repository override"}</Badge>
+    </div>
+  );
+}
+
+function policyOutcome(config: CodeReviewPolicyConfig | null): "disabled" | "comment" | "approve" {
+  if (!config?.enabled) return "disabled";
+  return config.approval_mode === "approve_acceptable" ? "approve" : "comment";
+}
+
+function PolicySummary({
+  config,
+  repositorySelected,
+  githubTriggerStatus,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  repositorySelected: boolean;
+  githubTriggerStatus?: CodeReviewGitHubTriggerResponse["status"];
+}) {
+  if (!config) {
+    return (
+      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+        Loading review policy...
+      </div>
+    );
+  }
+
+  const outcome = policyOutcome(config);
+  const reviewers = config.agent_roster.reviewers.length;
+  const summaryItems = [
+    outcome === "disabled"
+      ? "Reviewer disabled"
+      : outcome === "approve"
+        ? "Approves acceptable PRs"
+        : "Comment-only reviews",
+    repositorySelected ? `GitHub reviewer ${githubTriggerStatusLabel(githubTriggerStatus ?? "unconfigured").toLowerCase()}` : "Select a repository for GitHub setup",
+    `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
+    `quorum ${config.agent_roster.require_reviewer_quorum}`,
+  ];
+
+  if (config.risk_policy.require_passing_checks) summaryItems.push("passing checks required");
+  if (config.agent_roster.disagreement_blocks) summaryItems.push("disagreement blocks approval");
+
+  return (
+    <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
+      <div className="text-sm font-medium text-foreground">Current behavior</div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        {summaryItems.map((item) => (
+          <Badge key={item} variant="outline">
+            {item}
+          </Badge>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function OutcomeControl({
+  config,
+  disabled,
+  onChange,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  disabled?: boolean;
+  onChange: (outcome: "disabled" | "comment" | "approve") => void;
+}) {
+  const selected = policyOutcome(config);
+  const options: Array<{
+    value: "disabled" | "comment" | "approve";
+    title: string;
+    description: string;
+  }> = [
+    {
+      value: "disabled",
+      title: "Disabled",
+      description: "Reviewer requests are acknowledged, but no review session starts.",
+    },
+    {
+      value: "comment",
+      title: "Comment only",
+      description: "The bot reviews PRs and leaves feedback without approving.",
+    },
+    {
+      value: "approve",
+      title: "Approve acceptable PRs",
+      description: "The bot can approve when the PR passes this policy.",
+    },
+  ];
+
+  return (
+    <div className="grid gap-2 rounded-md border border-border p-2 md:grid-cols-3">
+      {options.map((option) => {
+        const active = option.value === selected;
+        return (
+          <Button
+            key={option.value}
+            type="button"
+            variant={active ? "secondary" : "ghost"}
+            className="h-auto justify-start whitespace-normal px-3 py-3 text-left"
+            disabled={disabled}
+            aria-pressed={active}
+            onClick={() => {
+              if (!active) onChange(option.value);
+            }}
+          >
+            <span className="flex min-w-0 flex-col gap-1">
+              <span className="text-sm font-medium">{option.title}</span>
+              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
+            </span>
+          </Button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1439,11 +1577,13 @@ function AgentRosterControls({
   config,
   disabled,
   modelGroups,
+  openCodeAvailability,
   commitPolicy,
 }: {
   config: CodeReviewPolicyConfig | null;
   disabled?: boolean;
   modelGroups: AgentModelGroup[];
+  openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
 }) {
   const reviewers = config?.agent_roster.reviewers ?? [];
@@ -1491,6 +1631,7 @@ function AgentRosterControls({
                 ariaLabel={`Reviewer ${index + 1} model`}
                 value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
                 modelGroups={modelGroups}
+                openCodeAvailability={openCodeAvailability}
                 currentAgent={agent}
                 currentModel={reviewerModels[index]}
                 disabled={disabled}
@@ -1540,6 +1681,7 @@ function AgentRosterControls({
           ariaLabel="Orchestrator model"
           value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
           modelGroups={modelGroups}
+          openCodeAvailability={openCodeAvailability}
           currentAgent={config?.agent_roster.orchestrator}
           currentModel={orchestratorModel}
           disabled={disabled}
@@ -1559,6 +1701,7 @@ function AgentRosterControls({
 function AgentModelSelect({
   value,
   modelGroups,
+  openCodeAvailability,
   currentAgent,
   currentModel,
   disabled,
@@ -1567,6 +1710,7 @@ function AgentModelSelect({
 }: {
   value: string;
   modelGroups: AgentModelGroup[];
+  openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
   currentAgent?: string;
   currentModel?: string;
   disabled?: boolean;
@@ -1587,20 +1731,15 @@ function AgentModelSelect({
           <SelectGroup>
             <SelectLabel>Current selection</SelectLabel>
             <SelectItem value={selectionValue(currentAgent, currentModel)}>
-              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {currentModel}
+              {AGENTS_BY_KEY[currentAgent]?.label ?? currentAgent} · {modelOptionLabel(currentModel)}
             </SelectItem>
           </SelectGroup>
         ) : null}
-        {modelGroups.map((group) => (
-          <SelectGroup key={group.key}>
-            <SelectLabel>{group.label}</SelectLabel>
-            {group.models.map((model) => (
-              <SelectItem key={`${group.key}-${model}`} value={selectionValue(group.key, model)}>
-                {model}
-              </SelectItem>
-            ))}
-          </SelectGroup>
-        ))}
+        <ModelOptionGroups
+          modelGroups={modelGroups}
+          getOptionValue={(group, model) => selectionValue(group.key, model)}
+          openCodeAvailability={openCodeAvailability}
+        />
       </SelectContent>
     </Select>
   );

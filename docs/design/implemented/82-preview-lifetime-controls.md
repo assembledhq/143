@@ -1,7 +1,6 @@
 # Design: Preview Lifetime Controls
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-05-19
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 Session previews are intentionally temporary. The current product default is a 15 minute idle timeout and a 30 minute hard TTL, with explicit extension capped at 2 hours from preview creation. This keeps unused preview containers from occupying scarce worker slots while still giving active reviewers enough time to inspect and iterate.
 

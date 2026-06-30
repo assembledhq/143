@@ -132,7 +132,6 @@ describe("isImageURL", () => {
     expect(isImageURL("/uploads/photo.jpeg")).toBe(true);
     expect(isImageURL("/uploads/photo.gif")).toBe(true);
     expect(isImageURL("/uploads/photo.webp")).toBe(true);
-    expect(isImageURL("/uploads/photo.svg")).toBe(true);
   });
 
   it("matches data: image URLs", () => {
@@ -141,6 +140,7 @@ describe("isImageURL", () => {
 
   it("rejects non-image URLs", () => {
     expect(isImageURL("/uploads/doc.pdf")).toBe(false);
+    expect(isImageURL("/uploads/photo.svg")).toBe(false);
     expect(isImageURL("/uploads/file.txt")).toBe(false);
     expect(isImageURL("/uploads/data.json")).toBe(false);
   });

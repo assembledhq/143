@@ -1,7 +1,6 @@
 # Runtime / Sandbox Settings
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-11
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 143 currently exposes shared sandbox runtime controls across multiple settings pages. Static egress lives under Organization -> General, preview capacity lives on General, and coding-agent execution limits live under Platform -> Coding agents. That split makes each individual setting understandable in isolation, but it hides the product model: these settings all affect how 143 creates, schedules, networks, and retains sandbox runtimes for an organization.
 

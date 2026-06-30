@@ -1,8 +1,7 @@
 # 104 - Settings Simplification
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-06-17
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Applies to:** Next.js settings routes under
 > `frontend/src/app/(dashboard)/settings`
 

@@ -52,11 +52,11 @@ import type {
   PreviewListMeta,
   Repository,
 } from "@/lib/types";
-import { cn, safeExternalUrl } from "@/lib/utils";
+import { safeExternalUrl } from "@/lib/utils";
 
 type PreviewScope = "running" | "resumable" | "recent";
 
-const RESTART_LATEST_LABEL = "Start latest preview";
+const RESTART_LATEST_LABEL = "Start latest";
 const RESTART_LATEST_TOOLTIP = "Start a new preview from the latest source state";
 
 const SECTIONS: {
@@ -245,86 +245,20 @@ function expiresIn(value?: string): string {
   return future ? `in ${amount}` : `${amount} ago`;
 }
 
-type PreviewMarkerKind = "starting" | "attention" | "resumable" | "ready" | "idle";
-
-// Single source of truth so the marker's color and glyph never disagree.
-function previewMarkerKind(
-  preview: PreviewCurrentResponse,
-  scope: PreviewScope,
-): PreviewMarkerKind {
-  if (preview.status === "starting" || preview.status === "recycling") return "starting";
-  if (previewNeedsAttention(preview)) return "attention";
-  if (scope === "resumable" || preview.resumable) return "resumable";
-  if (preview.status === "ready" || preview.status === "partially_ready") return "ready";
-  return "idle";
-}
-
-function previewMarkerClass(kind: PreviewMarkerKind): string {
-  switch (kind) {
-    case "starting":
-      return "border-primary/30 bg-primary/10 text-primary";
-    case "attention":
-      return "border-destructive/30 bg-destructive text-destructive-foreground";
-    case "resumable":
-      return "border-primary/30 bg-background text-primary";
-    case "ready":
-      return "border-primary/30 bg-primary text-primary-foreground";
-    default:
-      return "border-border bg-muted text-muted-foreground";
-  }
-}
-
-function PreviewIdentityMarker({
-  preview,
-  scope,
-}: {
-  preview: PreviewCurrentResponse;
-  scope: PreviewScope;
-}) {
-  const kind = previewMarkerKind(preview, scope);
-
-  return (
-    <span
-      className={cn(
-        "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-xs font-semibold leading-none",
-        previewMarkerClass(kind),
-      )}
-      aria-hidden="true"
-    >
-      {kind === "starting" ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : kind === "attention" ? (
-        "!"
-      ) : kind === "resumable" ? (
-        <span className="h-2.5 w-2.5 rounded-full border border-current" />
-      ) : kind === "ready" ? (
-        <span className="h-2.5 w-2.5 rounded-full bg-current" />
-      ) : (
-        <span className="h-2.5 w-2.5 rounded-full border border-current bg-background" />
-      )}
-    </span>
-  );
-}
-
 function PreviewPrimaryCell({
   preview,
-  scope,
 }: {
   preview: PreviewCurrentResponse;
-  scope: PreviewScope;
 }) {
   return (
-    <Link href={previewDetailHref(preview)} className="flex min-w-0 items-start gap-2.5">
-      <PreviewIdentityMarker preview={preview} scope={scope} />
-      <span className="min-w-0 space-y-1">
-        <span className="block truncate text-sm font-medium text-foreground hover:underline">
-          {previewDisplayName(preview)}
-        </span>
-        <span className="block text-xs text-muted-foreground">
-          {preview.repository_full_name || preview.repository_id} ·{" "}
-          {preview.pinned ? "Pinned · " : ""}
-          {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
-        </span>
+    <Link href={previewDetailHref(preview)} className="block min-w-0 space-y-1">
+      <span className="block truncate text-sm font-medium text-foreground hover:underline">
+        {previewDisplayName(preview)}
+      </span>
+      <span className="block text-xs text-muted-foreground">
+        {preview.repository_full_name || preview.repository_id} ·{" "}
+        {preview.pinned ? "Pinned · " : ""}
+        {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
       </span>
     </Link>
   );
@@ -391,15 +325,20 @@ function PreviewActions({
   const previewHref = safeExternalUrl(preview.preview_url);
 
   return (
-    <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
       {previewHref ? (
-        <Button asChild size="sm">
+        <Button
+          asChild
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
+        >
           <a
             href={previewHref}
             target="_blank"
             rel="noreferrer"
           >
-            <ExternalLink className="h-4 w-4" />
+            <ExternalLink className="h-3.5 w-3.5" />
             Open
           </a>
         </Button>
@@ -407,10 +346,11 @@ function PreviewActions({
       {canMutate && scope === "running" && preview.current_preview_id ? (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
           onClick={() => onStop(preview)}
         >
-          <Square className="h-4 w-4" />
+          <Square className="h-3.5 w-3.5" />
           Stop
         </Button>
       ) : null}
@@ -423,11 +363,12 @@ function PreviewActions({
       {canMutate && scope === "resumable" ? (
         <Button
           size="sm"
-          variant="outline"
+          variant="ghost"
+          className="h-7 px-2 text-muted-foreground hover:text-foreground"
           loading={isRestartPending(preview)}
           onClick={() => onRestart(preview)}
         >
-          <Play className="h-4 w-4" />
+          <Play className="h-3.5 w-3.5" />
           Resume
         </Button>
       ) : null}
@@ -442,26 +383,23 @@ function PreviewActions({
 }
 
 function PreviewMobileRow(props: PreviewActionsProps) {
-  const { preview, scope } = props;
+  const { preview } = props;
 
   return (
     <div className="space-y-3 p-4">
-      <div className="flex min-w-0 items-start gap-2.5">
-        <PreviewIdentityMarker preview={preview} scope={scope} />
-        <div className="min-w-0 flex-1">
-          <Link
-            href={previewDetailHref(preview)}
-            className="block truncate font-medium text-foreground"
-          >
-            {previewDisplayName(preview)}
-          </Link>
-          <p className="truncate text-sm text-muted-foreground">
-            {preview.repository_full_name || preview.repository_id} ·{" "}
-            {sourceLabel(preview)}
-          </p>
-        </div>
+      <div className="min-w-0">
+        <Link
+          href={previewDetailHref(preview)}
+          className="block truncate font-medium text-foreground"
+        >
+          {previewDisplayName(preview)}
+        </Link>
+        <p className="truncate text-sm text-muted-foreground">
+          {preview.repository_full_name || preview.repository_id} ·{" "}
+          {sourceLabel(preview)}
+        </p>
       </div>
-      <div className="flex items-center justify-between gap-2 pl-9">
+      <div className="flex items-center justify-between gap-2">
         <PreviewStatusBadge
           status={preview.status}
           label={statusLabel(preview)}
@@ -471,9 +409,7 @@ function PreviewMobileRow(props: PreviewActionsProps) {
           {relativeTime(preview.created_at)}
         </span>
       </div>
-      <div className="pl-9">
-        <PreviewActions {...props} />
-      </div>
+      <PreviewActions {...props} />
     </div>
   );
 }
@@ -487,7 +423,7 @@ function previewColumns(
       header: "Preview",
       className: "w-[42%]",
       cellClassName: "min-w-0",
-      render: (preview) => <PreviewPrimaryCell preview={preview} scope={props.scope} />,
+      render: (preview) => <PreviewPrimaryCell preview={preview} />,
     },
     {
       id: "source",
@@ -504,8 +440,8 @@ function previewColumns(
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
-      className: "w-[20%] text-right",
-      cellClassName: "text-right",
+      className: "w-[20%] min-w-[13rem] text-right",
+      cellClassName: "text-right align-middle",
       render: (preview) => <PreviewActions preview={preview} {...props} />,
     },
   ];
@@ -611,10 +547,11 @@ function RestartLatestButton({
             size="sm"
             variant="ghost"
             aria-label={RESTART_LATEST_TOOLTIP}
+            className="h-7 px-2 text-muted-foreground hover:text-foreground"
             loading={loading}
             onClick={onClick}
           >
-            <RotateCw className="h-4 w-4" />
+            <RotateCw className="h-3.5 w-3.5" />
             {RESTART_LATEST_LABEL}
           </Button>
         </TooltipTrigger>

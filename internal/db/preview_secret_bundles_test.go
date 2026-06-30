@@ -11,8 +11,33 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/crypto"
 	"github.com/assembledhq/143/internal/models"
 )
+
+// TestPreviewSecretBundleStore_DecryptRejectsPlaintextWhenEncrypted verifies the
+// tripwire: a dev-plaintext blob is only legitimate when no encryption key is
+// configured (which never happens in production). With a key configured, reading
+// a plaintext blob must fail rather than silently returning an unencrypted secret.
+func TestPreviewSecretBundleStore_DecryptRejectsPlaintextWhenEncrypted(t *testing.T) {
+	t.Parallel()
+
+	cryptoSvc, err := crypto.NewService("test-master-key-at-least-32-chars-long!!")
+	require.NoError(t, err)
+
+	// "djA6e30=" base64-decodes to "v0:{}" — a dev-plaintext blob of `{}`.
+	blob := json.RawMessage(`{"alg":"dev-plaintext","ciphertext":"djA6e30="}`)
+	var out map[string]string
+
+	encryptedStore := NewPreviewSecretBundleStore(nil, cryptoSvc, "test-key")
+	err = encryptedStore.decryptJSON(blob, &out)
+	require.Error(t, err, "a key-configured store must refuse to read a dev-plaintext blob")
+	require.Contains(t, err.Error(), "refusing to read dev-plaintext")
+
+	// Without a key (the local dev workflow), dev-plaintext is still readable.
+	plaintextStore := NewPreviewSecretBundleStore(nil, nil, "test-key")
+	require.NoError(t, plaintextStore.decryptJSON(blob, &out), "a keyless store should still read dev-plaintext")
+}
 
 func TestPreviewSecretBundleStore_UpsertEncryptsAndVersions(t *testing.T) {
 	t.Parallel()

@@ -1,6 +1,6 @@
 # Preview Runtime Ownership and Drain Semantics
 
-> Status: In progress | Last reviewed: 2026-05-26
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
 
 Preview URLs are durable product artifacts, but the process that can serve a
 preview is a live worker attachment. The control plane therefore separates:

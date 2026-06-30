@@ -118,6 +118,7 @@ type openCodeStreamEvent struct {
 	ID             string          `json:"id,omitempty"`
 	SessionID      string          `json:"session_id,omitempty"`
 	SessionIDCamel string          `json:"sessionID,omitempty"`
+	Part           json.RawMessage `json:"part,omitempty"`
 	CostUSD        *float64        `json:"cost_usd,omitempty"`
 	TotalCostUSD   *float64        `json:"total_cost_usd,omitempty"`
 	Usage          *struct {
@@ -126,6 +127,38 @@ type openCodeStreamEvent struct {
 		CacheCreationTokens int `json:"cache_creation_input_tokens"`
 		OutputTokens        int `json:"output_tokens"`
 	} `json:"usage,omitempty"`
+}
+
+type openCodeStreamPart struct {
+	ID        string            `json:"id,omitempty"`
+	SessionID string            `json:"sessionID,omitempty"`
+	MessageID string            `json:"messageID,omitempty"`
+	Type      string            `json:"type,omitempty"`
+	CallID    string            `json:"callID,omitempty"`
+	Tool      string            `json:"tool,omitempty"`
+	Text      string            `json:"text,omitempty"`
+	Reason    string            `json:"reason,omitempty"`
+	Cost      *float64          `json:"cost,omitempty"`
+	State     openCodeToolState `json:"state,omitempty"`
+	Tokens    *struct {
+		Total     int `json:"total,omitempty"`
+		Input     int `json:"input"`
+		Output    int `json:"output"`
+		Reasoning int `json:"reasoning"`
+		Cache     struct {
+			Read  int `json:"read"`
+			Write int `json:"write"`
+		} `json:"cache"`
+	} `json:"tokens,omitempty"`
+}
+
+type openCodeToolState struct {
+	Status   string          `json:"status,omitempty"`
+	Input    json.RawMessage `json:"input,omitempty"`
+	Output   string          `json:"output,omitempty"`
+	Title    string          `json:"title,omitempty"`
+	Error    json.RawMessage `json:"error,omitempty"`
+	Metadata json.RawMessage `json:"metadata,omitempty"`
 }
 
 func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<- agent.LogEntry, summaryParts *[]string, lastAssistant *string) {
@@ -137,13 +170,35 @@ func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<
 		return
 	}
 
+	if sessionID := firstNonEmpty(event.SessionID, event.SessionIDCamel); sessionID != "" {
+		result.AgentSessionID = sessionID
+	}
+
 	switch event.Type {
 	case "session", "session_start", "started":
 		if sessionID := firstNonEmpty(event.SessionID, event.SessionIDCamel, event.ID); sessionID != "" {
 			result.AgentSessionID = sessionID
 		}
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
+	case "step_start":
+		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
+	case "step_finish":
+		if part, ok := decodeOpenCodePart(event.Part); ok {
+			mergeOpenCodeStepUsage(&result.TokenUsage, part)
+		}
+		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
 	case "assistant", "message", "text":
+		if part, ok := decodeOpenCodePart(event.Part); ok && part.Type == "text" {
+			content := strings.TrimSpace(part.Text)
+			if content == "" {
+				logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
+				return
+			}
+			logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: content}
+			*summaryParts = append(*summaryParts, content)
+			*lastAssistant = content
+			return
+		}
 		content := firstNonEmpty(event.Content, event.Message, event.Text)
 		if content == "" || (event.Type == "message" && event.Role != "" && event.Role != "assistant") {
 			logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
@@ -153,7 +208,15 @@ func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<
 		*summaryParts = append(*summaryParts, content)
 		*lastAssistant = content
 	case "tool_call", "tool_use":
+		if part, ok := decodeOpenCodePart(event.Part); ok && part.Type == "tool" {
+			emitOpenCodeToolPart(part, logCh)
+			return
+		}
 		toolName := firstNonEmpty(event.Name, event.Tool)
+		if toolName == "" {
+			logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
+			return
+		}
 		metadata := map[string]interface{}{"tool": toolName}
 		if len(event.Input) > 0 {
 			var inputMap map[string]interface{}
@@ -207,6 +270,120 @@ func parseOpenCodeStreamLine(line []byte, result *agent.AgentResult, logCh chan<
 	default:
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "debug", Message: string(line)}
 	}
+}
+
+func decodeOpenCodePart(raw json.RawMessage) (openCodeStreamPart, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return openCodeStreamPart{}, false
+	}
+	var part openCodeStreamPart
+	if err := json.Unmarshal(raw, &part); err != nil {
+		return openCodeStreamPart{}, false
+	}
+	return part, true
+}
+
+func emitOpenCodeToolPart(part openCodeStreamPart, logCh chan<- agent.LogEntry) {
+	toolName := strings.TrimSpace(part.Tool)
+	if toolName == "" {
+		return
+	}
+
+	metadata := map[string]interface{}{"tool": toolName}
+	if part.CallID != "" {
+		metadata["call_id"] = part.CallID
+	}
+	if input, ok := openCodeRawObject(part.State.Input); ok {
+		metadata["input"] = input
+	}
+	if part.State.Status != "" {
+		metadata["status"] = part.State.Status
+	}
+
+	message := "using tool: " + toolName
+	if part.State.Title != "" {
+		message = part.State.Title
+	}
+	logCh <- agent.LogEntry{
+		Timestamp: time.Now(),
+		Level:     "tool_use",
+		Message:   message,
+		Metadata:  metadata,
+	}
+
+	resultMetadata := map[string]interface{}{"type": "tool_result", "tool": toolName}
+	if part.CallID != "" {
+		resultMetadata["call_id"] = part.CallID
+	}
+	resultMessage := part.State.Output
+	if part.State.Status == "error" {
+		resultMessage = firstNonEmpty(openCodeRawMessage(part.State.Error), resultMessage)
+		resultMetadata["status"] = "error"
+	} else if part.State.Status != "" {
+		resultMetadata["status"] = part.State.Status
+	}
+	if resultMessage == "" {
+		resultMessage = firstNonEmpty(openCodeRawMessage(part.State.Metadata), part.State.Title)
+	}
+	if resultMessage == "" {
+		return
+	}
+	logCh <- agent.LogEntry{
+		Timestamp: time.Now(),
+		Level:     "output",
+		Message:   resultMessage,
+		Metadata:  resultMetadata,
+	}
+}
+
+func openCodeRawObject(raw json.RawMessage) (map[string]interface{}, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return nil, false
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func openCodeRawMessage(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	return string(raw)
+}
+
+func mergeOpenCodeStepUsage(dst *agent.TokenUsage, part openCodeStreamPart) {
+	if part.Tokens != nil {
+		dst.Reported = true
+		dst.InputTokens += part.Tokens.Input
+		dst.CachedInputTokens += part.Tokens.Cache.Read
+		dst.CacheCreationTokens += part.Tokens.Cache.Write
+		dst.OutputTokens += part.Tokens.Output
+		dst.TotalTokens += part.Tokens.Total
+	}
+	if part.Cost != nil {
+		addOpenCodeStepCost(dst, *part.Cost)
+	}
+}
+
+func addOpenCodeStepCost(dst *agent.TokenUsage, amount float64) {
+	dst.Reported = true
+	dst.TotalCostUSD += amount
+	if dst.Cost == nil || dst.Cost.Unit != agent.TokenCostUnitUSD || dst.Cost.Source != agent.TokenCostSourceDirect {
+		dst.Cost = &agent.TokenCost{
+			Unit:   agent.TokenCostUnitUSD,
+			Source: agent.TokenCostSourceDirect,
+		}
+	}
+	dst.Cost.Amount += amount
+	dst.Cost.Detail = "opencode_step_finish_cost"
 }
 
 func openCodePermissionError(event openCodeStreamEvent) string {

@@ -1,6 +1,6 @@
 # Worker Spin-Down Operations
 
-> Status: Implemented | Last reviewed: 2026-05-28
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 Production workers have an explicit operator path for decommissioning or
 maintenance:

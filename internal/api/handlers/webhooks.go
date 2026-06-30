@@ -123,7 +123,7 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 
 func (h *WebhookHandler) verifySignature(payload []byte, signature string) bool {
 	if h.cfg.GitHubWebhookSecret == "" {
-		return true // no secret configured, skip verification
+		return h.cfg.Env != "production"
 	}
 	if !strings.HasPrefix(signature, "sha256=") {
 		return false

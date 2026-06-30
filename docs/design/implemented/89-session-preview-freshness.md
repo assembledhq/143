@@ -1,7 +1,6 @@
 # Design: Session Preview Freshness
 
-> **Status:** Implemented
-> **Last reviewed:** 2026-05-28
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 Session previews can keep running after a coding-agent turn changes the workspace. The Preview tab should make that visible: when the running preview was started from an older workspace state, it shows that the preview is out of date and offers a single action to update and restart it with the latest session changes.
 

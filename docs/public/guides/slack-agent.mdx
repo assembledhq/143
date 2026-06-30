@@ -1,0 +1,80 @@
+---
+title: Slack agent
+description: Mention `@143` in Slack, DM the bot, or start from App Home to create a 143 coding session from a Slack conversation.
+section: Guides
+order: 14
+status: stable
+audience: engineer
+tags:
+  - slack
+  - integrations
+  - agents
+llm_summary: Configure and use the Slack agent so Slack mentions, DMs, App Home, or `/143` can start or continue 143 sessions and post progress back to Slack.
+---
+
+Use the Slack agent when work starts in an engineering conversation. Slack stays the lightweight collaboration surface for acks, progress, replies, and next actions; the canonical transcript, sandbox, diff, preview, and PR state live in 143.
+
+## Setup
+
+<Steps>
+  <Step>Connect Slack from 143 settings.</Step>
+  <Step>Invite the 143 Slack app to the channels where teammates should be able to mention it.</Step>
+  <Step>Open Manage Slack and choose Slackbot defaults: default repository, default branch, routing, visibility, allowed actions, and notification preset.</Step>
+  <Step>Select monitored or notification channels, then add channel overrides when a channel needs different routing or notification behavior.</Step>
+  <Step>Link Slack users from Slack App Home, or let an admin map Slack users to 143 members for attribution, DMs, and authorized actions.</Step>
+</Steps>
+
+## Start work from Slack
+
+You can trigger the Slack agent in four ways:
+
+- Mention `@143` in a channel where the app is present.
+- Send the bot a DM.
+- Open the 143 Slack App Home and use Start from Slack.
+- Use `/143` if the slash command is installed for your workspace.
+
+Examples:
+
+```text
+@143 start a fix for the login redirect loop
+@143 ask why did this deploy fail?
+@143 create a preview for branch jsmith/navbar-redesign
+/143 repair this PR https://github.com/acme/api/pull/42
+```
+
+In channels, `@143` responds to explicit mentions. It does not decide to answer or start work from ordinary unmentioned channel messages.
+
+## Routing modes
+
+Slackbot defaults and channel overrides control how mentions are interpreted:
+
+- **Auto:** lets the session handle the request normally. Prefix a message with `ask` to force answer-only behavior, or `start` to force durable coding work.
+- **Answer only:** useful for support or incident channels where `@143` should explain, inspect context, or answer without requiring a repository.
+- **Start work:** useful for engineering work queues where mentions should become coding sessions when repository context is available.
+
+## Repo selection priority
+
+When Slack asks for durable coding work, 143 resolves the repository in this order:
+
+1. An explicit repository reference in the Slack message or detected linked context.
+2. The channel default repository.
+3. The Slack installation default repository.
+4. The organization default work repository.
+5. A single active connected repository.
+6. Otherwise, 143 creates the session but waits for repository selection before starting the coding run.
+
+143 also carries detected PRs, preview URLs, branches, file paths, Sentry links, Linear-style issues, attachments, and thread context into the session prompt when available.
+
+## Follow-ups
+
+Reply in the same Slack thread to continue the linked 143 session. 143 reuses the Slack thread as long as the session can be continued; if the previous session is already in a terminal non-resumable state, a new session is started and linked back to the thread.
+
+## How it works
+
+When the Slack agent receives a mention, DM, App Home start, or slash command, it creates or continues a normal 143 session with `origin = slack`. The bot posts a quick acknowledgement with the session link, sends sparse progress updates, then posts the final answer and useful outcome links such as branch, PR, preview, CI state, diff stats, or required next action.
+
+Human-input requests can be delivered back to the originating Slack thread and answered from Slack by linked users with the right access. Slack App Home also surfaces pending responses, recent Slack-started sessions, active previews, recent automation runs, and connection basics.
+
+<Callout type="info" title="Visibility">
+If the session was started from Slack, Slack remains the lightweight collaboration surface. Use the linked 143 session for the full transcript, workspace state, diffs, preview controls, and PR workflow.
+</Callout>

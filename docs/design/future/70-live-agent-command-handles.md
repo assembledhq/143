@@ -1,7 +1,7 @@
 # Design: Live Agent Command Handles
 
-> **Status:** Future
->
+> **Status:** Not Started | **Last reviewed:** 2026-06-30
+
 > **Related docs:** [overall.md](../overall.md), [60-agent-runtime-timeouts-and-checkpointed-shutdown.md](60-agent-runtime-timeouts-and-checkpointed-shutdown.md), [68-sandbox-agent-tabs-and-threads.md](68-sandbox-agent-tabs-and-threads.md)
 
 ## Summary

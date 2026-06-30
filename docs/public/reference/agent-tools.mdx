@@ -14,6 +14,13 @@ llm_summary: API reference for the 143-tools CLI commands coding agents use to q
 
 Coding agents call `143-tools` from inside the sandbox to query connected integrations without handling provider credentials directly. The available commands depend on which integrations are configured for the session, so `143-tools --help` is the source of truth at runtime.
 
+<FlowDiagram
+  items={["Coding agent in sandbox", "143-tools CLI", "143 integration broker", "Sentry, Linear, logs, Slack, GitHub, previews"]}
+  caption="Agents get scoped tool access without seeing provider credentials."
+/>
+
+Use this page as a lookup table. For task flows, start with the guide for the integration or preview workflow you are configuring.
+
 ## CLI contract
 
 Agent-facing commands use a hierarchical shape:

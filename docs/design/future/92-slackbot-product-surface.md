@@ -1,8 +1,7 @@
 # 92 - Slackbot Product Surface
 
-> **Status:** Partially implemented
-> **Last reviewed:** 2026-06-02
->
+> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
+
 > **Depends on:** Slack OAuth integration, session/job creation APIs, durable preview control plane, human input requests, and notification delivery primitives.
 
 ## Problem

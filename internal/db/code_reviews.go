@@ -759,7 +759,7 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
-			       s.title AS session_title, r.name AS repository_name, pr.github_repo, pr.github_pr_number,
+			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
 			       pr.github_pr_url, pr.title AS pull_request_title,
 			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
 		FROM code_review_session_metadata m
@@ -924,11 +924,33 @@ func (s *CodeReviewStore) ListPromptArtifacts(ctx context.Context, orgID, sessio
 }
 
 func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
+	return s.upsertFinding(ctx, finding, false)
+}
+
+func (s *CodeReviewStore) ReplaceFinding(ctx context.Context, finding *models.CodeReviewFinding) error {
+	return s.upsertFinding(ctx, finding, true)
+}
+
+func (s *CodeReviewStore) upsertFinding(ctx context.Context, finding *models.CodeReviewFinding, replaceOnConflict bool) error {
 	if err := finding.Severity.Validate(); err != nil {
 		return err
 	}
 	if err := finding.Confidence.Validate(); err != nil {
 		return err
+	}
+	conflictSet := "selected_for_inline = EXCLUDED.selected_for_inline"
+	if replaceOnConflict {
+		conflictSet = `
+			agent_result_id = EXCLUDED.agent_result_id,
+			severity = EXCLUDED.severity,
+			confidence = EXCLUDED.confidence,
+			path = EXCLUDED.path,
+			start_line = EXCLUDED.start_line,
+			end_line = EXCLUDED.end_line,
+			summary = EXCLUDED.summary,
+			body = EXCLUDED.body,
+			selected_for_inline = code_review_findings.selected_for_inline OR EXCLUDED.selected_for_inline,
+			github_comment_id = COALESCE(code_review_findings.github_comment_id, EXCLUDED.github_comment_id)`
 	}
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO code_review_findings (
@@ -939,7 +961,7 @@ func (s *CodeReviewStore) CreateFinding(ctx context.Context, finding *models.Cod
 			@path, @start_line, @end_line, @summary, @body, @selected_for_inline, @github_comment_id
 		)
 		ON CONFLICT (org_id, session_id, dedupe_key) DO UPDATE
-		SET selected_for_inline = EXCLUDED.selected_for_inline
+		SET `+conflictSet+`
 		RETURNING `+codeReviewFindingColumns, pgx.NamedArgs{
 		"org_id":              finding.OrgID,
 		"session_id":          finding.SessionID,

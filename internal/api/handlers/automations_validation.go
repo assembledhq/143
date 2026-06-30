@@ -55,6 +55,12 @@ func validateBaseBranch(b string) error {
 	if strings.Contains(b, "..") {
 		return fmt.Errorf("base_branch must not contain '..'")
 	}
+	// A leading '-' lets the value be parsed as an option (not a refspec) when
+	// it later reaches `git fetch origin <branch>`, so reject it here at the
+	// write rather than relying solely on --end-of-options at the call sites.
+	if strings.HasPrefix(b, "-") {
+		return fmt.Errorf("base_branch must not start with '-'")
+	}
 	return nil
 }
 

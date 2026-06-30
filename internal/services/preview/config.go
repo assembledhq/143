@@ -614,6 +614,9 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 			if isReservedPlatformPreviewEnvName(envName) {
 				errs = append(errs, fmt.Sprintf("service %q: env %q is reserved for platform-injected preview runtime metadata", name, envName))
 			}
+			if !isValidSecretEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("service %q: env %q is not a valid environment variable name", name, envName))
+			}
 		}
 		if svc.Ready.HTTPPath == "" {
 			errs = append(errs, fmt.Sprintf("service %q: ready.http_path is required", name))
@@ -636,6 +639,9 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 		for envName := range infra.InjectEnv {
 			if isReservedPlatformPreviewEnvName(envName) {
 				errs = append(errs, fmt.Sprintf("infrastructure %q: inject_env %q is reserved for platform-injected preview runtime metadata", name, envName))
+			}
+			if !isValidSecretEnvName(envName) {
+				errs = append(errs, fmt.Sprintf("infrastructure %q: inject_env %q is not a valid environment variable name", name, envName))
 			}
 		}
 		for _, svcName := range infra.InjectInto {
@@ -662,6 +668,9 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 	for _, envName := range cfg.Credentials.Env {
 		if isReservedPlatformPreviewEnvName(envName) {
 			errs = append(errs, fmt.Sprintf("credentials: env %q is reserved for platform-injected preview runtime metadata", envName))
+		}
+		if !isValidSecretEnvName(envName) {
+			errs = append(errs, fmt.Sprintf("credentials: env %q is not a valid environment variable name", envName))
 		}
 	}
 	for i, ref := range cfg.Secrets {

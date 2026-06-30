@@ -12,6 +12,7 @@ import (
 	"image/gif"
 	"image/png"
 	"math"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,10 +153,28 @@ func (c *ChromeDPInspector) previewURL(previewID, path string) (string, error) {
 	if strings.Contains(path, "..") {
 		return "", fmt.Errorf("path must not contain .., got %q", path)
 	}
-	url := c.cfg.PreviewURLTemplate
-	url = strings.ReplaceAll(url, "{{.PreviewID}}", previewID)
-	url = strings.ReplaceAll(url, "{{.Path}}", path)
-	return url, nil
+	rendered := c.cfg.PreviewURLTemplate
+	rendered = strings.ReplaceAll(rendered, "{{.PreviewID}}", previewID)
+	rendered = strings.ReplaceAll(rendered, "{{.Path}}", path)
+	return rendered, nil
+}
+
+// sameOrigin reports whether rawURL has the same scheme and host (including
+// port) as expectedURL. It is used to confine the server-side headless browser
+// to the preview origin. A prefix check is unsafe here because
+// "https://x.preview.dev" is a prefix of both "https://x.preview.dev.evil.com"
+// and "https://x.preview.dev@evil.com" — comparing parsed scheme+host closes
+// both bypasses. A parse failure or scheme/host mismatch returns false.
+func sameOrigin(rawURL, expectedURL string) bool {
+	target, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	expected, err := url.Parse(expectedURL)
+	if err != nil {
+		return false
+	}
+	return target.Scheme == expected.Scheme && target.Host == expected.Host
 }
 
 // =============================================================================
@@ -919,7 +938,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 					stepErr = fmt.Errorf("invalid navigate URL: %w", urlErr)
 					break
 				}
-				if !strings.HasPrefix(url, strings.TrimSuffix(expectedURL, "/")) {
+				if !sameOrigin(url, expectedURL) {
 					stepErr = fmt.Errorf("navigate URL must match preview origin, got %q", url)
 					break
 				}

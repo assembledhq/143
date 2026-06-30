@@ -2,7 +2,7 @@
 title: Coding-agent auth
 description: Configure coding-agent credentials so 143 can run sessions reliably.
 section: Guides
-order: 15
+order: 16
 status: stable
 audience: engineer
 tags:
@@ -13,6 +13,14 @@ llm_summary: Configure personal or organization-level coding-agent authenticatio
 ---
 
 Agent auth is runtime infrastructure, not prompt context. Set it up in 143 settings so sessions can start reliably without exposing provider keys in issues, repo config, or user instructions.
+
+<BoundaryDiagram
+  leftTitle="Keep in 143 settings"
+  leftItems={["Personal coding-agent auth", "Organization fallback auth", "Provider-specific model defaults"]}
+  rightTitle="Keep out of prompts and repos"
+  rightItems={["Provider API keys", "Database URLs", "OAuth tokens"]}
+  caption="Credentials are runtime configuration. Prompts, issue comments, and repo config should describe behavior, not carry secrets."
+/>
 
 ## Who configures auth
 
