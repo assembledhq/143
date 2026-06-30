@@ -34,7 +34,7 @@ func TestEvaluatorEvaluate(t *testing.T) {
 		checkWant map[models.PRReadinessCheckType]models.PRReadinessCheckStatus
 	}{
 		{
-			name: "ready with test evidence",
+			name: "ready without review blockers",
 			input: EvaluationInput{
 				Session: models.Session{
 					ID:                  sessionID,
@@ -53,11 +53,10 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 			expected: models.PRReadinessRunStatusPassed,
 			checkWant: map[models.PRReadinessCheckType]models.PRReadinessCheckStatus{
-				models.PRReadinessCheckTypeFreshness:           models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeAgentReviewClean:    models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeTestEvidencePresent: models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeRiskFlags:           models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeContextComplete:     models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeFreshness:        models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeAgentReviewClean: models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeRiskFlags:        models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeContextComplete:  models.PRReadinessCheckStatusPassed,
 			},
 		},
 		{
@@ -87,7 +86,7 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 		},
 		{
-			name: "warnings for missing tests and sensitive files",
+			name: "warnings for sensitive files",
 			input: EvaluationInput{
 				Session: models.Session{
 					ID:                  sessionID,
@@ -104,8 +103,7 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 			expected: models.PRReadinessRunStatusWarnings,
 			checkWant: map[models.PRReadinessCheckType]models.PRReadinessCheckStatus{
-				models.PRReadinessCheckTypeTestEvidencePresent: models.PRReadinessCheckStatusWarning,
-				models.PRReadinessCheckTypeRiskFlags:           models.PRReadinessCheckStatusWarning,
+				models.PRReadinessCheckTypeRiskFlags: models.PRReadinessCheckStatusWarning,
 			},
 		},
 	}
