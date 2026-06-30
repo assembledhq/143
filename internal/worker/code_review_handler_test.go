@@ -314,6 +314,88 @@ func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
+func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	findingID := uuid.New()
+	now := time.Now().UTC()
+	rawDiff := "diff --git a/internal/db/users.go b/internal/db/users.go"
+	rawReview := `The review found one issue.
+::code-comment{title="[P1] Missing org filter" body="This query can read another org's rows." file="/workspace/internal/db/users.go" start=42 priority=1}`
+	state := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:   codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReviewerIndex: 0,
+		ThreadID:      threadID.String(),
+		ReadOnly:      true,
+	})
+	updatedState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:       codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReviewerIndex:     0,
+		ThreadID:          threadID.String(),
+		FindingCount:      1,
+		CostCents:         0.25,
+		ReadOnly:          true,
+		ReadOnlyViolation: true,
+		CompletedAt:       now.Format(time.RFC3339),
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
+				nil, 1, &now, nil, &rawDiff, nil, nil,
+				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, rawReview, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("INSERT INTO code_review_findings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(newCodeReviewFindingRows().
+			AddRow(findingID, orgID, sessionID, &resultID, "internal/db/users.go:42:42:missing org filter",
+				models.CodeReviewFindingSeverityHigh, models.CodeReviewFindingConfidenceHigh,
+				stringPtr("internal/db/users.go"), intPtr(42), intPtr(42), "Missing org filter",
+				"This query can read another org's rows.", false, nil, now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusCompleted, &rawReview, updatedState, now))
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policy := codeReviewPolicyRecordForTest(cfg)
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+
+	require.NoError(t, err, "read-only workspace changes should not invalidate a completed reviewer output")
+	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should parse output and mark the result completed")
+}
+
 type codeReviewDescriptionLLMStub struct {
 	calls    int
 	response string
@@ -824,6 +906,55 @@ func TestCodeReviewChecksPassingIgnoresSelfReportedStatuses(t *testing.T) {
 
 	require.True(t, codeReviewChecksPassing(policy, health),
 		"the reviewer's own pending status must not block its own approval")
+}
+
+func codeReviewPolicyRecordForTest(config models.CodeReviewPolicyConfig) models.CodeReviewPolicyRecord {
+	return models.CodeReviewPolicyRecord{
+		ID:                 uuid.New(),
+		Version:            1,
+		Enabled:            config.Enabled,
+		ApprovalMode:       config.ApprovalMode,
+		DescriptionPolicy:  config.DescriptionPolicy,
+		RiskPolicy:         config.RiskPolicy,
+		AgentRoster:        config.AgentRoster,
+		InlineCommentLimit: config.InlineCommentLimit,
+		Inheritance:        config.Inheritance,
+		CreatedAt:          time.Now().UTC(),
+	}
+}
+
+func newCodeReviewAgentResultRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "agent_provider", "agent_model", "role", "status",
+		"raw_output", "structured_result", "created_at",
+	})
+}
+
+func newCodeReviewFindingRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+		"confidence", "path", "start_line", "end_line", "summary", "body",
+		"selected_for_inline", "github_comment_id", "created_at",
+	})
+}
+
+func newSessionThreadRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "session_id", "org_id", "agent_type", "model_override",
+		"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+		"result_summary", "diff", "failure_explanation", "failure_category",
+		"started_at", "completed_at", "created_at", "created_by_source", "created_by_thread_id", "archived_at",
+		"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+		"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
+		"execution_mode", "filesystem_mode",
+	})
+}
+
+func newSessionMessageRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content",
+		"attachments", "references", "commands", "token_usage", "source", "created_at",
+	})
 }
 
 func stringPtr(value string) *string {
