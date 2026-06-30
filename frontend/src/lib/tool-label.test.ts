@@ -157,7 +157,18 @@ describe("deriveToolDisplay", () => {
 
     it("handles null metadata without crashing", () => {
       const log = makeLog(null);
-      expect(deriveToolDisplay(log).label).toBe("Ran unknown");
+      expect(deriveToolDisplay(log)).toEqual({
+        label: "Ran tool",
+        canonical: "unknown",
+      });
+    });
+
+    it("handles empty tool names without rendering unknown", () => {
+      const log = makeLog({ tool: "" });
+      expect(deriveToolDisplay(log)).toEqual({
+        label: "Ran tool",
+        canonical: "unknown",
+      });
     });
 
     it("handles missing input without crashing", () => {
