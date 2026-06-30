@@ -4,7 +4,7 @@ The open-source platform where your whole team builds software together.
 
 143 is an open-source platform for running coding agents in the cloud. Connect your repos, pick the agents you want — Codex, Claude Code, OpenCode, and others — wire in the tools that hold your product context, and let the team kick off work from a browser, Slack, or an issue tracker. What comes back is a reviewable branch or GitHub PR, with the diff, transcript, checks, and a live preview all in one place.
 
-[143.dev](https://www.143.dev) · [Getting started](#getting-started) · [Docs](docs/public/index.mdx) · [Architecture](docs/design/overall.md) · [Self-hosting](docs/self-hosting/README.md)
+[143.dev](https://www.143.dev) · [Docs](https://www.143.dev/docs) · [Architecture](docs/design/overall.md) · [Self-hosting](https://www.143.dev/docs/self-hosting)
 
 <p align="center">
   <img src="frontend/public/product/product-review-diff.png" alt="Reviewing an agent's change in 143: a code diff with the changed-files list and review controls" width="900">
