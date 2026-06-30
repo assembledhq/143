@@ -310,9 +310,15 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 		expected     bool
 	}{
 		{
-			name:      "event list matches event",
+			name:      "explicit session completed does not match",
 			raw:       json.RawMessage(`{"events":["session.completed"]}`),
 			eventKind: "session.completed",
+			expected:  false,
+		},
+		{
+			name:      "event list matches event",
+			raw:       json.RawMessage(`{"events":["session.failed"]}`),
+			eventKind: "session.failed",
 			expected:  true,
 		},
 		{
@@ -358,10 +364,28 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			expected:  false,
 		},
 		{
-			name:      "event family wildcard matches event",
+			name:      "event family wildcard does not match preview stale",
 			raw:       json.RawMessage(`{"events":["preview.*"]}`),
 			eventKind: "preview.stale",
-			expected:  true,
+			expected:  false,
+		},
+		{
+			name:      "explicit pr opened does not match",
+			raw:       json.RawMessage(`{"events":["pr.opened"]}`),
+			eventKind: "pr.opened",
+			expected:  false,
+		},
+		{
+			name:      "explicit auto repair attention does not match",
+			raw:       json.RawMessage(`{"events":["pr.auto_repair_attention"]}`),
+			eventKind: "pr.auto_repair_attention",
+			expected:  false,
+		},
+		{
+			name:      "explicit readiness attention does not match",
+			raw:       json.RawMessage(`{"events":["pr.readiness_attention"]}`),
+			eventKind: "pr.readiness_attention",
+			expected:  false,
 		},
 		{
 			name:      "event family wildcard rejects other family",
@@ -414,15 +438,16 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		eventKind string
 		expected  bool
 	}{
-		{name: "balanced includes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: true},
-		{name: "balanced includes auto repair attention", preset: &balanced, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: true},
-		{name: "balanced includes readiness attention", preset: &balanced, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: true},
+		{name: "balanced excludes PR opened", preset: &balanced, eventKind: string(models.SlackNotificationPROpened), expected: false},
+		{name: "balanced excludes auto repair attention", preset: &balanced, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: false},
+		{name: "balanced excludes readiness attention", preset: &balanced, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
+		{name: "balanced excludes session completed", preset: &balanced, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "balanced excludes preview ready", preset: &balanced, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
 		{name: "balanced excludes preview failed", preset: &balanced, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "balanced excludes preview stale", preset: &balanced, eventKind: string(models.SlackNotificationPreviewStale), expected: false},
 		{name: "quiet includes human input", preset: &quiet, eventKind: string(models.SlackNotificationHumanInputRequested), expected: true},
-		{name: "quiet includes auto repair attention", preset: &quiet, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: true},
-		{name: "quiet includes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: true},
+		{name: "quiet excludes auto repair attention", preset: &quiet, eventKind: string(models.SlackNotificationPRAutoRepairAttention), expected: false},
+		{name: "quiet excludes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
 		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
 		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: true},
@@ -437,6 +462,34 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 			got := slackNotificationSubscriptionMatches(json.RawMessage(`{}`), tt.preset, tt.eventKind, nil)
 			require.Equal(t, tt.expected, got, "preset subscription matcher should return the expected decision")
 		})
+	}
+}
+
+func TestSlackNotificationEventDisabled(t *testing.T) {
+	t.Parallel()
+
+	disabled := []string{
+		string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationPROpened),
+		string(models.SlackNotificationPreviewReady),
+		string(models.SlackNotificationPreviewFailed),
+		string(models.SlackNotificationPreviewStale),
+		string(models.SlackNotificationPRAutoRepairAttention),
+		string(models.SlackNotificationPRReadinessAttention),
+	}
+	for _, eventKind := range disabled {
+		require.True(t, slackNotificationEventDisabled(eventKind), "%s should be a retired notification event", eventKind)
+	}
+
+	enabled := []string{
+		string(models.SlackNotificationSessionFailed),
+		string(models.SlackNotificationAutomationCompleted),
+		string(models.SlackNotificationAutomationFailed),
+		string(models.SlackNotificationAutomationFailureStreak),
+		string(models.SlackNotificationHumanInputRequested),
+	}
+	for _, eventKind := range enabled {
+		require.False(t, slackNotificationEventDisabled(eventKind), "%s should still be deliverable", eventKind)
 	}
 }
 
@@ -892,7 +945,11 @@ func TestSlackConfigureChannelModalIncludesNotificationSubscriptions(t *testing.
 	require.NoError(t, err, "channel config modal blocks should marshal to JSON")
 	blocksStr := string(blocksJSON)
 	require.Contains(t, blocksStr, "automation.run.failure_streak", "channel config modal should expose automation failure-streak notifications")
-	require.Contains(t, blocksStr, `"preview.*"`, "channel config modal should expose all-preview-events wildcard subscription")
+	require.NotContains(t, blocksStr, "session.completed", "channel config modal should not expose session-completed notifications")
+	require.NotContains(t, blocksStr, "pr.opened", "channel config modal should not expose PR-opened notifications")
+	require.NotContains(t, blocksStr, "preview.ready", "channel config modal should not expose preview-ready notifications")
+	require.NotContains(t, blocksStr, "preview.stale", "channel config modal should not expose preview-stale notifications")
+	require.NotContains(t, blocksStr, `"preview.*"`, "channel config modal should not expose preview wildcard subscriptions")
 }
 
 func TestSlackHomeOrgSelectorBlockIsActionable(t *testing.T) {
