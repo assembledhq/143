@@ -759,7 +759,7 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
-			       s.title AS session_title, r.name AS repository_name, pr.github_repo, pr.github_pr_number,
+			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,
 			       pr.github_pr_url, pr.title AS pull_request_title,
 			       COALESCE(NULLIF(s.revision_context->>'pull_request_author', ''), pr.authored_by::text) AS pull_request_author
 		FROM code_review_session_metadata m
