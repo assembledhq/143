@@ -219,6 +219,7 @@ export default function NewAutomationPage() {
       goal: initialTemplate?.goal ?? "",
       intervalValue: initialTemplate?.defaultInterval ?? 1,
       intervalUnit: initialTemplate?.defaultUnit ?? "days",
+      scheduleEnabled: initialTemplate?.scheduleEnabled ?? true,
       timezone: detectedTimezone,
     }),
   );
@@ -456,11 +457,21 @@ export default function NewAutomationPage() {
   );
 
   const applyTemplate = (template: AutomationTemplate) => {
+    setIntervalValueInput(String(template.defaultInterval));
     patchForm({
       name: template.name,
       goal: template.goal,
       intervalValue: template.defaultInterval,
       intervalUnit: template.defaultUnit,
+      scheduleEnabled: template.scheduleEnabled,
+      productTriggers: [],
+      triggerBaseBranches: "",
+      triggerAuthors: "",
+      triggerPaths: "",
+      triggerFeedbackTypes: "",
+      triggerReviewStates: "",
+      pagerDutyEnabled: false,
+      linearEnabled: false,
     });
     setTemplateOpen(false);
     requestAnimationFrame(() => {
