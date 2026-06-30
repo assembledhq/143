@@ -977,7 +977,7 @@ func TestAuthHandler_DemoLogin(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Preview Viewer", "viewer", nil, nil, nil, nil, nil, nil, time.Now()),
+							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Dennis Ritchie", "viewer", nil, nil, nil, nil, nil, nil, time.Now()),
 					)
 				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
 					WithArgs(userID, orgID).
@@ -1007,7 +1007,7 @@ func TestAuthHandler_DemoLogin(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoAdminEmail, "Preview Admin", "admin", nil, nil, nil, nil, nil, nil, time.Now()),
+							AddRow(userID, orgID, demoseed.DemoAdminEmail, "Ada Lovelace", "admin", nil, nil, nil, nil, nil, nil, time.Now()),
 					)
 				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
 					WithArgs(userID, orgID).
@@ -1031,7 +1031,7 @@ func TestAuthHandler_DemoLogin(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Preview Viewer", "viewer", nil, nil, nil, nil, &passwordHash, nil, time.Now()),
+							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Dennis Ritchie", "viewer", nil, nil, nil, nil, &passwordHash, nil, time.Now()),
 					)
 				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
 					WithArgs(userID, orgID).

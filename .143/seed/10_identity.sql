@@ -14,7 +14,7 @@ VALUES
     '00000000-0000-4000-a000-000000000002'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
     'preview-admin@143.dev',
-    'Preview Admin',
+    'Ada Lovelace',
     'admin',
     NULL,
     now()
@@ -23,7 +23,7 @@ VALUES
     '00000000-0000-4000-a000-000000000003'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
     'preview-member@143.dev',
-    'Preview Member',
+    'Grace Hopper',
     'member',
     NULL,
     now()
@@ -32,7 +32,7 @@ VALUES
     '00000000-0000-4000-a000-000000000004'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
     'preview-builder@143.dev',
-    'Preview Builder',
+    'Alan Turing',
     'builder',
     NULL,
     now()
@@ -41,7 +41,7 @@ VALUES
     '00000000-0000-4000-a000-000000000005'::uuid,
     '00000000-0000-4000-a000-000000000001'::uuid,
     'preview-viewer@143.dev',
-    'Preview Viewer',
+    'Dennis Ritchie',
     'viewer',
     NULL,
     now()
