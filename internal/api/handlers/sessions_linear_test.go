@@ -430,11 +430,15 @@ func TestSessionHandler_CreateManual_ChecksConcurrencyBeforeLinearLinking(t *tes
 }
 
 // budgetSummer is a static TokenSummer stub for the daily-spend kill switch,
-// so the budget gate can be exercised without a second mock DB round-trip.
-type budgetSummer struct{ total int64 }
+// so the budget gate can be exercised without a second mock DB round-trip. A
+// non-nil err exercises the fail-open path.
+type budgetSummer struct {
+	total int64
+	err   error
+}
 
 func (b budgetSummer) SumTokensSince(context.Context, time.Time) (int64, error) {
-	return b.total, nil
+	return b.total, b.err
 }
 
 func TestSessionHandler_CreateManual_RejectsWhenDailyTokenBudgetExhausted(t *testing.T) {
@@ -446,24 +450,14 @@ func TestSessionHandler_CreateManual_RejectsWhenDailyTokenBudgetExhausted(t *tes
 
 	orgID := uuid.New()
 	now := time.Now()
-	runID := uuid.New()
-	messageID := int64(1)
-	// Generous per-org concurrency so the concurrency cap passes and the
-	// global budget gate is what rejects the session.
-	settings := `{"max_concurrent_runs":10}`
 
+	// The kill switch is checked before the session is persisted, so a
+	// rejection touches only the org-settings read — no session row, message,
+	// or concurrency query is issued (and thus none is expected here).
 	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-			AddRow(orgID, "test-org", []byte(settings), now, now))
-	expectManualSessionCreate(mock, runID, now)
-	mock.ExpectQuery("INSERT INTO session_messages").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
-	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+			AddRow(orgID, "test-org", nil, now, now))
 
 	handler := newSessionHandler(t, mock)
 	linker := &fakeLinearLinker{}
@@ -482,6 +476,56 @@ func TestSessionHandler_CreateManual_RejectsWhenDailyTokenBudgetExhausted(t *tes
 	require.Equal(t, http.StatusTooManyRequests, w.Code, "exhausted daily token budget should reject the session")
 	require.Contains(t, w.Body.String(), "GLOBAL_BUDGET_EXCEEDED", "rejection should carry the budget error code")
 	require.Equal(t, 0, linker.called, "no Linear side effects after a budget rejection")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_CreateManual_FailsOpenWhenBudgetReadErrors(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	now := time.Now()
+	runID := uuid.New()
+	messageID := int64(1)
+	jobID := uuid.New()
+
+	// Full happy-path create: a budget-read error must not block creation, so
+	// the session row, message, concurrency check, and run_agent enqueue all
+	// proceed exactly as if the kill switch were disabled.
+	mock.ExpectQuery("SELECT .+ FROM organizations WHERE id").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "test-org", nil, now, now))
+	expectManualSessionCreate(mock, runID, now)
+	mock.ExpectQuery("INSERT INTO session_messages").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
+	mock.ExpectQuery("SELECT count").
+		WithArgs(pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+
+	handler := newSessionHandler(t, mock)
+	// Guard is enabled, but reading the daily total fails. The handler must
+	// fail open (allow the session) rather than wedge all creation on a
+	// transient dependency outage.
+	handler.SetTokenBudgetGuard(budget.New(1000, budgetSummer{err: errors.New("usage db unavailable")}))
+
+	body := `{"message":"Fix the login bug","agent_type":"claude_code"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual", strings.NewReader(body))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	w := httptest.NewRecorder()
+
+	handler.CreateManual(w, req)
+
+	require.Equal(t, http.StatusCreated, w.Code, "a budget-read error must fail open and still create the session")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

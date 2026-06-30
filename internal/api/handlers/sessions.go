@@ -4233,6 +4233,38 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 		}
 		session.CapabilitySnapshot = snapshot
 	}
+	// Deployment-wide daily-spend kill switch — checked BEFORE persisting the
+	// session so a rejected create leaves no orphan row. It caps the LLM tokens
+	// recorded on session messages per UTC day; because the coding agent is
+	// backed by our own OpenAI token (we don't put down per-user coding-agent
+	// credentials on the hosted deployment), that recorded usage is what bills
+	// to us. When the ceiling is hit, new user-initiated sessions are paused
+	// until the next UTC day; in-flight sessions keep running.
+	//
+	// Scope (intentional): this gate fires on the user-initiated create path
+	// only. Autonomous runs (PM, automations) enqueue run_agent directly and
+	// are not blocked here — their usage is still COUNTED in the daily total,
+	// and they are bounded by their own per-org concurrency caps and schedules.
+	// Small platform helper calls (title generation, etc.) bill to the same
+	// OpenAI token but aren't recorded on session messages, so they're not
+	// counted — they're a rounding error next to agent-turn spend.
+	//
+	// The guard is nil (and Check a no-op) when GLOBAL_DAILY_TOKEN_BUDGET is
+	// unset, so this is free in the common case.
+	if decision, budgetErr := h.tokenBudget.Check(r.Context()); budgetErr != nil {
+		// Fail open: a transient error reading the daily total must not wedge
+		// all session creation. Log and let the session proceed.
+		h.logger.Warn().Err(budgetErr).Msg("global token budget check failed; allowing session (fail-open)")
+	} else if !decision.Allowed {
+		h.logger.Warn().
+			Int64("tokens_used", decision.Used).
+			Int64("daily_budget", decision.Budget).
+			Msg("global daily token budget exhausted; rejecting new session")
+		writeError(w, r, http.StatusTooManyRequests, "GLOBAL_BUDGET_EXCEEDED",
+			"This deployment has hit its daily usage limit, so new sessions are paused until it resets at 00:00 UTC. Sessions already running aren't affected — please try again after the reset.")
+		return
+	}
+
 	if err := h.runStore.Create(r.Context(), session); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create manual session", err)
 		return
@@ -4293,27 +4325,6 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	if runningCount >= maxConcurrent {
 		writeError(w, r, http.StatusTooManyRequests, "CONCURRENCY_LIMIT",
 			fmt.Sprintf("Too many sessions running (%d/%d). Please wait for a session to finish before starting a new one.", runningCount, maxConcurrent))
-		return
-	}
-
-	// Deployment-wide daily-spend kill switch. Independent of the per-org
-	// concurrency cap above: that bounds how many sessions one org runs in
-	// parallel, this bounds total LLM token spend across every org per UTC day
-	// so a flood of open-signup accounts can't run up an unbounded bill.
-	// In-flight sessions keep running; only new work is paused until the next
-	// UTC day. The guard is nil (and Check a no-op) when the kill switch is
-	// disabled, so this is free in the common case.
-	if decision, budgetErr := h.tokenBudget.Check(r.Context()); budgetErr != nil {
-		// Fail open: a transient error reading the daily total must not wedge
-		// all session creation. Log and let the session proceed.
-		h.logger.Warn().Err(budgetErr).Msg("global token budget check failed; allowing session (fail-open)")
-	} else if !decision.Allowed {
-		h.logger.Warn().
-			Int64("tokens_used", decision.Used).
-			Int64("daily_budget", decision.Budget).
-			Msg("global daily token budget exhausted; rejecting new session")
-		writeError(w, r, http.StatusTooManyRequests, "GLOBAL_BUDGET_EXCEEDED",
-			"This deployment has hit its daily usage limit, so new sessions are paused until it resets at 00:00 UTC. Sessions already running aren't affected — please try again after the reset.")
 		return
 	}
 
