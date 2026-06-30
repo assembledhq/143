@@ -507,25 +507,17 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			continue
 		}
 		if codeReviewThreadReadOnlyViolation(thread) {
-			raw := "reviewer thread was configured read-only but produced workspace changes"
-			state.Error = raw
 			state.ReadOnly = true
 			state.ReadOnlyViolation = true
 			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
 				state.Reverted = true
 			}
-			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
-				return err
-			}
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
-			if err != nil {
-				return err
-			}
-			state.RawArtifactKey = rawArtifactKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark reviewer read-only violation failed: %w", err)
-			}
-			continue
+			logger.Warn().
+				Str("session_id", job.SessionID.String()).
+				Str("thread_id", thread.ID.String()).
+				Str("reviewer", result.AgentProvider).
+				Bool("reverted", state.Reverted).
+				Msg("code review reviewer thread produced workspace changes; ignoring for review validity")
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
@@ -786,28 +778,6 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 		return false
 	}
 	return true
-}
-
-func createCodeReviewReadOnlyViolationFinding(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, resultID uuid.UUID, thread models.SessionThread) error {
-	if store == nil {
-		return nil
-	}
-	summary := "Review tab modified the workspace during read-only review"
-	body := "This review tab was configured for read-only code review but produced a workspace diff. The result is excluded from approval evidence."
-	finding := &models.CodeReviewFinding{
-		OrgID:         job.OrgID,
-		SessionID:     job.SessionID,
-		AgentResultID: &resultID,
-		DedupeKey:     "read_only_violation:" + thread.ID.String(),
-		Severity:      models.CodeReviewFindingSeverityCritical,
-		Confidence:    models.CodeReviewFindingConfidenceHigh,
-		Summary:       summary,
-		Body:          body,
-	}
-	if err := store.CreateFinding(ctx, finding); err != nil {
-		return fmt.Errorf("create read-only violation finding: %w", err)
-	}
-	return nil
 }
 
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
@@ -1481,25 +1451,17 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			continue
 		}
 		if codeReviewThreadReadOnlyViolation(thread) {
-			raw := "orchestrator thread was configured read-only but produced workspace changes"
-			state.Error = raw
 			state.ReadOnly = true
 			state.ReadOnlyViolation = true
 			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
 				state.Reverted = true
 			}
-			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
-				return err
-			}
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
-			if err != nil {
-				return err
-			}
-			state.RawArtifactKey = rawArtifactKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark orchestrator read-only violation failed: %w", err)
-			}
-			continue
+			logger.Warn().
+				Str("session_id", job.SessionID.String()).
+				Str("thread_id", thread.ID.String()).
+				Str("orchestrator", result.AgentProvider).
+				Bool("reverted", state.Reverted).
+				Msg("code review orchestrator thread produced workspace changes; ignoring for review validity")
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
