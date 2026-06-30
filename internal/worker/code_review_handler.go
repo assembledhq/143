@@ -594,6 +594,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				if raw == "" {
 					raw = "reviewer thread produced workspace changes without persisted assistant output"
 				}
+				state.Error = raw
 				state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 				rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
 				if err != nil {
@@ -1569,7 +1570,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			findings[i].OrgID = job.OrgID
 			findings[i].SessionID = job.SessionID
 			findings[i].AgentResultID = &result.ID
-			if err := stores.CodeReviews.CreateFinding(ctx, &findings[i]); err != nil {
+			if err := stores.CodeReviews.ReplaceFinding(ctx, &findings[i]); err != nil {
 				return fmt.Errorf("create harvested orchestrator code review finding: %w", err)
 			}
 		}
@@ -1948,12 +1949,29 @@ func codeReviewReviewerEvidence(results []models.CodeReviewAgentResult) (quorum 
 		}
 		switch result.Status {
 		case models.CodeReviewAgentResultStatusCompleted:
-			quorum++
+			if codeReviewReviewerResultHasUsableOutput(result) {
+				quorum++
+			}
 		case models.CodeReviewAgentResultStatusFailed, models.CodeReviewAgentResultStatusTimedOut:
 			failures++
 		}
 	}
 	return quorum, failures
+}
+
+func codeReviewReviewerResultHasUsableOutput(result models.CodeReviewAgentResult) bool {
+	if result.Status != models.CodeReviewAgentResultStatusCompleted {
+		return false
+	}
+	state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+	if !ok {
+		return true
+	}
+	return !codeReviewReviewerStateHasNoUsableOutput(state)
+}
+
+func codeReviewReviewerStateHasNoUsableOutput(state codeReviewReviewerStructuredResult) bool {
+	return state.ReadOnlyViolation && strings.TrimSpace(state.Error) != ""
 }
 
 func codeReviewBlockingFindings(findings []models.CodeReviewFinding) int {
@@ -2641,6 +2659,10 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 		}
 		switch result.Status {
 		case models.CodeReviewAgentResultStatusCompleted:
+			if !codeReviewReviewerResultHasUsableOutput(result) {
+				summaries = append(summaries, name+" produced no usable review output")
+				continue
+			}
 			if findingCounts[result.ID] == 0 {
 				summaries = append(summaries, name+" clean")
 			} else {

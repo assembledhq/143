@@ -791,6 +791,45 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			reason:   "reviewer quorum 1 is below policy requirement 2",
 		},
 		{
+			name: "withholds approval when completed read-only reviewer has no usable output",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude", Status: models.CodeReviewAgentResultStatusCompleted},
+					{
+						Role:          models.CodeReviewAgentRoleReviewer,
+						AgentProvider: "codex",
+						Status:        models.CodeReviewAgentResultStatusCompleted,
+						StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+							ReadOnlyViolation: true,
+							Error:             "reviewer thread produced workspace changes without persisted assistant output",
+						}),
+					},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected:     models.CodeReviewDecisionNeedsHumanReview,
+			reason:       "reviewer quorum 1 is below policy requirement 2",
+			bodyContains: "codex produced no usable review output",
+		},
+		{
 			name: "withholds approval for fork pull requests when policy disallows forks",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
