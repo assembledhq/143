@@ -183,6 +183,10 @@ describe('TeamSettingsPage', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Invite' }));
 
     expect(screen.getByText('Invite a member')).toBeInTheDocument();
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      'GitHub username',
+      'Email',
+    ]);
     expect(screen.getByRole('tab', { name: 'GitHub username' })).toHaveAttribute('data-state', 'active');
     expect(screen.getByPlaceholderText('octocat')).toBeInTheDocument();
     expect(screen.getByLabelText('Notification email')).toBeInTheDocument();
