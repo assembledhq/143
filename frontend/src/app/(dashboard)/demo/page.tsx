@@ -11,6 +11,7 @@ import {
   MonitorPlay,
   Play,
 } from "lucide-react";
+import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -49,7 +50,7 @@ export default function DemoPage() {
   const manifest = data?.data;
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+    <PageContainer size="wide" className="flex flex-col gap-6">
       <PageHeader
         title="143 demo"
         description="A read-only replay of a seeded coding-agent workflow."
@@ -105,16 +106,16 @@ export default function DemoPage() {
             {replaySteps.map((step, index) => (
               <Card key={step.title}>
                 <CardContent>
-                <div className="mb-4 flex items-center justify-between">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-foreground">
-                    <step.icon className="h-4 w-4" />
+                  <div className="mb-4 flex items-center justify-between">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-md bg-muted text-foreground">
+                      <step.icon className="h-4 w-4" />
+                    </div>
+                    <span className="text-xs font-medium text-muted-foreground tabular-nums">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
                   </div>
-                  <span className="text-xs font-medium text-muted-foreground tabular-nums">
-                    {String(index + 1).padStart(2, "0")}
-                  </span>
-                </div>
-                <h3 className="text-sm font-semibold text-foreground">{step.title}</h3>
-                <p className="mt-2 text-sm text-muted-foreground">{step.description}</p>
+                  <h3 className="text-sm font-semibold text-foreground">{step.title}</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">{step.description}</p>
                 </CardContent>
               </Card>
             ))}
@@ -176,6 +177,6 @@ export default function DemoPage() {
           </Card>
         </>
       )}
-    </div>
+    </PageContainer>
   );
 }
