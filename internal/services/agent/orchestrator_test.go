@@ -9641,6 +9641,50 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
 }
 
+func TestRunAgent_OpenCodeLogicalModelOverrideReachesSandboxAsResolvedRoute(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeOpenCode
+	run.ModelOverride = strPtr(models.DefaultOpenCodeModel)
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeOpenCode
+	d.issues.issue = issue
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenCode: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenCode,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenCodeConfig{
+						APIKey:          "sk-or-opencode",
+						BackingProvider: models.ProviderOpenRouter,
+					},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "opencode-route", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should execute with an OpenRouter-backed OpenCode credential")
+	require.Equal(t, "sk-or-opencode", capturedCfg.Env["OPENROUTER_API_KEY"], "OpenCode should use the OpenRouter-backed credential")
+	require.Equal(t, models.OpenCodeModelOpenRouterGLM52, capturedCfg.Env["OPENCODE_MODEL"], "logical OpenCode overrides should resolve to the physical OpenRouter route before reaching the sandbox")
+	require.NotEqual(t, models.DefaultOpenCodeModel, capturedCfg.Env["OPENCODE_MODEL"], "the sandbox must not receive a bare logical OpenCode model id")
+	require.Contains(t, capturedCfg.Env["OPENCODE_CONFIG_CONTENT"], models.OpenCodeModelOpenRouterGLM52, "OpenCode runtime config should match the resolved physical model")
+}
+
 // --- Amp/Pi agent env resolution ---
 
 // TestRunAgent_AmpCredentialEnv asserts that Amp sessions receive auth from

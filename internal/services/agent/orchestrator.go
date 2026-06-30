@@ -2549,11 +2549,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	// Apply per-run model override before the auth pre-flight so the sandbox
 	// sees the effective model/mode selection rather than only the org default.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(run.AgentType, run.ModelOverride, sandboxCfg.Env)
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
@@ -3473,11 +3469,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	// Apply the per-session model override before the auth pre-flight so the
 	// sandbox sees the effective model/mode selection.
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, sandboxCfg.Env)
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -7760,11 +7752,7 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			refreshedEnv[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, refreshedEnv)
 	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
 		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -7772,6 +7760,21 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 		refreshedEnv["HOME"] = sandboxCfg.HomeDir
 	}
 	return refreshedEnv
+}
+
+func applyDirectModelOverrideEnv(agentType models.AgentType, modelOverride *string, env map[string]string) {
+	if env == nil || modelOverride == nil || strings.TrimSpace(*modelOverride) == "" {
+		return
+	}
+	if agentType == models.AgentTypeOpenCode {
+		// OpenCode accepts logical model IDs in stored session config, but its
+		// CLI requires the resolved physical provider/model route. ResolveForModel
+		// has already translated the override into OPENCODE_MODEL.
+		return
+	}
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" {
+		env[envVar] = *modelOverride
+	}
 }
 
 func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {
