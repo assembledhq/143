@@ -186,6 +186,17 @@ func (s *AuditLogStore) List(ctx context.Context, orgID uuid.UUID, filters Audit
 		w.addArg("cursor_id", *filters.CursorID)
 	}
 
+	// Routine preview secret-bundle resolution events are emitted by the system
+	// on every hourly preview recycle. They are pure housekeeping noise in the
+	// org activity log, so hide them from the default listing while keeping the
+	// matching ".failed" events (and every other action) visible. An explicit
+	// action filter still surfaces them when a caller asks for them directly.
+	if filters.Action != models.AuditActionPreviewSecretBundleResolved {
+		w.add("NOT (resource_type = @hide_resolved_resource AND action = @hide_resolved_action)",
+			"hide_resolved_resource", models.AuditResourcePreviewSecretBundle)
+		w.addArg("hide_resolved_action", models.AuditActionPreviewSecretBundleResolved)
+	}
+
 	where, args := w.build()
 
 	query := `

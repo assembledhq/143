@@ -192,8 +192,10 @@ func TestAuditLogStore_List(t *testing.T) {
 			name:    "returns entries for org with no filters",
 			filters: AuditLogFilters{},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
-					WithArgs(pgxmock.AnyArg()).
+				// The default listing appends a NOT(...) clause to hide routine
+				// preview_secret_bundle.resolved events, adding two bound args.
+				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND NOT .+resource_type .+ action").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(newAuditLogColumns()).
 							AddRow(int64(1), orgID, "user", userID.String(), &userID,
@@ -227,8 +229,9 @@ func TestAuditLogStore_List(t *testing.T) {
 			name:    "filters by actor_type",
 			filters: AuditLogFilters{ActorType: models.AuditActorUser},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				// org_id + actor_type + the two hide-resolved args.
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND actor_type").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(newAuditLogColumns()).
 							AddRow(int64(1), orgID, "user", userID.String(), &userID,
@@ -253,7 +256,7 @@ func TestAuditLogStore_List(t *testing.T) {
 			filters: AuditLogFilters{},
 			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(newAuditLogColumns()))
 			},
 			expected: func(_, _ uuid.UUID, _ time.Time) []models.AuditLog {
@@ -265,10 +268,63 @@ func TestAuditLogStore_List(t *testing.T) {
 			filters: AuditLogFilters{},
 			setupMock: func(mock pgxmock.PgxPoolIface, _, _ uuid.UUID, _ time.Time) {
 				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id").
-					WithArgs(pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
+		},
+		{
+			name:    "hides routine preview_secret_bundle.resolved events by default",
+			filters: AuditLogFilters{},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				// The query must carry the NOT(...) exclusion clause. The mock
+				// returns only the rows the DB would (a ".failed" event survives).
+				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND NOT .resource_type = .+ AND action = ").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(newAuditLogColumns()).
+							AddRow(int64(3), orgID, "system", "preview-secret-resolver", nil,
+								"preview_secret_bundle.failed", "preview_secret_bundle", nil,
+								nil, nil, nil, nil,
+								nil, nil, now),
+					)
+			},
+			expected: func(orgID, _ uuid.UUID, now time.Time) []models.AuditLog {
+				return []models.AuditLog{
+					{
+						ID: 3, OrgID: orgID, ActorType: "system",
+						ActorID: "preview-secret-resolver",
+						Action:  "preview_secret_bundle.failed", ResourceType: "preview_secret_bundle",
+						CreatedAt: now,
+					},
+				}
+			},
+		},
+		{
+			name:    "includes resolved events when explicitly filtered",
+			filters: AuditLogFilters{Action: models.AuditActionPreviewSecretBundleResolved},
+			setupMock: func(mock pgxmock.PgxPoolIface, orgID, userID uuid.UUID, now time.Time) {
+				// Explicit action filter: no NOT(...) clause, just org_id + action.
+				mock.ExpectQuery("(?s)SELECT .+ FROM audit_logs WHERE org_id .+ AND action = ").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(
+						pgxmock.NewRows(newAuditLogColumns()).
+							AddRow(int64(4), orgID, "system", "preview-secret-resolver", nil,
+								"preview_secret_bundle.resolved", "preview_secret_bundle", nil,
+								nil, nil, nil, nil,
+								nil, nil, now),
+					)
+			},
+			expected: func(orgID, _ uuid.UUID, now time.Time) []models.AuditLog {
+				return []models.AuditLog{
+					{
+						ID: 4, OrgID: orgID, ActorType: "system",
+						ActorID: "preview-secret-resolver",
+						Action:  "preview_secret_bundle.resolved", ResourceType: "preview_secret_bundle",
+						CreatedAt: now,
+					},
+				}
+			},
 		},
 	}
 
