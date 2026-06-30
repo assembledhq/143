@@ -92,7 +92,8 @@ func TestService_EnqueueRun(t *testing.T) {
 				ID:                  sessionID,
 				OrgID:               orgID,
 				RepositoryID:        &repositoryID,
-				WorkspaceGeneration: 42,
+				WorkspaceGeneration: 7,
+				WorkspaceRevision:   42,
 				SnapshotKey:         &snapshotKey,
 			}
 

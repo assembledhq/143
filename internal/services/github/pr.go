@@ -4266,7 +4266,7 @@ func (s *PRService) formatPRReadinessFooter(ctx context.Context, run *models.Ses
 		}
 		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
 	}
-	if latest.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringPtr(latest.EvaluatedSnapshotKey) != stringPtr(run.SnapshotKey) {
+	if latest.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringPtr(latest.EvaluatedSnapshotKey) != stringPtr(run.SnapshotKey) {
 		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
 	}
 	passed, warnings, blockers := 0, 0, 0
