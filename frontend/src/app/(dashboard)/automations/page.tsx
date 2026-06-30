@@ -396,7 +396,6 @@ function AutomationsWorkspace({
           icon={Plus}
           title="Create an automation when you are ready."
           description="Start from a blank setup or use a template below."
-          action={canManage ? { label: "New automation", href: "/automations/new" } : undefined}
         />
       )}
     </section>

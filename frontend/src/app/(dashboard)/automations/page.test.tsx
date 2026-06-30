@@ -29,11 +29,7 @@ describe("AutomationsPage", () => {
     expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
-    // Both the page header and the empty-state CTA expose a "New automation"
-    // link; both must point at the create route.
-    const newAutomationLinks = screen.getAllByRole("link", { name: /^New automation$/i });
-    expect(newAutomationLinks.length).toBeGreaterThan(0);
-    newAutomationLinks.forEach((link) => expect(link).toHaveAttribute("href", "/automations/new"));
+    expect(screen.getByRole("link", { name: /^New automation$/i })).toHaveAttribute("href", "/automations/new");
     expect(screen.getByRole("tab", { name: "Popular" })).toBeInTheDocument();
     expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
