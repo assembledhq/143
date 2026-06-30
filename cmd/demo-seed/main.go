@@ -102,7 +102,7 @@ func runPrune(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	databaseURL := fs.String("database-url", os.Getenv("DEMO_SEED_DATABASE_URL"), "demo database URL to prune")
-	maxAge := fs.Duration("max-age", 24*time.Hour, "delete volatile demo auth sessions older than this duration")
+	maxAge := fs.Duration("max-age", 24*time.Hour, "delete volatile demo auth sessions and audit rows older than this duration")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

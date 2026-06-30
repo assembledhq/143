@@ -13,15 +13,24 @@ import {
 import { PreviewLandingContent } from "./page";
 
 let searchParams = new URLSearchParams("launch=1");
+const currentUserRole = vi.hoisted(() => ({ value: "member" }));
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => searchParams,
+}));
+
+vi.mock("@/hooks/use-auth", () => ({
+  useAuth: () => ({
+    user: { id: "user-1", role: currentUserRole.value },
+    isLoading: false,
+  }),
 }));
 
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   searchParams = new URLSearchParams("launch=1");
+  currentUserRole.value = "member";
 });
 
 function renderLaunchPage(id = "target-1") {
@@ -520,6 +529,46 @@ describe("PreviewLandingPage detail mode", () => {
     expect(screen.getByRole("button", { name: "Preview actions" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Bootstrap token" })).not.toBeInTheDocument();
     expect(screen.queryByText("prev-1")).not.toBeInTheDocument();
+  });
+
+  it("hides mutating preview controls for viewers", async () => {
+    const user = userEvent.setup();
+    currentUserRole.value = "viewer";
+    searchParams = new URLSearchParams("");
+
+    server.use(
+      http.get("*/api/v1/previews/target-1", () =>
+        HttpResponse.json({
+          data: {
+            target_id: "target-1",
+            preview_id: "prev-1",
+            repository_id: "repo-1",
+            repository_full_name: "acme/web",
+            branch: "feature/preview",
+            commit_sha: "529975ce1faa2961ef3f23abde2418bf561116d9",
+            source_type: "manual",
+            status: "ready",
+            current_phase: "ready",
+            stable_url: "https://143.dev/previews/target-1",
+            preview_url: "https://target-1.preview.143.dev",
+            expires_at: "2026-05-26T21:05:00Z",
+          },
+        }),
+      ),
+    );
+
+    renderLaunchPage();
+
+    expect(await screen.findByRole("heading", { name: "acme/web" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start preview" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Preview actions" }));
+
+    expect(await screen.findByText("Refresh status")).toBeInTheDocument();
+    expect(screen.queryByText("Start latest preview")).not.toBeInTheDocument();
+    expect(screen.queryByText("Restart runtime")).not.toBeInTheDocument();
+    expect(screen.queryByText("Stop runtime")).not.toBeInTheDocument();
   });
 });
 

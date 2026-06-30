@@ -99,7 +99,7 @@ DEMO_ENTRY_EMAIL=preview-viewer@143.dev
 
 Visitors click **Enter demo**. The app calls `POST /api/v1/auth/demo`, signs in the seeded viewer, and redirects to `/demo`.
 
-`DEMO_READ_ONLY=true` blocks state-changing API routes except demo entry and logout. Seeded rows are fixed; the only expected runtime churn is auth sessions, which the host prunes nightly.
+`DEMO_READ_ONLY=true` blocks state-changing API routes except demo entry and logout. Seeded rows are fixed; the expected runtime churn is auth sessions and auth audit rows, which the host prunes nightly.
 
 For an emergency full reset:
 

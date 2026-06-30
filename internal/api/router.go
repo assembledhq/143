@@ -1076,7 +1076,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
-			r.With(middleware.ClaimRateLimit(10)).Post("/api/v1/auth/demo", authHandler.DemoLogin)
+			r.With(middleware.DemoEntryRateLimit(10)).Post("/api/v1/auth/demo", authHandler.DemoLogin)
 			// Public: the verification link may be opened on a device with
 			// no session; the single-use token is the credential. Shares the
 			// claim endpoints' rate limit — same token-guessing surface.

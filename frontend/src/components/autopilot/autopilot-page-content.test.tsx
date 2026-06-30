@@ -84,11 +84,15 @@ vi.mock("./use-autopilot-page-data", () => ({
 }));
 
 vi.mock("./autopilot-steering-sheet", () => ({
-  AutopilotSteeringSheet: () => null,
+  AutopilotSteeringSheet: ({ open }: { open: boolean }) => (
+    open ? <div role="dialog" aria-label="Autopilot steering" /> : null
+  ),
 }));
 
 vi.mock("./autopilot-documents-sheet", () => ({
-  AutopilotDocumentsSheet: () => null,
+  AutopilotDocumentsSheet: ({ open }: { open: boolean }) => (
+    open ? <div role="dialog" aria-label="Autopilot documents" /> : null
+  ),
 }));
 
 vi.mock("@/components/autopilot-proposal-card", () => ({
@@ -153,6 +157,12 @@ describe("AutopilotPageContent", () => {
     expect(await screen.findByText("Autopilot")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run analysis" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByText("No direction set"));
+    await userEvent.click(screen.getByText("No documents"));
+
+    expect(screen.queryByRole("dialog", { name: "Autopilot steering" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Autopilot documents" })).not.toBeInTheDocument();
   });
 
   it("lets admins start a blocked queue issue and attach session notes", async () => {

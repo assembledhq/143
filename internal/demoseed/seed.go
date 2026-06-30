@@ -277,12 +277,29 @@ func prune(ctx context.Context, opts PruneOptions, connect func(context.Context,
 	cutoff := time.Now().Add(-opts.MaxAge)
 	tag, err := pool.Exec(ctx, `
 		DELETE FROM auth_sessions
-		WHERE org_id = $1
+		WHERE org_id = $1::uuid
 		  AND created_at < $2`, DemoOrgID, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("prune old demo auth sessions: %w", err)
 	}
-	return tag.RowsAffected(), nil
+
+	var auditRows int64
+	if err := pool.QueryRow(ctx, `SELECT delete_expired_audit_logs($1::uuid, $2)`, DemoOrgID, retentionDaysForMaxAge(opts.MaxAge)).Scan(&auditRows); err != nil {
+		return 0, fmt.Errorf("prune old demo audit logs: %w", err)
+	}
+
+	return tag.RowsAffected() + auditRows, nil
+}
+
+func retentionDaysForMaxAge(maxAge time.Duration) int {
+	retentionDays := int(maxAge / (24 * time.Hour))
+	if maxAge%(24*time.Hour) != 0 {
+		retentionDays++
+	}
+	if retentionDays < 1 {
+		retentionDays = 1
+	}
+	return retentionDays
 }
 
 func apply(ctx context.Context, opts ApplyOptions, deps applyDeps) error {

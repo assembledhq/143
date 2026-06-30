@@ -188,6 +188,7 @@ export function AutopilotPageContent() {
           focusAreas={viewModel.focusAreas}
           documentsSummary={viewModel.documentsSummary}
           weightsSummary={viewModel.weightsSummary}
+          canEdit={canMutate}
           onEditDirection={() => setShowDirectionEditor(true)}
           onManageDocuments={() => setShowDocumentsEditor(true)}
           onOpenSettings={() => router.push("/settings/autopilot")}
