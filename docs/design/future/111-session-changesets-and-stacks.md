@@ -133,23 +133,31 @@ platform to model every patch detail.
 
 Changesets should be available to coding agents through three simple channels.
 
-### Prompt Context
+### Prompt Context Pointer
 
-When a session has changesets, agent prompts include a compact stack summary:
+Do not inject the full changeset stack into every user prompt or every agent
+turn. That would create context bloat and stale state risk. The durable source of
+truth for changeset state should be `143-tools changesets`.
+
+Prompt context should be a small pointer, not a stack dump:
+
+- whether the session has changesets
+- the current composer target, if one is selected
+- the allowed mutation scope for this turn
+- a reminder to call `143-tools changesets list/status/current` before reasoning
+  about stack state, descendants, or publish/restack actions
+
+Example minimal context:
 
 ```text
-Session changesets:
-1. Foundation        PR #101  branch 143/foundation  base main             state open
-2. API integration   PR #102  branch 143/api         base 143/foundation   state needs_restack
-3. UI wiring         draft    branch 143/ui          base 143/api          state planned
-
-Current target: Changeset 2 - API integration
-Allowed mutation: target changeset worktree
-Affected descendants: Changeset 3
+This session has changesets. Current target: Changeset 2 - API integration.
+Allowed mutation: target changeset worktree. Use `143-tools changesets` for
+current stack state before publishing, previewing, or restacking.
 ```
 
-The prompt gives enough context for the agent to reason about the stack without
-needing to call tools for every step.
+The platform may include a tiny selected-changeset summary when the user has
+explicitly targeted a changeset, but broad stack summaries should be loaded on
+demand through tools rather than prefilled into prompts.
 
 ### Worktree
 
