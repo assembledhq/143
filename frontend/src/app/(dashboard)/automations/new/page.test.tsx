@@ -269,10 +269,12 @@ describe("NewAutomationPage", () => {
     expect(triggerGroup).not.toHaveClass("border-border", "bg-background");
     expect(screen.getByText("Pull request events")).toBeInTheDocument();
     expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("When checks finish")).not.toBeChecked();
     expect(screen.getByLabelText("When a PR is opened")).not.toBeChecked();
     expect(
       screen.getByLabelText("When there is new PR feedback"),
     ).not.toBeChecked();
+    expect(screen.getByLabelText("When a PR is merged")).not.toBeChecked();
     expect(screen.queryByText("Also trigger on")).not.toBeInTheDocument();
     expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
     expect(screen.getByText("Triggers").parentElement).toHaveClass("flex-wrap");
@@ -694,6 +696,96 @@ describe("NewAutomationPage", () => {
     expect(
       (screen.getByLabelText("Goal") as HTMLTextAreaElement).value,
     ).toContain("Review the repository for concrete, actionable security risk");
+  });
+
+  it("resets event trigger choices when applying a template", async () => {
+    searchParamsState.value = "";
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | undefined;
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("/api/v1/automations", async ({ request }) => {
+        requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            data: {
+              id: "automation-1",
+              org_id: "org-1",
+              repository_id: "repo-1",
+              name: requestBody.name,
+              goal: requestBody.goal,
+              icon_type: "emoji",
+              icon_value: "⚙️",
+              execution_mode: "sequential",
+              max_concurrent: 1,
+              base_branch: "main",
+              identity_scope: "org",
+              pre_pr_review_loops: 1,
+              schedule_type: requestBody.schedule_type,
+              github_event_triggers: [],
+              timezone: "UTC",
+              enabled: true,
+              priority: 50,
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await screen.findByLabelText("Name");
+    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("When a PR is updated"));
+    expect(screen.getByLabelText("On a schedule")).not.toBeChecked();
+    expect(screen.getByLabelText("When a PR is updated")).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Templates" }));
+    await user.click(await screen.findByText("Security sweep"));
+
+    expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("When a PR is updated")).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({
+        schedule_type: "interval",
+        triggers: [],
+      });
+    });
+    expect(requestBody).toMatchObject({
+      interval_value: 7,
+      interval_unit: "days",
+      interval_run_at: "09:00",
+    });
+    expect(requestBody).not.toHaveProperty("event_triggers");
   });
 
   it("restores the latest in-progress automation draft when no template is selected", async () => {
