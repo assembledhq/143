@@ -1178,7 +1178,7 @@ describe("IntegrationsPage", () => {
     await waitFor(() => {
       expect(updateSlackSettingsMock).toHaveBeenCalledWith({
         notification_preset: "custom",
-        notification_subscriptions: { events: ["session.completed", "session.failed"], automations: [], slack_user_ids: [] },
+        notification_subscriptions: { events: ["session.failed"], automations: [], slack_user_ids: [] },
       });
     });
   });

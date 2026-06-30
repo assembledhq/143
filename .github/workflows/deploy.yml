@@ -9,6 +9,7 @@ env:
 
 jobs:
   build:
+    if: github.repository == 'assembledhq/143'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,6 +66,7 @@ jobs:
 
   predeploy-latest:
     needs: build
+    if: github.repository == 'assembledhq/143'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -90,7 +92,7 @@ jobs:
 
   deploy:
     needs: [build, predeploy-latest]
-    if: needs.predeploy-latest.outputs.should_deploy == 'true'
+    if: github.repository == 'assembledhq/143' && needs.predeploy-latest.outputs.should_deploy == 'true'
     runs-on: ubuntu-latest
     # A worker drain can hold a deploy job for up to ~45 minutes while
     # in-flight coding turns finish. Queue overlapping deploys instead of

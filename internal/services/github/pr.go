@@ -353,6 +353,12 @@ const (
 	// tree. This blocks a stale or start-over checkpoint from wiping out
 	// someone else's commits through --force-with-lease.
 	PushBranchDivergedPRMessage = "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again."
+	// BaseBranchUnrelatedPRMessage is shown when the repository's current PR
+	// base branch no longer shares git history with the session checkpoint.
+	// This usually means the repo history was rewritten after the session
+	// started. Refuse before pushing so stale private-history branches do not
+	// get published only to fail at GitHub's create-PR API.
+	BaseBranchUnrelatedPRMessage = "The repository's base branch could not be found or no longer shares history with this session. Recreate or rebase the session on the current base branch, then create the PR again."
 	// SandboxAuthUnavailablePRMessage is shown when 143 cannot prepare the
 	// sandbox credential socket needed for git push. Keep it distinct from the
 	// GitHub permissions fallback because these failures are often runtime or
@@ -422,6 +428,12 @@ var ErrPushRejected = errors.New("git push rejected by remote")
 // intentionally distinct from ErrPushRejected: the lease may be fresh, but the
 // local snapshot is still stale and must not overwrite the remote tree.
 var ErrPushBranchDiverged = errors.New("remote branch diverged from session snapshot")
+
+// ErrBaseBranchUnrelated is returned before pushing when the repository's
+// current PR base branch has no merge-base with the hydrated session branch.
+// GitHub would reject the PR after the push with "no history in common"; this
+// sentinel prevents publishing the stale branch first.
+var ErrBaseBranchUnrelated = errors.New("base branch has no history in common with session branch")
 
 // ErrSandboxAuthUnavailable is returned when the host cannot prepare the
 // sandbox credential socket used by git-credential. This is a 143 runtime/auth
@@ -541,10 +553,24 @@ type CreateBranchResult struct {
 	HeadSHA string
 }
 
+func targetBranchForPR(run *models.Session, repo *models.Repository) string {
+	if run != nil && run.TargetBranch != nil {
+		if branch := strings.TrimSpace(*run.TargetBranch); branch != "" {
+			return branch
+		}
+	}
+	if repo != nil {
+		if branch := strings.TrimSpace(repo.DefaultBranch); branch != "" {
+			return branch
+		}
+	}
+	return "main"
+}
+
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
 // session's sandbox snapshot, committing any uncommitted changes, pushing to
-// a new remote branch, and opening a pull request against the repo's default
-// branch via the REST API.
+// a new remote branch, and opening a pull request against the session target
+// branch (falling back to the repo default branch) via the REST API.
 //
 // Pushing directly from the restored working tree preserves file modes,
 // symlinks, binaries, and `.gitattributes` normalization — all lost by the
@@ -649,10 +675,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	token := resolution.Token
 
 	owner, repoName := splitRepo(repo.FullName)
-	defaultBranch := repo.DefaultBranch
-	if defaultBranch == "" {
-		defaultBranch = "main"
-	}
+	defaultBranch := targetBranchForPR(run, &repo)
 
 	branchName := formatBranchName(run, issue)
 	commitMsg := formatCommitMessage(run, issue)
@@ -667,7 +690,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -882,7 +905,8 @@ func (s *PRService) CreateBranch(ctx context.Context, run *models.Session, param
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	baseBranch := targetBranchForPR(run, &repo)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -1044,7 +1068,7 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, commitMsg, authorName, authorEmail)
+	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,7 +1260,7 @@ func (s *PRService) pushSessionBranch(
 	run *models.Session,
 	repo *models.Repository,
 	orgSettings models.OrgSettings,
-	snapshotKey, branchName, commitMsg, authorName, authorEmail string,
+	snapshotKey, branchName, baseBranch, commitMsg, authorName, authorEmail string,
 ) (*pushResult, error) {
 	if s.sandboxAuth == nil {
 		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
@@ -1295,7 +1319,7 @@ func (s *PRService) pushSessionBranch(
 	}
 
 	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, pushURL)
+	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, pushURL)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -1336,6 +1360,12 @@ func (s *PRService) pushSessionBranch(
 			msg = pushBranchDivergedMessage
 		}
 		return nil, fmt.Errorf("%w: %s", ErrPushBranchDiverged, msg)
+	case pushExitBaseUnrelated:
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = pushBaseUnrelatedMessage
+		}
+		return nil, fmt.Errorf("%w: %s", ErrBaseBranchUnrelated, msg)
 	default:
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -1456,6 +1486,12 @@ const pushExitNoChanges = 77
 // work with a stale or start-over checkpoint.
 const pushExitBranchDiverged = 78
 
+// pushExitBaseUnrelated is the sentinel exit code the push script uses when
+// the current remote base branch has no merge-base with the session branch.
+// This prevents publishing stale-history session branches that GitHub will
+// reject as PR heads after the push.
+const pushExitBaseUnrelated = 79
+
 // pushHeadSHASentinel is a well-known prefix the push script writes to stdout
 // after a successful `git push`. The caller scans stdout for this line and
 // extracts the just-pushed commit SHA. Chosen to be unlikely to collide with
@@ -1463,6 +1499,8 @@ const pushExitBranchDiverged = 78
 const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
+
+const pushBaseUnrelatedMessage = "remote base branch could not be found or has no history in common with this session checkpoint; refusing to push"
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
@@ -1495,9 +1533,12 @@ const pushScriptTemplate = `set -eu
 cleanup() { rm -f %[1]s; }
 trap cleanup EXIT
 branch=%[7]s
+base_branch=%[8]s
 push_url=%[6]s
 remote_ref="refs/heads/$branch"
 remote_guard_ref="refs/remotes/__143_push_guard/$branch"
+base_ref="refs/heads/$base_branch"
+base_guard_ref="refs/remotes/__143_base_guard/$base_branch"
 cd %[2]s
 git config user.name %[3]s
 git config user.email %[4]s
@@ -1511,25 +1552,37 @@ if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
         exit %[5]d
     fi
 fi
+if [ -n "$base_branch" ]; then
+    base_sha=$(git ls-remote "$push_url" "$base_ref" | awk 'NR==1 {print $1}')
+    if [ -z "$base_sha" ]; then
+        echo "%[10]s" >&2
+        exit %[11]d
+    fi
+    git fetch --no-tags --quiet "$push_url" "+${base_ref}:${base_guard_ref}"
+    if ! git merge-base "$base_guard_ref" HEAD >/dev/null 2>&1; then
+        echo "%[10]s" >&2
+        exit %[11]d
+    fi
+fi
 remote_sha=$(git ls-remote "$push_url" "$remote_ref" | awk 'NR==1 {print $1}')
 if [ -n "$remote_sha" ]; then
     git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
     if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
         if ! git diff --quiet HEAD "$remote_guard_ref"; then
-            echo "%[9]s" >&2
-            exit %[10]d
+            echo "%[12]s" >&2
+            exit %[13]d
         fi
     fi
 fi
 git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"
-echo "%[8]s$(git rev-parse HEAD)"
+echo "%[9]s$(git rev-parse HEAD)"
 `
 
 // buildPushScript renders pushScriptTemplate with caller-supplied values.
 // Every %s interpolation is passed through shellQuote, which correctly
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
-func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, pushURL string) string {
+func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, pushURL string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(commitMsgPath),
@@ -1539,11 +1592,14 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		pushExitNoChanges,
 		shellQuote(pushURL),
 		shellQuote(branchName),
+		shellQuote(baseBranch),
 		// pushHeadSHASentinel is a compile-time string literal containing only
 		// safe shell characters ("__143_HEAD_SHA="), so it's intentionally
 		// interpolated raw — no shellQuote. Anyone who later changes the
 		// sentinel to include shell metacharacters MUST add quoting here.
 		pushHeadSHASentinel,
+		pushBaseUnrelatedMessage,
+		pushExitBaseUnrelated,
 		pushBranchDivergedMessage,
 		pushExitBranchDiverged,
 	)
@@ -4266,7 +4322,7 @@ func (s *PRService) formatPRReadinessFooter(ctx context.Context, run *models.Ses
 		}
 		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
 	}
-	if latest.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringPtr(latest.EvaluatedSnapshotKey) != stringPtr(run.SnapshotKey) {
+	if latest.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringPtr(latest.EvaluatedSnapshotKey) != stringPtr(run.SnapshotKey) {
 		return "<!-- 143 readiness -->\n**143 readiness:** not available for this revision."
 	}
 	passed, warnings, blockers := 0, 0, 0

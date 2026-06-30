@@ -253,7 +253,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="__default__">Default model</SelectItem>
-          <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} />
+          <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={selectedModel} />
         </SelectContent>
       </Select>
 
@@ -1126,7 +1126,7 @@ export function ManualSessionComposer({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__default__">Default model</SelectItem>
-            <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} />
+            <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={selectedModel} />
           </SelectContent>
         </Select>
       </div>
@@ -1506,7 +1506,7 @@ export function ManualSessionComposer({
                 <Input
                   ref={uploadInputRef}
                   type="file"
-                  accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
+                  accept="image/png,image/jpeg,image/gif,image/webp,.heic,.heif,.pdf,.txt,.md,.json,.csv"
                   multiple
                   className="hidden"
                   onChange={onUploadChange}

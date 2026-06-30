@@ -644,6 +644,58 @@ func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ReplaceFindingUpdatesConflictContent(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	resultID := uuid.New()
+	findingID := uuid.New()
+	path := "internal/worker/code_review_handler.go"
+	startLine := 42
+	endLine := 42
+	now := time.Date(2026, 6, 30, 6, 30, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery(`(?s)ON CONFLICT \(org_id, session_id, dedupe_key\) DO UPDATE\s+SET\s+agent_result_id = EXCLUDED.agent_result_id.*summary = EXCLUDED.summary.*body = EXCLUDED.body.*github_comment_id = COALESCE`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+			"confidence", "path", "start_line", "end_line", "summary", "body",
+			"selected_for_inline", "github_comment_id", "created_at",
+		}).AddRow(findingID, orgID, sessionID, &resultID, "internal/worker/code_review_handler.go:42:42:missing coverage",
+			models.CodeReviewFindingSeverityMedium, models.CodeReviewFindingConfidenceHigh,
+			&path, &startLine, &endLine, "Missing coverage", "Use the orchestrator wording.", false, nil, now))
+
+	finding := &models.CodeReviewFinding{
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		AgentResultID: &resultID,
+		DedupeKey:     "internal/worker/code_review_handler.go:42:42:missing coverage",
+		Severity:      models.CodeReviewFindingSeverityMedium,
+		Confidence:    models.CodeReviewFindingConfidenceHigh,
+		Path:          &path,
+		StartLine:     &startLine,
+		EndLine:       &endLine,
+		Summary:       "Missing coverage",
+		Body:          "Use the orchestrator wording.",
+	}
+
+	err = NewCodeReviewStore(mock).ReplaceFinding(context.Background(), finding)
+
+	require.NoError(t, err, "ReplaceFinding should replace existing finding content on dedupe conflicts")
+	require.Equal(t, findingID, finding.ID, "ReplaceFinding should scan the returned finding")
+	require.Equal(t, "Use the orchestrator wording.", finding.Body, "ReplaceFinding should expose the replacement body")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, []byte) {
 	t.Helper()
 	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)

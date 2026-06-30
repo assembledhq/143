@@ -15,11 +15,35 @@ interface ModelOptionGroupsProps {
   // When absent (registry still loading / API failed) OpenCode models render
   // as normal, enabled options with no transport badge.
   openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
+  // selectedModel is always kept visible even when it has no runnable route, so
+  // the trigger keeps displaying the current value instead of falling back to
+  // the placeholder while the stored selection silently persists.
+  selectedModel?: string;
 }
 
-// openCodeModelItemDecor computes the per-item badge/disabled state for an
-// OpenCode model. Returns plain (no badge, enabled) for non-OpenCode models or
-// when availability data is absent.
+export function shouldRenderModelOption(
+  model: string,
+  isOpenCode: boolean,
+  availabilityById?: Map<string, OpenCodeModelAvailability>,
+): boolean {
+  const availability = isOpenCode ? availabilityById?.get(model) : undefined;
+  return !availability || availability.hasRunnableRoute;
+}
+
+// isModelOptionVisible decides whether a model renders in the picker. Available
+// models always show; an unavailable model shows only when it is the current
+// selection (so the trigger stays truthful).
+export function isModelOptionVisible(
+  model: string,
+  isOpenCode: boolean,
+  availabilityById?: Map<string, OpenCodeModelAvailability>,
+  selectedModel?: string,
+): boolean {
+  return model === selectedModel || shouldRenderModelOption(model, isOpenCode, availabilityById);
+}
+
+// openCodeModelItemDecor computes the per-item transport badge for an OpenCode
+// model. Unavailable OpenCode models are filtered before this runs.
 function openCodeModelItemDecor(
   model: string,
   isOpenCode: boolean,
@@ -28,8 +52,8 @@ function openCodeModelItemDecor(
   const availability = isOpenCode ? availabilityById?.get(model) : undefined;
   if (!availability) return { disabled: false, trailing: null };
   return {
-    disabled: !availability.hasRunnableRoute,
-    trailing: availability.transportLabel ?? (availability.hasRunnableRoute ? null : "add a key"),
+    disabled: false,
+    trailing: availability.transportLabel,
   };
 }
 
@@ -38,12 +62,15 @@ function ModelSelectItem({
   model,
   isOpenCode,
   availabilityById,
+  selectedModel,
 }: {
   value: string;
   model: string;
   isOpenCode: boolean;
   availabilityById?: Map<string, OpenCodeModelAvailability>;
+  selectedModel?: string;
 }) {
+  if (!isModelOptionVisible(model, isOpenCode, availabilityById, selectedModel)) return null;
   const { disabled, trailing } = openCodeModelItemDecor(model, isOpenCode, availabilityById);
   return (
     <SelectItem value={value} disabled={disabled}>
@@ -57,53 +84,72 @@ function ModelSelectItem({
 
 // ModelOptionGroups renders the grouped model options for the session/PM model
 // pickers. For OpenCode models it adds a "· OpenRouter" transport badge (the
-// route that would run given current keys) and disables models with no runnable
-// transport. Centralized so model pickers stay consistent.
-export function ModelOptionGroups({ modelGroups, getOptionValue, openCodeAvailability }: ModelOptionGroupsProps) {
+// route that would run given current keys) and hides models with no runnable
+// transport, except the current selection which always stays visible.
+// Centralized so the model pickers stay consistent.
+export function ModelOptionGroups({
+  modelGroups,
+  getOptionValue,
+  openCodeAvailability,
+  selectedModel,
+}: ModelOptionGroupsProps) {
   return (
     <>
-      {modelGroups.map((group) => (
-        <SelectGroup key={group.key}>
-          <SelectLabel>{group.label}</SelectLabel>
-          {group.models.map((model) => (
-            <ModelSelectItem
-              key={model}
-              value={getOptionValue ? getOptionValue(group, model) : model}
-              model={model}
-              isOpenCode={group.key === "opencode"}
-              availabilityById={openCodeAvailability}
-            />
-          ))}
-        </SelectGroup>
-      ))}
+      {modelGroups.map((group) => {
+        const isOpenCode = group.key === "opencode";
+        const models = group.models.filter((model) =>
+          isModelOptionVisible(model, isOpenCode, openCodeAvailability, selectedModel),
+        );
+        if (models.length === 0) return null;
+        return (
+          <SelectGroup key={group.key}>
+            <SelectLabel>{group.label}</SelectLabel>
+            {models.map((model) => (
+              <ModelSelectItem
+                key={model}
+                value={getOptionValue ? getOptionValue(group, model) : model}
+                model={model}
+                isOpenCode={isOpenCode}
+                availabilityById={openCodeAvailability}
+                selectedModel={selectedModel}
+              />
+            ))}
+          </SelectGroup>
+        );
+      })}
     </>
   );
 }
 
 // FlatModelOptions renders a single agent's model list (no groups) with the same
-// OpenCode transport badge + disabled treatment. Used by the in-session composer
-// where the picker is scoped to one agent.
+// OpenCode transport badge + availability filtering. Used by the in-session
+// composer where the picker is scoped to one agent.
 export function FlatModelOptions({
   models,
   agentType,
   openCodeAvailability,
+  selectedModel,
 }: {
   models: readonly string[];
   agentType: string;
   openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
+  selectedModel?: string;
 }) {
   const isOpenCode = agentType === "opencode";
   return (
     <>
-      {models.map((model) => (
-        <ModelSelectItem
-          key={model}
-          value={model}
-          model={model}
-          isOpenCode={isOpenCode}
-          availabilityById={openCodeAvailability}
-        />
-      ))}
+      {models
+        .filter((model) => isModelOptionVisible(model, isOpenCode, openCodeAvailability, selectedModel))
+        .map((model) => (
+          <ModelSelectItem
+            key={model}
+            value={model}
+            model={model}
+            isOpenCode={isOpenCode}
+            availabilityById={openCodeAvailability}
+            selectedModel={selectedModel}
+          />
+        ))}
     </>
   );
 }

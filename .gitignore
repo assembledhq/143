@@ -42,6 +42,8 @@ go.work.sum
 .sops.yaml
 # CI checkout location of the private secrets repo (see deploy.yml)
 .infra/
+# Production deploy SSH access control lives in the private 143-infra repo.
+/deploy/authorized_keys/
 
 # air live reload
 tmp/

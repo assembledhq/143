@@ -35,7 +35,6 @@ var allowedUploadTypes = map[string]bool{
 	"image/heif":          true,
 	"image/heic-sequence": true,
 	"image/heif-sequence": true,
-	"image/svg+xml":       true,
 	"application/pdf":     true,
 	"text/plain":          true,
 	"text/markdown":       true,
@@ -234,8 +233,6 @@ func extensionFromMIME(mime string) string {
 		return ".heic"
 	case "image/heif-sequence":
 		return ".heif"
-	case "image/svg+xml":
-		return ".svg"
 	case "application/pdf":
 		return ".pdf"
 	case "text/plain":

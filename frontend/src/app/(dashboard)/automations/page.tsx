@@ -33,8 +33,10 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { EmptyState } from "@/components/empty-state";
 import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { useAuth } from "@/hooks/use-auth";
+import { Card, CardContent } from "@/components/ui/card";
 
 const popularCategory = {
   id: "popular",
@@ -133,101 +135,108 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
         </div>
       </div>
 
-      <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-3 sm:p-4">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search templates..."
-            className="h-8 bg-background pl-9"
-          />
-        </div>
+      <Card>
+        <CardContent className="space-y-4 p-3 sm:p-4">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search templates..."
+              className="h-8 bg-background pl-9"
+            />
+          </div>
 
-        <Tabs defaultValue={popularCategory.id}>
-          <TabsList size="sm" className="max-w-full overflow-x-auto overflow-y-hidden">
-            {categories.map((category) => (
-              <TabsTrigger key={category.id} value={category.id}>
-                {category.name}
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <Tabs defaultValue={popularCategory.id}>
+            <TabsList size="sm" className="max-w-full overflow-x-auto overflow-y-hidden">
+              {categories.map((category) => (
+                <TabsTrigger key={category.id} value={category.id}>
+                  {category.name}
+                </TabsTrigger>
+              ))}
+            </TabsList>
 
-          {categories.map((category) => {
-            const templates = templatesForCategory(category.id)
-              .filter((template) => templateMatchesSearch(template, query));
+            {categories.map((category) => {
+              const templates = templatesForCategory(category.id)
+                .filter((template) => templateMatchesSearch(template, query));
 
-            return (
-              <TabsContent key={category.id} value={category.id} className="mt-3 space-y-3">
-                <div className="space-y-0.5">
-                  <h3 className="text-xs font-medium text-foreground">{category.name}</h3>
-                  <p className="text-xs text-muted-foreground">{category.description}</p>
-                </div>
+              return (
+                <TabsContent key={category.id} value={category.id} className="mt-3 space-y-3">
+                  <div className="space-y-0.5">
+                    <h3 className="text-xs font-medium text-foreground">{category.name}</h3>
+                    <p className="text-xs text-muted-foreground">{category.description}</p>
+                  </div>
 
-                {templates.length > 0 ? (
-                  <div className="grid gap-2 lg:grid-cols-2">
-                    {templates.map((template) => {
-                      const Icon = template.icon;
+                  {templates.length > 0 ? (
+                    <div className="grid gap-2 lg:grid-cols-2">
+                      {templates.map((template) => {
+                        const Icon = template.icon;
 
-                      return (
-                        <div
-                          key={template.id}
-                          className="flex min-h-24 items-start gap-3 rounded-md border border-border/60 bg-background p-3"
-                        >
-                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/40">
-                            <Icon className="h-4 w-4 text-muted-foreground" />
-                          </div>
-                          <div className="min-w-0 flex-1 space-y-2">
-                            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                              <div className="min-w-0 space-y-1">
-                                <h4 className="text-sm font-medium leading-5 text-foreground">
-                                  {template.name}
-                                </h4>
-                                <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
-                                  {template.summary}
-                                </p>
+                        return (
+                          <Card
+                            key={template.id}
+                            className="min-h-24 rounded-lg border-border/60 shadow-none"
+                          >
+                            <CardContent className="flex items-start gap-3 p-3">
+                              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/40">
+                                <Icon className="h-4 w-4 text-muted-foreground" />
                               </div>
-                              <Badge variant="outline" className="w-fit shrink-0 bg-background text-muted-foreground">
-                                {formatTemplateCadence(template)}
-                              </Badge>
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="hidden min-w-0 flex-wrap gap-1.5 sm:flex">
-                                {template.tags.slice(0, 2).map((tag) => (
-                                  <Badge key={tag} variant="ghost" className="px-0 text-muted-foreground">
-                                    {tag}
+                              <div className="min-w-0 flex-1 space-y-2">
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                  <div className="min-w-0 space-y-1">
+                                    <h4 className="text-sm font-medium leading-5 text-foreground">
+                                      {template.name}
+                                    </h4>
+                                    <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+                                      {template.summary}
+                                    </p>
+                                  </div>
+                                  <Badge variant="outline" className="w-fit shrink-0 bg-background text-muted-foreground">
+                                    {formatTemplateCadence(template)}
                                   </Badge>
-                                ))}
-                              </div>
+                                </div>
 
-                              {canManage ? (
-                                <Button asChild variant="ghost" size="sm" className="ml-auto">
-                                  <Link
-                                    href={`/automations/new?template=${template.id}`}
-                                    aria-label={`Use ${template.name}`}
-                                  >
-                                    Use
-                                    <ArrowRight className="h-3.5 w-3.5" />
-                                  </Link>
-                                </Button>
-                              ) : null}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="rounded-md border border-border/60 bg-background px-4 py-8 text-center text-sm text-muted-foreground">
-                    No templates match your search.
-                  </div>
-                )}
-              </TabsContent>
-            );
-          })}
-        </Tabs>
-      </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="hidden min-w-0 flex-wrap gap-1.5 sm:flex">
+                                    {template.tags.slice(0, 2).map((tag) => (
+                                      <Badge key={tag} variant="ghost" className="px-0 text-muted-foreground">
+                                        {tag}
+                                      </Badge>
+                                    ))}
+                                  </div>
+
+                                  {canManage ? (
+                                    <Button asChild variant="ghost" size="sm" className="ml-auto">
+                                      <Link
+                                        href={`/automations/new?template=${template.id}`}
+                                        aria-label={`Use ${template.name}`}
+                                      >
+                                        Use
+                                        <ArrowRight className="h-3.5 w-3.5" />
+                                      </Link>
+                                    </Button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <EmptyState
+                      variant="inline"
+                      icon={Search}
+                      title="No templates found"
+                      description="Try a different search or choose another category."
+                    />
+                  )}
+                </TabsContent>
+              );
+            })}
+          </Tabs>
+        </CardContent>
+      </Card>
     </section>
   );
 }
@@ -383,12 +392,11 @@ function AutomationsWorkspace({
           />
         </div>
       ) : (
-        <div className="rounded-lg border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center">
-          <p className="text-sm font-medium text-foreground">Create an automation when you are ready.</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Start from a blank setup or use a template below.
-          </p>
-        </div>
+        <EmptyState
+          icon={Plus}
+          title="Create an automation when you are ready."
+          description="Start from a blank setup or use a template below."
+        />
       )}
     </section>
   );

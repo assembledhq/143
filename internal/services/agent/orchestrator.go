@@ -1325,7 +1325,24 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if run.RepositoryID == nil || strings.TrimSpace(snapshotKey) == "" || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
 		return
 	}
-	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
+	current, err := o.sessions.GetByID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to reload session before completion PR readiness auto-run")
+		return
+	}
+	currentSnapshotKey := derefString(current.SnapshotKey)
+	if current.RepositoryID == nil || strings.TrimSpace(currentSnapshotKey) == "" {
+		return
+	}
+	if currentSnapshotKey != snapshotKey {
+		log.Warn().
+			Str("session_id", run.ID.String()).
+			Str("expected_snapshot_key", snapshotKey).
+			Str("current_snapshot_key", currentSnapshotKey).
+			Msg("skipping completion PR readiness auto-run because persisted session snapshot is not current")
+		return
+	}
+	resolved, err := o.prReadiness.ResolvePolicy(ctx, current.OrgID, current.RepositoryID)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to resolve PR readiness policy for completion auto-run")
 		return
@@ -1333,37 +1350,37 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if !resolved.Config.AutoRun.AfterSessionCompletion {
 		return
 	}
-	latest, err := o.prReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	latest, err := o.prReadiness.GetLatestBySession(ctx, current.OrgID, current.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load latest PR readiness before completion auto-run")
 		return
 	}
 	if err == nil && latest != nil &&
-		latest.EvaluatedWorkspaceRevision == run.WorkspaceGeneration &&
-		derefString(latest.EvaluatedSnapshotKey) == snapshotKey {
+		latest.EvaluatedWorkspaceRevision == current.WorkspaceRevision &&
+		derefString(latest.EvaluatedSnapshotKey) == currentSnapshotKey {
 		return
 	}
 	readinessRun := &models.PRReadinessRun{
-		OrgID:                      run.OrgID,
-		SessionID:                  run.ID,
-		RepositoryID:               run.RepositoryID,
+		OrgID:                      current.OrgID,
+		SessionID:                  current.ID,
+		RepositoryID:               current.RepositoryID,
 		Status:                     models.PRReadinessRunStatusQueued,
-		EvaluatedWorkspaceRevision: run.WorkspaceGeneration,
-		EvaluatedSnapshotKey:       &snapshotKey,
+		EvaluatedWorkspaceRevision: current.WorkspaceRevision,
+		EvaluatedSnapshotKey:       &currentSnapshotKey,
 		Summary:                    "Queued",
-		TriggeredByUserID:          run.TriggeredByUserID,
+		TriggeredByUserID:          current.TriggeredByUserID,
 	}
 	if err := o.prReadiness.CreateRun(ctx, readinessRun); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to create completion PR readiness run")
 		return
 	}
 	payload := map[string]string{
-		"org_id":       run.OrgID.String(),
-		"session_id":   run.ID.String(),
+		"org_id":       current.OrgID.String(),
+		"session_id":   current.ID.String(),
 		"readiness_id": readinessRun.ID.String(),
 	}
-	dedupeKey := "pr_readiness:" + run.ID.String()
-	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
+	dedupeKey := "pr_readiness:" + current.ID.String()
+	if _, err := o.jobs.Enqueue(ctx, current.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Str("readiness_id", readinessRun.ID.String()).Msg("failed to enqueue completion PR readiness run")
 	}
 }
@@ -2549,11 +2566,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	// Apply per-run model override before the auth pre-flight so the sandbox
 	// sees the effective model/mode selection rather than only the org default.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(run.AgentType, run.ModelOverride, sandboxCfg.Env)
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
@@ -3079,6 +3092,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		})
 		return nil
 	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, run, sandbox, result)
+		o.failRunWithResult(ctx, run, runResult, agentErr.Error())
+		logAgentRunFailed(log, run, agentErr, "failed", runStartedAt, nil)
+		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		})
+		return fmt.Errorf("execute agent: %w", agentErr)
+	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
 	currentRuntimeID := uuid.Nil
@@ -3473,11 +3498,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	// Apply the per-session model override before the auth pre-flight so the
 	// sandbox sees the effective model/mode selection.
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, sandboxCfg.Env)
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -4498,6 +4519,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if handled {
 			return nil
 		}
+	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, session, sandbox, result)
+		o.failRunWithResult(ctx, session, runResult, agentErr.Error())
+		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
+		return fmt.Errorf("execute agent on continue: %w", agentErr)
 	}
 
 	// 7. Create assistant message with result summary.
@@ -5629,6 +5658,16 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
+	o.failRunWithResult(ctx, run, result, errMsg)
+}
+
+func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
+		result.Error = strPtr(errMsg)
+	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
@@ -5655,6 +5694,20 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	}
 	o.notifyPagerDutySessionComplete(ctx, run, models.SessionStatusFailed, errMsg)
 	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || threadID == nil || *threadID == uuid.Nil {
+		return
+	}
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID == *threadID {
+		return
+	}
+	if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Msg("failed to update active thread terminal status")
+	}
 }
 
 func (o *Orchestrator) notifyPagerDutySessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus, summary string) {
@@ -7027,63 +7080,11 @@ func (o *Orchestrator) handleReadOnlyReviewThreadResult(ctx context.Context, ses
 		return false, nil
 	}
 
-	message := "read-only review thread produced workspace changes"
-	if revertErr := o.revertReadOnlyReviewDiff(ctx, sandbox, diff); revertErr != nil {
-		message += "; automatic revert failed: " + revertErr.Error()
-		log.Warn().Err(revertErr).Str("thread_id", thread.ID.String()).Msg("failed to reverse read-only review thread diff")
-	}
-	category := "read_only_violation"
-	summary := "Read-only review blocked workspace changes"
-	threadResult := &models.SessionResult{
-		ResultSummary:   &summary,
-		Diff:            &diff,
-		Error:           &message,
-		FailureCategory: &category,
-	}
-	if o.sessionThreads != nil {
-		if err := o.sessionThreads.UpdateResult(ctx, session.OrgID, thread.ID, models.ThreadStatusFailed, threadResult); err != nil {
-			return true, fmt.Errorf("mark read-only review thread failed: %w", err)
-		}
-	}
-	if fallbackStatus == "" || fallbackStatus.IsTerminal() {
-		fallbackStatus = models.SessionStatusIdle
-	}
-	if err := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); err != nil {
-		return true, fmt.Errorf("restore session after read-only review violation: %w", err)
-	}
 	log.Warn().
 		Str("thread_id", thread.ID.String()).
 		Int("diff_bytes", len(diff)).
-		Msg("blocked read-only review thread workspace changes")
-	return true, nil
-}
-
-func (o *Orchestrator) revertReadOnlyReviewDiff(ctx context.Context, sandbox *Sandbox, diff string) error {
-	if o == nil || o.provider == nil || sandbox == nil || strings.TrimSpace(diff) == "" {
-		return nil
-	}
-	workDir := strings.TrimSpace(sandbox.WorkDir)
-	if workDir == "" {
-		workDir = "."
-	}
-	patchPath := path.Join(workDir, ".143-read-only-review-revert.patch")
-	if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(diff)); err != nil {
-		return fmt.Errorf("write revert patch: %w", err)
-	}
-	var stdout, stderr bytes.Buffer
-	cmd := fmt.Sprintf("cd '%s' && git apply -R --whitespace=nowarn '%s'; status=$?; rm -f '%s'; exit $status",
-		shellEscapeSingleQuote(workDir),
-		shellEscapeSingleQuote(patchPath),
-		shellEscapeSingleQuote(patchPath),
-	)
-	exitCode, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
-	if err != nil {
-		return fmt.Errorf("reverse apply read-only diff: %w", err)
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("reverse apply read-only diff exited %d: %s", exitCode, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+		Msg("read-only review thread produced workspace changes; continuing")
+	return false, nil
 }
 
 // snapshotSessionOnTurnSuccess wraps snapshotSession with the guard the
@@ -7760,11 +7761,7 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			refreshedEnv[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, refreshedEnv)
 	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
 		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -7772,6 +7769,21 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 		refreshedEnv["HOME"] = sandboxCfg.HomeDir
 	}
 	return refreshedEnv
+}
+
+func applyDirectModelOverrideEnv(agentType models.AgentType, modelOverride *string, env map[string]string) {
+	if env == nil || modelOverride == nil || strings.TrimSpace(*modelOverride) == "" {
+		return
+	}
+	if agentType == models.AgentTypeOpenCode {
+		// OpenCode accepts logical model IDs in stored session config, but its
+		// CLI requires the resolved physical provider/model route. ResolveForModel
+		// has already translated the override into OPENCODE_MODEL.
+		return
+	}
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" {
+		env[envVar] = *modelOverride
+	}
 }
 
 func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {

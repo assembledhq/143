@@ -575,8 +575,10 @@ function PublishDisabledHint({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <button
+        <Button
           type="button"
+          variant="link"
+          size="xs"
           id={id}
           onMouseEnter={() => {
             cancelScheduledClose();
@@ -585,11 +587,11 @@ function PublishDisabledHint({
           onMouseLeave={scheduleClose}
           onFocus={() => setOpen(true)}
           onBlur={scheduleClose}
-          className="flex items-start gap-1.5 rounded text-left text-xs leading-4 text-muted-foreground underline decoration-dotted decoration-muted-foreground/50 underline-offset-2 transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          className="h-auto items-start justify-start gap-1.5 whitespace-normal p-0 text-left text-xs leading-4 text-muted-foreground underline decoration-dotted decoration-muted-foreground/50 underline-offset-2 hover:text-foreground hover:no-underline focus-visible:text-foreground"
         >
           <HelpCircle className="mt-0.5 h-3 w-3 shrink-0" />
           <span>{reason}</span>
-        </button>
+        </Button>
       </PopoverTrigger>
       <PopoverContent
         align="start"

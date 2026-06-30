@@ -34,14 +34,14 @@ func TestEvaluatorEvaluate(t *testing.T) {
 		checkWant map[models.PRReadinessCheckType]models.PRReadinessCheckStatus
 	}{
 		{
-			name: "ready with test evidence",
+			name: "ready without review blockers",
 			input: EvaluationInput{
 				Session: models.Session{
-					ID:                  sessionID,
-					OrgID:               orgID,
-					SnapshotKey:         &snapshotKey,
-					WorkspaceGeneration: 7,
-					DiffStats:           diffStats,
+					ID:                sessionID,
+					OrgID:             orgID,
+					SnapshotKey:       &snapshotKey,
+					WorkspaceRevision: 7,
+					DiffStats:         diffStats,
 				},
 				EvaluatedWorkspaceRevision: 7,
 				EvaluatedSnapshotKey:       snapshotKey,
@@ -53,22 +53,21 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 			expected: models.PRReadinessRunStatusPassed,
 			checkWant: map[models.PRReadinessCheckType]models.PRReadinessCheckStatus{
-				models.PRReadinessCheckTypeFreshness:           models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeAgentReviewClean:    models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeTestEvidencePresent: models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeRiskFlags:           models.PRReadinessCheckStatusPassed,
-				models.PRReadinessCheckTypeContextComplete:     models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeFreshness:        models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeAgentReviewClean: models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeRiskFlags:        models.PRReadinessCheckStatusPassed,
+				models.PRReadinessCheckTypeContextComplete:  models.PRReadinessCheckStatusPassed,
 			},
 		},
 		{
 			name: "blocked by stale revision and failed review",
 			input: EvaluationInput{
 				Session: models.Session{
-					ID:                  sessionID,
-					OrgID:               orgID,
-					SnapshotKey:         &snapshotKey,
-					WorkspaceGeneration: 8,
-					DiffStats:           diffStats,
+					ID:                sessionID,
+					OrgID:             orgID,
+					SnapshotKey:       &snapshotKey,
+					WorkspaceRevision: 8,
+					DiffStats:         diffStats,
 				},
 				EvaluatedWorkspaceRevision: 7,
 				EvaluatedSnapshotKey:       snapshotKey,
@@ -87,14 +86,14 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 		},
 		{
-			name: "warnings for missing tests and sensitive files",
+			name: "warnings for sensitive files",
 			input: EvaluationInput{
 				Session: models.Session{
-					ID:                  sessionID,
-					OrgID:               orgID,
-					SnapshotKey:         &snapshotKey,
-					WorkspaceGeneration: 7,
-					DiffStats:           diffStats,
+					ID:                sessionID,
+					OrgID:             orgID,
+					SnapshotKey:       &snapshotKey,
+					WorkspaceRevision: 7,
+					DiffStats:         diffStats,
 				},
 				EvaluatedWorkspaceRevision: 7,
 				EvaluatedSnapshotKey:       snapshotKey,
@@ -104,8 +103,7 @@ func TestEvaluatorEvaluate(t *testing.T) {
 			},
 			expected: models.PRReadinessRunStatusWarnings,
 			checkWant: map[models.PRReadinessCheckType]models.PRReadinessCheckStatus{
-				models.PRReadinessCheckTypeTestEvidencePresent: models.PRReadinessCheckStatusWarning,
-				models.PRReadinessCheckTypeRiskFlags:           models.PRReadinessCheckStatusWarning,
+				models.PRReadinessCheckTypeRiskFlags: models.PRReadinessCheckStatusWarning,
 			},
 		},
 	}
@@ -133,7 +131,7 @@ func TestRiskFlagsNoDuplicates(t *testing.T) {
 
 	e := NewEvaluator(models.DefaultPRReadinessPolicy())
 	input := EvaluationInput{
-		Session:                    models.Session{WorkspaceGeneration: 1},
+		Session:                    models.Session{WorkspaceRevision: 1},
 		EvaluatedWorkspaceRevision: 1,
 		ChangedFiles: []string{
 			"migrations/000001_init.up.sql",

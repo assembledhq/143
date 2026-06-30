@@ -19,7 +19,7 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	session := models.Session{
 		ID:                         uuid.New(),
 		OrgID:                      uuid.New(),
-		WorkspaceGeneration:        12,
+		WorkspaceRevision:          12,
 		WorkspaceRevisionUpdatedAt: revisionUpdatedAt,
 		SnapshotKey:                &snapshotKey,
 		DiffStats:                  json.RawMessage(`{"files_changed":42,"additions":450,"deletions":100}`),
@@ -35,7 +35,7 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 
 	result, err := NewEvaluator(policy.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		LatestReviewLoop:           loop,
 		Logs: []models.SessionLog{
@@ -55,8 +55,6 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	require.NoError(t, err, "Evaluate should produce readiness checks for the current revision")
 
 	checks := checksByType(t, result.Checks)
-	require.Equal(t, models.PRReadinessCheckStatusPassed, checks[models.PRReadinessCheckTypeTestEvidencePresent].Status, "test evidence should pass only when a successful command is captured after the workspace revision timestamp")
-	require.JSONEq(t, `{"log_id":2}`, string(checks[models.PRReadinessCheckTypeTestEvidencePresent].Details), "test evidence should identify the fresh successful command")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeDependencyConfigRisk].Status, "dependency and runtime config changes should be called out")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeGeneratedFileChurn].Status, "generated file churn should be called out")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeRiskFlags].Status, "large diffs, migrations, and sensitive configured paths should be risk flags")
@@ -71,47 +69,16 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	require.Contains(t, packet, "unknowns", "review packet should disclose unknowns for reviewers")
 }
 
-func TestEvaluator_IgnoresStaleTestEvidence(t *testing.T) {
-	t.Parallel()
-
-	snapshotKey := "snap-current"
-	revisionUpdatedAt := time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC)
-	session := models.Session{
-		ID:                         uuid.New(),
-		OrgID:                      uuid.New(),
-		WorkspaceGeneration:        12,
-		WorkspaceRevisionUpdatedAt: revisionUpdatedAt,
-		SnapshotKey:                &snapshotKey,
-		DiffStats:                  json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
-	}
-
-	result, err := NewEvaluator(models.DefaultPRReadinessPolicy()).Evaluate(context.Background(), EvaluationInput{
-		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
-		EvaluatedSnapshotKey:       snapshotKey,
-		Logs: []models.SessionLog{
-			{ID: 1, Timestamp: revisionUpdatedAt.Add(-time.Minute), Message: "go test ./... passed exit code 0"},
-			{ID: 2, Timestamp: revisionUpdatedAt.Add(time.Minute), Message: "go test ./... failed exit code 1"},
-		},
-		ChangedFiles:     []string{"internal/api/foo.go"},
-		LinkedIssueCount: 1,
-	})
-	require.NoError(t, err, "Evaluate should complete even when no fresh successful test evidence exists")
-
-	checks := checksByType(t, result.Checks)
-	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeTestEvidencePresent].Status, "stale success and fresh failure output should not satisfy test evidence")
-}
-
 func TestEvaluator_LargeDiffUsesPersistedAddedRemovedStats(t *testing.T) {
 	t.Parallel()
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":1,"added":400,"removed":200}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":1,"added":400,"removed":200}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	cfg.LargeDiffFileThreshold = 25
@@ -119,7 +86,7 @@ func TestEvaluator_LargeDiffUsesPersistedAddedRemovedStats(t *testing.T) {
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles:               []string{"internal/api/session.go"},
 		LinkedIssueCount:           1,
@@ -137,18 +104,18 @@ func TestEvaluator_GeneratedFileChurnHonorsAllowedPaths(t *testing.T) {
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":2,"additions":4,"deletions":1}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":2,"additions":4,"deletions":1}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	cfg.GeneratedFileAllowedPaths = []string{"frontend/build/**"}
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles: []string{
 			"frontend/build/asset-manifest.json",
@@ -169,11 +136,11 @@ func TestEvaluator_SkipsChecksThatAreOffForAllRoles(t *testing.T) {
 
 	snapshotKey := "snap-current"
 	session := models.Session{
-		ID:                  uuid.New(),
-		OrgID:               uuid.New(),
-		WorkspaceGeneration: 12,
-		SnapshotKey:         &snapshotKey,
-		DiffStats:           json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
+		ID:                uuid.New(),
+		OrgID:             uuid.New(),
+		WorkspaceRevision: 12,
+		SnapshotKey:       &snapshotKey,
+		DiffStats:         json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
 	}
 	cfg := models.DefaultPRReadinessPolicyConfig()
 	check := cfg.Checks[models.PRReadinessCheckTypeGeneratedFileChurn]
@@ -186,7 +153,7 @@ func TestEvaluator_SkipsChecksThatAreOffForAllRoles(t *testing.T) {
 
 	result, err := NewEvaluator(cfg.EffectivePolicy()).Evaluate(context.Background(), EvaluationInput{
 		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceGeneration,
+		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
 		EvaluatedSnapshotKey:       snapshotKey,
 		ChangedFiles:               []string{"internal/generated/client.pb.go"},
 		LinkedIssueCount:           1,

@@ -569,13 +569,17 @@ if [ "$ROLE" = "worker" ]; then
   ssh "${SSH_OPTS[@]}" root@"$HOST" 'mkdir -p /var/cache/143/preview-dependency-cache && chown 1000:1000 /var/cache/143/preview-dependency-cache && chmod 0750 /var/cache/143/preview-dependency-cache'
 fi
 
-# Step 2b: Sync authorized keys from deploy/authorized_keys/*.pub
-# Replaces authorized_keys on the host with exactly the keys in the repo.
+# Step 2b: Sync authorized keys from the private secrets repo.
+# Replaces authorized_keys on the host with exactly the keys in 143-infra.
 # Safe here because provisioning just set up the deploy user with the SSH key.
-if ls "$PROJECT_DIR/deploy/authorized_keys"/*.pub &>/dev/null; then
-  echo "--- Syncing authorized keys ---"
-  "$SCRIPT_DIR/sync-keys.sh" --apply "$SSH_KEY" "$HOST"
+KEYS_DIR="$SECRETS_DIR/deploy/authorized_keys"
+if ! ls "$KEYS_DIR"/*.pub &>/dev/null; then
+  echo "ERROR: No deploy public keys found in $KEYS_DIR"
+  echo "Add public key files to deploy/authorized_keys/ in the private 143-infra repo, or set SECRETS_DIR."
+  exit 1
 fi
+echo "--- Syncing authorized keys from $KEYS_DIR ---"
+SECRETS_DIR="$SECRETS_DIR" "$SCRIPT_DIR/sync-keys.sh" --apply "$SSH_KEY" "$HOST"
 
 # Step 3: Write .env with secrets
 # Uses printf + pipe to avoid nested heredoc quoting issues with special chars.
