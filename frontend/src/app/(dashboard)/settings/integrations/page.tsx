@@ -89,15 +89,11 @@ const SLACK_ACTIONS: Array<{ value: SlackChannelAction; label: string }> = [
   { value: "human_input", label: "Human input" },
 ];
 const SLACK_NOTIFICATION_EVENTS = [
-  { value: "session.completed", label: "Session completed" },
   { value: "session.failed", label: "Session failed" },
   { value: "human_input.requested", label: "Human input requested" },
   { value: "automation.run.completed", label: "Automation completed" },
   { value: "automation.run.failed", label: "Automation failed" },
   { value: "automation.run.failure_streak", label: "Automation failure streak" },
-  { value: "pr.opened", label: "PR opened" },
-  { value: "preview.stale", label: "Preview stale" },
-  { value: "preview.*", label: "All preview events" },
 ] as const;
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
@@ -138,7 +134,8 @@ function slackPresetLabel(value?: SlackNotificationPreset): string {
 
 function slackNotificationEvents(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
   const events = settings?.notification_subscriptions?.events;
-  return Array.isArray(events) ? events.filter((event): event is string => typeof event === "string") : [];
+  const allowedEvents = new Set(SLACK_NOTIFICATION_EVENTS.map((event) => event.value));
+  return Array.isArray(events) ? events.filter((event): event is string => typeof event === "string" && allowedEvents.has(event)) : [];
 }
 
 function slackNotificationAutomations(settings?: { notification_subscriptions?: Record<string, unknown> }): string[] {
