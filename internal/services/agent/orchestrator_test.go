@@ -1403,6 +1403,18 @@ func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
 	return out
 }
 
+func (m *mockSessionThreadStore) statusesForThread(threadID uuid.UUID) []models.ThreadStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.ThreadStatus, 0)
+	for _, c := range m.updateStatusCalls {
+		if c.threadID == threadID {
+			out = append(out, c.status)
+		}
+	}
+	return out
+}
+
 func (m *mockSessionThreadStore) completedTurns() []struct {
 	threadID uuid.UUID
 	turn     int
@@ -1659,6 +1671,45 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_ResultErrorMarksRunFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
+			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
+			ExitCode: 1,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should return an error when the adapter result contains an error")
+	require.Contains(t, err.Error(), "execute agent", "RunAgent should wrap the adapter result error")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "RunAgent should persist one terminal result")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "RunAgent should mark the session failed")
+	require.NotNil(t, results[0].result.Error, "RunAgent should persist the adapter error")
+	require.Contains(t, *results[0].result.Error, "opencode CLI exited with code 1", "RunAgent should preserve the adapter error detail")
+
+	threadStatuses := d.sessionThreads.statuses()
+	require.Contains(t, threadStatuses, models.ThreadStatusFailed, "RunAgent should mark the primary thread failed")
+	require.NotContains(t, threadStatuses, models.ThreadStatusCompleted, "RunAgent should not mark an errored result completed")
+
+	enqueued := d.jobs.getEnqueued()
+	require.Contains(t, enqueued, "analyze_failure", "RunAgent should enqueue failure analysis for adapter result errors")
+	require.NotContains(t, enqueued, "open_pr", "RunAgent should not enqueue PR creation after an adapter result error")
+	require.Empty(t, d.messages.getMessages(), "RunAgent should not create an assistant success message for an adapter result error")
 }
 
 func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
@@ -6349,6 +6400,69 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.logs[0].ThreadID, "persisted output logs should keep the triggering thread id")
 	require.NotNil(t, d.logs.markedThreadID, "duplicate marker should preserve the thread id")
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
+}
+
+func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	activeThreadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = &primaryThreadID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &activeThreadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this secondary tab.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
+			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
+			ExitCode: 1,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &activeThreadID})
+	require.Error(t, err, "continue_session should return an error when the adapter result contains an error")
+	require.Contains(t, err.Error(), "execute agent on continue", "continue_session should wrap the adapter result error")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "continue_session should persist one terminal result")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "continue_session should mark the session failed")
+	require.NotNil(t, results[0].result.Error, "continue_session should persist the adapter error")
+	require.Contains(t, *results[0].result.Error, "opencode CLI exited with code 1", "continue_session should preserve the adapter error detail")
+
+	require.Contains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "continue_session should still fail the primary thread through session failure bookkeeping")
+	require.Contains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusFailed, "continue_session should fail the active secondary thread")
+	require.NotContains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusCompleted, "continue_session should not mark an errored secondary thread completed")
+	require.Empty(t, d.sessions.getTurnUpdates(), "continue_session should not persist a successful turn for an adapter result error")
+	require.Len(t, d.messages.getMessages(), 1, "continue_session should not append an assistant success message for an adapter result error")
 }
 
 func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
