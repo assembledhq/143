@@ -22,13 +22,16 @@ func TestOrgSettingsCache_SetAndGet(t *testing.T) {
 	t.Parallel()
 	c := NewOrgSettingsCache(time.Minute)
 	orgID := uuid.New()
-	cfg := models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}}
+	snapshot := AgentSettingsSnapshot{
+		AgentConfig:     models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}},
+		OpenCodeRouting: models.OpenCodeRoutingSettings{RequireOpenRouter: true},
+	}
 
-	c.Set(orgID, cfg)
+	c.Set(orgID, snapshot)
 
 	got, ok := c.Get(orgID)
 	require.True(t, ok, "set should be readable")
-	require.Equal(t, cfg, got)
+	require.Equal(t, snapshot, got, "snapshot round-trips agent config and routing policy")
 }
 
 func TestOrgSettingsCache_NilConfigIsCached(t *testing.T) {
@@ -39,11 +42,11 @@ func TestOrgSettingsCache_NilConfigIsCached(t *testing.T) {
 	// Caching nil is a legitimate "no agent_config" answer and must be a hit,
 	// not a miss — otherwise orgs without agent_config thrash the DB on every
 	// session start.
-	c.Set(orgID, nil)
+	c.Set(orgID, AgentSettingsSnapshot{})
 
 	got, ok := c.Get(orgID)
-	require.True(t, ok, "cached nil config must register as a hit")
-	require.Nil(t, got)
+	require.True(t, ok, "cached empty snapshot must register as a hit")
+	require.Nil(t, got.AgentConfig)
 }
 
 func TestOrgSettingsCache_Expiry(t *testing.T) {
@@ -55,7 +58,7 @@ func TestOrgSettingsCache_Expiry(t *testing.T) {
 	c.SetClockForTest(func() time.Time { return current })
 
 	orgID := uuid.New()
-	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "smart"}})
+	c.Set(orgID, AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{"amp": {"AMP_MODE": "smart"}}})
 
 	// Advance just under the TTL — still a hit.
 	current = base.Add(59 * time.Second)
@@ -74,8 +77,8 @@ func TestOrgSettingsCache_InvalidateOrg(t *testing.T) {
 	orgID := uuid.New()
 	other := uuid.New()
 
-	c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}})
-	c.Set(other, models.AgentEnvConfig{"amp": {"AMP_MODE": "rush"}})
+	c.Set(orgID, AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{"amp": {"AMP_MODE": "deep"}}})
+	c.Set(other, AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{"amp": {"AMP_MODE": "rush"}}})
 
 	c.InvalidateOrg(orgID)
 
@@ -113,7 +116,7 @@ func TestOrgSettingsCache_ConcurrentAccess(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < iterations; i++ {
-				c.Set(orgID, models.AgentEnvConfig{"amp": {"AMP_MODE": "large"}})
+				c.Set(orgID, AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{"amp": {"AMP_MODE": "large"}}})
 			}
 		}()
 		go func() {

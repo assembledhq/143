@@ -7,9 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/pashagolub/pgxmock/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,8 +36,8 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
 
@@ -59,7 +62,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
 		}))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
@@ -80,7 +83,6 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
-	config.FinalReviewTemplate = "final review template"
 	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
@@ -91,14 +93,13 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
 	require.NoError(t, err, "GetPolicyByID should load captured policy version")
 	require.Equal(t, policyID, record.ID, "GetPolicyByID should return requested policy")
-	require.Equal(t, config.FinalReviewTemplate, record.FinalReviewTemplate, "GetPolicyByID should scan final review template")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -111,7 +112,6 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
-	config.FinalReviewTemplate = "custom final review template"
 	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
@@ -122,7 +122,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
 		}))
 	mock.ExpectBegin()
 	mock.ExpectQuery("SELECT COALESCE").
@@ -135,12 +135,12 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "final_review_template", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, config.FinalReviewTemplate, inheritance, &userID, now))
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 	mock.ExpectCommit()
 
 	record, err := NewCodeReviewStore(mock).SavePolicy(context.Background(), orgID, &repoID, config, &userID)
@@ -148,7 +148,6 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NoError(t, err, "SavePolicy should insert a new active version")
 	require.Equal(t, 4, record.Version, "SavePolicy should increment from the current scope max version")
 	require.Equal(t, policyID, record.ID, "SavePolicy should return inserted policy")
-	require.Equal(t, config.FinalReviewTemplate, record.Config().FinalReviewTemplate, "SavePolicy should preserve final review template")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -314,6 +313,158 @@ func TestCodeReviewStore_CreateSessionMetadataReusesOutputKey(t *testing.T) {
 	require.Equal(t, metadataID, metadata.ID, "CreateSessionMetadata should scan metadata id")
 	require.True(t, metadata.FromFork, "CreateSessionMetadata should persist fork source evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+// TestCodeReviewStore_CompleteReviewPublishesUpdate verifies the store fans a
+// lifecycle event out to the org-scoped SSE stream after a status transition,
+// so the live code reviews list refreshes. miniredis-backed, mirroring the
+// SessionStore publish tests.
+func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	decisionApproved := models.CodeReviewDecisionApproved
+	acceptableTrue := true
+	finalBody := "final review body"
+	completedAt := now
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		}).AddRow(
+			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
+			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, &decisionApproved, &acceptableTrue, false,
+			nil, "pr:head:policy", nil, nil, nil, &finalBody, nil, &completedAt, now,
+		))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	_, err = store.CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
+		SessionID:       sessionID,
+		Decision:        models.CodeReviewDecisionApproved,
+		Acceptable:      true,
+		FinalReviewBody: "final review body",
+	})
+	require.NoError(t, err, "CompleteReview should persist the completed transition")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.SessionID != nil && *event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
+}
+
+// TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate covers
+// the batch transition: it touches many rows at once, so it publishes a single
+// org-scoped event with no session ID (session_id omitted) when any rows change.
+func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
+	require.Equal(t, int64(2), affected, "MarkStaleForPullRequestExceptHead should report rows affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Eventually(t, func() bool {
+		select {
+		case event := <-sub.C:
+			return event.SessionID == nil && event.OrgID == orgID && event.Status == models.CodeReviewSessionStatusStale
+		default:
+			return false
+		}
+	}, 2*time.Second, 20*time.Millisecond, "batch stale transition should publish one org-scoped event with no session id")
+}
+
+func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	pullRequestID := uuid.New()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize against miniredis")
+	streams := cache.NewCodeReviewStreams(client, zerolog.Nop())
+	sub, err := streams.Subscribe(orgID)
+	require.NoError(t, err, "subscribe should succeed against miniredis")
+	defer sub.Close()
+
+	mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+
+	store := NewCodeReviewStore(mock)
+	store.SetStreams(streams)
+	store.SetLogger(zerolog.Nop())
+
+	affected, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
+	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
+	require.Equal(t, int64(0), affected, "no rows should be affected")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+
+	require.Never(t, func() bool {
+		select {
+		case <-sub.C:
+			return true
+		default:
+			return false
+		}
+	}, 150*time.Millisecond, 20*time.Millisecond, "a no-op batch update should not publish an event")
 }
 
 func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {

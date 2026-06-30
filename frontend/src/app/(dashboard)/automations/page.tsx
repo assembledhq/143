@@ -5,6 +5,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
+import {
+  removeAutomationFromListCaches,
+  upsertAutomationInListCaches,
+} from "@/lib/automation-list-cache";
+import { queryKeys } from "@/lib/query-keys";
 import { formatDateTime, formatTimeAgo } from "@/lib/utils";
 import type { Automation } from "@/lib/types";
 import {
@@ -29,6 +34,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { useAuth } from "@/hooks/use-auth";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -70,6 +76,48 @@ function formatTemplateCadence(template: AutomationTemplate) {
     : template.defaultUnit;
 
   return `Every ${template.defaultInterval} ${unit}`;
+}
+
+type AutomationFilter = "all" | "enabled" | "paused";
+
+function formatAutomationRunDate(value?: string) {
+  return formatDateTime(value, { fallback: "Not scheduled" });
+}
+
+function automationStatus(automation: Automation) {
+  return automation.enabled ? "Enabled" : "Paused";
+}
+
+// formatAutomationSchedule already appends "(timezone)" for cron and run-at
+// schedules, so only surface a standalone timezone line when it isn't already
+// part of the schedule label (e.g. sub-24h interval cadences).
+function automationScheduleTimezone(automation: Automation) {
+  if (!automation.timezone) return null;
+  return formatAutomationSchedule(automation).includes(automation.timezone)
+    ? null
+    : automation.timezone;
+}
+
+function automationStatusBadge(automation: Automation) {
+  return (
+    <Badge variant={automation.enabled ? "success" : "secondary"}>
+      {automationStatus(automation)}
+    </Badge>
+  );
+}
+
+function automationMatchesQuery(automation: Automation, query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+
+  return [
+    automation.name,
+    automation.goal,
+    automation.base_branch,
+    automation.timezone,
+    formatAutomationSchedule(automation),
+    automationStatus(automation),
+  ].join(" ").toLowerCase().includes(normalizedQuery);
 }
 
 function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
@@ -193,31 +241,6 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
   );
 }
 
-function AutomationSection({
-  title,
-  automations,
-  canManage,
-}: {
-  title: string;
-  automations: Automation[];
-  canManage: boolean;
-}) {
-  if (automations.length === 0) return null;
-
-  return (
-    <section className="space-y-2">
-      <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        {title} ({automations.length})
-      </h3>
-      <div className="overflow-hidden rounded-lg border border-border/70 bg-background">
-        {automations.map((automation) => (
-          <AutomationCard key={automation.id} automation={automation} canManage={canManage} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
 function AutomationsWorkspace({
   enabled,
   paused,
@@ -227,7 +250,95 @@ function AutomationsWorkspace({
   paused: Automation[];
   canManage: boolean;
 }) {
+  const [filter, setFilter] = useState<AutomationFilter>("all");
+  const [query, setQuery] = useState("");
   const total = enabled.length + paused.length;
+  const automations = useMemo(() => [...enabled, ...paused], [enabled, paused]);
+  const filteredAutomations = useMemo(() => {
+    const byStatus = automations.filter((automation) => {
+      if (filter === "enabled") return automation.enabled;
+      if (filter === "paused") return !automation.enabled;
+      return true;
+    });
+
+    return byStatus.filter((automation) => automationMatchesQuery(automation, query));
+  }, [automations, filter, query]);
+
+  const columns: ResponsiveResourceListColumn<Automation>[] = [
+    {
+      id: "automation",
+      header: "Automation",
+      className: "w-[34%]",
+      cellClassName: "min-w-0",
+      render: (automation) => (
+        <Link href={`/automations/${automation.id}`} className="block min-w-0 space-y-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <span
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-card text-base leading-none"
+              aria-label={`Automation icon for ${automation.name}`}
+            >
+              {automation.icon_value || "⚙️"}
+            </span>
+            <span className="truncate text-sm font-medium text-foreground">{automation.name}</span>
+          </div>
+          {automation.goal ? (
+            <p className="line-clamp-2 pl-9 text-xs leading-5 text-muted-foreground">
+              {automation.goal}
+            </p>
+          ) : null}
+        </Link>
+      ),
+    },
+    {
+      id: "status",
+      header: "Status",
+      className: "w-28",
+      render: automationStatusBadge,
+    },
+    {
+      id: "schedule",
+      header: "Schedule",
+      className: "w-[22%]",
+      render: (automation) => {
+        const timezone = automationScheduleTimezone(automation);
+        return (
+          <div className="space-y-1">
+            <div className="text-xs text-foreground">{formatAutomationSchedule(automation)}</div>
+            {timezone ? (
+              <div className="text-xs text-muted-foreground">{timezone}</div>
+            ) : null}
+          </div>
+        );
+      },
+    },
+    {
+      id: "next",
+      header: "Next run",
+      className: "w-32",
+      render: (automation) => (
+        <span className="text-xs text-muted-foreground">
+          {automation.enabled ? formatAutomationRunDate(automation.next_run_at) : "Paused"}
+        </span>
+      ),
+    },
+    {
+      id: "last",
+      header: "Last run",
+      className: "w-28",
+      render: (automation) => (
+        <span className="text-xs text-muted-foreground">
+          {automation.last_run_at ? formatTimeAgo(automation.last_run_at) : "Never"}
+        </span>
+      ),
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "w-12 text-right",
+      cellClassName: "text-right",
+      render: (automation) => <AutomationActions automation={automation} canManage={canManage} />,
+    },
+  ];
 
   return (
     <section className="space-y-4" aria-labelledby="your-automations-heading">
@@ -242,19 +353,43 @@ function AutomationsWorkspace({
               : "No recurring agents are configured yet."}
           </p>
         </div>
-        {total > 0 ? (
-          <div className="flex gap-2 text-xs text-muted-foreground">
-            <span>{enabled.length} enabled</span>
-            <span aria-hidden="true">/</span>
-            <span>{paused.length} paused</span>
-          </div>
-        ) : null}
       </div>
 
       {total > 0 ? (
-        <div className="space-y-5">
-          <AutomationSection title="Enabled" automations={enabled} canManage={canManage} />
-          <AutomationSection title="Paused" automations={paused} canManage={canManage} />
+        <div className="space-y-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <Tabs value={filter} onValueChange={(value) => setFilter(value as AutomationFilter)}>
+              <TabsList size="sm" className="w-full justify-start overflow-x-auto lg:w-auto">
+                <TabsTrigger value="all">All {total}</TabsTrigger>
+                <TabsTrigger value="enabled">Enabled {enabled.length}</TabsTrigger>
+                <TabsTrigger value="paused">Paused {paused.length}</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <div className="relative w-full lg:max-w-72">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search automations..."
+                className="h-8 bg-background pl-9"
+              />
+            </div>
+          </div>
+
+          <ResponsiveResourceList
+            ariaLabel="Automations"
+            items={filteredAutomations}
+            getItemKey={(automation) => automation.id}
+            columns={columns}
+            emptyState={
+              query.trim()
+                ? "No automations match your search."
+                : "No automations match this filter."
+            }
+            renderMobileItem={(automation) => (
+              <AutomationMobileRow automation={automation} canManage={canManage} />
+            )}
+          />
         </div>
       ) : (
         <EmptyState
@@ -268,18 +403,25 @@ function AutomationsWorkspace({
   );
 }
 
-function AutomationCard({ automation, canManage }: { automation: Automation; canManage: boolean }) {
+function AutomationActions({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const queryClient = useQueryClient();
-  const schedule = formatAutomationSchedule(automation);
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
   });
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: (res) => {
+      upsertAutomationInListCaches(queryClient, res.data);
+      queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
   });
 
   // deleteInFlight closes the same render-tick race that runNowInFlight does on
@@ -289,7 +431,13 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
   const deleteInFlight = useRef(false);
   const deleteMutation = useMutation({
     mutationFn: () => api.automations.del(automation.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["automations"] }),
+    onSuccess: () => {
+      removeAutomationFromListCaches(queryClient, automation.id);
+      queryClient.removeQueries({
+        queryKey: queryKeys.automations.detail(automation.id),
+      });
+      queryClient.invalidateQueries({ queryKey: queryKeys.automations.all });
+    },
     onSettled: () => {
       deleteInFlight.current = false;
     },
@@ -308,90 +456,92 @@ function AutomationCard({ automation, canManage }: { automation: Automation; can
     deleteMutation.isError ? "Failed to delete." :
     null;
 
-  return (
-    <div className="border-b border-border/60 bg-background transition-colors last:border-b-0 hover:bg-muted/30">
-      <div className="flex items-start gap-3 p-4 sm:gap-4">
-        <Link href={`/automations/${automation.id}`} className="min-w-0 flex-1">
-          <div className="flex items-start gap-3">
-            <span
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border/80 bg-card text-lg leading-none shadow-sm"
-              aria-label={`Automation icon for ${automation.name}`}
-            >
-              {automation.icon_value || "⚙️"}
-            </span>
-            <div className="min-w-0 flex-1 space-y-2.5">
-              <div className="space-y-1.5">
-                <h3 className="break-words text-sm font-medium leading-5 text-foreground">
-                  {automation.name}
-                </h3>
-                <span className="inline-flex max-w-full items-center rounded-md bg-muted/45 px-2 py-0.5 text-xs leading-5 text-muted-foreground">
-                  <span className="truncate">{schedule}</span>
-                </span>
-              </div>
-              <div className="flex flex-col gap-1 text-xs leading-5 text-muted-foreground sm:flex-row sm:flex-wrap sm:gap-x-3 sm:gap-y-1">
-                {automation.last_run_at && (
-                  <span>Last run: {formatTimeAgo(automation.last_run_at)}</span>
-                )}
-                {automation.next_run_at && automation.enabled && (
-                  <span title={formatDateTime(automation.next_run_at, { year: true, seconds: true })}>
-                    Next: {formatDateTime(automation.next_run_at)}
-                  </span>
-                )}
-                {!automation.enabled && automation.paused_at && (
-                  <span>Paused {formatTimeAgo(automation.paused_at)}</span>
-                )}
-              </div>
-            </div>
-          </div>
-        </Link>
+  if (!canManage) return null;
 
-        {canManage && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-8 w-8 self-start shrink-0"
-                aria-label={`More options for ${automation.name}`}
-              >
-                <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              {automation.enabled ? (
-                <DropdownMenuItem
-                  onClick={() => pauseMutation.mutate()}
-                  disabled={pauseMutation.isPending}
-                >
-                  <Pause className="h-3.5 w-3.5 mr-2" />
-                  Pause
-                </DropdownMenuItem>
-              ) : (
-                <DropdownMenuItem
-                  onClick={() => resumeMutation.mutate()}
-                  disabled={resumeMutation.isPending}
-                >
-                  <Play className="h-3.5 w-3.5 mr-2" />
-                  Resume
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem
-                onClick={handleDelete}
-                disabled={deleteMutation.isPending}
-                className="text-destructive focus:text-destructive"
-              >
-                <Trash2 className="h-3.5 w-3.5 mr-2" />
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 shrink-0"
+            aria-label={`More options for ${automation.name}`}
+          >
+            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          {automation.enabled ? (
+            <DropdownMenuItem
+              onClick={() => pauseMutation.mutate()}
+              disabled={pauseMutation.isPending}
+            >
+              <Pause className="h-3.5 w-3.5 mr-2" />
+              Pause
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              onClick={() => resumeMutation.mutate()}
+              disabled={resumeMutation.isPending}
+            >
+              <Play className="h-3.5 w-3.5 mr-2" />
+              Resume
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem
+            onClick={handleDelete}
+            disabled={deleteMutation.isPending}
+            className="text-destructive focus:text-destructive"
+          >
+            <Trash2 className="h-3.5 w-3.5 mr-2" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       {mutationError && (
-        <p className="px-4 pb-3 text-xs text-destructive" role="alert">
+        <p className="text-right text-xs text-destructive" role="alert">
           {mutationError}
         </p>
       )}
+    </div>
+  );
+}
+
+function AutomationMobileRow({ automation, canManage }: { automation: Automation; canManage: boolean }) {
+  const timezone = automationScheduleTimezone(automation);
+  return (
+    <div className="flex items-start gap-3 p-4">
+      <Link href={`/automations/${automation.id}`} className="min-w-0 flex-1 space-y-3">
+        <div className="flex items-start gap-2.5">
+          <span
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+            aria-label={`Automation icon for ${automation.name}`}
+          >
+            {automation.icon_value || "⚙️"}
+          </span>
+          <div className="min-w-0 flex-1 space-y-1">
+            <h3 className="break-words text-sm font-medium leading-5 text-foreground">
+              {automation.name}
+            </h3>
+            {automationStatusBadge(automation)}
+          </div>
+        </div>
+        <div className="space-y-1 pl-10 text-xs leading-5 text-muted-foreground">
+          <p className="break-words text-foreground">{formatAutomationSchedule(automation)}</p>
+          {timezone ? <p className="break-words">{timezone}</p> : null}
+          <p>
+            {automation.enabled
+              ? `Next ${formatAutomationRunDate(automation.next_run_at)}`
+              : automation.paused_at
+                ? `Paused ${formatTimeAgo(automation.paused_at)}`
+                : "Paused"}
+            <span aria-hidden="true"> · </span>
+            Last {automation.last_run_at ? formatTimeAgo(automation.last_run_at) : "never"}
+          </p>
+        </div>
+      </Link>
+      <AutomationActions automation={automation} canManage={canManage} />
     </div>
   );
 }
@@ -400,7 +550,7 @@ export default function AutomationsPage() {
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
   const { data, isLoading } = useQuery({
-    queryKey: ["automations"],
+    queryKey: queryKeys.automations.all,
     queryFn: () => api.automations.list(),
     refetchInterval: 10000,
   });
@@ -419,7 +569,7 @@ export default function AutomationsPage() {
             <Button asChild>
               <Link href="/automations/new">
                 <Plus className="h-4 w-4" />
-                New
+                New automation
               </Link>
             </Button>
           ) : undefined}

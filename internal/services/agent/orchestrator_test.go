@@ -1403,6 +1403,18 @@ func (m *mockSessionThreadStore) statuses() []models.ThreadStatus {
 	return out
 }
 
+func (m *mockSessionThreadStore) statusesForThread(threadID uuid.UUID) []models.ThreadStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.ThreadStatus, 0)
+	for _, c := range m.updateStatusCalls {
+		if c.threadID == threadID {
+			out = append(out, c.status)
+		}
+	}
+	return out
+}
+
 func (m *mockSessionThreadStore) completedTurns() []struct {
 	threadID uuid.UUID
 	turn     int
@@ -1659,6 +1671,45 @@ func TestRunAgent_SuccessfulRun(t *testing.T) {
 
 	// Sandbox should be destroyed.
 	require.Equal(t, 1, d.provider.GetDestroyCalls())
+}
+
+func TestRunAgent_ResultErrorMarksRunFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
+			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
+			ExitCode: 1,
+		}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "RunAgent should return an error when the adapter result contains an error")
+	require.Contains(t, err.Error(), "execute agent", "RunAgent should wrap the adapter result error")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "RunAgent should persist one terminal result")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "RunAgent should mark the session failed")
+	require.NotNil(t, results[0].result.Error, "RunAgent should persist the adapter error")
+	require.Contains(t, *results[0].result.Error, "opencode CLI exited with code 1", "RunAgent should preserve the adapter error detail")
+
+	threadStatuses := d.sessionThreads.statuses()
+	require.Contains(t, threadStatuses, models.ThreadStatusFailed, "RunAgent should mark the primary thread failed")
+	require.NotContains(t, threadStatuses, models.ThreadStatusCompleted, "RunAgent should not mark an errored result completed")
+
+	enqueued := d.jobs.getEnqueued()
+	require.Contains(t, enqueued, "analyze_failure", "RunAgent should enqueue failure analysis for adapter result errors")
+	require.NotContains(t, enqueued, "open_pr", "RunAgent should not enqueue PR creation after an adapter result error")
+	require.Empty(t, d.messages.getMessages(), "RunAgent should not create an assistant success message for an adapter result error")
 }
 
 func TestRunAgent_RateLimitRetriesWithFallbackCredential(t *testing.T) {
@@ -2973,7 +3024,7 @@ func TestContinueSession_PRRepairReconstructsFromExpectedHead(t *testing.T) {
 	})
 	require.NoError(t, err, "ContinueSession should reconstruct PR repairs even while a post-PR snapshot upload is pending")
 	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should start from the repository target branch before fetching the PR head")
-	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/acme/backend.git' 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
 	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head into the session working branch")
 	require.NotContains(t, d.provider.ExecCalls, "git checkout -b '143/00000000/nullpointerexception-in-handler'", "PR repair reconstruction should not create a branch from the target branch tip")
 }
@@ -3040,7 +3091,7 @@ func TestContinueSession_PRRepairReconstructionClearsRecordedContainer(t *testin
 	require.Equal(t, containerID, clearedContainer, "PR repair reconstruction should clear the recorded container before creating a fresh workspace")
 	require.Equal(t, containerID, destroyedContainer, "PR repair reconstruction should destroy the unheld recorded container after clearing it from the session row")
 	require.Equal(t, "main", cloneBranch, "PR repair reconstruction should clone from the repository target branch")
-	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags origin 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref")
+	require.Contains(t, d.provider.ExecCalls, "git fetch --quiet --no-tags 'https://x-access-token:ghp_test123@github.com/acme/backend.git' 'pull/42/head'", "PR repair reconstruction should fetch the GitHub PR head ref using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
 	require.Contains(t, d.provider.ExecCalls, "git checkout -B '143/00000000/nullpointerexception-in-handler' FETCH_HEAD", "PR repair reconstruction should check out the expected head in the fresh workspace")
 }
 
@@ -6351,6 +6402,69 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	require.Equal(t, threadID, *d.logs.markedThreadID, "duplicate marker should use the triggering thread id")
 }
 
+func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	activeThreadID := uuid.New()
+	issue := testIssue(orgID)
+	issue.Source = models.IssueSourceManual
+	session := testRun(orgID, issue.ID)
+	session.Origin = models.SessionOriginManual
+	session.InteractionMode = models.SessionInteractionModeInteractive
+	session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.SnapshotKey = strPtr("snapshots/test/session.tar")
+	session.PrimaryThreadID = &primaryThreadID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.messages.messages = []models.SessionMessage{
+		{
+			ID:         1,
+			SessionID:  session.ID,
+			OrgID:      orgID,
+			ThreadID:   &activeThreadID,
+			TurnNumber: 2,
+			Role:       models.MessageRoleUser,
+			Content:    "Please continue this secondary tab.",
+		},
+	}
+	d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+		_, err := io.ReadAll(reader)
+		return err
+	}
+	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		return &agent.AgentResult{
+			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
+			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
+			ExitCode: 1,
+		}, nil
+	}
+	d.snapshots.data = map[string][]byte{
+		*session.SnapshotKey: []byte("restored-snapshot"),
+	}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{ThreadID: &activeThreadID})
+	require.Error(t, err, "continue_session should return an error when the adapter result contains an error")
+	require.Contains(t, err.Error(), "execute agent on continue", "continue_session should wrap the adapter result error")
+
+	results := d.sessions.getResultUpdates()
+	require.Len(t, results, 1, "continue_session should persist one terminal result")
+	require.Equal(t, models.SessionStatusFailed, results[0].status, "continue_session should mark the session failed")
+	require.NotNil(t, results[0].result.Error, "continue_session should persist the adapter error")
+	require.Contains(t, *results[0].result.Error, "opencode CLI exited with code 1", "continue_session should preserve the adapter error detail")
+
+	require.Contains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "continue_session should still fail the primary thread through session failure bookkeeping")
+	require.Contains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusFailed, "continue_session should fail the active secondary thread")
+	require.NotContains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusCompleted, "continue_session should not mark an errored secondary thread completed")
+	require.Empty(t, d.sessions.getTurnUpdates(), "continue_session should not persist a successful turn for an adapter result error")
+	require.Len(t, d.messages.getMessages(), 1, "continue_session should not append an assistant success message for an adapter result error")
+}
+
 func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
 	t.Parallel()
 
@@ -6500,6 +6614,13 @@ func TestContinueSession_ContextCanceledWithoutUserCancelIsInterruptedNotCancell
 	require.NotErrorIs(t, err, agent.ErrSessionCancelled, "plain parent context cancellation should not be classified as user cancellation")
 	require.NotContains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusCancelled), "system interruptions must not mark the session cancelled")
 	require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "system interruptions without a checkpoint should restore the pre-turn status")
+	queuedRecovery := false
+	for _, update := range d.sessions.recoveryStates {
+		if update.state == models.RecoveryStateQueued {
+			queuedRecovery = true
+		}
+	}
+	require.True(t, queuedRecovery, "system interruptions should queue session recovery so the UI's recovery banner fires instead of a bare \"Agent is working…\"")
 }
 
 // TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns is the
@@ -9634,6 +9755,50 @@ func TestRunAgent_UserCancelTakesPrecedenceOverDeadline(t *testing.T) {
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure", "cancel path must not enqueue failure analysis")
 }
 
+func TestRunAgent_OpenCodeLogicalModelOverrideReachesSandboxAsResolvedRoute(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	issue := testIssue(orgID)
+	run := testRun(orgID, issue.ID)
+	run.AgentType = models.AgentTypeOpenCode
+	run.ModelOverride = strPtr(models.DefaultOpenCodeModel)
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeOpenCode
+	d.issues.issue = issue
+	d.codingCreds = &mockCodingCredentialProvider{
+		resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+			models.ProviderOpenCode: {
+				{
+					ID:       uuid.New(),
+					OrgID:    orgID,
+					Provider: models.ProviderOpenCode,
+					Priority: 1,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenCodeConfig{
+						APIKey:          "sk-or-opencode",
+						BackingProvider: models.ProviderOpenRouter,
+					},
+				},
+			},
+		},
+	}
+
+	var capturedCfg agent.SandboxConfig
+	d.provider.CreateFn = func(ctx context.Context, cfg agent.SandboxConfig) (*agent.Sandbox, error) {
+		capturedCfg = cfg
+		return &agent.Sandbox{ID: "opencode-route", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.NoError(t, err, "RunAgent should execute with an OpenRouter-backed OpenCode credential")
+	require.Equal(t, "sk-or-opencode", capturedCfg.Env["OPENROUTER_API_KEY"], "OpenCode should use the OpenRouter-backed credential")
+	require.Equal(t, models.OpenCodeModelOpenRouterGLM52, capturedCfg.Env["OPENCODE_MODEL"], "logical OpenCode overrides should resolve to the physical OpenRouter route before reaching the sandbox")
+	require.NotEqual(t, models.DefaultOpenCodeModel, capturedCfg.Env["OPENCODE_MODEL"], "the sandbox must not receive a bare logical OpenCode model id")
+	require.Contains(t, capturedCfg.Env["OPENCODE_CONFIG_CONTENT"], models.OpenCodeModelOpenRouterGLM52, "OpenCode runtime config should match the resolved physical model")
+}
+
 // --- Amp/Pi agent env resolution ---
 
 // TestRunAgent_AmpCredentialEnv asserts that Amp sessions receive auth from
@@ -9799,6 +9964,50 @@ func TestRunAgent_AmpMissingAPIKeyFailsFast(t *testing.T) {
 		"error should name the missing credential so users know what to configure")
 	require.False(t, sandboxCreated,
 		"pre-flight auth check must fire before sandbox creation")
+}
+
+// TestRunAgent_AuthFailureTerminalizesPrimaryThread is a regression test for the
+// stuck "Agent is working…" indicator: a pre-flight auth failure (e.g. the user
+// picks a model with no backing credential) marked the session failed but left
+// the primary thread at "running". Because the UI binds that indicator to the
+// thread status — not the session status — the spinner kept running until the
+// reaper swept the thread ~2.5h later. failRun must now terminalize the thread
+// on every early-exit failure path, not just the main run loop.
+func TestRunAgent_AuthFailureTerminalizesPrimaryThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	run := testRun(orgID, testIssue(orgID).ID)
+	run.AgentType = models.AgentTypeAmp
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
+
+	d := defaultDeps()
+	d.adapter.name = models.AgentTypeAmp
+	d.sessionThreads = &mockSessionThreadStore{}
+
+	var sandboxCreated bool
+	d.provider.CreateFn = func(context.Context, agent.SandboxConfig) (*agent.Sandbox, error) {
+		sandboxCreated = true
+		return &agent.Sandbox{ID: "amp-unreachable", Provider: "mock", WorkDir: "/workspace"}, nil
+	}
+
+	err := buildOrchestrator(d).RunAgent(context.Background(), run)
+	require.Error(t, err, "missing-credential run must fail fast")
+	require.False(t, sandboxCreated, "auth check must fire before sandbox creation")
+
+	results := d.sessions.getResultUpdates()
+	require.NotEmpty(t, results, "auth failure should persist a session result")
+	require.Equal(t, models.SessionStatusFailed, results[len(results)-1].status,
+		"pre-flight auth failure should mark the session failed")
+
+	statuses := d.sessionThreads.statuses()
+	require.NotEmpty(t, statuses, "the primary thread should have been touched")
+	require.Equal(t, models.ThreadStatusRunning, statuses[0],
+		"thread is marked running at launch, before the auth check")
+	require.Equal(t, models.ThreadStatusFailed, statuses[len(statuses)-1],
+		"pre-flight auth failure must terminalize the primary thread so the UI's "+
+			"thread-bound \"Agent is working…\" indicator clears instead of spinning until the reaper")
 }
 
 // TestRunAgent_PiModelOverrideReachesSandbox asserts that a per-run override
@@ -9990,9 +10199,9 @@ func TestRunAgent_AmpAgentConfigCached(t *testing.T) {
 	orgs := &mockOrgStore{org: models.Organization{ID: orgID, Settings: settingsJSON}}
 
 	cache := agent.NewOrgSettingsCache(time.Minute)
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp
@@ -10084,9 +10293,9 @@ func TestRunAgent_AmpAgentConfigCacheTTLExpires(t *testing.T) {
 	// Prime the cache with a value distinct from the org store so a cache hit
 	// is observable in the captured sandbox env. The Set timestamp uses the
 	// current (base) clock, so the entry expires at base + 1 minute.
-	cache.Set(orgID, models.AgentEnvConfig{
+	cache.Set(orgID, agent.AgentSettingsSnapshot{AgentConfig: models.AgentEnvConfig{
 		"amp": {"AMP_MODE": models.AmpModeDeep},
-	})
+	}})
 
 	d := defaultDeps()
 	d.adapter.name = models.AgentTypeAmp

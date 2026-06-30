@@ -292,6 +292,35 @@ type OrgSettings struct {
 	// LinearAutomation, which is purely outbound. The feature is opt-in;
 	// nothing happens to a Linear-connected org until an admin enables it.
 	LinearAgent LinearAgentSettings `json:"linear_agent,omitempty"`
+
+	// OpenCodeRouting governs how OpenCode logical-model selections are
+	// resolved to a concrete transport at session launch. See
+	// docs/design/115-logical-models-and-route-resolution.md.
+	OpenCodeRouting OpenCodeRoutingSettings `json:"opencode_routing,omitempty"`
+}
+
+// OpenCodeRoutingSettings controls auto-routing of OpenCode logical models.
+type OpenCodeRoutingSettings struct {
+	// RequireOpenRouter enforces OpenRouter-only routing for OpenCode logical
+	// models: auto-routing will NOT fall through to the OpenCode-native
+	// transport (direct vendor gateway) even when no OpenRouter credential is
+	// runnable. It is an opt-in for US/data-sensitive orgs, because the native
+	// transport lacks OpenRouter's audited US-only inference-provider allowlist.
+	//
+	// Default (false) keeps OpenRouter first but permits native fallback, which
+	// preserves the behavior of orgs that authenticate only an OpenCode-native
+	// key. This gates auto-routing only; a pinned native model id
+	// (OPENCODE_MODEL_CUSTOM = "opencode/glm-5.2") is an explicit user choice
+	// and always bypasses the gate.
+	RequireOpenRouter bool `json:"require_openrouter,omitempty"`
+}
+
+// DefaultNewOrganizationSettings returns persisted settings for newly-created
+// organizations. Do not move these into ParseOrgSettings defaults unless the
+// value should also apply retroactively to existing organizations with absent
+// settings.
+func DefaultNewOrganizationSettings() json.RawMessage {
+	return json.RawMessage(`{"session_automation":{"automatic_follow_through":{"resolve_conflicts_when_idle":true,"fix_tests_when_idle":true}}}`)
 }
 
 // SessionAutomationSettings controls organization-level session follow-through

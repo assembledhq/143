@@ -1325,7 +1325,24 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if run.RepositoryID == nil || strings.TrimSpace(snapshotKey) == "" || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
 		return
 	}
-	resolved, err := o.prReadiness.ResolvePolicy(ctx, run.OrgID, run.RepositoryID)
+	current, err := o.sessions.GetByID(ctx, run.OrgID, run.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to reload session before completion PR readiness auto-run")
+		return
+	}
+	currentSnapshotKey := derefString(current.SnapshotKey)
+	if current.RepositoryID == nil || strings.TrimSpace(currentSnapshotKey) == "" {
+		return
+	}
+	if currentSnapshotKey != snapshotKey {
+		log.Warn().
+			Str("session_id", run.ID.String()).
+			Str("expected_snapshot_key", snapshotKey).
+			Str("current_snapshot_key", currentSnapshotKey).
+			Msg("skipping completion PR readiness auto-run because persisted session snapshot is not current")
+		return
+	}
+	resolved, err := o.prReadiness.ResolvePolicy(ctx, current.OrgID, current.RepositoryID)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to resolve PR readiness policy for completion auto-run")
 		return
@@ -1333,37 +1350,37 @@ func (o *Orchestrator) enqueuePRReadinessAfterCompletion(ctx context.Context, ru
 	if !resolved.Config.AutoRun.AfterSessionCompletion {
 		return
 	}
-	latest, err := o.prReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	latest, err := o.prReadiness.GetLatestBySession(ctx, current.OrgID, current.ID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to load latest PR readiness before completion auto-run")
 		return
 	}
 	if err == nil && latest != nil &&
-		latest.EvaluatedWorkspaceRevision == run.WorkspaceGeneration &&
-		derefString(latest.EvaluatedSnapshotKey) == snapshotKey {
+		latest.EvaluatedWorkspaceRevision == current.WorkspaceRevision &&
+		derefString(latest.EvaluatedSnapshotKey) == currentSnapshotKey {
 		return
 	}
 	readinessRun := &models.PRReadinessRun{
-		OrgID:                      run.OrgID,
-		SessionID:                  run.ID,
-		RepositoryID:               run.RepositoryID,
+		OrgID:                      current.OrgID,
+		SessionID:                  current.ID,
+		RepositoryID:               current.RepositoryID,
 		Status:                     models.PRReadinessRunStatusQueued,
-		EvaluatedWorkspaceRevision: run.WorkspaceGeneration,
-		EvaluatedSnapshotKey:       &snapshotKey,
+		EvaluatedWorkspaceRevision: current.WorkspaceRevision,
+		EvaluatedSnapshotKey:       &currentSnapshotKey,
 		Summary:                    "Queued",
-		TriggeredByUserID:          run.TriggeredByUserID,
+		TriggeredByUserID:          current.TriggeredByUserID,
 	}
 	if err := o.prReadiness.CreateRun(ctx, readinessRun); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to create completion PR readiness run")
 		return
 	}
 	payload := map[string]string{
-		"org_id":       run.OrgID.String(),
-		"session_id":   run.ID.String(),
+		"org_id":       current.OrgID.String(),
+		"session_id":   current.ID.String(),
 		"readiness_id": readinessRun.ID.String(),
 	}
-	dedupeKey := "pr_readiness:" + run.ID.String()
-	if _, err := o.jobs.Enqueue(ctx, run.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
+	dedupeKey := "pr_readiness:" + current.ID.String()
+	if _, err := o.jobs.Enqueue(ctx, current.OrgID, "agent", "run_pr_readiness", payload, 6, &dedupeKey); err != nil {
 		log.Warn().Err(err).Str("session_id", run.ID.String()).Str("readiness_id", readinessRun.ID.String()).Msg("failed to enqueue completion PR readiness run")
 	}
 }
@@ -1424,10 +1441,7 @@ func (o *Orchestrator) RecoverSession(ctx context.Context, session *models.Sessi
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		o.failRunWithCategory(cleanupCtx, session, errMsg, FailureCategoryRecovery, explanation, nextSteps)
-		o.updatePrimaryThreadTerminal(cleanupCtx, session, models.ThreadStatusFailed, &models.SessionResult{
-			Error:           &explanation,
-			FailureCategory: strPtr(FailureCategoryRecovery),
-		}, log)
+		// failRun (via failRunWithCategory) terminalizes the primary thread.
 		if err := o.sessions.UpdateRecoveryState(cleanupCtx, session.OrgID, session.ID, models.RecoveryStateNone, nil, nil, false); err != nil {
 			log.Warn().Err(err).Msg("failed to clear recovery state after exhausting no-checkpoint recovery")
 		}
@@ -2552,11 +2566,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	// Apply per-run model override before the auth pre-flight so the sandbox
 	// sees the effective model/mode selection rather than only the org default.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(run.AgentType, run.ModelOverride, sandboxCfg.Env)
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
@@ -3032,9 +3042,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		}
 		o.failRun(ctx, run, err.Error())
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
-		o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, &models.SessionResult{
-			Error: strPtr(err.Error()),
-		}, log)
+		// failRun now terminalizes the primary thread; no explicit update needed here.
 		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -3083,6 +3091,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			event.Str("status", string(models.SessionStatusAwaitingInput))
 		})
 		return nil
+	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, run, sandbox, result)
+		o.failRunWithResult(ctx, run, runResult, agentErr.Error())
+		logAgentRunFailed(log, run, agentErr, "failed", runStartedAt, nil)
+		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		})
+		return fmt.Errorf("execute agent: %w", agentErr)
 	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
@@ -3478,11 +3498,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	// Apply the per-session model override before the auth pre-flight so the
 	// sandbox sees the effective model/mode selection.
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, sandboxCfg.Env)
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -4272,7 +4288,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, prRepairOpts)
+		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, log, prRepairOpts)
 		if err != nil {
 			if errors.Is(err, ErrStalePullRequestHead) {
 				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
@@ -4287,7 +4303,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
-		o.runSandboxGitBootstrap(ctx, sandbox, sandboxCfg.WorkDir, log)
 		if err := o.prepareSandboxRepository(ctx, sandbox, sandboxCfg.WorkDir, log, session); err != nil {
 			o.failRun(ctx, session, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
@@ -4504,6 +4519,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if handled {
 			return nil
 		}
+	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, session, sandbox, result)
+		o.failRunWithResult(ctx, session, runResult, agentErr.Error())
+		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
+		return fmt.Errorf("execute agent on continue: %w", agentErr)
 	}
 
 	// 7. Create assistant message with result summary.
@@ -4758,7 +4781,7 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64
 // full name (for memory lookup). Handles sessions with or without a repository.
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
-func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
+func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -4804,9 +4827,17 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 		if err := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, branch, token); err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("clone repo: %w", err)
 		}
+		// Configure the git credential helper immediately after the clone, so any
+		// subsequent authenticated git operation in this fresh workspace can reach
+		// GitHub through the per-session auth socket. CloneRepo scrubs the
+		// installation token out of origin, so without the helper in place git
+		// would fall back to an interactive credential prompt and fail in the
+		// sandbox. (The PR-head fetch below authenticates explicitly and does not
+		// depend on this, but running bootstrap here keeps any future git op safe.)
+		o.runSandboxGitBootstrap(ctx, sandbox, sandbox.WorkDir, log)
 		workingBranch := sessionWorkingBranch(session, &issue)
 		if repairOpts != nil && repairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction {
-			if err := o.checkoutPullRequestHead(ctx, sandbox, workingBranch, repairOpts); err != nil {
+			if err := o.checkoutPullRequestHead(ctx, sandbox, repo.CloneURL, token, workingBranch, repairOpts); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4814,7 +4845,7 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 			if workingBranch == "" {
 				return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("code review session is missing working branch")
 			}
-			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
+			if err := o.checkoutExpectedPullRequestHead(ctx, sandbox, repo.CloneURL, token, codeReviewPRNumber, workingBranch, codeReviewHeadSHA); err != nil {
 				return models.Issue{}, "", TokenBillingModeUnknown, err
 			}
 			session.WorkingBranch = &workingBranch
@@ -4879,7 +4910,7 @@ func codeReviewCheckoutContextFromSession(session *models.Session) (int, string,
 	return parsed.GitHubPRNumber, headSHA, true, nil
 }
 
-func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, workingBranch string, repairOpts *PRRepairContinueOptions) error {
+func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *Sandbox, repoURL, token, workingBranch string, repairOpts *PRRepairContinueOptions) error {
 	if repairOpts == nil {
 		return nil
 	}
@@ -4893,18 +4924,31 @@ func (o *Orchestrator) checkoutPullRequestHead(ctx context.Context, sandbox *San
 	if repairOpts.PullRequestNumber <= 0 {
 		return fmt.Errorf("pull request repair reconstruction missing pull request number")
 	}
-	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
+	return o.checkoutExpectedPullRequestHead(ctx, sandbox, repoURL, token, repairOpts.PullRequestNumber, workingBranch, repairOpts.HeadSHA)
 }
 
-func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
-	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags origin 'pull/%d/head'", pullRequestNumber)
+func (o *Orchestrator) checkoutExpectedPullRequestHead(ctx context.Context, sandbox *Sandbox, repoURL, token string, pullRequestNumber int, workingBranch, expectedHeadSHA string) error {
+	// Fetch the PR head from an explicitly authenticated URL rather than the
+	// `origin` remote. CloneRepo scrubs the installation token out of origin
+	// after cloning, so `git fetch origin` relies entirely on the credential
+	// helper being configured. Authenticating the fetch directly makes it
+	// self-sufficient: it does not depend on git-bootstrap having run, so it
+	// cannot regress into git falling back to an interactive username prompt
+	// (which fails in the sandbox with "could not read Username for
+	// 'https://github.com': No such device or address"). Embedding the
+	// short-lived token in the fetch URL leaves nothing at rest in .git/config.
+	fetchRemote := "origin"
+	if token != "" && repoURL != "" {
+		fetchRemote = authenticatedGitURL(repoURL, token)
+	}
+	fetchCmd := fmt.Sprintf("git fetch --quiet --no-tags '%s' 'pull/%d/head'", shellEscapeSingleQuote(fetchRemote), pullRequestNumber)
 	var fetchErr bytes.Buffer
 	fetchExit, fetchExecErr := o.provider.Exec(ctx, sandbox, fetchCmd, io.Discard, &fetchErr)
 	if fetchExecErr != nil {
 		return fmt.Errorf("fetch pull request head: %w", fetchExecErr)
 	}
 	if fetchExit != 0 {
-		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, fetchErr.String())
+		return fmt.Errorf("fetch pull request head: exit=%d stderr=%s", fetchExit, redactGitToken(fetchErr.String(), token))
 	}
 
 	checkoutCmd := fmt.Sprintf("git checkout -B '%s' FETCH_HEAD", shellEscapeSingleQuote(workingBranch))
@@ -5614,9 +5658,25 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
+	o.failRunWithResult(ctx, run, result, errMsg)
+}
+
+func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
+		result.Error = strPtr(errMsg)
+	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
+	// Drive the primary thread terminal too. The frontend's "Agent is working…"
+	// indicator is bound to the thread status, not the session status, so failing
+	// only the session leaves the thread stuck at "running" — the UI keeps spinning
+	// until the reaper sweeps it (~2.5h later). updatePrimaryThreadTerminal also
+	// publishes a thread-runtime SSE event so any open page flips immediately.
+	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
@@ -5634,6 +5694,20 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	}
 	o.notifyPagerDutySessionComplete(ctx, run, models.SessionStatusFailed, errMsg)
 	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || threadID == nil || *threadID == uuid.Nil {
+		return
+	}
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID == *threadID {
+		return
+	}
+	if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Msg("failed to update active thread terminal status")
+	}
 }
 
 func (o *Orchestrator) notifyPagerDutySessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus, summary string) {
@@ -5750,10 +5824,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 			"Retry the session — transient slowness (LLM latency, git clone) may have pushed the run over the edge",
 		},
 	)
-	o.updatePrimaryThreadTerminal(cleanupCtx, run, models.ThreadStatusFailed, &models.SessionResult{
-		Error:           &explanation,
-		FailureCategory: strPtr(FailureCategoryTimeout),
-	}, log)
+	// failRun (via failRunWithCategory) terminalizes the primary thread.
 }
 
 // ensureCodexAuth injects Codex auth credentials into the sandbox. On failure
@@ -6898,6 +6969,16 @@ func (o *Orchestrator) handleSystemInterruptedSession(ctx context.Context, sessi
 	if err := o.sessions.UpdateStatus(bgCtx, session.OrgID, session.ID, fallbackStatus); err != nil {
 		log.Warn().Err(err).Str("status", string(fallbackStatus)).Msg("failed to restore session status after system interruption")
 	}
+	// Surface the interruption at the session level so the UI's recovery banner
+	// ("Restoring runtime from checkpoint") fires while the requeued turn waits to
+	// resume — matching how lost-job reclaim queues session recovery. Without this
+	// the banner stays hidden (it reads session.recovery_state, not the thread's)
+	// and the only signal is a "running" thread, i.e. a bare "Agent is working…".
+	// BeginRuntime / RecoverSession clear recovery_state once the turn resumes.
+	queuedAt := time.Now().UTC()
+	if err := o.sessions.UpdateRecoveryState(bgCtx, session.OrgID, session.ID, models.RecoveryStateQueued, &queuedAt, nil, false); err != nil {
+		log.Warn().Err(err).Msg("failed to mark session recovery as queued after system interruption")
+	}
 	if o.sessionThreads != nil && session.PrimaryThreadID != nil && *session.PrimaryThreadID != uuid.Nil {
 		if recorder, ok := o.sessionThreads.(sessionThreadRecoveryMetadataStore); ok {
 			if err := recorder.RecordRecoveryMetadata(bgCtx, session.OrgID, *session.PrimaryThreadID, runtimeReason, time.Now().UTC(), string(models.RecoveryStateQueued), string(runtimeReason)); err != nil {
@@ -7252,10 +7333,7 @@ func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *
 	terminalCtx, terminalCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer terminalCancel()
 	o.failRunWithCategory(terminalCtx, session, errMsg, FailureCategoryTimeout, explanation, nextSteps)
-	o.updatePrimaryThreadTerminal(terminalCtx, session, models.ThreadStatusFailed, &models.SessionResult{
-		Error:           &explanation,
-		FailureCategory: strPtr(FailureCategoryTimeout),
-	}, log)
+	// failRun (via failRunWithCategory) terminalizes the primary thread.
 
 	if snapshotKey != "" {
 		warmCtx, warmCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -7470,6 +7548,25 @@ func formatWorkingBranch(run *models.Session, issue *models.Issue) string {
 // shellEscapeSingleQuote escapes single quotes for safe use in shell commands.
 func shellEscapeSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\\''")
+}
+
+// authenticatedGitURL embeds a short-lived installation token into an https git
+// URL, mirroring DockerProvider.CloneRepo so authenticated fetches work without
+// relying on the credential helper being configured yet.
+func authenticatedGitURL(repoURL, token string) string {
+	if token == "" {
+		return repoURL
+	}
+	return strings.Replace(repoURL, "https://", fmt.Sprintf("https://x-access-token:%s@", token), 1)
+}
+
+// redactGitToken removes an installation token from a string so it is safe to
+// surface in error messages.
+func redactGitToken(s, token string) string {
+	if token == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, token, "***")
 }
 
 func derefString(value *string) string {
@@ -7716,11 +7813,7 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			refreshedEnv[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, refreshedEnv)
 	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
 		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -7728,6 +7821,21 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 		refreshedEnv["HOME"] = sandboxCfg.HomeDir
 	}
 	return refreshedEnv
+}
+
+func applyDirectModelOverrideEnv(agentType models.AgentType, modelOverride *string, env map[string]string) {
+	if env == nil || modelOverride == nil || strings.TrimSpace(*modelOverride) == "" {
+		return
+	}
+	if agentType == models.AgentTypeOpenCode {
+		// OpenCode accepts logical model IDs in stored session config, but its
+		// CLI requires the resolved physical provider/model route. ResolveForModel
+		// has already translated the override into OPENCODE_MODEL.
+		return
+	}
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" {
+		env[envVar] = *modelOverride
+	}
 }
 
 func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {

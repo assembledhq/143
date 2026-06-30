@@ -6,22 +6,68 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog"
 )
 
 type CodeReviewStore struct {
-	db DBTX
+	db      DBTX
+	streams *cache.CodeReviewStreams
+	logger  zerolog.Logger
 }
 
 func NewCodeReviewStore(db DBTX) *CodeReviewStore {
-	return &CodeReviewStore{db: db}
+	return &CodeReviewStore{db: db, logger: zerolog.Nop()}
+}
+
+// SetStreams injects the Redis helper used to fan code review lifecycle changes
+// out to the org-scoped SSE stream. Publishing is best-effort: a nil helper (no
+// Redis) simply means no live events and the frontend falls back to polling.
+// lint:allow-no-orgid reason="process-wide dependency injection for Redis code review streaming"
+func (s *CodeReviewStore) SetStreams(streams *cache.CodeReviewStreams) {
+	s.streams = streams
+}
+
+// SetLogger injects the structured logger used for best-effort stream publishing.
+// lint:allow-no-orgid reason="process-wide dependency injection for store logging"
+func (s *CodeReviewStore) SetLogger(logger zerolog.Logger) {
+	s.logger = logger
+}
+
+// publishUpdated emits a best-effort code review lifecycle event. Failures are
+// logged and swallowed so a Redis hiccup never fails the underlying DB write.
+func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.CodeReviewSessionMetadata) {
+	if s.streams == nil {
+		return
+	}
+	// Batch transitions publish a synthetic metadata with a zero session ID;
+	// surface that as a nil pointer so the event omits session_id entirely.
+	var sessionID *uuid.UUID
+	if metadata.SessionID != uuid.Nil {
+		id := metadata.SessionID
+		sessionID = &id
+	}
+	if err := s.streams.PublishUpdated(ctx, metadata.OrgID, models.CodeReviewUpdatedEvent{
+		OrgID:     metadata.OrgID,
+		SessionID: sessionID,
+		Status:    metadata.Status,
+		Decision:  metadata.Decision,
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		s.logger.Warn().Err(err).
+			Str("org_id", metadata.OrgID.String()).
+			Str("session_id", metadata.SessionID.String()).
+			Msg("failed to publish code review update to Redis")
+	}
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		description_policy, risk_policy, agent_roster, inline_comment_limit, final_review_template, inheritance, created_by_user_id, created_at`
+		description_policy, risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
@@ -337,24 +383,23 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
 				org_id, repository_id, active, version, enabled, approval_mode, description_policy,
-				risk_policy, agent_roster, inline_comment_limit, final_review_template, inheritance, created_by_user_id
+				risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id
 			) VALUES (
 				@org_id, @repository_id, true, @version, @enabled, @approval_mode, @description_policy,
-				@risk_policy, @agent_roster, @inline_comment_limit, @final_review_template, @inheritance, @created_by_user_id
+				@risk_policy, @agent_roster, @inline_comment_limit, @inheritance, @created_by_user_id
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
-		"org_id":                orgID,
-		"repository_id":         repositoryID,
-		"version":               version,
-		"enabled":               config.Enabled,
-		"approval_mode":         config.ApprovalMode,
-		"description_policy":    descriptionPolicy,
-		"risk_policy":           riskPolicy,
-		"agent_roster":          agentRoster,
-		"inline_comment_limit":  config.InlineCommentLimit,
-		"final_review_template": config.FinalReviewTemplate,
-		"inheritance":           inheritance,
-		"created_by_user_id":    createdByUserID,
+		"org_id":               orgID,
+		"repository_id":        repositoryID,
+		"version":              version,
+		"enabled":              config.Enabled,
+		"approval_mode":        config.ApprovalMode,
+		"description_policy":   descriptionPolicy,
+		"risk_policy":          riskPolicy,
+		"agent_roster":         agentRoster,
+		"inline_comment_limit": config.InlineCommentLimit,
+		"inheritance":          inheritance,
+		"created_by_user_id":   createdByUserID,
 	})
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("insert code review policy: %w", err)
@@ -448,6 +493,7 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 		return err
 	}
 	*metadata = created
+	s.publishUpdated(ctx, created)
 	return nil
 }
 
@@ -517,7 +563,12 @@ func (s *CodeReviewStore) MarkRunning(ctx context.Context, orgID, sessionID uuid
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review running: %w", err)
 	}
-	return collectOneCodeReviewMetadata(rows)
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
 }
 
 func (s *CodeReviewStore) SetPromptArtifactKey(ctx context.Context, orgID, sessionID uuid.UUID, artifactKey string) (models.CodeReviewSessionMetadata, error) {
@@ -556,7 +607,14 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 	if err != nil {
 		return 0, fmt.Errorf("mark stale code reviews: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	affected := tag.RowsAffected()
+	if affected > 0 {
+		// Batch update touches multiple rows; publish one org-scoped signal so
+		// the list refreshes. SessionID is left zero — the frontend refetches
+		// the whole list rather than reading individual fields off the event.
+		s.publishUpdated(ctx, models.CodeReviewSessionMetadata{OrgID: orgID, Status: models.CodeReviewSessionStatusStale})
+	}
+	return affected, nil
 }
 
 func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
@@ -578,7 +636,12 @@ func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.U
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review stale: %w", err)
 	}
-	return collectOneCodeReviewMetadata(rows)
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
 }
 
 type CompleteCodeReviewParams struct {
@@ -618,7 +681,12 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("complete code review: %w", err)
 	}
-	return collectOneCodeReviewMetadata(rows)
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
 }
 
 func (s *CodeReviewStore) RecordGitHubReview(ctx context.Context, orgID, sessionID uuid.UUID, githubReviewID int64, githubReviewURL string, finalReviewBody string) (models.CodeReviewSessionMetadata, error) {
@@ -660,7 +728,12 @@ func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("fail code review: %w", err)
 	}
-	return collectOneCodeReviewMetadata(rows)
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
 }
 
 type CodeReviewListFilters struct {
@@ -1010,7 +1083,7 @@ func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) 
 	var record models.CodeReviewPolicyRecord
 	var descriptionPolicy, riskPolicy, agentRoster, inheritance []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &record.FinalReviewTemplate, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
+		&descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {

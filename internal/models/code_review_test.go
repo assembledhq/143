@@ -59,6 +59,8 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
+	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
+	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
 }
 
@@ -75,9 +77,13 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
+		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},
+		{name: "rejects invalid reviewer model", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerModels = []string{DefaultCodexModel, DefaultCodexModel}
+		}, expectErr: true},
+		{name: "rejects invalid orchestrator model", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.OrchestratorModel = strPtr(DefaultCodexModel) }, expectErr: true},
 		{name: "rejects oversized quorum", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.RequireReviewerQuorum = 3 }, expectErr: true},
 		{name: "rejects too short timeout", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.TimeoutSeconds = 30 }, expectErr: true},
-		{name: "rejects negative cost", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.MaxCostCents = -1 }, expectErr: true},
 	}
 
 	for _, tt := range tests {
@@ -96,24 +102,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 			require.NoError(t, err, "valid code review policy should be accepted")
 		})
 	}
-}
-
-func TestCodeReviewPolicyRecordConfigPreservesFinalReviewTemplate(t *testing.T) {
-	t.Parallel()
-
-	record := CodeReviewPolicyRecord{
-		ApprovalMode:        CodeReviewApprovalModeCommentOnly,
-		Enabled:             true,
-		DescriptionPolicy:   DefaultCodeReviewPolicyConfig().DescriptionPolicy,
-		RiskPolicy:          DefaultCodeReviewPolicyConfig().RiskPolicy,
-		AgentRoster:         DefaultCodeReviewPolicyConfig().AgentRoster,
-		InlineCommentLimit:  4,
-		FinalReviewTemplate: "custom final review template",
-	}
-
-	config := record.Config()
-
-	require.Equal(t, "custom final review template", config.FinalReviewTemplate, "policy records should round-trip final review templates")
 }
 
 func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
@@ -176,7 +164,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				LinesChanged:      100,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				UpToDate:          true,
 				Author:            "devin",
 			},
@@ -191,7 +178,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				Categories:             []string{"auth"},
 				ChecksPassing:          false,
 				DescriptionPassed:      false,
-				Mergeable:              false,
 				FromFork:               true,
 				UnresolvedHumanThreads: 1,
 				BlockingFindings:       1,
@@ -202,7 +188,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				"changed lines 350 exceeds policy limit 300",
 				"required GitHub checks are not passing",
 				"PR description policy did not pass",
-				"PR is not mergeable",
 				"fork PRs are not eligible for approval",
 				"unresolved human review threads are present",
 				"review agents reported blocking findings",
@@ -223,7 +208,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				ChecksPassing:         true,
 				RequiredChecksPassing: map[string]bool{"ci/lint": true},
 				DescriptionPassed:     true,
-				Mergeable:             true,
 				Author:                "sam",
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
@@ -241,7 +225,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				LinesChanged:      20,
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				Author:            "sam",
 				AuthorClass:       "human",
 			},
@@ -258,7 +241,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				ChangedPaths:      []string{"internal/models/code_review.go"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				Author:            "devin",
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
@@ -272,7 +254,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				LinesChanged:          20,
 				ChecksPassing:         true,
 				DescriptionPassed:     true,
-				Mergeable:             true,
 				Author:                "devin",
 				ScopeMismatch:         true,
 				UnresolvedUncertainty: true,
@@ -296,7 +277,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				ChangedPaths:      []string{"internal/api/router.go"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				Author:            "devin",
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
@@ -315,7 +295,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				ChangedPaths:      []string{"internal/db/schema/users.go"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				Author:            "devin",
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
@@ -323,21 +302,46 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			}},
 		},
 		{
-			name: "blocks review cost above ceiling",
-			mutate: func(c *CodeReviewPolicyConfig) {
-				c.AgentRoster.MaxCostCents = 25
-			},
+			name: "low-risk docs lane raises the churn ceiling",
 			input: CodeReviewRiskInput{
 				FilesChanged:      1,
-				LinesChanged:      20,
+				LinesChanged:      607,
+				ChangedPaths:      []string{"docs/design/future/111-session-changesets-and-stacks.md"},
+				Categories:        []string{"docs"},
 				ChecksPassing:     true,
 				DescriptionPassed: true,
-				Mergeable:         true,
 				Author:            "devin",
-				ReviewCostCents:   25.1,
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: true},
+		},
+		{
+			name: "low-risk docs lane still enforces its own ceiling",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      1200,
+				ChangedPaths:      []string{"docs/huge.md"},
+				Categories:        []string{"docs"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "devin",
 			},
 			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"review cost 25.10 cents exceeds policy limit 25 cents",
+				"changed lines 1200 exceeds policy limit 1000",
+			}},
+		},
+		{
+			name: "low-risk lane does not apply to mixed docs and code changes",
+			input: CodeReviewRiskInput{
+				FilesChanged:      2,
+				LinesChanged:      607,
+				ChangedPaths:      []string{"docs/x.md", "internal/api/router.go"},
+				Categories:        []string{"docs", "backend"},
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "devin",
+			},
+			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
+				"changed lines 607 exceeds policy limit 300",
 			}},
 		},
 	}

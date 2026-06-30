@@ -231,14 +231,13 @@ func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
 		},
 	}}
 	policy := models.CodeReviewPolicyRecord{
-		Version:             3,
-		Enabled:             policyConfig.Enabled,
-		ApprovalMode:        policyConfig.ApprovalMode,
-		DescriptionPolicy:   policyConfig.DescriptionPolicy,
-		RiskPolicy:          policyConfig.RiskPolicy,
-		AgentRoster:         policyConfig.AgentRoster,
-		InlineCommentLimit:  policyConfig.InlineCommentLimit,
-		FinalReviewTemplate: policyConfig.FinalReviewTemplate,
+		Version:            3,
+		Enabled:            policyConfig.Enabled,
+		ApprovalMode:       policyConfig.ApprovalMode,
+		DescriptionPolicy:  policyConfig.DescriptionPolicy,
+		RiskPolicy:         policyConfig.RiskPolicy,
+		AgentRoster:        policyConfig.AgentRoster,
+		InlineCommentLimit: policyConfig.InlineCommentLimit,
 	}
 	llm := &codeReviewDescriptionLLMStub{response: `{"passed":true,"reason":"fresh call"}`}
 
@@ -315,6 +314,88 @@ func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
+func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	findingID := uuid.New()
+	now := time.Now().UTC()
+	rawDiff := "diff --git a/internal/db/users.go b/internal/db/users.go"
+	rawReview := `The review found one issue.
+::code-comment{title="[P1] Missing org filter" body="This query can read another org's rows." file="/workspace/internal/db/users.go" start=42 priority=1}`
+	state := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:   codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReviewerIndex: 0,
+		ThreadID:      threadID.String(),
+		ReadOnly:      true,
+	})
+	updatedState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:       codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReviewerIndex:     0,
+		ThreadID:          threadID.String(),
+		FindingCount:      1,
+		CostCents:         0.25,
+		ReadOnly:          true,
+		ReadOnlyViolation: true,
+		CompletedAt:       now.Format(time.RFC3339),
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Code review: codex", nil, []string{"internal/db/users.go"}, models.ThreadStatusCompleted,
+				nil, 1, &now, nil, &rawDiff, nil, nil,
+				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, rawReview, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("INSERT INTO code_review_findings").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(newCodeReviewFindingRows().
+			AddRow(findingID, orgID, sessionID, &resultID, "internal/db/users.go:42:42:missing org filter",
+				models.CodeReviewFindingSeverityHigh, models.CodeReviewFindingConfidenceHigh,
+				stringPtr("internal/db/users.go"), intPtr(42), intPtr(42), "Missing org filter",
+				"This query can read another org's rows.", false, nil, now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusCompleted, &rawReview, updatedState, now))
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	policy := codeReviewPolicyRecordForTest(cfg)
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+
+	require.NoError(t, err, "read-only workspace changes should not invalidate a completed reviewer output")
+	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should parse output and mark the result completed")
+}
+
 type codeReviewDescriptionLLMStub struct {
 	calls    int
 	response string
@@ -339,6 +420,50 @@ func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
 	require.Contains(t, decision.RiskReasons, "Automated reviewer agents are not configured for this worker.", "decision should explain missing live reviewers")
 	require.Contains(t, body, "Policy version: 7", "final body should include captured policy version")
 	require.Contains(t, body, "Reviewed head: abc123", "final body should include reviewed head")
+}
+
+func TestCodeReviewReviewerAgentModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	cfg.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode}
+	cfg.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel, "  "}
+
+	require.Equal(t, models.DefaultCodexModel, *codeReviewReviewerAgentModel(cfg, 0, models.AgentTypeCodex),
+		"non-empty configured model should win")
+	require.Equal(t, models.DefaultClaudeCodeModel, *codeReviewReviewerAgentModel(cfg, 1, models.AgentTypeClaudeCode),
+		"whitespace-only configured model should fall back to the per-agent default")
+	require.Equal(t, models.DefaultClaudeCodeModel, *codeReviewReviewerAgentModel(cfg, 5, models.AgentTypeClaudeCode),
+		"out-of-range index should fall back to the per-agent default")
+
+	empty := models.DefaultCodeReviewPolicyConfig()
+	empty.AgentRoster.ReviewerModels = nil
+	require.Equal(t, models.DefaultCodexModel, *codeReviewReviewerAgentModel(empty, 0, models.AgentTypeCodex),
+		"missing reviewer_models should fall back to the per-agent default")
+}
+
+func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	cfg.AgentRoster.Orchestrator = models.AgentTypeOpenCode
+
+	pinned := cfg
+	model := models.OpenCodeModelGPT54Mini
+	pinned.AgentRoster.OrchestratorModel = &model
+	require.Equal(t, models.OpenCodeModelGPT54Mini, *codeReviewOrchestratorAgentModel(pinned),
+		"non-empty configured orchestrator model should win")
+
+	whitespace := cfg
+	blank := "   "
+	whitespace.AgentRoster.OrchestratorModel = &blank
+	require.Equal(t, models.OpenCodeModelGPT55, *codeReviewOrchestratorAgentModel(whitespace),
+		"whitespace-only orchestrator model should fall back to the per-agent default")
+
+	unset := cfg
+	unset.AgentRoster.OrchestratorModel = nil
+	require.Equal(t, models.OpenCodeModelGPT55, *codeReviewOrchestratorAgentModel(unset),
+		"nil orchestrator model should fall back to the per-agent default")
 }
 
 func TestCodeReviewStatusTargetURL(t *testing.T) {
@@ -644,6 +769,76 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "excluded risk category changed: dependencies",
 		},
+		{
+			name: "approves large docs-only change through the low-risk lane despite timed-out reviewers",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+						// The reviewer's own status is pending while it runs; it must
+						// not be counted as a failing check against its own approval.
+						{Name: "143 Code Reviewer", Status: models.PullRequestCheckStatusPending},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusTimedOut},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusTimedOut},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					// Filename contains "session" — must not be classified as auth.
+					// 607 lines exceeds the base 300 cap but is under the docs lane cap.
+					{Filename: "docs/design/future/111-session-changesets-and-stacks.md", Additions: 607, Deletions: 0},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionApproved,
+		},
+		{
+			name: "still requires human review for a docs change above the low-risk lane ceiling",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "docs/design/future/huge.md", Additions: 1200, Deletions: 0},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "changed lines 1200 exceeds policy limit 1000",
+		},
 	}
 
 	for _, tt := range tests {
@@ -662,6 +857,104 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCodeReviewPathCategoriesDocsOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		path     string
+		expected []string
+	}{
+		{
+			name:     "docs filename containing session is not classified as auth",
+			path:     "docs/design/future/111-session-changesets-and-stacks.md",
+			expected: []string{"docs"},
+		},
+		{
+			name:     "docs filename containing token is not classified as crypto",
+			path:     "docs/auth-token-rotation.md",
+			expected: []string{"docs"},
+		},
+		{
+			name:     "non-docs auth path still classified as auth",
+			path:     "internal/auth/session.go",
+			expected: []string{"backend", "auth"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, codeReviewPathCategories(tt.path), "docs prose must not inherit code-risk categories")
+		})
+	}
+}
+
+func TestCodeReviewChecksPassingIgnoresSelfReportedStatuses(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	health := &models.PullRequestHealthResponse{
+		Checks: []models.PullRequestCheckSummary{
+			{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+			{Name: "143 Code Reviewer", Status: models.PullRequestCheckStatusPending},
+			{Name: "preview/143", Status: models.PullRequestCheckStatusPending},
+		},
+	}
+
+	require.True(t, codeReviewChecksPassing(policy, health),
+		"the reviewer's own pending status must not block its own approval")
+}
+
+func codeReviewPolicyRecordForTest(config models.CodeReviewPolicyConfig) models.CodeReviewPolicyRecord {
+	return models.CodeReviewPolicyRecord{
+		ID:                 uuid.New(),
+		Version:            1,
+		Enabled:            config.Enabled,
+		ApprovalMode:       config.ApprovalMode,
+		DescriptionPolicy:  config.DescriptionPolicy,
+		RiskPolicy:         config.RiskPolicy,
+		AgentRoster:        config.AgentRoster,
+		InlineCommentLimit: config.InlineCommentLimit,
+		Inheritance:        config.Inheritance,
+		CreatedAt:          time.Now().UTC(),
+	}
+}
+
+func newCodeReviewAgentResultRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "agent_provider", "agent_model", "role", "status",
+		"raw_output", "structured_result", "created_at",
+	})
+}
+
+func newCodeReviewFindingRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "agent_result_id", "dedupe_key", "severity",
+		"confidence", "path", "start_line", "end_line", "summary", "body",
+		"selected_for_inline", "github_comment_id", "created_at",
+	})
+}
+
+func newSessionThreadRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "session_id", "org_id", "agent_type", "model_override",
+		"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
+		"result_summary", "diff", "failure_explanation", "failure_category",
+		"started_at", "completed_at", "created_at", "created_by_source", "created_by_thread_id", "archived_at",
+		"base_snapshot_key", "cost_cents", "pending_message_count", "cancel_requested_at",
+		"runtime_stop_reason", "runtime_graceful_stop_at", "recovery_state", "recovery_reason", "recovery_event_history",
+		"execution_mode", "filesystem_mode",
+	})
+}
+
+func newSessionMessageRows() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content",
+		"attachments", "references", "commands", "token_usage", "source", "created_at",
+	})
 }
 
 func stringPtr(value string) *string {

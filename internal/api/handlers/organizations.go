@@ -109,7 +109,7 @@ func (h *OrganizationsHandler) createOrgWithAdmin(ctx context.Context, name stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	org := &models.Organization{Name: name, Settings: json.RawMessage(`{}`)}
+	org := &models.Organization{Name: name, Settings: models.DefaultNewOrganizationSettings()}
 	if err := db.NewOrganizationStore(tx).Create(ctx, org); err != nil {
 		return nil, fmt.Errorf("create organization: %w", err)
 	}

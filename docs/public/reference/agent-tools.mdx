@@ -47,6 +47,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `github` | `list_recent_prs`, `get_pr_reviews` |
 | `circleci` | `list_flaky_tests`, `get_job_test_results`, `get_recent_test_failures` |
 | `logs` | `query`, `context`, `fields`, `stats` |
+| `preview` | `create`, `status`, `list`, `stop`, `restart`, `update`, `screenshot`, `console`, `inspect`, `interact`, `multi_viewport`, `visual_diff`, `assert` |
 | `slack` | `search_messages`, `get_thread`, `send` |
 | `issue` | `create` |
 | `pr` | `create` |
@@ -405,6 +406,78 @@ Common use: group errors by service, org, or endpoint before drilling into raw l
 
 ```bash
 143-tools logs stats --provider victorialogs --query 'level:error' --since 1h --group_by service --limit 20
+```
+
+## Previews
+
+Preview commands use 143's platform-controlled preview lifecycle and browser inspector. For coding agents, prefer `--session-id` so screenshots and browser checks run against the live session workspace before the branch is published. Browser diagnostics also accept `--preview-id` for a known branch preview.
+
+### `preview create`
+
+Create or reuse a preview.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--session-id` | string | Conditional | Session UUID for a session preview. Recommended for agent iteration. |
+| `--repository` | string | Conditional | Repository full name or unique short name for a branch preview. |
+| `--branch` | string | Conditional | Pushed branch name for a branch preview. |
+| `--wait` | boolean | No | Wait until the preview is ready or fails. |
+
+```bash
+143-tools preview create --session-id "$143_SESSION_ID" --wait
+143-tools preview create --repository example-org/example-app --branch feature/foo --wait
+```
+
+### `preview status`
+
+Read status, URL, freshness, and the recommended update mode.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--session-id` | string | Conditional | Session UUID for the active session preview. |
+| `--preview-id` | string | Conditional | Preview UUID for a branch preview. |
+
+```bash
+143-tools preview status --session-id "$143_SESSION_ID"
+```
+
+### `preview update`
+
+Make a session preview reflect recent workspace edits. The platform selects the fastest safe path: browser reload, soft service restart, full recycle, cold relaunch, or no-op. Config overrides escalate to full recycle.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--session-id` | string | Yes | Session UUID. |
+| `--path` | string | No | Path to reload/check. Defaults to `/`. |
+| `--wait` | boolean | No | Wait when a restart is started. |
+| `--force-mode` | string | No | Diagnostic override: `browser_reload`, `soft_service_restart`, `full_recycle`, `cold_relaunch`, or `noop_current`. |
+| `--reload-browser` | boolean | No | Reload the browser context when possible. Defaults to `true`. |
+| `--config` | JSON string | No | Optional preview config override. |
+
+```bash
+143-tools preview update --session-id "$143_SESSION_ID" --wait
+```
+
+### Browser Inspection
+
+Use these after creating or updating a preview. Pass either `--session-id` or `--preview-id`.
+
+| Command | Required flags | Purpose |
+|---|---|---|
+| `preview screenshot` | target | Capture a screenshot. Optional flags: `--path`, `--viewport-w`, `--viewport-h`, `--full-page`, `--delay-ms`, `--inline-base64`. Responses include `artifact.url`. |
+| `preview console` | target | Read browser console messages. Optional `--level error` filters output. |
+| `preview inspect` | target plus `--selector` or `--x`/`--y` | Inspect DOM metadata for an element. |
+| `preview interact` | target, `--steps` | Execute browser actions from a JSON step array. Step timeouts accept `timeout_ms`. |
+| `preview multi_viewport` | target | Capture mobile, tablet, and desktop screenshots, or pass `--viewports` JSON. Each capture includes artifact metadata. |
+| `preview visual_diff` | target, `--before-snapshot-id`, `--after-snapshot-id` | Compare two stored preview snapshots. |
+| `preview assert` | target, `--assertions` | Run browser assertions from a JSON assertion array. |
+
+```bash
+143-tools preview screenshot --session-id "$143_SESSION_ID" --path / --viewport-w 1280 --viewport-h 720 --inline-base64 false
+143-tools preview inspect --session-id "$143_SESSION_ID" --selector '[data-testid=save]'
+143-tools preview interact --session-id "$143_SESSION_ID" --steps '[{"action":"click","selector":"[data-testid=save]","screenshot":true}]'
+143-tools preview multi_viewport --session-id "$143_SESSION_ID" --path /
+143-tools preview console --session-id "$143_SESSION_ID" --level error
 ```
 
 ## Messaging

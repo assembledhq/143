@@ -218,6 +218,40 @@ func (h *InternalPreviewHandler) StopPreview(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "stopped"}})
 }
 
+func (h *InternalPreviewHandler) SoftRestartPreview(w http.ResponseWriter, r *http.Request) {
+	clearWriteDeadline(w, r)
+
+	previewID, err := uuid.Parse(chi.URLParam(r, "previewID"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_ID", "invalid preview id")
+		return
+	}
+	claims, ok := h.authorize(w, r, "soft_restart")
+	if !ok {
+		return
+	}
+	r = r.WithContext(middleware.WithOrgID(r.Context(), claims.OrgID))
+	orgID := middleware.OrgIDFromContext(r.Context())
+	if claims.PreviewID == nil || *claims.PreviewID != previewID {
+		writeError(w, r, http.StatusForbidden, "PREVIEW_MISMATCH", "preview token does not match the requested preview")
+		return
+	}
+	if h.manager == nil {
+		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "preview manager is not configured")
+		return
+	}
+	// Delegate to the PreviewHandler helper so the soft restart loads the
+	// instance's session and stamps the runtime workspace revision, mirroring
+	// RecyclePreview. The bare manager.SoftRestartPreview would leave the
+	// runtime revision unstamped on remote workers, stranding freshness at
+	// out_of_date.
+	if previewErr := h.preview.softRestartPreviewByID(r.Context(), orgID, previewID); previewErr != nil {
+		writePreviewHTTPError(w, r, previewErr)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
+}
+
 func (h *InternalPreviewHandler) RecyclePreview(w http.ResponseWriter, r *http.Request) {
 	// Recycle = teardown + relaunch (image pulls + readiness probes); same
 	// WriteTimeout-overrun risk as StartPreview.
@@ -376,7 +410,13 @@ func (h *InternalPreviewHandler) InspectElement(w http.ResponseWriter, r *http.R
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
-	result, err := inspector.InspectElement(r.Context(), previewID.String(), body.X, body.Y)
+	var result *models.ElementInfo
+	var err error
+	if strings.TrimSpace(body.Selector) != "" {
+		result, err = inspector.InspectElementBySelector(r.Context(), previewID.String(), strings.TrimSpace(body.Selector))
+	} else {
+		result, err = inspector.InspectElement(r.Context(), previewID.String(), body.X, body.Y)
+	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "INSPECT_FAILED", "failed to inspect element", err)
 		return

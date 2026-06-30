@@ -2,6 +2,7 @@ package reviewloop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -134,6 +135,75 @@ func TestService_StartRejectsExistingRunningLoop(t *testing.T) {
 	require.Nil(t, loop, "Start should not return a loop when another loop is running")
 	require.Empty(t, store.createdLoops, "Start should not create another loop row")
 	require.Empty(t, threads.created, "Start should not create an orphan review thread")
+}
+
+func TestService_AutoReadinessEnabledUsesOrgPolicy(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	tests := []struct {
+		name              string
+		raw               json.RawMessage
+		status            models.ReviewLoopStatus
+		triggeredByUserID *uuid.UUID
+		userSettings      models.UserSettings
+		want              bool
+	}{
+		{
+			name:   "disabled by default",
+			raw:    json.RawMessage(`{}`),
+			status: models.ReviewLoopStatusClean,
+			want:   false,
+		},
+		{
+			name:   "enabled for clean by default states",
+			raw:    json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop":true}}}`),
+			status: models.ReviewLoopStatusClean,
+			want:   true,
+		},
+		{
+			name:   "does not run for terminal state outside policy",
+			raw:    json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop":true,"readiness_after_review_loop_states":["failed"]}}}`),
+			status: models.ReviewLoopStatusClean,
+			want:   false,
+		},
+		{
+			name:              "user on overrides org off",
+			raw:               json.RawMessage(`{}`),
+			status:            models.ReviewLoopStatusClean,
+			triggeredByUserID: &userID,
+			userSettings: models.UserSettings{AutomaticPRFollowThrough: &models.AutomaticPRFollowThroughSettings{
+				ReadinessAfterReviewLoop: models.AutomaticFollowThroughPreferenceOn,
+			}},
+			want: true,
+		},
+		{
+			name:              "user off overrides org on",
+			raw:               json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop":true}}}`),
+			status:            models.ReviewLoopStatusClean,
+			triggeredByUserID: &userID,
+			userSettings: models.UserSettings{AutomaticPRFollowThrough: &models.AutomaticPRFollowThroughSettings{
+				ReadinessAfterReviewLoop: models.AutomaticFollowThroughPreferenceOff,
+			}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc := NewService(&fakeReviewLoopStore{}, &fakeThreadService{}, func(s *Service) {
+				s.orgs = fakeOrgStore{org: models.Organization{ID: orgID, Settings: tt.raw}}
+				s.users = fakeUserSettingsStore{user: models.UserWithSettings{ID: userID, Settings: tt.userSettings}}
+			})
+			got, err := svc.autoReadinessEnabled(context.Background(), orgID, tt.status, tt.triggeredByUserID)
+			require.NoError(t, err, "autoReadinessEnabled should parse organization policy")
+			require.Equal(t, tt.want, got, "autoReadinessEnabled should resolve the configured review-loop terminal state")
+		})
+	}
 }
 
 func TestService_StartRejectsMissingSnapshot(t *testing.T) {
@@ -709,6 +779,30 @@ type fakeThreadService struct {
 	message models.SessionMessage
 	sent    []threadsvc.SendMessageInput
 	created []threadsvc.CreateThreadInput
+}
+
+type fakeOrgStore struct {
+	org models.Organization
+	err error
+}
+
+func (f fakeOrgStore) GetByID(_ context.Context, _ uuid.UUID) (models.Organization, error) {
+	if f.err != nil {
+		return models.Organization{}, f.err
+	}
+	return f.org, nil
+}
+
+type fakeUserSettingsStore struct {
+	user models.UserWithSettings
+	err  error
+}
+
+func (f fakeUserSettingsStore) GetByIDGlobalWithSettings(_ context.Context, _ uuid.UUID) (models.UserWithSettings, error) {
+	if f.err != nil {
+		return models.UserWithSettings{}, f.err
+	}
+	return f.user, nil
 }
 
 func (f *fakeThreadService) GetSession(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {

@@ -7,8 +7,10 @@ import {
   AVAILABLE_AMP_MODES,
   AVAILABLE_CLAUDE_CODE_MODELS,
   AVAILABLE_CODEX_MODELS,
-  AVAILABLE_OPENCODE_MODELS,
+  OPENCODE_LOGICAL_MODELS,
   AVAILABLE_PI_MODELS,
+  isOpenCodeLogicalModel,
+  openCodeModelLabel,
 } from "@/lib/model-constants";
 import type { CodexAuthStatus, CodingCredentialSummary, ResolvedCredential } from "@/lib/types";
 
@@ -72,6 +74,29 @@ export const AGENTS: readonly AgentMeta[] = [
     ],
   },
   {
+    key: "opencode",
+    label: "OpenCode",
+    short: "OC",
+    color: "#111827",
+    description: "OpenCode multi-provider coding agent",
+    providerKey: "opencode",
+    models: OPENCODE_LOGICAL_MODELS,
+    note: "Pick a model; OpenCode routes it to OpenRouter (recommended) or a native key automatically. One key may target OpenCode native auth or a backing provider; it is stored separately from Codex and Claude Code keys.",
+    envVars: [
+      { name: "OPENCODE_API_KEY", label: "API Key", sensitive: true, placeholder: "OpenCode or provider API key" },
+      { name: "OPENCODE_MODEL", label: "Default model", options: [...OPENCODE_LOGICAL_MODELS] },
+      {
+        name: "OPENCODE_MODEL_CUSTOM",
+        label: "Custom model override",
+        placeholder: "provider/model (e.g. xai/grok-code-fast)",
+        advanced: true,
+        helpText: "Wins over Default model. OpenCode accepts provider/model ids from its upstream catalog.",
+      },
+      { name: "OPENCODE_BACKING_PROVIDER", label: "Backing provider", placeholder: "opencode, openai, anthropic, gemini, or openrouter", advanced: true },
+      { name: "OPENCODE_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
+    ],
+  },
+  {
     key: "amp",
     label: "Amp",
     short: "AM",
@@ -105,29 +130,6 @@ export const AGENTS: readonly AgentMeta[] = [
       },
     ],
   },
-  {
-    key: "opencode",
-    label: "OpenCode",
-    short: "OC",
-    color: "#111827",
-    description: "OpenCode multi-provider coding agent",
-    providerKey: "opencode",
-    models: AVAILABLE_OPENCODE_MODELS,
-    note: "OpenCode uses explicit OpenCode-scoped keys. A key may target OpenCode native auth or a backing provider, but it is stored separately from Codex and Claude Code keys.",
-    envVars: [
-      { name: "OPENCODE_API_KEY", label: "API Key", sensitive: true, placeholder: "OpenCode or provider API key" },
-      { name: "OPENCODE_MODEL", label: "Default model", options: [...AVAILABLE_OPENCODE_MODELS] },
-      {
-        name: "OPENCODE_MODEL_CUSTOM",
-        label: "Custom model override",
-        placeholder: "provider/model (e.g. xai/grok-code-fast)",
-        advanced: true,
-        helpText: "Wins over Default model. OpenCode accepts provider/model ids from its upstream catalog.",
-      },
-      { name: "OPENCODE_BACKING_PROVIDER", label: "Backing provider", placeholder: "opencode, openai, anthropic, gemini, or openrouter", advanced: true },
-      { name: "OPENCODE_BASE_URL", label: "Base URL", placeholder: "Custom API endpoint (optional)", advanced: true },
-    ],
-  },
 ] as const;
 
 export const AGENTS_BY_KEY: Readonly<Record<string, AgentMeta>> = Object.fromEntries(
@@ -154,10 +156,22 @@ export function agentTypeForModel(model: string): string | undefined {
     if (agent.key === "pi") continue;
     if (agent.models.includes(model)) return agent.key;
   }
+  // OpenCode logical ids (e.g. "glm-5.2") map to OpenCode. Checked after the
+  // curated lists so bare names a first-party agent owns (e.g. "gpt-5.5" →
+  // Codex, "claude-fable-5" → Claude Code) keep their existing owner. Mirrors
+  // the backend AgentTypeForModel ordering.
+  if (isOpenCodeLogicalModel(model)) return "opencode";
   if (AGENTS_BY_KEY.pi.models.includes(model)) return "pi";
   // Unknown provider/model strings (custom Pi or custom OpenCode models) cannot
   // be unambiguously classified — let callers fall back to their default agent.
   return undefined;
+}
+
+// modelOptionLabel returns a friendly display label for a model id shown in the
+// session/PM model dropdowns. OpenCode logical and physical ids resolve to a
+// readable name (e.g. "GLM 5.2"); every other model renders as-is.
+export function modelOptionLabel(model: string): string {
+  return openCodeModelLabel(model);
 }
 
 // True when the user has the credentials needed to run the given agent.

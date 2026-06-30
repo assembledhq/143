@@ -253,6 +253,7 @@ type PullRequestHealthResponse struct {
 	FailingTestDetailAvailable   bool                              `json:"failing_test_detail_available"`
 	ObsoleteActiveRepairSessions bool                              `json:"obsolete_active_repair_sessions,omitempty"`
 	MergeWhenReady               PullRequestMergeWhenReadyStatus   `json:"merge_when_ready"`
+	AutoRepairExhaustedActions   []PullRequestRepairActionType     `json:"auto_repair_exhausted_actions,omitempty"`
 }
 
 type PullRequestMergeWhenReadyStatus struct {
@@ -270,6 +271,7 @@ type PullRequestActiveRepair struct {
 	ThreadID      *uuid.UUID                  `json:"thread_id,omitempty"`
 	SessionStatus SessionStatus               `json:"session_status"`
 	HealthVersion int64                       `json:"health_version"`
+	AutoAttempt   bool                        `json:"auto_attempt,omitempty"`
 }
 
 type PullRequestRepairResponse struct {
@@ -316,20 +318,40 @@ type PullRequestMergeResponse struct {
 }
 
 type PullRequestRepairRun struct {
-	ID                 uuid.UUID                      `db:"id" json:"id"`
-	OrgID              uuid.UUID                      `db:"org_id" json:"org_id"`
-	PullRequestID      uuid.UUID                      `db:"pull_request_id" json:"pull_request_id"`
-	SessionID          uuid.UUID                      `db:"session_id" json:"session_id"`
-	ThreadID           *uuid.UUID                     `db:"thread_id" json:"thread_id,omitempty"`
-	ActionType         PullRequestRepairActionType    `db:"action_type" json:"action_type"`
-	HealthVersion      int64                          `db:"health_version" json:"health_version"`
-	HeadSHA            string                         `db:"head_sha" json:"head_sha,omitempty"`
-	BaseSHA            string                         `db:"base_sha" json:"base_sha,omitempty"`
-	WorkspaceMode      PullRequestRepairWorkspaceMode `db:"workspace_mode" json:"workspace_mode"`
-	Active             bool                           `db:"active" json:"active"`
-	ObsoletedByVersion *int64                         `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`
-	CreatedAt          time.Time                      `db:"created_at" json:"created_at"`
-	UpdatedAt          time.Time                      `db:"updated_at" json:"updated_at"`
+	ID                 uuid.UUID                          `db:"id" json:"id"`
+	OrgID              uuid.UUID                          `db:"org_id" json:"org_id"`
+	PullRequestID      uuid.UUID                          `db:"pull_request_id" json:"pull_request_id"`
+	SessionID          uuid.UUID                          `db:"session_id" json:"session_id"`
+	ThreadID           *uuid.UUID                         `db:"thread_id" json:"thread_id,omitempty"`
+	ActionType         PullRequestRepairActionType        `db:"action_type" json:"action_type"`
+	HealthVersion      int64                              `db:"health_version" json:"health_version"`
+	HeadSHA            string                             `db:"head_sha" json:"head_sha,omitempty"`
+	BaseSHA            string                             `db:"base_sha" json:"base_sha,omitempty"`
+	WorkspaceMode      PullRequestRepairWorkspaceMode     `db:"workspace_mode" json:"workspace_mode"`
+	AutoAttempt        bool                               `db:"auto_attempt" json:"auto_attempt,omitempty"`
+	TriggerReason      string                             `db:"trigger_reason" json:"trigger_reason,omitempty"`
+	TriggeredBySource  PullRequestRepairTriggeredBySource `db:"triggered_by_source" json:"triggered_by_source,omitempty"`
+	TriggeredByUserID  *uuid.UUID                         `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
+	Active             bool                               `db:"active" json:"active"`
+	ObsoletedByVersion *int64                             `db:"obsoleted_by_version" json:"obsoleted_by_version,omitempty"`
+	CreatedAt          time.Time                          `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time                          `db:"updated_at" json:"updated_at"`
+}
+
+type PullRequestRepairTriggeredBySource string
+
+const (
+	PullRequestRepairTriggeredBySourceManual           PullRequestRepairTriggeredBySource = "manual"
+	PullRequestRepairTriggeredBySourceSystemAutoRepair PullRequestRepairTriggeredBySource = "system_auto_repair"
+)
+
+func (s PullRequestRepairTriggeredBySource) Validate() error {
+	switch s {
+	case "", PullRequestRepairTriggeredBySourceManual, PullRequestRepairTriggeredBySourceSystemAutoRepair:
+		return nil
+	default:
+		return fmt.Errorf("invalid PullRequestRepairTriggeredBySource: %q", s)
+	}
 }
 
 type PullRequestUpdatedEvent struct {

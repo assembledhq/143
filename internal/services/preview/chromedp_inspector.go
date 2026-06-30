@@ -387,6 +387,7 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		PageTitle:     title,
 		ConsoleErrors: consoleErrors,
 		URL:           url,
+		Viewport:      models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH},
 		CapturedAt:    time.Now(),
 	}, nil
 }
@@ -599,6 +600,48 @@ func (c *ChromeDPInspector) InspectElement(ctx context.Context, previewID string
 	}
 
 	return &info, nil
+}
+
+func (c *ChromeDPInspector) InspectElementBySelector(ctx context.Context, previewID string, selector string) (*models.ElementInfo, error) {
+	pc, err := c.getOrCreatePreviewCtx(previewID)
+	if err != nil {
+		return nil, fmt.Errorf("get preview context: %w", err)
+	}
+
+	merged, mergeCancel := mergeContexts(pc.ctx, ctx)
+	defer mergeCancel()
+	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
+	defer cancel()
+
+	selectorJSON, err := json.Marshal(selector)
+	if err != nil {
+		return nil, fmt.Errorf("marshal selector: %w", err)
+	}
+	js := fmt.Sprintf(`(function() {
+		var el = document.querySelector(%s);
+		if (!el) return null;
+		var rect = el.getBoundingClientRect();
+		return JSON.stringify({
+			x: Math.max(0, Math.round(rect.left + rect.width / 2)),
+			y: Math.max(0, Math.round(rect.top + rect.height / 2))
+		});
+	})()`, string(selectorJSON))
+
+	var raw string
+	if err := chromedp.Run(timeoutCtx, chromedp.Evaluate(js, &raw)); err != nil {
+		return nil, fmt.Errorf("inspect selector: %w", err)
+	}
+	if raw == "" {
+		return nil, fmt.Errorf("no element found for selector %q", selector)
+	}
+	var point struct {
+		X int `json:"x"`
+		Y int `json:"y"`
+	}
+	if err := json.Unmarshal([]byte(raw), &point); err != nil {
+		return nil, fmt.Errorf("unmarshal selector point: %w", err)
+	}
+	return c.InspectElement(ctx, previewID, point.X, point.Y)
 }
 
 // =============================================================================
@@ -973,6 +1016,7 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 					PNG:        pngData,
 					PageTitle:  title,
 					URL:        currentURL,
+					Viewport:   models.ViewportSpec{Width: 1280, Height: 720},
 					CapturedAt: time.Now(),
 				}
 			}

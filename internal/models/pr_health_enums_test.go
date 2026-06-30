@@ -236,6 +236,34 @@ func TestPullRequestRepairActionTypeValidate(t *testing.T) {
 	}
 }
 
+func TestPullRequestRepairTriggeredBySourceValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		source    PullRequestRepairTriggeredBySource
+		expectErr bool
+	}{
+		{name: "empty defaults to manual", source: ""},
+		{name: "manual", source: PullRequestRepairTriggeredBySourceManual},
+		{name: "system", source: PullRequestRepairTriggeredBySourceSystemAutoRepair},
+		{name: "invalid", source: PullRequestRepairTriggeredBySource("automation"), expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.source.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "Validate should reject unsupported repair trigger sources")
+				return
+			}
+			require.NoError(t, err, "Validate should accept supported repair trigger sources")
+		})
+	}
+}
+
 func TestPullRequestRepairWorkspaceModeValidate(t *testing.T) {
 	t.Parallel()
 

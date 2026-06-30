@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { http, HttpResponse } from "msw";
+import { QueryClient } from "@tanstack/react-query";
 import {
   fireEvent,
   renderWithProviders,
@@ -11,6 +12,8 @@ import {
 import { server } from "@/test/mocks/server";
 import NewAutomationPage from "./page";
 import { AUTOMATION_GOAL_MAX_LENGTH } from "@/lib/automation-validation";
+import { queryKeys } from "@/lib/query-keys";
+import type { Automation, ListResponse, SingleResponse } from "@/lib/types";
 
 const DRAFT_STORAGE_KEY = "143:new-automation-draft";
 const pushMock = vi.fn();
@@ -266,10 +269,12 @@ describe("NewAutomationPage", () => {
     expect(triggerGroup).not.toHaveClass("border-border", "bg-background");
     expect(screen.getByText("Pull request events")).toBeInTheDocument();
     expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("When checks finish")).not.toBeChecked();
     expect(screen.getByLabelText("When a PR is opened")).not.toBeChecked();
     expect(
       screen.getByLabelText("When there is new PR feedback"),
     ).not.toBeChecked();
+    expect(screen.getByLabelText("When a PR is merged")).not.toBeChecked();
     expect(screen.queryByText("Also trigger on")).not.toBeInTheDocument();
     expect(screen.queryByText("Pull requests")).not.toBeInTheDocument();
     expect(screen.getByText("Triggers").parentElement).toHaveClass("flex-wrap");
@@ -403,6 +408,118 @@ describe("NewAutomationPage", () => {
     expect(requestBody).not.toHaveProperty("interval_value");
     expect(requestBody).not.toHaveProperty("interval_unit");
     expect(requestBody).not.toHaveProperty("interval_run_at");
+  });
+
+  it("updates the automations list and detail caches after creating an automation", async () => {
+    const user = userEvent.setup();
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+    });
+    const existingAutomation: Automation = {
+      id: "automation-existing",
+      org_id: "org-1",
+      repository_id: "repo-1",
+      name: "Existing automation",
+      goal: "Keep existing recurring work visible.",
+      icon_type: "emoji",
+      icon_value: "⚙️",
+      execution_mode: "sequential",
+      max_concurrent: 1,
+      base_branch: "main",
+      identity_scope: "org",
+      pre_pr_review_loops: 1,
+      schedule_type: "interval",
+      interval_value: 1,
+      interval_unit: "days",
+      interval_run_at: "09:00",
+      timezone: "UTC",
+      enabled: true,
+      priority: 50,
+      github_event_triggers: [],
+      created_at: "2026-03-04T12:00:00Z",
+      updated_at: "2026-03-04T12:00:00Z",
+    };
+    const createdAutomation: Automation = {
+      ...existingAutomation,
+      id: "automation-1",
+      name: "PR feedback responder",
+      goal: "Respond to new PR feedback.",
+      schedule_type: "none",
+      interval_value: undefined,
+      interval_unit: undefined,
+      interval_run_at: undefined,
+      created_at: "2026-03-05T12:00:00Z",
+      updated_at: "2026-03-05T12:00:00Z",
+    };
+    const createdResponse: SingleResponse<Automation> = {
+      data: createdAutomation,
+    };
+
+    queryClient.setQueryData<ListResponse<Automation>>(
+      queryKeys.automations.all,
+      {
+        data: [existingAutomation],
+        meta: {},
+      },
+    );
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("/api/v1/automations", () =>
+        HttpResponse.json(createdResponse, { status: 201 }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />, { queryClient });
+
+    fireEvent.change(await screen.findByLabelText("Name"), {
+      target: { value: "PR feedback responder" },
+    });
+    fireEvent.change(screen.getByLabelText("Goal"), {
+      target: { value: "Respond to new PR feedback." },
+    });
+    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("When there is new PR feedback"));
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/automations/automation-1");
+    });
+    expect(
+      queryClient.getQueryData<ListResponse<Automation>>(
+        queryKeys.automations.all,
+      )?.data,
+    ).toEqual([createdAutomation, existingAutomation]);
+    expect(
+      queryClient.getQueryData<SingleResponse<Automation>>(
+        queryKeys.automations.detail("automation-1"),
+      ),
+    ).toEqual(createdResponse);
   });
 
   it("submits an event-only PagerDuty incident automation", async () => {
@@ -579,6 +696,137 @@ describe("NewAutomationPage", () => {
     expect(
       (screen.getByLabelText("Goal") as HTMLTextAreaElement).value,
     ).toContain("Review the repository for concrete, actionable security risk");
+  });
+
+  it("resets event trigger choices when applying a template", async () => {
+    searchParamsState.value = "";
+    const user = userEvent.setup();
+    let requestBody: Record<string, unknown> | undefined;
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+      http.post("/api/v1/automations", async ({ request }) => {
+        requestBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(
+          {
+            data: {
+              id: "automation-1",
+              org_id: "org-1",
+              repository_id: "repo-1",
+              name: requestBody.name,
+              goal: requestBody.goal,
+              icon_type: "emoji",
+              icon_value: "⚙️",
+              execution_mode: "sequential",
+              max_concurrent: 1,
+              base_branch: "main",
+              identity_scope: "org",
+              pre_pr_review_loops: 1,
+              schedule_type: requestBody.schedule_type,
+              github_event_triggers: [],
+              timezone: "UTC",
+              enabled: true,
+              priority: 50,
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    await screen.findByLabelText("Name");
+    await user.click(screen.getByLabelText("On a schedule"));
+    await user.click(screen.getByLabelText("When a PR is updated"));
+    expect(screen.getByLabelText("On a schedule")).not.toBeChecked();
+    expect(screen.getByLabelText("When a PR is updated")).toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Templates" }));
+    await user.click(await screen.findByText("Security sweep"));
+
+    expect(screen.getByDisplayValue("Security sweep")).toBeInTheDocument();
+    expect(screen.getByLabelText("On a schedule")).toBeChecked();
+    expect(screen.getByLabelText("When a PR is updated")).not.toBeChecked();
+
+    await user.click(screen.getByRole("button", { name: "Create automation" }));
+
+    await waitFor(() => {
+      expect(requestBody).toMatchObject({
+        schedule_type: "interval",
+        triggers: [],
+      });
+    });
+    expect(requestBody).toMatchObject({
+      interval_value: 7,
+      interval_unit: "days",
+      interval_run_at: "09:00",
+    });
+    expect(requestBody).not.toHaveProperty("event_triggers");
+  });
+
+  it("allows a blank interval while editing a template-backed form and restores it on blur", async () => {
+    const user = userEvent.setup();
+
+    server.use(
+      http.get("/api/v1/repositories", () =>
+        HttpResponse.json({
+          data: [
+            {
+              id: "repo-1",
+              org_id: "org-1",
+              integration_id: "int-1",
+              github_id: 1,
+              full_name: "acme/repo",
+              default_branch: "main",
+              private: false,
+              clone_url: "https://github.com/acme/repo.git",
+              installation_id: 10,
+              status: "active",
+              settings: {},
+              created_at: "2026-03-05T12:00:00Z",
+              updated_at: "2026-03-05T12:00:00Z",
+            },
+          ],
+          meta: {},
+        }),
+      ),
+    );
+
+    renderWithProviders(<NewAutomationPage />);
+
+    const intervalInput = await screen.findByLabelText("Interval value");
+    await user.clear(intervalInput);
+
+    expect(intervalInput).toHaveValue(null);
+    expect(screen.getByRole("button", { name: "Create automation" })).toBeDisabled();
+
+    await user.tab();
+
+    expect(intervalInput).toHaveValue(1);
   });
 
   it("restores the latest in-progress automation draft when no template is selected", async () => {

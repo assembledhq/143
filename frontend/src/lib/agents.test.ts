@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  AGENTS,
   AGENTS_BY_KEY,
   agentDisplayLabel,
   agentTypeForModel,
@@ -75,6 +76,14 @@ const personalClaudeSubscription: CodingCredentialSummary = {
 };
 
 describe("availableAgentModelGroups", () => {
+  it("orders OpenCode as the third main coding agent", () => {
+    expect(AGENTS.slice(0, 3).map((agent) => agent.key)).toEqual([
+      "codex",
+      "claude_code",
+      "opencode",
+    ]);
+  });
+
   it("includes only the default agent when no creds resolve", () => {
     const groups = availableAgentModelGroups([], null, [], "codex");
     expect(groups.map((g) => g.key)).toEqual(["codex"]);
@@ -174,6 +183,14 @@ describe("agentTypeForModel", () => {
     // xai/grok-code-fast is not in any curated list; it could be a custom Pi
     // or custom OpenCode model — the caller owns that context.
     expect(agentTypeForModel("xai/grok-code-fast")).toBeUndefined();
+  });
+
+  it("routes OpenCode logical ids to OpenCode but leaves bare first-party names with their owner", () => {
+    expect(agentTypeForModel("glm-5.2")).toBe("opencode");
+    expect(agentTypeForModel("kimi-k2.6")).toBe("opencode");
+    // Bare names owned by a first-party agent keep that owner.
+    expect(agentTypeForModel("gpt-5.5")).toBe("codex");
+    expect(agentTypeForModel("claude-fable-5")).toBe("claude_code");
   });
 
   it("exposes explicit OpenCode custom model metadata", () => {

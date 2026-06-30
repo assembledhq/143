@@ -195,8 +195,10 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 	var snapshot []models.AgentCapabilitySnapshotItem
 	var automationRunID *uuid.UUID
 	rows, err := tx.Query(ctx, `
-		SELECT s.capability_snapshot, sal.automation_run_id
+		SELECT COALESCE(sem.capability_snapshot, '[]'::jsonb), sal.automation_run_id
 		FROM sessions s
+		LEFT JOIN session_execution_metadata sem
+		  ON sem.org_id = s.org_id AND sem.session_id = s.id
 		LEFT JOIN session_automation_links sal
 		  ON sal.org_id = s.org_id AND sal.session_id = s.id
 		WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL
@@ -227,19 +229,21 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 		return nil, fmt.Errorf("marshal capability snapshot: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
-		UPDATE sessions
-		SET capability_snapshot = @snapshot
-		WHERE org_id = @org_id AND id = @session_id`,
-		pgx.NamedArgs{"snapshot": raw, "org_id": orgID, "session_id": sessionID},
+		INSERT INTO session_execution_metadata (session_id, org_id, capability_snapshot)
+		VALUES (@session_id, @org_id, @snapshot::jsonb)
+		ON CONFLICT (session_id) DO UPDATE
+		SET capability_snapshot = EXCLUDED.capability_snapshot,
+		    updated_at = now()`,
+		pgx.NamedArgs{"snapshot": string(raw), "org_id": orgID, "session_id": sessionID},
 	); err != nil {
 		return nil, fmt.Errorf("update session capability snapshot: %w", err)
 	}
 	if automationRunID != nil {
 		if _, err := tx.Exec(ctx, `
 			UPDATE automation_runs
-			SET capability_snapshot = @snapshot
+			SET capability_snapshot = @snapshot::jsonb
 			WHERE org_id = @org_id AND id = @run_id`,
-			pgx.NamedArgs{"snapshot": raw, "org_id": orgID, "run_id": *automationRunID},
+			pgx.NamedArgs{"snapshot": string(raw), "org_id": orgID, "run_id": *automationRunID},
 		); err != nil {
 			return nil, fmt.Errorf("update automation run capability snapshot: %w", err)
 		}

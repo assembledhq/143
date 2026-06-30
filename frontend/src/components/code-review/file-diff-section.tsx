@@ -202,6 +202,36 @@ function sliceHunk(hunk: DiffFile["hunks"][number], lineLimit: number): DiffFile
   };
 }
 
+function diffFileContentKey(file: DiffFile): string {
+  let hash = 0;
+  const append = (value: string | number | null | undefined) => {
+    const text = value == null ? "null" : String(value);
+    for (let i = 0; i < text.length; i++) {
+      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    hash = ((hash << 5) - hash + 31) | 0;
+  };
+
+  append(file.oldPath);
+  append(file.newPath);
+  append(file.stats.added);
+  append(file.stats.removed);
+  for (const hunk of file.hunks) {
+    append(hunk.oldStart);
+    append(hunk.oldCount);
+    append(hunk.newStart);
+    append(hunk.newCount);
+    append(hunk.header);
+    for (const line of hunk.lines) {
+      append(line.type);
+      append(line.content);
+      append(line.oldLineNumber);
+      append(line.newLineNumber);
+    }
+  }
+  return `${file.newPath}:${file.hunks.length}:${hash}`;
+}
+
 export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
   function FileDiffSection({
     file,
@@ -222,15 +252,17 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
     showInlineCommentComposer = true,
     onRequestEditComment,
   }, ref) {
+    const fileContentKey = useMemo(() => diffFileContentKey(file), [file]);
     const [gapStates, setGapStates] = useState<Map<string, ContextGapState>>(new Map());
     const [visibleLineState, setVisibleLineState] = useState({
-      file,
+      fileContentKey,
       count: INITIAL_RENDERED_DIFF_LINES,
     });
     let visibleLineLimit = visibleLineState.count;
-    if (visibleLineState.file !== file) {
+    if (visibleLineState.fileContentKey !== fileContentKey) {
       visibleLineLimit = INITIAL_RENDERED_DIFF_LINES;
-      setVisibleLineState({ file, count: INITIAL_RENDERED_DIFF_LINES });
+      setVisibleLineState({ fileContentKey, count: INITIAL_RENDERED_DIFF_LINES });
+      setGapStates(new Map());
     }
 
     const buildGapState = useCallback((kind: GapKind, key: string, hiddenStart: number, hiddenEnd: number | undefined, lineDelta: number) => {
@@ -510,7 +542,7 @@ export const FileDiffSection = forwardRef<HTMLDivElement, FileDiffSectionProps>(
                   size="sm"
                   className="text-xs"
                   onClick={() => setVisibleLineState((state) => ({
-                    file,
+                    fileContentKey,
                     count: state.count + RENDERED_DIFF_LINE_INCREMENT,
                   }))}
                 >

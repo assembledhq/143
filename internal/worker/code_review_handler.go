@@ -78,6 +78,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 						Str("session_id", job.SessionID.String()).
 						Str("status", string(existing.Status)).
 						Msg("skipping terminal code review job")
+					reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 					return nil
 				}
 			}
@@ -121,6 +122,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				Str("session_id", job.SessionID.String()).
 				Str("reviewed_head", job.HeadSHA).
 				Msg("marked code review stale after PR head changed")
+			reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 			return nil
 		}
 		descriptionEvaluation, err := evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
@@ -184,6 +186,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 			logger.Info().Str("session_id", job.SessionID.String()).Bool("github_submitted", submitted).Msg("completed unavailable code review")
+			reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 			return nil
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
@@ -229,6 +232,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
+		reconcileCodeReviewSessionStatus(ctx, stores, logger, job)
 		return nil
 	}
 }
@@ -244,7 +248,6 @@ func buildUnavailableCodeReviewOutcome(policy models.CodeReviewPolicyConfig, job
 		PolicyVersion: job.PolicyVersion,
 		HeadSHA:       job.HeadSHA,
 		Summary:       "143 recorded the review request and withheld automated approval.",
-		Template:      policy.FinalReviewTemplate,
 	})
 	return decision, body
 }
@@ -256,6 +259,38 @@ func codeReviewMetadataTerminal(status models.CodeReviewSessionStatus) bool {
 	default:
 		return false
 	}
+}
+
+// reconcileCodeReviewSessionStatus drives the parent session to a terminal
+// status once the review itself is finished. The run_code_review job — not the
+// per-thread runtime — owns the lifecycle of an origin=code_review session, so
+// when the handler reaches a terminal outcome it must stop leaving the session
+// in whatever transient state (e.g. a 'pending' parked by a sibling reviewer's
+// sandbox-node retry) the thread machinery left behind. Without this, a fully
+// completed review can strand its session in 'pending' until the reaper sweeps
+// it and stamps the misleading "unable to start within the expected time"
+// failure on an already-successful review. Best-effort: a reconciliation
+// failure is logged, not surfaced, so it can never undo a posted review.
+func reconcileCodeReviewSessionStatus(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load session for code review reconciliation")
+		return
+	}
+	if session.Status.IsTerminal() {
+		return
+	}
+	if err := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusCompleted); err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to reconcile code review session to completed")
+		return
+	}
+	logger.Info().
+		Str("session_id", job.SessionID.String()).
+		Str("prev_status", string(session.Status)).
+		Msg("reconciled code review session to completed")
 }
 
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
@@ -335,6 +370,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	for idx, agentType := range cfg.AgentRoster.Reviewers {
+		agentModel := codeReviewReviewerAgentModel(cfg, idx, agentType)
 		key := codeReviewReviewerKey(idx, agentType)
 		if _, ok := existing[key]; ok {
 			continue
@@ -345,7 +381,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 				OrgID:         job.OrgID,
 				SessionID:     job.SessionID,
 				AgentProvider: string(agentType),
-				AgentModel:    codeReviewDefaultAgentModel(agentType),
+				AgentModel:    agentModel,
 				Role:          models.CodeReviewAgentRoleReviewer,
 				Status:        models.CodeReviewAgentResultStatusTimedOut,
 				RawOutput:     &raw,
@@ -366,6 +402,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 		artifactMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key": key,
 			"agent_type":   agentType,
+			"agent_model":  stringPtrValue(agentModel),
 			"head_sha":     job.HeadSHA,
 		})
 		if err != nil {
@@ -387,8 +424,9 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			SessionID:       job.SessionID,
 			OrgID:           job.OrgID,
 			AgentType:       string(agentType),
+			Model:           stringPtrValue(agentModel),
 			Label:           codeReviewReviewerThreadLabel(agentType),
-			Instructions:    "Inspect only. Do not edit files, commit, push, or change the workspace.",
+			Instructions:    "Inspect and report only. Identify and describe problems — do not fix them. Do not edit, create, or delete files, apply patches or fixes, commit, push, or otherwise change the workspace, even for trivial fixes. Fixes happen later in a separate step.",
 			FileScope:       fileScope,
 			ExecutionMode:   models.ThreadExecutionModeReview,
 			FilesystemMode:  models.ThreadFilesystemModeReadOnly,
@@ -409,7 +447,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 			OrgID:            job.OrgID,
 			SessionID:        job.SessionID,
 			AgentProvider:    string(agentType),
-			AgentModel:       codeReviewDefaultAgentModel(agentType),
+			AgentModel:       agentModel,
 			Role:             models.CodeReviewAgentRoleReviewer,
 			Status:           models.CodeReviewAgentResultStatusQueued,
 			StructuredResult: structured,
@@ -505,25 +543,17 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			continue
 		}
 		if codeReviewThreadReadOnlyViolation(thread) {
-			raw := "reviewer thread was configured read-only but produced workspace changes"
-			state.Error = raw
 			state.ReadOnly = true
 			state.ReadOnlyViolation = true
 			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
 				state.Reverted = true
 			}
-			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
-				return err
-			}
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleReviewer, result.AgentProvider, raw)
-			if err != nil {
-				return err
-			}
-			state.RawArtifactKey = rawArtifactKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark reviewer read-only violation failed: %w", err)
-			}
-			continue
+			logger.Warn().
+				Str("session_id", job.SessionID.String()).
+				Str("thread_id", thread.ID.String()).
+				Str("reviewer", result.AgentProvider).
+				Bool("reverted", state.Reverted).
+				Msg("code review reviewer thread produced workspace changes; ignoring for review validity")
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
@@ -652,11 +682,29 @@ func codeReviewDefaultAgentModel(agentType models.AgentType) *string {
 	case models.AgentTypePi:
 		model = models.PiModelClaudeOpus48
 	case models.AgentTypeOpenCode:
-		model = models.OpenCodeModelGPT54Mini
+		model = models.OpenCodeModelGPT55
 	default:
 		return nil
 	}
 	return &model
+}
+
+func codeReviewReviewerAgentModel(cfg models.CodeReviewPolicyConfig, idx int, agentType models.AgentType) *string {
+	if idx >= 0 && idx < len(cfg.AgentRoster.ReviewerModels) {
+		if model := strings.TrimSpace(cfg.AgentRoster.ReviewerModels[idx]); model != "" {
+			return &model
+		}
+	}
+	return codeReviewDefaultAgentModel(agentType)
+}
+
+func codeReviewOrchestratorAgentModel(cfg models.CodeReviewPolicyConfig) *string {
+	if cfg.AgentRoster.OrchestratorModel != nil {
+		if model := strings.TrimSpace(*cfg.AgentRoster.OrchestratorModel); model != "" {
+			return &model
+		}
+	}
+	return codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator)
 }
 
 func storeCodeReviewPromptArtifact(ctx context.Context, stores *Stores, artifact models.CodeReviewPromptArtifact) error {
@@ -768,28 +816,6 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 	return true
 }
 
-func createCodeReviewReadOnlyViolationFinding(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, resultID uuid.UUID, thread models.SessionThread) error {
-	if store == nil {
-		return nil
-	}
-	summary := "Review tab modified the workspace during read-only review"
-	body := "This review tab was configured for read-only code review but produced a workspace diff. The result is excluded from approval evidence."
-	finding := &models.CodeReviewFinding{
-		OrgID:         job.OrgID,
-		SessionID:     job.SessionID,
-		AgentResultID: &resultID,
-		DedupeKey:     "read_only_violation:" + thread.ID.String(),
-		Severity:      models.CodeReviewFindingSeverityCritical,
-		Confidence:    models.CodeReviewFindingConfidenceHigh,
-		Summary:       summary,
-		Body:          body,
-	}
-	if err := store.CreateFinding(ctx, finding); err != nil {
-		return fmt.Errorf("create read-only violation finding: %w", err)
-	}
-	return nil
-}
-
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
 	requirements := make([]prompts.CodeReviewDescriptionRequirementPromptData, 0, len(cfg.DescriptionPolicy.Requirements))
 	for _, requirement := range cfg.DescriptionPolicy.Requirements {
@@ -815,7 +841,6 @@ func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, c
 		MaxFilesChanged:         cfg.RiskPolicy.MaxFilesChanged,
 		MaxLinesChanged:         cfg.RiskPolicy.MaxLinesChanged,
 		RequirePassingChecks:    cfg.RiskPolicy.RequirePassingChecks,
-		RequireMergeable:        cfg.RiskPolicy.RequireMergeable,
 		RequireUpToDate:         cfg.RiskPolicy.RequireUpToDate,
 		AllowForks:              cfg.RiskPolicy.AllowForks,
 		ExcludeSensitivePaths:   cfg.RiskPolicy.ExcludeSensitivePaths,
@@ -865,7 +890,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 }
 
 func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
-	reviewerQuorum, reviewerFailures := codeReviewReviewerEvidence(agentResults)
+	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	descriptionPassed := description.Passed
 	if len(description.RequirementSummaries) == 0 {
 		descriptionPassed = codeReviewDescriptionPassed(cfg, pr, changedFiles)
@@ -882,7 +907,6 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		ChecksPassing:          codeReviewChecksPassing(cfg, health),
 		RequiredChecksPassing:  codeReviewRequiredChecksPassing(cfg, health),
 		DescriptionPassed:      descriptionPassed,
-		Mergeable:              codeReviewMergeable(health),
 		UpToDate:               codeReviewUpToDate(health),
 		Author:                 codeReviewAuthor(job, pr),
 		AuthorClass:            codeReviewAuthorClass(pr),
@@ -890,15 +914,26 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		ContextFetchFailed:     health == nil || !reviewContextAvailable,
 		HeadSHAChanged:         codeReviewHeadChanged(job.HeadSHA, pr, health),
 		BlockingFindings:       codeReviewBlockingFindings(findings),
-		ReviewerDisagreement:   reviewerFailures > 0,
+		ReviewerDisagreement:   false,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
-		ReviewCostCents:        codeReviewAgentResultCostCents(agentResults),
 		PromptInjectionFound:   description.PromptInjectionFound,
 	})
-	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum {
+	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
 		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, cfg.AgentRoster.RequireReviewerQuorum))
 	}
 	return risk.Reasons
+}
+
+// codeReviewLowRiskQuorumWaived reports whether the resolved policy's low-risk
+// lane waives the reviewer-quorum requirement for this change. It lets a clean
+// low-risk change (e.g. docs-only) approve on the heuristic gates even when the
+// review agents fail or time out, which is otherwise the dominant blocker.
+func codeReviewLowRiskQuorumWaived(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) bool {
+	lane := models.ResolveCodeReviewPolicyConfig(&policy).RiskPolicy.LowRiskLane
+	if !lane.WaiveReviewerQuorum {
+		return false
+	}
+	return models.CodeReviewLowRiskLaneApplies(lane, codeReviewChangedCategories(changedFiles))
 }
 
 func codeReviewReviewerOutputsForPrompt(results []models.CodeReviewAgentResult) []string {
@@ -1312,13 +1347,14 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		}
 	}
 	cfg := policy.Config()
+	agentModel := codeReviewOrchestratorAgentModel(cfg)
 	if codeReviewReviewTimedOut(cfg, metadata) {
 		raw := "orchestrator timed out before the worker could start the orchestrator thread"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
 			AgentProvider: string(cfg.AgentRoster.Orchestrator),
-			AgentModel:    codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator),
+			AgentModel:    agentModel,
 			Role:          models.CodeReviewAgentRoleOrchestrator,
 			Status:        models.CodeReviewAgentResultStatusTimedOut,
 			RawOutput:     &raw,
@@ -1342,62 +1378,103 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		Metadata: mustMarshalCodeReviewJSON(map[string]any{
 			"head_sha":       job.HeadSHA,
 			"policy_version": policy.Version,
+			"agent_model":    stringPtrValue(agentModel),
 		}),
 	}); err != nil {
 		return err
 	}
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
-	thread, err := threads.CreateThread(ctx, threadsvc.CreateThreadInput{
-		SessionID:       job.SessionID,
-		OrgID:           job.OrgID,
-		AgentType:       string(cfg.AgentRoster.Orchestrator),
-		Label:           "Code review: orchestrator",
-		Instructions:    "Synthesize only. Do not edit files, commit, push, or change the workspace.",
-		FileScope:       codeReviewChangedPaths(changedFiles),
-		ExecutionMode:   models.ThreadExecutionModeReview,
-		FilesystemMode:  models.ThreadFilesystemModeReadOnly,
-		CreatedBySource: models.ThreadCreatedBySourceSystem,
-	})
+	// Run the orchestrator on the session's primary ("Main") thread rather than
+	// spinning up a dedicated tab. The primary thread is created with the
+	// session's AgentType (the orchestrator) and model, so synthesis lands on the
+	// main session thread the user sees first instead of a separate review tab.
+	// The reviewers keep their own read-only tabs; only the final synthesis is
+	// folded back onto the main thread.
+	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
-		return fmt.Errorf("create code review orchestrator thread: %w", err)
+		return fmt.Errorf("load code review session for orchestrator: %w", err)
+	}
+
+	// A sibling reviewer's sandbox-node retry can park the parent session in a
+	// non-claimable 'pending' state. Every reviewer thread is terminal by the
+	// time we dispatch the orchestrator, so reset a stranded 'pending' session
+	// back to idle so the SendMessage below can claim it instead of failing with
+	// ErrSessionNotResumable — which would degrade the review and strand the
+	// session for the reaper to sweep as "unable to start within the expected
+	// time".
+	if session.Status == models.SessionStatusPending {
+		if resetErr := stores.Sessions.UpdateStatus(ctx, job.OrgID, job.SessionID, models.SessionStatusIdle); resetErr != nil {
+			logger.Warn().Err(resetErr).Str("session_id", job.SessionID.String()).Msg("failed to reset stranded code review session before orchestrator dispatch")
+		} else {
+			session.Status = models.SessionStatusIdle
+			logger.Warn().Str("session_id", job.SessionID.String()).Msg("reset stranded pending code review session to idle before orchestrator dispatch")
+		}
+	}
+
+	threadID, err := primaryThreadIDForSession(ctx, stores, session)
+	if err != nil {
+		return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-		ThreadID:          thread.ID.String(),
+		ThreadID:          threadID.String(),
 		PromptArtifactKey: artifactKey,
-		ReadOnly:          true,
+		ReadOnly:          false,
 	})
+	// The orchestrator agent result is created only once the thread is actually
+	// dispatched. A transient claim race leaves no result behind, so the next
+	// run_code_review poll re-enters this function cleanly and retries.
+	if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
+		SessionID:     job.SessionID,
+		OrgID:         job.OrgID,
+		ThreadID:      threadID,
+		Message:       promptText,
+		MessageSource: models.SessionMessageSourceAgentTool,
+	}); err != nil {
+		// Transient: the session was momentarily non-resumable despite the reset
+		// above (e.g. re-parked by a sibling's sandbox-node retry between the
+		// reset and the claim). Don't record a permanent orchestrator failure —
+		// let run_code_review re-poll so synthesis dispatches once the session
+		// settles. The orchestrator runs on the Main thread, so there is no
+		// transient tab to clean up, and no agent result exists yet, so the next
+		// pass re-enters this function cleanly.
+		if errors.Is(err, threadsvc.ErrSessionNotResumable) {
+			logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("code review session was not resumable for orchestrator dispatch; retrying")
+			return codeReviewWaitingForOrchestrator(cfg)
+		}
+		// Permanent failure: record a terminal orchestrator result so the review
+		// can finish in a degraded state instead of looping forever.
+		raw := err.Error()
+		failed := &models.CodeReviewAgentResult{
+			OrgID:         job.OrgID,
+			SessionID:     job.SessionID,
+			AgentProvider: string(cfg.AgentRoster.Orchestrator),
+			AgentModel:    agentModel,
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+			Status:        models.CodeReviewAgentResultStatusFailed,
+			RawOutput:     &raw,
+			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				ThreadID:          threadID.String(),
+				PromptArtifactKey: artifactKey,
+				Error:             raw,
+			}),
+		}
+		if createErr := stores.CodeReviews.CreateAgentResult(ctx, failed); createErr != nil {
+			return fmt.Errorf("create failed code review orchestrator result: %w", createErr)
+		}
+		logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
+		return nil
+	}
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
 		SessionID:        job.SessionID,
 		AgentProvider:    string(cfg.AgentRoster.Orchestrator),
-		AgentModel:       codeReviewDefaultAgentModel(cfg.AgentRoster.Orchestrator),
+		AgentModel:       agentModel,
 		Role:             models.CodeReviewAgentRoleOrchestrator,
-		Status:           models.CodeReviewAgentResultStatusQueued,
+		Status:           models.CodeReviewAgentResultStatusRunning,
 		StructuredResult: structured,
 	}
 	if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
 		return fmt.Errorf("create code review orchestrator result: %w", err)
-	}
-	if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
-		SessionID:     job.SessionID,
-		OrgID:         job.OrgID,
-		ThreadID:      thread.ID,
-		Message:       promptText,
-		MessageSource: models.SessionMessageSourceAgentTool,
-	}); err != nil {
-		raw := err.Error()
-		if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
-			ThreadID:          thread.ID.String(),
-			PromptArtifactKey: artifactKey,
-			Error:             raw,
-		})); updateErr != nil {
-			logger.Warn().Err(updateErr).Str("thread_id", thread.ID.String()).Msg("failed to record failed code review orchestrator result")
-		}
-		logger.Warn().Err(err).Str("thread_id", thread.ID.String()).Msg("failed to start code review orchestrator thread")
-		return nil
-	}
-	if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusRunning, nil, structured); err != nil {
-		return fmt.Errorf("mark code review orchestrator running: %w", err)
 	}
 	return nil
 }
@@ -1450,25 +1527,17 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			continue
 		}
 		if codeReviewThreadReadOnlyViolation(thread) {
-			raw := "orchestrator thread was configured read-only but produced workspace changes"
-			state.Error = raw
 			state.ReadOnly = true
 			state.ReadOnlyViolation = true
 			if reverted := revertCodeReviewReadOnlyThread(ctx, stores, services, logger, job, thread); reverted {
 				state.Reverted = true
 			}
-			if err := createCodeReviewReadOnlyViolationFinding(ctx, stores.CodeReviews, job, result.ID, thread); err != nil {
-				return err
-			}
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
-			if err != nil {
-				return err
-			}
-			state.RawArtifactKey = rawArtifactKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark orchestrator read-only violation failed: %w", err)
-			}
-			continue
+			logger.Warn().
+				Str("session_id", job.SessionID.String()).
+				Str("thread_id", thread.ID.String()).
+				Str("orchestrator", result.AgentProvider).
+				Bool("reverted", state.Reverted).
+				Msg("code review orchestrator thread produced workspace changes; ignoring for review validity")
 		}
 		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
@@ -1560,7 +1629,7 @@ type liveCodeReviewOutcomeInput struct {
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
-	reviewerQuorum, reviewerFailures := codeReviewReviewerEvidence(input.AgentResults)
+	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
@@ -1579,7 +1648,6 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ChecksPassing:          codeReviewChecksPassing(policy, input.Health),
 		RequiredChecksPassing:  codeReviewRequiredChecksPassing(policy, input.Health),
 		DescriptionPassed:      descriptionPassed,
-		Mergeable:              codeReviewMergeable(input.Health),
 		UpToDate:               codeReviewUpToDate(input.Health),
 		Author:                 codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:            codeReviewAuthorClass(input.PullRequest),
@@ -1587,14 +1655,13 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ContextFetchFailed:     input.Health == nil || !input.ChangedFilesAvailable || reviewContextFetchFailed,
 		HeadSHAChanged:         codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
 		BlockingFindings:       blockingFindings,
-		ReviewerDisagreement:   reviewerFailures > 0 || input.OrchestratorSynthesis.ReviewerDisagreement,
+		ReviewerDisagreement:   input.OrchestratorSynthesis.ReviewerDisagreement,
 		UnresolvedHumanThreads: unresolvedHumanThreads,
-		ReviewCostCents:        codeReviewAgentResultCostCents(input.AgentResults),
 		ScopeMismatch:          input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum {
+	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles) {
 		risk.Acceptable = false
 		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, policy.AgentRoster.RequireReviewerQuorum))
 	}
@@ -1607,12 +1674,10 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		PolicyVersion:             input.Job.PolicyVersion,
 		HeadSHA:                   input.Job.HeadSHA,
 		Summary:                   codeReviewOutcomeSummary(decision, input.OrchestratorSynthesis),
-		Template:                  policy.FinalReviewTemplate,
 		DescriptionPassed:         &descriptionPassed,
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
 		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasons, input.ChangedFiles),
-		Checklist:                 codeReviewApprovalChecklist(policy, input, descriptionPassed),
 	})
 	return decision, body
 }
@@ -1879,25 +1944,6 @@ func codeReviewReviewerEvidence(results []models.CodeReviewAgentResult) (quorum 
 	return quorum, failures
 }
 
-func codeReviewAgentResultCostCents(results []models.CodeReviewAgentResult) float64 {
-	total := 0.0
-	for _, result := range results {
-		switch result.Role {
-		case models.CodeReviewAgentRoleReviewer:
-			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
-			if ok {
-				total += state.CostCents
-			}
-		case models.CodeReviewAgentRoleOrchestrator:
-			state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
-			if ok {
-				total += state.CostCents
-			}
-		}
-	}
-	return total
-}
-
 func codeReviewBlockingFindings(findings []models.CodeReviewFinding) int {
 	count := 0
 	for _, finding := range findings {
@@ -1946,12 +1992,12 @@ func codeReviewChangedCategories(files []codereviewsvc.PullRequestFile) []string
 func codeReviewPathCategories(path string) []string {
 	normalized := strings.ToLower(strings.TrimSpace(path))
 	categories := make([]string, 0, 2)
-	if strings.HasPrefix(normalized, "docs/") ||
-		strings.HasSuffix(normalized, ".md") ||
-		strings.HasSuffix(normalized, ".mdx") ||
-		strings.HasSuffix(normalized, ".rst") ||
-		strings.HasSuffix(normalized, ".adoc") {
-		categories = append(categories, "docs")
+	if codeReviewDocsPath(normalized) {
+		// Documentation is prose, not code. Returning only "docs" keeps the
+		// substring-based code-risk heuristics below (auth/crypto/permissions/
+		// etc.) from misclassifying a doc whose filename merely contains a
+		// sensitive word, e.g. "111-session-changesets.md" reading as "auth".
+		return []string{"docs"}
 	}
 	if strings.Contains(normalized, "/test/") ||
 		strings.Contains(normalized, "/tests/") ||
@@ -2005,6 +2051,15 @@ func codeReviewPathCategories(path string) []string {
 		categories = append(categories, "infra")
 	}
 	return categories
+}
+
+func codeReviewDocsPath(normalized string) bool {
+	normalized = strings.ToLower(strings.TrimSpace(normalized))
+	return strings.HasPrefix(normalized, "docs/") ||
+		strings.HasSuffix(normalized, ".md") ||
+		strings.HasSuffix(normalized, ".mdx") ||
+		strings.HasSuffix(normalized, ".rst") ||
+		strings.HasSuffix(normalized, ".adoc")
 }
 
 func codeReviewDescriptionPassed(policy models.CodeReviewPolicyConfig, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile) bool {
@@ -2210,7 +2265,31 @@ func codeReviewChecksPassing(policy models.CodeReviewPolicyConfig, health *model
 	if health == nil {
 		return false
 	}
-	return codeReviewAllChecksPassing(health.ChecksConfirmed, health.Checks)
+	return codeReviewAllChecksPassing(health.ChecksConfirmed, codeReviewExternalChecks(health.Checks))
+}
+
+// codeReviewExternalChecks drops 143's own non-CI status contexts before the
+// checks-passing gate is evaluated. The code reviewer publishes its own
+// "143 Code Reviewer" commit status (and the preview integration publishes
+// "preview/143"); both are pending by construction while the review runs, so
+// counting them would make the reviewer block its own approval.
+func codeReviewExternalChecks(checks []models.PullRequestCheckSummary) []models.PullRequestCheckSummary {
+	filtered := make([]models.PullRequestCheckSummary, 0, len(checks))
+	for _, check := range checks {
+		if codeReviewSelfReportedCheck(check.Name) {
+			continue
+		}
+		filtered = append(filtered, check)
+	}
+	return filtered
+}
+
+func codeReviewSelfReportedCheck(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	if normalized == "" {
+		return false
+	}
+	return strings.Contains(normalized, "143 code reviewer") || strings.HasPrefix(normalized, "preview/143")
 }
 
 func codeReviewRequiredChecksPassing(policy models.CodeReviewPolicyConfig, health *models.PullRequestHealthResponse) map[string]bool {
@@ -2243,10 +2322,6 @@ func codeReviewAllChecksPassing(confirmed bool, checks []models.PullRequestCheck
 		}
 	}
 	return true
-}
-
-func codeReviewMergeable(health *models.PullRequestHealthResponse) bool {
-	return health != nil && health.Status == models.PullRequestStatusOpen && health.CanMerge && health.MergeState == models.PullRequestMergeStateClean && !health.HasConflicts
 }
 
 func codeReviewUpToDate(health *models.PullRequestHealthResponse) bool {
@@ -2609,31 +2684,6 @@ func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codere
 		}
 	}
 	return out
-}
-
-func codeReviewApprovalChecklist(policy models.CodeReviewPolicyConfig, input liveCodeReviewOutcomeInput, descriptionPassed bool) []string {
-	checklist := []string{
-		fmt.Sprintf("Changed files: %d/%d", len(input.ChangedFiles), policy.RiskPolicy.MaxFilesChanged),
-		fmt.Sprintf("Changed lines: %d/%d", codeReviewLinesChanged(input.ChangedFiles), policy.RiskPolicy.MaxLinesChanged),
-	}
-	if policy.RiskPolicy.RequirePassingChecks {
-		if codeReviewChecksPassing(policy, input.Health) {
-			checklist = append(checklist, "Required checks: passing")
-		} else {
-			checklist = append(checklist, "Required checks: not passing")
-		}
-	}
-	if descriptionPassed {
-		checklist = append(checklist, "PR description: passed")
-	} else {
-		checklist = append(checklist, "PR description: failed")
-	}
-	if codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health) {
-		checklist = append(checklist, "Reviewed head: stale")
-	} else {
-		checklist = append(checklist, "Reviewed head: current")
-	}
-	return checklist
 }
 
 func ensureCodeReviewOrchestratorResult(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, decision models.CodeReviewDecisionEvaluation, raw string) error {

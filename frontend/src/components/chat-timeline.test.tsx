@@ -100,6 +100,23 @@ describe("ChatTimeline", () => {
     expect(screen.getByText("Assistant replied")).toBeInTheDocument();
   });
 
+  it("labels system-authored repair prompts", () => {
+    const entries: TimelineEntry[] = [
+      {
+        kind: "message",
+        data: makeMessage({
+          id: 1,
+          content: "Please fix these tests and push changes to the pull request branch.",
+          role: "user",
+          source: "system_auto_repair",
+        }),
+      },
+    ];
+    render(<ChatTimeline entries={entries} isRunning={false} />);
+    expect(screen.getByText("143 auto-repair")).toBeInTheDocument();
+    expect(screen.getByText("Please fix these tests and push changes to the pull request branch.")).toBeInTheDocument();
+  });
+
   it("anchors grouped hidden logs by the first hidden transcript entry", () => {
     const entries: TimelineEntry[] = [
       {
@@ -349,6 +366,25 @@ describe("ChatTimeline", () => {
     render(<ChatTimeline entries={[]} isRunning={true} stoppingLabel="Stopping agent..." />);
     expect(screen.getByText("Stopping agent...")).toBeInTheDocument();
     expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
+  it("shows recovery indicator instead of working indicator while resuming after an interruption", () => {
+    render(<ChatTimeline entries={[]} isRunning={true} recoveryActive={true} />);
+    expect(screen.getByText("Resuming after maintenance...")).toBeInTheDocument();
+    expect(screen.queryByText("Agent is working...")).not.toBeInTheDocument();
+  });
+
+  it("prefers the stopping indicator over the recovery indicator when both apply", () => {
+    render(
+      <ChatTimeline entries={[]} isRunning={true} recoveryActive={true} stoppingLabel="Stopping agent..." />,
+    );
+    expect(screen.getByText("Stopping agent...")).toBeInTheDocument();
+    expect(screen.queryByText("Resuming after maintenance...")).not.toBeInTheDocument();
+  });
+
+  it("does not show recovery indicator when not running", () => {
+    render(<ChatTimeline entries={[]} isRunning={false} recoveryActive={true} />);
+    expect(screen.queryByText("Resuming after maintenance...")).not.toBeInTheDocument();
   });
 
   it("does not show working indicator when not running", () => {

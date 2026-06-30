@@ -1,8 +1,28 @@
-import { describe, it, expect } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor } from "@/test/test-utils";
+import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
+
+const toast = vi.hoisted(() => ({
+  success: vi.fn(),
+  info: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock("@/lib/notify", () => ({ notify: toast }));
+
 import CodeReviewsPage from "./page";
+
+// jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
+// is a no-op in tests (the list refreshes via React Query as usual). Mirrors
+// the eval batch page test.
+vi.mock("@/lib/use-resource-sse", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/use-resource-sse")>("@/lib/use-resource-sse");
+  return {
+    ...actual,
+    useResourceSSE: () => ({ healthy: true }),
+  };
+});
 import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
@@ -59,7 +79,8 @@ const policy: CodeReviewResolvedPolicy = {
       allowed_path_patterns: ["internal/**"],
       blocked_path_patterns: ["migrations/**"],
       exclude_categories: ["auth", "billing"],
-      require_mergeable: true,
+      required_checks: ["lint", "test"],
+      eligible_authors: ["anya"],
       require_up_to_date: false,
       allow_forks: false,
       allow_policy_changes: false,
@@ -67,10 +88,11 @@ const policy: CodeReviewResolvedPolicy = {
     agent_roster: {
       reviewers: ["codex", "claude_code"],
       orchestrator: "claude_code",
+      reviewer_models: ["gpt-5.4", "claude-sonnet-4-6"],
+      orchestrator_model: "claude-sonnet-4-6",
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
-      max_cost_cents: 500,
     },
     inline_comment_limit: 4,
     inheritance: {
@@ -188,7 +210,10 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   },
 };
 
-function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady) {
+function mockCodeReviewBaseHandlers(
+  trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady,
+  onPolicyUpdate?: (config: CodeReviewPolicyConfig) => void,
+) {
   // Autosave issues whole-config PUTs and refetches on settle, so the GET must
   // reflect the last saved config for optimistic values to stick across the
   // invalidation round-trip.
@@ -204,6 +229,7 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     http.put("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig };
       currentConfig = body.config;
+      onPolicyUpdate?.(body.config);
       return HttpResponse.json({
         data: {
           ...currentConfig,
@@ -217,9 +243,18 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     }),
     http.get("/api/v1/code-review-github-trigger", () => HttpResponse.json({ data: trigger } satisfies SingleResponse<CodeReviewGitHubTriggerResponse>)),
   );
+  return {
+    getCurrentConfig: () => currentConfig,
+  };
 }
 
 describe("CodeReviewsPage", () => {
+  beforeEach(() => {
+    toast.success.mockReset();
+    toast.info.mockReset();
+    toast.error.mockReset();
+  });
+
   it("renders review sessions and policy configuration", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
@@ -238,40 +273,229 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
-    // Essentials and the GitHub trigger are visible without expanding anything.
+    // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
+    expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
+    expect(screen.getByText("Uses organization default")).toBeInTheDocument();
+    expect(screen.getByText("Current behavior")).toBeInTheDocument();
+    expect(screen.getByText("Comment-only reviews")).toBeInTheDocument();
+    expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
+    expect(screen.getByText("2 reviewers")).toBeInTheDocument();
+    expect(screen.getByText("quorum 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Comment only/i })).toBeInTheDocument();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Set up GitHub reviewer/i })).not.toBeInTheDocument();
 
     // Fine-tuning groups are collapsed by default; expand the ones we assert on.
     await user.click(screen.getByRole("button", { name: /Paths, authors & checks/i }));
-    expect(await screen.findByDisplayValue("*auth*")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("internal/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("migrations/**")).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/auth\s+billing/)).toBeInTheDocument();
+    expect(await screen.findByText("*auth*")).toBeInTheDocument();
+    expect(screen.getByText("internal/**")).toBeInTheDocument();
+    expect(screen.getByText("migrations/**")).toBeInTheDocument();
+    expect(screen.getByText("billing")).toBeInTheDocument();
+    expect(screen.getByText("lint")).toBeInTheDocument();
+    expect(screen.getByText("anya")).toBeInTheDocument();
+    expect(screen.getAllByText("1 item").length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Quality gates/i }));
     expect(await screen.findByText("Enforce sensitive paths")).toBeInTheDocument();
     expect(screen.getByText("Allow policy changes")).toBeInTheDocument();
     expect(screen.getByText("Block reviewer disagreement")).toBeInTheDocument();
+    await user.hover(screen.getByRole("button", { name: /About Require passing checks/i }));
+    expect(
+      (await screen.findAllByText(/Blocks approval until the PR's required GitHub checks are passing/i)).length,
+    ).toBeGreaterThan(0);
 
     await user.click(screen.getByRole("button", { name: /Description requirements/i }));
-    expect(await screen.findByDisplayValue("Understandable description")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: /testing applicability/i })).toBeInTheDocument();
+    expect(await screen.findByText("Understandable description")).toBeInTheDocument();
+    expect(screen.getByText("Every PR")).toBeInTheDocument();
+    expect(screen.getByText("Nontrivial: 2+ files or 31+ lines")).toBeInTheDocument();
 
     // Review depth was removed entirely.
     expect(screen.queryByRole("combobox", { name: /Review depth/i })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    expect(await screen.findByRole("combobox", { name: "Reviewer 1 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Reviewer 2 model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Orchestrator model" })).toBeInTheDocument();
 
     // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
     await user.click(await screen.findByRole("option", { name: "Small backend change" }));
     await user.click(screen.getByRole("button", { name: /Apply template/i }));
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalledWith("Applied Small backend change");
+    });
     await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
     expect((await screen.findAllByDisplayValue("4")).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Timeout value")).toHaveValue(30);
+    expect(screen.getByRole("combobox", { name: "Timeout unit" })).toHaveTextContent("Minutes");
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("edits description requirements in a focused side sheet", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Description requirements/i }));
+    await user.click(await screen.findByRole("button", { name: "Edit Testing evidence" }));
+
+    const sheet = await screen.findByRole("dialog", { name: "Edit description requirement" });
+    expect(sheet).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Testing evidence")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Requirement applicability" })).toHaveTextContent("Nontrivial");
+    expect(screen.getByText("Files changed at least")).toBeInTheDocument();
+    expect(screen.getByText("Lines changed at least")).toBeInTheDocument();
+    expect(screen.queryByText("Categories")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Requirement applicability" }));
+    await user.click(await screen.findByRole("option", { name: "Paths" }));
+
+    expect(await screen.findByText("Path patterns")).toBeInTheDocument();
+    expect(screen.queryByText("Files changed at least")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Close" }));
+    expect(await screen.findByText("Paths: no paths set")).toBeInTheDocument();
+  });
+
+  it("saves outcome choices to the existing policy fields", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+
+    await user.click(await screen.findByRole("button", { name: /^Comment only/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(true);
+    });
+    expect(state.getCurrentConfig().approval_mode).toBe("comment_only");
+
+    await user.click(screen.getByRole("button", { name: /^Disabled/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(false);
+    });
+
+    await user.click(screen.getByRole("button", { name: /^Approve acceptable PRs/i }));
+    await waitFor(() => {
+      expect(state.getCurrentConfig().enabled).toBe(true);
+    });
+    expect(state.getCurrentConfig().approval_mode).toBe("approve_acceptable");
+  });
+
+  it("edits paths, authors, and checks as compact autosaved lists", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    const sensitivePathsInput = await screen.findByRole("textbox", { name: "Sensitive paths" });
+    await user.type(sensitivePathsInput, " src/payments/** {enter}");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/payments/**")).toBeInTheDocument();
+
+    await user.click(sensitivePathsInput);
+    await user.paste("src/admin/**\nsrc/reports/**\nsrc/admin/**");
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["*auth*", "src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText("src/admin/**")).toBeInTheDocument();
+    expect(screen.getByText("src/reports/**")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Remove *auth*" }));
+
+    await waitFor(() => {
+      expect(policyUpdates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          risk_policy: expect.objectContaining({
+            sensitive_paths: ["src/payments/**", "src/admin/**", "src/reports/**"],
+          }),
+        }),
+      );
+    });
+    expect(screen.queryByText("*auth*")).not.toBeInTheDocument();
+
+    const requiredChecksEditor = screen.getByText("Required checks").closest("section");
+    expect(requiredChecksEditor).not.toBeNull();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("2 items")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("lint")).toBeInTheDocument();
+    expect(within(requiredChecksEditor as HTMLElement).getByText("test")).toBeInTheDocument();
+
+    // Add-button labels are singularized correctly, including "categories" -> "category".
+    expect(screen.getByRole("button", { name: "Add excluded category" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add required check" })).toBeInTheDocument();
+  });
+
+  it("surfaces template apply save failures through the shared toast", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.put("/api/v1/code-review-policies", () =>
+        HttpResponse.json(
+          { error: { code: "SAVE_FAILED", message: "Policy could not be saved" } },
+          { status: 500 },
+        ),
+      ),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("combobox", { name: /Starter template/i }));
+    await user.click(await screen.findByRole("option", { name: "Small backend change" }));
+    await user.click(screen.getByRole("button", { name: /Apply template/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Couldn't save. Your change was reverted.");
+    });
+  });
+
+  it("saves code review timeout in seconds from the selected unit", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: /Approval criteria/i }));
+
+    expect(await screen.findByLabelText("Timeout value")).toHaveValue(30);
+    await user.click(screen.getByRole("combobox", { name: "Timeout unit" }));
+    await user.click(await screen.findByRole("option", { name: "Hours" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.timeout_seconds).toBe(30 * 60 * 60);
+    });
   });
 
   it("renders GitHub trigger account-required state", async () => {
@@ -292,10 +516,42 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
     expect(await screen.findByText("Needs GitHub account")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Connect GitHub/i })).toBeInTheDocument();
+  });
+
+  it("explains why GitHub reviewer setup is disabled", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers({
+      status: "auth_required",
+      repository_id: "repo-1",
+      repository_full_name: "acme/api",
+      github_org: "acme",
+      team_slug: "143-code-reviewer",
+      team_name: "143 Code Reviewer",
+      team_reviewer: "@acme/143-code-reviewer",
+      repo_permission: "pull",
+      message: "Connect your GitHub account before creating the reviewer team.",
+    });
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+
+    const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
+    expect(setupButton).toBeDisabled();
+
+    await user.hover(setupButton);
+
+    expect(
+      await screen.findByRole("tooltip", {
+        name: "Connect your GitHub account first so 143 can set up the GitHub reviewer menu option.",
+      }),
+    ).toBeInTheDocument();
   });
 
   it("surfaces GitHub trigger setup permission errors", async () => {
@@ -325,8 +581,8 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("tab", { name: /Configurations/i }));
-    await user.click(await screen.findByRole("button", { name: /Create \/ repair team/i }));
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(await screen.findByRole("button", { name: /Set up GitHub reviewer/i }));
 
     await waitFor(() => {
       expect(setupCalls).toBe(1);

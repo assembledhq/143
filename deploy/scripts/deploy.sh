@@ -860,6 +860,7 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment DEPLOY_REQUESTED_BY "${DEPLOY_REQUESTED_BY:-deploy-script}")" \
   "$(remote_env_assignment DEPLOY_REASON "${DEPLOY_REASON:-routine worker rollout}")" \
   "$(remote_env_assignment FORCE_DEPLOY_WITH_ACTIVE_SESSIONS "${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}")" \
+  "$(remote_env_assignment FORCE_INTERRUPT_ACTIVE_RUNTIMES "${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}")" \
   "$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")" \
   "$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")" \
   "$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")" \

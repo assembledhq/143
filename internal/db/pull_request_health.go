@@ -20,7 +20,8 @@ const (
 	prHealthSnapshotSelectColumns = `pull_request_id, org_id, version, head_sha, base_sha, summary_json,
 		conflict_payload, failing_tests_payload, payload_size_bytes, enrichment_status, enriched_at, created_at`
 	prRepairRunSelectColumns = `id, org_id, pull_request_id, session_id, thread_id, action_type, health_version,
-		workspace_mode, active, obsoleted_by_version, created_at, updated_at,
+		workspace_mode, auto_attempt, trigger_reason, triggered_by_source, triggered_by_user_id,
+		active, obsoleted_by_version, created_at, updated_at,
 		COALESCE(head_sha, '') AS head_sha, COALESCE(base_sha, '') AS base_sha`
 )
 
@@ -393,17 +394,64 @@ func (s *PullRequestStore) ListActiveRepairRunsByHead(ctx context.Context, orgID
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
 }
 
+func (s *PullRequestStore) CountAutoRepairAttemptsByHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, action models.PullRequestRepairActionType) (int, error) {
+	query := `
+		SELECT count(*)
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND head_sha = @head_sha
+		  AND action_type = @action_type
+		  AND auto_attempt = true`
+	var count int
+	if err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"head_sha":        headSHA,
+		"action_type":     action,
+	}).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count automatic pull request repair attempts by head: %w", err)
+	}
+	return count, nil
+}
+
+func (s *PullRequestStore) GetAutoRepairRunByThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.PullRequestRepairRun, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+prRepairRunSelectColumns+`
+		FROM pull_request_repair_runs
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND thread_id = @thread_id
+		  AND auto_attempt = true
+		ORDER BY created_at DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"thread_id":  threadID,
+	})
+	if err != nil {
+		return models.PullRequestRepairRun{}, fmt.Errorf("query automatic pull request repair run by thread: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequestRepairRun])
+}
+
 func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.PullRequestRepairRun) error {
 	if run.WorkspaceMode == "" {
 		run.WorkspaceMode = models.PullRequestRepairWorkspaceModeSnapshotContinuation
 	}
+	if run.TriggeredBySource == "" {
+		run.TriggeredBySource = models.PullRequestRepairTriggeredBySourceManual
+	}
+	if err := run.TriggeredBySource.Validate(); err != nil {
+		return err
+	}
 	query := `
 		INSERT INTO pull_request_repair_runs (
 			org_id, pull_request_id, session_id, thread_id, action_type, health_version, workspace_mode, active, obsoleted_by_version,
-			head_sha, base_sha
+			head_sha, base_sha, auto_attempt, trigger_reason, triggered_by_source, triggered_by_user_id
 		) VALUES (
 			@org_id, @pull_request_id, @session_id, @thread_id, @action_type, @health_version, @workspace_mode, @active, @obsoleted_by_version,
-			@head_sha, @base_sha
+			@head_sha, @base_sha, @auto_attempt, @trigger_reason, @triggered_by_source, @triggered_by_user_id
 		)
 		RETURNING id, created_at, updated_at`
 
@@ -419,6 +467,10 @@ func (s *PullRequestStore) CreateRepairRun(ctx context.Context, run *models.Pull
 		"obsoleted_by_version": run.ObsoletedByVersion,
 		"head_sha":             run.HeadSHA,
 		"base_sha":             run.BaseSHA,
+		"auto_attempt":         run.AutoAttempt,
+		"trigger_reason":       run.TriggerReason,
+		"triggered_by_source":  run.TriggeredBySource,
+		"triggered_by_user_id": run.TriggeredByUserID,
 	}).Scan(&run.ID, &run.CreatedAt, &run.UpdatedAt)
 }
 

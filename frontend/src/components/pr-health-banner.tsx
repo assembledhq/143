@@ -57,6 +57,8 @@ type PRHealthBannerProps = {
   onQueueMergeWhenReady?: () => void;
   onCancelMergeWhenReady?: () => void;
   onOpenRepairSession?: (sessionId: string, threadId?: string) => void;
+  onStopAutoRepair?: (sessionId: string, threadId?: string) => void;
+  stopAutoRepairPending?: boolean;
   pushChanges?: PushChangesAction;
   reviewAction?: ReviewPRAction;
 };
@@ -77,6 +79,8 @@ export function PRHealthBanner({
   onQueueMergeWhenReady,
   onCancelMergeWhenReady,
   onOpenRepairSession,
+  onStopAutoRepair,
+  stopAutoRepairPending = false,
   pushChanges,
   reviewAction,
 }: PRHealthBannerProps) {
@@ -89,6 +93,8 @@ export function PRHealthBanner({
     .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
   const canShowResolveConflictsButton = !prHealthBlocked && health.can_resolve_conflicts && !activeRepairState.suppressResolveConflicts;
   const canShowFixTestsButton = !prHealthBlocked && hasRepairableFailedChecks({ ...health, checks: orderedChecks }) && !activeRepairState.suppressFixTests;
+  const resolveConflictsAutoExhausted = health.auto_repair_exhausted_actions?.includes("resolve_conflicts") ?? false;
+  const fixTestsAutoExhausted = health.auto_repair_exhausted_actions?.includes("fix_tests") ?? false;
   const mergeAction = deriveMergeActionState({
     health: { ...health, checks: orderedChecks },
     hasActiveRepair: activeRepairState.suppressMerge,
@@ -246,6 +252,17 @@ export function PRHealthBanner({
                         Open repair session
                       </Button>
                     )}
+                    {activeRepairState.isAutoRepair && activeRepairState.repairSessionID && onStopAutoRepair && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={stopAutoRepairPending}
+                        onClick={() => onStopAutoRepair(activeRepairState.repairSessionID!, activeRepairState.openThreadID ?? undefined)}
+                      >
+                        {stopAutoRepairPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                        Stop auto-repair for this PR
+                      </Button>
+                    )}
                   </div>
                 )}
                 <div className="flex flex-wrap gap-2">
@@ -316,7 +333,7 @@ export function PRHealthBanner({
                           ) : (
                             <Wrench className="mr-1.5 h-3.5 w-3.5" />
                           )}
-                          {pendingAction === "resolve_conflicts" ? "Opening repair session…" : "Resolve conflicts"}
+                          {pendingAction === "resolve_conflicts" ? "Opening repair session…" : resolveConflictsAutoExhausted ? "Resolve conflicts again" : "Resolve conflicts"}
                         </Button>
                         {onResolveConflictsWithoutPushing && (
                           <DropdownMenu>
@@ -359,7 +376,7 @@ export function PRHealthBanner({
                           ) : (
                             <Wrench className="mr-1.5 h-3.5 w-3.5" />
                           )}
-                          {pendingAction === "fix_tests" ? "Opening repair session…" : "Fix tests"}
+                          {pendingAction === "fix_tests" ? "Opening repair session…" : fixTestsAutoExhausted ? "Fix tests again" : "Fix tests"}
                         </Button>
                         {onFixTestsWithoutPushing && (
                           <DropdownMenu>
@@ -490,6 +507,8 @@ function deriveActiveRepairState(
   label: string | null;
   openSessionID: string | null;
   openThreadID: string | null;
+  repairSessionID: string | null;
+  isAutoRepair: boolean;
   suppressFixTests: boolean;
   suppressResolveConflicts: boolean;
   suppressMerge: boolean;
@@ -506,11 +525,17 @@ function deriveActiveRepairState(
   return {
     label: dominantRepair
       ? dominantRepair.action_type === "resolve_conflicts"
-        ? "Resolve conflicts running"
-        : "Fix tests running"
+        ? dominantRepair.auto_attempt
+          ? "Resolving conflicts automatically..."
+          : "Resolve conflicts running"
+        : dominantRepair.auto_attempt
+          ? "Fixing tests automatically..."
+          : "Fix tests running"
       : null,
     openSessionID: dominantRepair && repairIsInDifferentView ? dominantRepair.session_id : null,
     openThreadID: dominantRepair?.thread_id ?? null,
+    repairSessionID: dominantRepair?.session_id ?? null,
+    isAutoRepair: dominantRepair?.auto_attempt ?? false,
     suppressFixTests: !!fixTests || !!resolveConflicts,
     suppressResolveConflicts: !!resolveConflicts,
     suppressMerge: repairs.length > 0,

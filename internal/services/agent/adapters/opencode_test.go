@@ -2,6 +2,9 @@ package adapters
 
 import (
 	"bufio"
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,14 +187,21 @@ func TestParseOpenCodeStreamLine_ErrorAndPermissionEvents(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		line          string
-		expectedError string
+		name              string
+		line              string
+		expectedError     string
+		expectedSessionID string
 	}{
 		{
 			name:          "terminal error sets result error",
 			line:          `{"type":"error","error":"rate limited"}`,
 			expectedError: "rate limited",
+		},
+		{
+			name:              "terminal object error preserves message ref and session",
+			line:              `{"type":"error","sessionID":"ses_opencode","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_123"}}}`,
+			expectedError:     "UnknownError: Unexpected server error. Check server logs for details. (ref: err_123)",
+			expectedSessionID: "ses_opencode",
 		},
 		{
 			name:          "permission event fails fast",
@@ -219,8 +229,191 @@ func TestParseOpenCodeStreamLine_ErrorAndPermissionEvents(t *testing.T) {
 
 			logs := drain(logCh)
 			require.Equal(t, tt.expectedError, result.Error, "OpenCode parser should convert terminal failures into result errors")
+			require.Equal(t, tt.expectedSessionID, result.AgentSessionID, "OpenCode parser should preserve session ids from terminal failures")
 			require.Len(t, logs, 1, "OpenCode parser should emit one log for failures")
 			require.Equal(t, "error", logs[0].Level, "OpenCode parser should log failures at error level")
 		})
 	}
+}
+
+func TestCaptureOpenCodeFailureLogs_RedactsAndEmitsLatestLogs(t *testing.T) {
+	t.Parallel()
+
+	const (
+		newLogPath = "/home/sandbox/.local/share/opencode/log/new.log"
+		oldLogPath = "/home/sandbox/.local/share/opencode/log/old.log"
+	)
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	provider := newMockProvider()
+	provider.Files[newLogPath] = []byte("request failed\nauthorization: Bearer sk-or-v1-secret\napi_key=\"AIzaabcdefghijklmnopqrstuvwxyz\"\n{\"token\":\"plain-json-token-value\",\"OPENROUTER_API_KEY\":\"plain-json-openrouter\"}\nOPENROUTER_API_KEY=plain-env-openrouter\nOPENROUTER_API_KEY=\"plain env key with spaces\"\n")
+	provider.Files[oldLogPath] = []byte("old log")
+	provider.ReadFileFn = func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
+		require.FailNow(t, "OpenCode log capture should use bounded tail commands instead of reading full files")
+		return nil, nil
+	}
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		require.Contains(t, cmd, "/home/sandbox/.local/share/opencode/log", "OpenCode log discovery should inspect the sandbox log directory")
+		if writeMockOpenCodeLogExec(t, cmd, stdout, provider.Files, []string{newLogPath, "/home/sandbox/not-opencode.log", oldLogPath}) {
+			return 0, nil
+		}
+		require.FailNow(t, "OpenCode log capture should only issue discovery, size, and tail commands", "cmd: %s", cmd)
+		return 0, nil
+	}
+
+	logCh := make(chan agent.LogEntry, 4)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	captureOpenCodeFailureLogs(ctx, sandbox, zerolog.Nop(), logCh)
+	close(logCh)
+
+	logs := drain(logCh)
+	require.Len(t, logs, 2, "OpenCode log capture should emit logs only for files under the OpenCode log directory")
+	require.Equal(t, "error", logs[0].Level, "OpenCode diagnostic logs should be emitted at error level for failed runs")
+	require.Contains(t, logs[0].Message, "request failed", "OpenCode diagnostic log should include the captured log content")
+	require.NotContains(t, logs[0].Message, "sk-or-v1-secret", "OpenCode diagnostic log should redact OpenRouter keys")
+	require.NotContains(t, logs[0].Message, "AIzaabcdefghijklmnopqrstuvwxyz", "OpenCode diagnostic log should redact Google API keys")
+	require.NotContains(t, logs[0].Message, "plain-json-token-value", "OpenCode diagnostic log should redact quoted token values")
+	require.NotContains(t, logs[0].Message, "plain-json-openrouter", "OpenCode diagnostic log should redact quoted API key values")
+	require.NotContains(t, logs[0].Message, "plain-env-openrouter", "OpenCode diagnostic log should redact env-style API key values")
+	require.NotContains(t, logs[0].Message, "plain env key with spaces", "OpenCode diagnostic log should redact quoted env-style API key values")
+	require.Contains(t, logs[0].Message, `"token":"[REDACTED]"`, "OpenCode diagnostic log should preserve quoted token keys while redacting values")
+	require.Contains(t, logs[0].Message, `"OPENROUTER_API_KEY":"[REDACTED]"`, "OpenCode diagnostic log should preserve quoted API key names while redacting values")
+	require.Contains(t, logs[0].Message, "OPENROUTER_API_KEY=[REDACTED]", "OpenCode diagnostic log should preserve env-style key names while redacting values")
+	require.Contains(t, logs[0].Message, "OPENROUTER_API_KEY=\"[REDACTED]\"", "OpenCode diagnostic log should preserve quoted env-style key names while redacting values")
+	require.Contains(t, logs[0].Message, "api_key=\"[REDACTED]\"", "OpenCode diagnostic log should preserve key names while redacting values")
+	require.Equal(t, "opencode_log", logs[0].Metadata["source"], "OpenCode diagnostic log should identify its source")
+	require.Equal(t, "opencode_failure_log", logs[0].Metadata["diagnostic"], "OpenCode diagnostic log should identify diagnostic kind")
+	require.Equal(t, newLogPath, logs[0].Metadata["path"], "OpenCode diagnostic log should record the source file path")
+	require.Equal(t, false, logs[0].Metadata["truncated"], "small OpenCode diagnostic logs should not be marked truncated")
+}
+
+func TestOpenCodeAdapter_Execute_CapturesFailureLogs(t *testing.T) {
+	t.Parallel()
+
+	const logPath = "/home/sandbox/.local/share/opencode/log/server.log"
+	sandbox := &agent.Sandbox{
+		ID:      "test",
+		WorkDir: "/workspace",
+		HomeDir: "/home/sandbox",
+		Metadata: map[string]string{
+			agent.SandboxMetadataBaseCommitSHA: "abc123",
+		},
+	}
+	provider := newMockProvider()
+	provider.Files[logPath] = []byte("local OpenCode server stack trace\n")
+	provider.ReadFileFn = func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
+		require.FailNow(t, "OpenCode failure capture should use bounded tail commands instead of reading full files")
+		return nil, nil
+	}
+	provider.ExecStreamFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, onLine func(line []byte), stderr io.Writer) (int, error) {
+		require.Contains(t, cmd, "opencode run", "OpenCode adapter should execute the OpenCode CLI")
+		onLine([]byte(`{"type":"error","sessionID":"ses_opencode","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_123"}}}`))
+		return 1, nil
+	}
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		switch {
+		case writeMockOpenCodeLogExec(t, cmd, stdout, provider.Files, []string{logPath}):
+		case strings.HasPrefix(cmd, "git rev-parse"):
+			_, _ = stdout.Write([]byte("true\n"))
+		case strings.HasPrefix(cmd, "git diff"):
+			_, _ = stdout.Write([]byte(""))
+		}
+		return 0, nil
+	}
+
+	adapter := NewOpenCodeAdapter(zerolog.Nop())
+	logCh := make(chan agent.LogEntry, 16)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	result, err := adapter.Execute(ctx, sandbox, &agent.AgentPrompt{
+		SystemPrompt: "Fix it.",
+		UserPrompt:   "Bug.",
+		MaxTokens:    50_000,
+	}, logCh)
+	require.NoError(t, err, "OpenCode execution should return a result for CLI non-zero exits")
+	require.NotNil(t, result, "OpenCode execution should return the non-zero result")
+	require.Equal(t, 1, result.ExitCode, "OpenCode execution should preserve the CLI exit code")
+	require.Contains(t, result.Error, "opencode CLI exited with code 1", "OpenCode execution should surface the non-zero exit")
+	require.Contains(t, result.Error, "UnknownError: Unexpected server error. Check server logs for details. (ref: err_123)", "OpenCode execution should preserve parsed terminal error details")
+	close(logCh)
+
+	logs := drain(logCh)
+	var capturedLog *agent.LogEntry
+	for i := range logs {
+		if logs[i].Metadata["source"] == "opencode_log" {
+			capturedLog = &logs[i]
+			break
+		}
+	}
+	require.NotNil(t, capturedLog, "OpenCode execution should attach local OpenCode logs after failures")
+	require.Contains(t, capturedLog.Message, "local OpenCode server stack trace", "captured OpenCode log should include local server diagnostics")
+	require.Equal(t, logPath, capturedLog.Metadata["path"], "captured OpenCode log should record the source log file")
+}
+
+func TestCaptureOpenCodeFailureLogs_TruncatesLargeLogs(t *testing.T) {
+	t.Parallel()
+
+	const largeLogPath = "/home/sandbox/.local/share/opencode/log/large.log"
+	sandbox := &agent.Sandbox{ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox"}
+	provider := newMockProvider()
+	provider.Files[largeLogPath] = []byte(strings.Repeat("a", openCodeFailureLogMaxBytes+10) + "tail")
+	provider.ReadFileFn = func(ctx context.Context, sb *agent.Sandbox, path string) ([]byte, error) {
+		require.FailNow(t, "OpenCode log capture should not read oversized log files in full")
+		return nil, nil
+	}
+	provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		if writeMockOpenCodeLogExec(t, cmd, stdout, provider.Files, []string{largeLogPath}) {
+			return 0, nil
+		}
+		require.FailNow(t, "OpenCode log capture should only issue discovery, size, and tail commands", "cmd: %s", cmd)
+		return 0, nil
+	}
+
+	logCh := make(chan agent.LogEntry, 2)
+	ctx := WithSandboxProvider(context.Background(), provider)
+
+	captureOpenCodeFailureLogs(ctx, sandbox, zerolog.Nop(), logCh)
+	close(logCh)
+
+	logs := drain(logCh)
+	require.Len(t, logs, 1, "OpenCode log capture should emit the large log")
+	require.Contains(t, logs[0].Message, "tail", "OpenCode diagnostic log should keep the end of oversized logs")
+	require.Equal(t, true, logs[0].Metadata["truncated"], "oversized OpenCode diagnostic logs should be marked truncated")
+	require.Equal(t, openCodeFailureLogMaxBytes+14, logs[0].Metadata["original_bytes"], "OpenCode diagnostic log should record original byte size")
+}
+
+func writeMockOpenCodeLogExec(t *testing.T, cmd string, stdout io.Writer, files map[string][]byte, listedPaths []string) bool {
+	t.Helper()
+
+	switch {
+	case strings.HasPrefix(cmd, "if [ -d "):
+		_, _ = stdout.Write([]byte(strings.Join(listedPaths, "\n") + "\n"))
+		return true
+	case strings.HasPrefix(cmd, "wc -c < "):
+		path := mockOpenCodeLogPathForCommand(t, cmd, listedPaths)
+		fmt.Fprintf(stdout, "%d\n", len(files[path]))
+		return true
+	case strings.HasPrefix(cmd, "tail -c "):
+		path := mockOpenCodeLogPathForCommand(t, cmd, listedPaths)
+		data := files[path]
+		if len(data) > openCodeFailureLogMaxBytes {
+			data = data[len(data)-openCodeFailureLogMaxBytes:]
+		}
+		_, _ = stdout.Write(data)
+		return true
+	default:
+		return false
+	}
+}
+
+func mockOpenCodeLogPathForCommand(t *testing.T, cmd string, paths []string) string {
+	t.Helper()
+
+	for _, path := range paths {
+		if strings.Contains(cmd, "'"+path+"'") {
+			return path
+		}
+	}
+	require.FailNow(t, "OpenCode log command should target a listed log path", "cmd: %s", cmd)
+	return ""
 }

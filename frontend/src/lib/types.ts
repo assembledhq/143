@@ -129,23 +129,28 @@ export interface CodeReviewPolicyConfig {
     allowed_path_patterns?: string[];
     blocked_path_patterns?: string[];
     exclude_categories?: string[];
-    require_mergeable: boolean;
     require_up_to_date: boolean;
     allow_forks: boolean;
     allow_policy_changes: boolean;
     eligible_authors?: string[];
     required_checks?: string[];
+    low_risk_lane?: {
+      enabled: boolean;
+      categories?: string[];
+      max_lines_changed?: number;
+      waive_reviewer_quorum?: boolean;
+    };
   };
   agent_roster: {
     reviewers: string[];
     orchestrator: string;
+    reviewer_models?: string[];
+    orchestrator_model?: string;
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;
-    max_cost_cents: number;
   };
   inline_comment_limit: number;
-  final_review_template?: string;
   inheritance?: {
     inherit_org_defaults: boolean;
     override_fields?: string[];
@@ -1681,7 +1686,7 @@ export interface SessionMessage {
   references?: SessionInputReference[];
   commands?: SessionInputCommand[];
   token_usage?: Record<string, unknown>;
-  source?: "agent_tool";
+  source?: "agent_tool" | "system_auto_repair";
   created_at: string;
 }
 
@@ -1890,6 +1895,7 @@ export interface PullRequestActiveRepair {
   thread_id?: string;
   session_status: SessionStatus;
   health_version: number;
+  auto_attempt?: boolean;
 }
 
 export interface PullRequestRepairRequest {
@@ -1952,6 +1958,7 @@ export interface PullRequestHealthResponse {
   failing_test_detail_available: boolean;
   obsolete_active_repair_sessions?: boolean;
   merge_when_ready: PullRequestMergeWhenReadyStatus;
+  auto_repair_exhausted_actions?: Array<"fix_tests" | "resolve_conflicts">;
 }
 
 export interface PullRequestRepairResponse {
@@ -1978,6 +1985,14 @@ export interface PullRequestUpdatedEvent {
   head_sha: string;
   base_sha: string;
   synced_at: string;
+}
+
+export interface CodeReviewUpdatedEvent {
+  org_id: string;
+  session_id?: string;
+  status?: CodeReviewSessionStatus;
+  decision?: CodeReviewDecision;
+  updated_at: string;
 }
 
 export interface SessionReviewComment {
@@ -2064,6 +2079,9 @@ export interface OrgSettings {
   auto_archive_on_pr_close?: boolean;
   session_automation?: SessionAutomationSettings;
   coding_agent_tab_tools_enabled?: boolean;
+  opencode_routing?: {
+    require_openrouter?: boolean;
+  };
   sandbox_network?: {
     static_egress_enabled?: boolean;
   };
@@ -2101,6 +2119,21 @@ export interface NetworkSettingsStatus {
   static_egress_enabled: boolean;
   static_egress_public_ip?: string;
   static_egress_unavailable_reason?: string;
+}
+
+// OpenCode logical-model registry served by GET /api/v1/settings/opencode-models.
+// The backend (internal/models/opencode_models.go) is the source of truth for
+// per-model routes, so route data is not hand-synced into the frontend.
+export interface OpenCodeRouteInfo {
+  backing: string;
+  transport_label: string;
+  physical_model_id: string;
+}
+
+export interface OpenCodeModelInfo {
+  id: string;
+  display_name: string;
+  routes: OpenCodeRouteInfo[];
 }
 
 export interface RuntimeSettingsStatus {

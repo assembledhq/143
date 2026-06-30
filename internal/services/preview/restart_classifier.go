@@ -9,6 +9,7 @@ import (
 
 type PreviewRestartClassifier interface {
 	Classify(paths []string) []models.PreviewRestartReason
+	SelectUpdateMode(status models.PreviewStatus, freshness *models.PreviewFreshness, reloadBrowser, hmrCapable bool) models.PreviewUpdateMode
 }
 
 type DefaultPreviewRestartClassifier struct{}
@@ -40,6 +41,45 @@ func (DefaultPreviewRestartClassifier) Classify(paths []string) []models.Preview
 		return nil
 	}
 	return reasons
+}
+
+// SelectUpdateMode chooses the cheapest safe lifecycle path to bring a preview
+// up to date. hmrCapable reports whether the primary service hot-reloads source
+// edits in place; it only influences the out-of-date branch, where an
+// HMR-capable service can serve the latest source after a browser reload rather
+// than paying a service restart. The caller is responsible for ensuring that
+// only non-restart-requiring (source-only) changes reach the out-of-date state;
+// config/lockfile/env changes surface as restart reasons and route to a full
+// recycle before this branch is considered.
+func (DefaultPreviewRestartClassifier) SelectUpdateMode(status models.PreviewStatus, freshness *models.PreviewFreshness, reloadBrowser, hmrCapable bool) models.PreviewUpdateMode {
+	if freshness == nil || freshness.State == models.PreviewFreshnessUnknown {
+		return models.PreviewUpdateModeColdRelaunch
+	}
+	switch status {
+	case models.PreviewStatusStarting:
+		return ""
+	case models.PreviewStatusFailed, models.PreviewStatusStopped, models.PreviewStatusExpired, models.PreviewStatusUnavailable:
+		return models.PreviewUpdateModeColdRelaunch
+	}
+	if freshness.RestartRequired || len(freshness.RestartReasons) > 0 {
+		return models.PreviewUpdateModeFullRecycle
+	}
+	switch freshness.State {
+	case models.PreviewFreshnessCurrent, models.PreviewFreshnessLiveUpdated:
+		if reloadBrowser {
+			return models.PreviewUpdateModeBrowserReload
+		}
+		return models.PreviewUpdateModeNoopCurrent
+	case models.PreviewFreshnessOutOfDate:
+		if hmrCapable {
+			return models.PreviewUpdateModeBrowserReload
+		}
+		return models.PreviewUpdateModeSoftServiceRestart
+	case models.PreviewFreshnessUpdating:
+		return ""
+	default:
+		return models.PreviewUpdateModeColdRelaunch
+	}
 }
 
 func classifyPreviewRestartPath(p string) (models.PreviewRestartReasonKind, string, bool) {

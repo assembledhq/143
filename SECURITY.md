@@ -37,12 +37,16 @@ Out of scope:
 
 Please do **not** open a public GitHub issue for security vulnerabilities.
 
-**Preferred channel:**
+**Preferred open-source channel:**
 
 - Use GitHub's private security advisory reporting flow:
   [`github.com/assembledhq/143/security/advisories/new`](https://github.com/assembledhq/143/security/advisories/new)
 
-**Alternative channel:**
+This is the best path for vulnerabilities in the open-source codebase because
+it keeps the report private while preserving the advisory, patch, credit, and
+release workflow in GitHub.
+
+**Hosted-service fallback:**
 
 - Email [`security@assembled.com`](mailto:security@assembled.com)
 
@@ -157,8 +161,8 @@ release notes, and a SECURITY_ACKNOWLEDGMENTS file after a fix is available.
 
 | Channel | Address |
 |---------|---------|
-| **Security advisories** (preferred) | [`github.com/assembledhq/143/security/advisories/new`](https://github.com/assembledhq/143/security/advisories/new) |
-| **Email** | [`security@assembled.com`](mailto:security@assembled.com) |
+| **Open-source security advisories** (preferred) | [`github.com/assembledhq/143/security/advisories/new`](https://github.com/assembledhq/143/security/advisories/new) |
+| **Hosted-service fallback email** | [`security@assembled.com`](mailto:security@assembled.com) |
 
 For non-security bugs, please open a regular [GitHub issue](https://github.com/assembledhq/143/issues).
 

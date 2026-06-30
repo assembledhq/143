@@ -42,12 +42,16 @@ import (
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	slackbotsvc "github.com/assembledhq/143/internal/services/slackbot"
 	"github.com/assembledhq/143/internal/services/storage"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
 const sandboxCapacityRetryDelay = 10 * time.Second
 const previewCapacityRetryDelay = 5 * time.Second
 const previewStartupInterruptedRetryDelay = 2 * time.Second
 const prePRReviewRetryDelay = 5 * time.Second
+const continuePostSuccessActionPushPRChanges = "push_pr_changes"
+
+var enqueuePRPushChangesJobAfterContinue = enqueuePRPushChangesJob
 
 // prePRReviewMaxWait bounds how long a readiness run will requeue itself waiting
 // for the agent review loop to finish. The wait uses BypassMaxRetryDuration +
@@ -58,6 +62,7 @@ const prePRReviewRetryDelay = 5 * time.Second
 const prePRReviewMaxWait = 30 * time.Minute
 const defaultSessionPrewarmQueuedTimeout = 15 * time.Minute
 const failureCategoryStaleSandbox = "stale_sandbox"
+const failureCategoryInterrupted = "interrupted_unrecovered"
 
 var sandboxCapacityDetailPattern = regexp.MustCompile(`sandbox capacity reached:\s*(\d+)/(\d+)\s+sandboxes active or reserved`)
 
@@ -320,6 +325,102 @@ func registerSandboxCapacityDeadLetter(ctx context.Context, stores *Stores, serv
 	})
 }
 
+// registerSystemInterruptDeadLetter terminalizes a session (and its primary
+// thread) when a turn interrupted by a system stop — a worker drain or rolling
+// deploy — never manages to resume and the requeued job ultimately dead-letters.
+// The interrupt branch returns a RetryableError so the same turn re-runs on
+// another worker; this hook is the deterministic give-up cleanup. Without it the
+// session sits at its pre-turn status with the primary thread still "running"
+// (so the UI keeps showing "Agent is working…") until the reaper sweeps it
+// ~2.5h later — exactly the orphan the reaper's phase-0.5 comment describes.
+func registerSystemInterruptDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, session models.Session, threadID *uuid.UUID, jobType string) {
+	if stores == nil || stores.Sessions == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+
+		errMsg := "Session stopped: it was interrupted by maintenance and could not be resumed before the retry window expired."
+		explanation := "A worker drain or system stop interrupted this run and the requeued attempt never completed — the job dead-lettered, e.g. during a rolling deploy. No further automatic retry will happen."
+		nextSteps := []string{
+			"Retry the session — the interruption was most likely a transient deploy or worker restart",
+			"Check worker logs if sessions repeatedly fail to resume after deploys",
+		}
+		if deadLetterErr != nil {
+			logger.Warn().
+				Err(deadLetterErr).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("session job dead-lettered after a system interruption could not resume")
+		}
+
+		failedSession := session
+		failureCategory := failureCategoryInterrupted
+		failedSession.Status = models.SessionStatusFailed
+		failedSession.Error = &errMsg
+		failedSession.FailureCategory = &failureCategory
+		failedSession.FailureExplanation = &explanation
+		failedSession.FailureNextSteps = nextSteps
+		failedSession.FailureRetryAdvised = true
+
+		result := &models.SessionResult{Error: &errMsg}
+		if err := stores.Sessions.UpdateResult(writeCtx, session.OrgID, session.ID, models.SessionStatusFailed, result); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to mark session failed after system-interrupt dead-letter")
+			return
+		}
+		if err := stores.Sessions.UpdateFailure(writeCtx, session.OrgID, session.ID, explanation, failureCategoryInterrupted, nextSteps, true); err != nil {
+			logger.Error().
+				Err(err).
+				Str("session_id", session.ID.String()).
+				Str("job_type", jobType).
+				Msg("failed to persist system-interrupt failure details")
+		}
+		if threadID != nil && *threadID != uuid.Nil && stores.SessionThreads != nil {
+			threadCategory := failureCategoryInterrupted
+			threadResult := &models.SessionResult{
+				Error:           &errMsg,
+				FailureCategory: &threadCategory,
+			}
+			if err := stores.SessionThreads.UpdateResult(writeCtx, session.OrgID, *threadID, models.ThreadStatusFailed, threadResult); err != nil {
+				logger.Error().
+					Err(err).
+					Str("session_id", session.ID.String()).
+					Str("thread_id", threadID.String()).
+					Str("job_type", jobType).
+					Msg("failed to mark session thread failed after system-interrupt dead-letter")
+			}
+		}
+		if services != nil && services.ProjectTasks != nil && failedSession.ProjectTaskID != nil {
+			if err := services.ProjectTasks.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update project task after system-interrupt dead-letter")
+			}
+		}
+		if services != nil && services.AutomationRuns != nil && failedSession.AutomationRunID != nil {
+			if err := services.AutomationRuns.OnSessionComplete(writeCtx, &failedSession, models.SessionStatusFailed); err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", failedSession.ID.String()).
+					Str("job_type", jobType).
+					Msg("failed to update automation run after system-interrupt dead-letter")
+			}
+		}
+		if stores.Jobs != nil {
+			linear.EnqueueMilestone(writeCtx, stores.Jobs, logger, failedSession.OrgID, failedSession.ID, "failed", 0)
+		}
+		enqueueSlackRunUpdateIfLinked(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, "failed", "143 session failed", errMsg, true)
+		enqueueSlackSessionNotifications(writeCtx, stores, logger, failedSession.OrgID, failedSession.ID, failedSession.AutomationRunID, string(models.SlackNotificationSessionFailed), "143 session failed", errMsg)
+	})
+}
+
 // DataRetentionConfig holds retention periods for the data cleanup handler.
 type DataRetentionConfig struct {
 	WebhookDays              int
@@ -570,6 +671,7 @@ type prCreator interface {
 	ReconcilePullRequestState(ctx context.Context, orgID uuid.UUID, limit int) error
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
+	MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
@@ -1831,13 +1933,19 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 		}
 
 		// Carry the run's GoalSnapshot into PMApproach so promptSeedForSession
-		// surfaces it as the synthesized issue's description. Without this the
-		// agent receives an empty "Session task" seed and silently ignores any
-		// conditions or invariants the user wrote in the automation goal.
-		var goalSeed *string
-		if strings.TrimSpace(run.GoalSnapshot) != "" {
-			g := run.GoalSnapshot
-			goalSeed = &g
+		// surfaces it as the synthesized issue's description. Append run
+		// metadata here because automation goals often scope themselves relative
+		// to the previous execution, and the agent cannot derive that timestamp
+		// reliably from the repo alone.
+		goalSeed, err := automationRunPromptSeed(run)
+		if err != nil {
+			now := time.Now()
+			summary := err.Error()
+			if _, updateErr := stores.AutomationRuns.TransitionStatusIf(ctx, orgID, runID, models.AutomationRunStatusRunning, models.AutomationRunStatusFailed, &now, &summary); updateErr != nil {
+				log.Error().Err(updateErr).Msg("failed to mark run failed after automation prompt seed error")
+				return fmt.Errorf("mark run failed after automation prompt seed error: %w", updateErr)
+			}
+			return nil
 		}
 
 		session := &models.Session{
@@ -1852,7 +1960,7 @@ func newAutomationRunHandler(stores *Stores, services *Services, logger zerolog.
 			TargetBranch:       targetBranch,
 			RepositoryID:       repositoryID,
 			AutomationRunID:    &runID,
-			PMApproach:         goalSeed,
+			PMApproach:         &goalSeed,
 			CapabilitySnapshot: run.CapabilitySnapshot,
 		}
 		if err := stores.Sessions.Create(ctx, session); err != nil {
@@ -1928,6 +2036,30 @@ func automationRunRepositoryID(run models.AutomationRun, automation models.Autom
 		return nil, fmt.Errorf("invalid repository_id in automation trigger context: %w", err)
 	}
 	return &parsed, nil
+}
+
+func automationRunPromptSeed(run models.AutomationRun) (string, error) {
+	var snapshot struct {
+		PreviousRunAt *string `json:"previous_run_at"`
+	}
+	if len(run.ConfigSnapshot) > 0 {
+		if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
+			return "", fmt.Errorf("parse automation config snapshot for prompt context: %w", err)
+		}
+	}
+
+	previousRunAt := "none"
+	if snapshot.PreviousRunAt != nil && strings.TrimSpace(*snapshot.PreviousRunAt) != "" {
+		previousRunAt = strings.TrimSpace(*snapshot.PreviousRunAt)
+	}
+
+	context := fmt.Sprintf("Automation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
+		run.TriggeredAt.UTC().Format(time.RFC3339), previousRunAt)
+	goal := strings.TrimSpace(run.GoalSnapshot)
+	if goal == "" {
+		return context, nil
+	}
+	return goal + "\n\n" + context, nil
 }
 
 func automationExecutionUserID(automation models.Automation, identityScope models.AutomationIdentityScope) (*uuid.UUID, error) {
@@ -3652,6 +3784,10 @@ func slackNotificationDefaultTitle(kind models.SlackNotificationKind) string {
 		return "Preview stale"
 	case models.SlackNotificationHumanInputRequested:
 		return "143 needs your response"
+	case models.SlackNotificationPRAutoRepairAttention:
+		return "Automatic PR repair needs attention"
+	case models.SlackNotificationPRReadinessAttention:
+		return "PR readiness needs attention"
 	default:
 		return "143 notification"
 	}
@@ -3679,6 +3815,10 @@ func slackNotificationDefaultBody(kind models.SlackNotificationKind) string {
 		return "The session has newer workspace changes than the active preview."
 	case models.SlackNotificationHumanInputRequested:
 		return "The agent is waiting for a human response."
+	case models.SlackNotificationPRAutoRepairAttention:
+		return "143 could not complete automatic PR repair. Open the session or pull request to decide the next step."
+	case models.SlackNotificationPRReadinessAttention:
+		return "Automatic readiness checks found blockers. Open the session or pull request to decide the next step."
 	default:
 		return ""
 	}
@@ -3691,9 +3831,25 @@ type slackNotificationSubscriptionConfig struct {
 	DMUserIDs    []string `json:"dm_user_ids"`
 }
 
-func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
+// slackNotificationEventDisabled reports whether an event kind has been retired
+// from Slack notifications. Disabled kinds are never delivered regardless of a
+// channel's preset or custom subscription.
+func slackNotificationEventDisabled(eventKind string) bool {
 	switch eventKind {
-	case string(models.SlackNotificationPreviewReady), string(models.SlackNotificationPreviewFailed):
+	case string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationPROpened),
+		string(models.SlackNotificationPreviewReady),
+		string(models.SlackNotificationPreviewFailed),
+		string(models.SlackNotificationPreviewStale),
+		string(models.SlackNotificationPRAutoRepairAttention),
+		string(models.SlackNotificationPRReadinessAttention):
+		return true
+	}
+	return false
+}
+
+func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
+	if slackNotificationEventDisabled(eventKind) {
 		return false
 	}
 	if len(raw) == 0 || string(raw) == "null" {
@@ -3729,11 +3885,9 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 		}
 	case models.SlackNotificationPresetBalanced:
 		return []string{
-			string(models.SlackNotificationSessionCompleted),
 			string(models.SlackNotificationSessionFailed),
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
-			string(models.SlackNotificationPROpened),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetVerbose:
@@ -3804,6 +3958,9 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 	if stores == nil || stores.SlackChannels == nil || stores.Jobs == nil || input.EventKind == "" {
 		return
 	}
+	if slackNotificationEventDisabled(input.EventKind) {
+		return
+	}
 	settings, err := stores.SlackChannels.ListNotificationSubscriptions(ctx, orgID)
 	if err != nil {
 		logger.Warn().Err(err).Str("event_kind", input.EventKind).Msg("failed to list Slack notification subscriptions")
@@ -3868,6 +4025,59 @@ func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, lo
 	}
 }
 
+func notifyPRAutoRepairAttentionIfAutomatic(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, rawPullRequestID, action, reason string, autoAttempt bool) {
+	if !autoAttempt || rawPullRequestID == "" {
+		return
+	}
+	pullRequestID, err := uuid.Parse(rawPullRequestID)
+	if err != nil {
+		logger.Warn().Err(err).Str("pull_request_id", rawPullRequestID).Msg("invalid pull request ID for automatic PR repair notification")
+		return
+	}
+	notifyPRAutoRepairAttention(ctx, stores, logger, orgID, sessionID, &pullRequestID, action, reason)
+}
+
+func notifyPRAutoRepairAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, pullRequestID *uuid.UUID, action, reason string) {
+	body := "143 could not complete automatic PR repair. Open the session or pull request to decide the next step."
+	reason = strings.TrimSpace(reason)
+	if reason != "" {
+		body = "143 could not complete automatic PR repair: " + reason
+	}
+	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+		EventKind:     string(models.SlackNotificationPRAutoRepairAttention),
+		Title:         "Automatic PR repair needs attention",
+		Body:          body,
+		SessionID:     &sessionID,
+		PullRequestID: pullRequestID,
+	})
+}
+
+func notifyPRAutoReadinessAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, status models.PRReadinessRunStatus, summary string) {
+	var pullRequestID *uuid.UUID
+	if stores != nil && stores.PullRequests != nil {
+		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		if err == nil {
+			id := pr.ID
+			pullRequestID = &id
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to load pull request for automatic PR readiness notification")
+		}
+	}
+	body := "Automatic readiness checks need attention."
+	if strings.TrimSpace(summary) != "" {
+		body = summary
+	} else if status == models.PRReadinessRunStatusFailed {
+		body = "Automatic readiness checks failed before producing a result."
+	}
+	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
+		EventKind:     string(models.SlackNotificationPRReadinessAttention),
+		Title:         "PR readiness needs attention",
+		Body:          body,
+		SessionID:     &sessionID,
+		PullRequestID: pullRequestID,
+	})
+}
+
 func parseSlackNotificationSubscriptionConfig(raw json.RawMessage) slackNotificationSubscriptionConfig {
 	var cfg slackNotificationSubscriptionConfig
 	if len(raw) == 0 || string(raw) == "null" {
@@ -3907,13 +4117,17 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		return
 	}
 	automationKind := string(models.SlackNotificationAutomationCompleted)
+	automationTitle := "Automation completed"
+	automationBody := "An automation run completed."
 	if eventKind == string(models.SlackNotificationSessionFailed) {
 		automationKind = string(models.SlackNotificationAutomationFailed)
+		automationTitle = title
+		automationBody = body
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind:       automationKind,
-		Title:           title,
-		Body:            body,
+		Title:           automationTitle,
+		Body:            automationBody,
 		SessionID:       &sessionID,
 		AutomationID:    &run.AutomationID,
 		AutomationRunID: automationRunID,
@@ -4733,12 +4947,10 @@ func slackConfigureChannelModal(input models.SlackInteractionJobPayload, repos [
 				"type":      "checkboxes",
 				"action_id": "selected",
 				"options": []map[string]any{
-					{"text": map[string]string{"type": "plain_text", "text": "Session completed"}, "value": "session.completed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Session failed"}, "value": "session.failed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation completed"}, "value": "automation.run.completed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation failed"}, "value": "automation.run.failed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation failure streak"}, "value": "automation.run.failure_streak"},
-					{"text": map[string]string{"type": "plain_text", "text": "All preview events (ready, failed, stale)"}, "value": "preview.*"},
 				},
 			},
 		}},
@@ -7622,6 +7834,10 @@ func newRunAgentHandler(stores *Stores, services *Services, logger zerolog.Logge
 			}
 			if errors.Is(err, agent.ErrSessionInterrupted) {
 				retryAfter := 2 * time.Second
+				// Deterministically fail the session + thread if this interrupted
+				// turn never resumes and the requeued job dead-letters, instead of
+				// orphaning them at "running" until the reaper.
+				registerSystemInterruptDeadLetter(ctx, stores, services, logger, run, run.PrimaryThreadID, "run_agent")
 				logger.Info().
 					Str("session_id", runID.String()).
 					Err(err).
@@ -8749,21 +8965,27 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID           string `json:"session_id"`
-			OrgID               string `json:"org_id"`
-			ThreadID            string `json:"thread_id"`
-			PullRequestID       string `json:"pull_request_id"`
-			RepairRunID         string `json:"repair_run_id"`
-			CommandType         string `json:"command_type"`
-			HealthVersion       int64  `json:"health_version"`
-			HeadSHA             string `json:"head_sha"`
-			WorkspaceMode       string `json:"workspace_mode"`
-			PullRequestNumber   int    `json:"pull_request_number"`
-			HumanInputRequestID string `json:"human_input_request_id"`
-			QueuedMessageID     string `json:"queued_message_id"`
+			SessionID             string `json:"session_id"`
+			OrgID                 string `json:"org_id"`
+			ThreadID              string `json:"thread_id"`
+			PullRequestID         string `json:"pull_request_id"`
+			RepairRunID           string `json:"repair_run_id"`
+			CommandType           string `json:"command_type"`
+			HealthVersion         int64  `json:"health_version"`
+			HeadSHA               string `json:"head_sha"`
+			WorkspaceMode         string `json:"workspace_mode"`
+			PullRequestNumber     int    `json:"pull_request_number"`
+			AutoAttempt           bool   `json:"auto_attempt"`
+			HumanInputRequestID   string `json:"human_input_request_id"`
+			QueuedMessageID       string `json:"queued_message_id"`
+			PostSuccessAction     string `json:"post_success_action"`
+			PostSuccessAuthorMode string `json:"post_success_author_mode"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
+		}
+		if input.PostSuccessAction != "" && input.PostSuccessAction != continuePostSuccessActionPushPRChanges {
+			return fmt.Errorf("unsupported continue_session post_success_action: %s", input.PostSuccessAction)
 		}
 
 		orgID, err := parseOrgID(input.OrgID, ctx)
@@ -8966,6 +9188,15 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			if errors.Is(err, agent.ErrSessionInterrupted) {
 				retryAfter := 2 * time.Second
+				var interruptThreadID *uuid.UUID
+				if hasThread {
+					threadIDLocal := threadID
+					interruptThreadID = &threadIDLocal
+				}
+				// Deterministically fail the session + thread if this interrupted
+				// turn never resumes and the requeued job dead-letters, instead of
+				// orphaning them at "running" until the reaper.
+				registerSystemInterruptDeadLetter(ctx, stores, services, logger, session, interruptThreadID, "continue_session")
 				logger.Info().
 					Str("session_id", sessionID.String()).
 					Err(err).
@@ -8986,6 +9217,11 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					if syncErr := services.PR.SyncPullRequestState(ctx, orgID, uuid.MustParse(input.PullRequestID)); syncErr != nil {
 						logger.Warn().Err(syncErr).Str("pull_request_id", input.PullRequestID).Msg("failed to sync pull request state after stale repair head")
 					}
+				}
+				notifyPRAutoRepairAttentionIfAutomatic(ctx, stores, logger, orgID, sessionID, input.PullRequestID, input.CommandType, "pull request head changed during automatic repair", input.AutoAttempt)
+				if input.AutoAttempt {
+					metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", input.CommandType, "stale_head")
+					metrics.RecordPRAutoRepairRegret(ctx, orgID.String(), "", input.CommandType, "head_changed_during_repair")
 				}
 				return &FatalError{Err: err}
 			}
@@ -9090,6 +9326,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					reviewCleanupCancel()
 				}
 			}
+			notifyPRAutoRepairAttentionIfAutomatic(ctx, stores, logger, orgID, sessionID, input.PullRequestID, input.CommandType, err.Error(), input.AutoAttempt)
+			if input.AutoAttempt {
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", input.CommandType, "failed")
+				// Automatic repair is best-effort: the named branches above already
+				// requeue the known-transient cases, so an unclassified failure here
+				// is deterministic against this snapshot continuation. Dead-letter
+				// instead of retrying so the attention notification and outcome metric
+				// fire once rather than once per max_attempts retry.
+				return &FatalError{Err: err}
+			}
 			return err
 		}
 
@@ -9152,6 +9398,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
 			}
 		}
+		autoRepairAfterContinue := true
 		if continueOpts != nil && continueOpts.PRRepair != nil && services.PR != nil {
 			if completionErr := services.PR.CompletePullRequestRepairRun(ctx, orgID, continueOpts.PRRepair.PullRequestID, continueOpts.PRRepair.RepairRunID); completionErr != nil {
 				logger.Warn().
@@ -9160,6 +9407,66 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
 					Str("repair_run_id", continueOpts.PRRepair.RepairRunID.String()).
 					Msg("failed to complete pull request repair run after continue_session")
+			}
+			if input.AutoAttempt {
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(continueOpts.PRRepair.CommandType), "completed")
+			}
+			if syncErr := services.PR.SyncPullRequestState(ctx, orgID, continueOpts.PRRepair.PullRequestID); syncErr != nil {
+				if errors.Is(syncErr, ghservice.ErrPullRequestMergeabilityPending) {
+					// The health snapshot was refreshed to the post-repair head;
+					// only GitHub's mergeability flag is still settling. The
+					// blocker signals the follow-through relies on are current,
+					// so proceed rather than stranding the repair chain.
+					logger.Debug().
+						Err(syncErr).
+						Str("session_id", sessionID.String()).
+						Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+						Msg("pull request mergeability still settling after repair; continuing automatic repair follow-through on refreshed health")
+				} else {
+					autoRepairAfterContinue = false
+					logger.Warn().
+						Err(syncErr).
+						Str("session_id", sessionID.String()).
+						Str("pull_request_id", continueOpts.PRRepair.PullRequestID.String()).
+						Msg("skipping automatic pull request repair follow-through until PR health is fresh")
+				}
+			}
+		}
+		if services.PR != nil && autoRepairAfterContinue {
+			if decision, autoRepairErr := services.PR.MaybeStartAutoRepair(ctx, orgID, sessionID, "session_idle"); autoRepairErr != nil {
+				logger.Warn().
+					Err(autoRepairErr).
+					Str("session_id", sessionID.String()).
+					Msg("failed to evaluate automatic pull request repair after continue_session")
+			} else if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
+				event := logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("auto_repair_action", string(decision.Action)).
+					Str("head_sha", decision.HeadSHA)
+				if decision.PullRequestID != nil {
+					event = event.Str("pull_request_id", decision.PullRequestID.String())
+				}
+				event.Msg("started automatic pull request repair after continue_session")
+			} else if decision != nil && decision.Status == ghservice.AutoRepairDecisionBudgetExhausted && input.AutoAttempt {
+				// Only surface "out of budget" right after the automatic repair turn
+				// that consumed it. This block runs after every continue_session, so
+				// without the AutoAttempt gate every later user turn on the same head
+				// would re-notify and re-count the same exhaustion.
+				notifyPRAutoRepairAttention(ctx, stores, logger, orgID, sessionID, decision.PullRequestID, string(decision.Action), decision.Reason)
+				metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", string(decision.Action), "budget_exhausted")
+			}
+		}
+		if input.PostSuccessAction == continuePostSuccessActionPushPRChanges {
+			queued, enqueueErr := enqueuePRPushChangesJobAfterContinue(ctx, stores, logger, orgID, sessionID, input.PostSuccessAuthorMode)
+			if enqueueErr != nil {
+				logger.Warn().
+					Err(enqueueErr).
+					Str("session_id", sessionID.String()).
+					Msg("failed to enqueue push_pr_changes after reconciliation turn")
+			} else if !queued {
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Msg("skipping post-reconciliation push because a PR push is already in flight")
 			}
 		}
 		enqueueSlackHumanInputsIfPending(ctx, stores, logger, orgID, sessionID)
@@ -10135,7 +10442,7 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if readinessRun.Status == models.PRReadinessRunStatusQueued || readinessRun.Status == models.PRReadinessRunStatusRunning {
 		return fmt.Errorf("PR readiness is still running")
 	}
-	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceGeneration || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
+	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
 		return fmt.Errorf("PR readiness is stale for current workspace revision")
 	}
 	if readinessRun.Status == models.PRReadinessRunStatusFailed {
@@ -10310,6 +10617,10 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err := stores.PRReadiness.CompleteRunWithChecks(ctx, orgID, readinessID, completed, result.Checks); err != nil {
 			return err
 		}
+		if run.TriggeredByUserID == nil && (result.Status == models.PRReadinessRunStatusBlocked || result.Status == models.PRReadinessRunStatusFailed) {
+			notifyPRAutoReadinessAttention(ctx, stores, logger, orgID, sessionID, result.Status, result.Summary)
+			metrics.RecordPRAutoRepairOutcome(ctx, orgID.String(), "", "readiness", string(result.Status))
+		}
 		return nil
 	}
 }
@@ -10438,7 +10749,7 @@ func renderCustomReadinessUserPrompt(check models.PRReadinessCustomCheck, sessio
 		"CheckName":         check.Name,
 		"ChangedFiles":      limitStrings(changedFiles, 100),
 		"DiffStats":         string(session.DiffStats),
-		"WorkspaceRevision": session.WorkspaceGeneration,
+		"WorkspaceRevision": session.WorkspaceRevision,
 		"Logs":              boundedReadinessLogs(logs, 20, 4000),
 	}
 	tmpl, err := template.New("custom_readiness_prompt").Parse(check.Prompt)
@@ -10816,6 +11127,8 @@ func userFacingPRError(err error) string {
 		return ghservice.PushRejectedPRMessage
 	case errors.Is(err, ghservice.ErrPushBranchDiverged):
 		return ghservice.PushBranchDivergedPRMessage
+	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
+		return ghservice.BaseBranchUnrelatedPRMessage
 	case errors.Is(err, ghservice.ErrSandboxAuthUnavailable):
 		return ghservice.SandboxAuthUnavailablePRMessage
 	default:
@@ -10834,6 +11147,118 @@ func prPushErrorCode(err error) models.PRPushErrorCode {
 	default:
 		return models.PRPushErrorCodeGeneric
 	}
+}
+
+func shouldAutoReconcilePRPushError(err error) bool {
+	return errors.Is(err, ghservice.ErrPushBranchDiverged) || errors.Is(err, ghservice.ErrPushRejected)
+}
+
+func enqueuePRPushChangesJob(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, authorMode string) (bool, error) {
+	if stores == nil || stores.Sessions == nil || stores.Jobs == nil {
+		return false, errors.New("PR push queue stores unavailable")
+	}
+	tx, err := stores.Sessions.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin PR push queue transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txSessions := db.NewSessionStore(tx)
+	txSessions.SetLogger(logger)
+	queued, err := txSessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
+	if err != nil {
+		return false, fmt.Errorf("mark PR push queued: %w", err)
+	}
+	if !queued {
+		return false, nil
+	}
+
+	payload := map[string]any{
+		"session_id": sessionID.String(),
+		"org_id":     orgID.String(),
+	}
+	if authorMode != "" {
+		payload["author_mode"] = authorMode
+	}
+	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
+	jobID, err := stores.Jobs.EnqueueInTx(ctx, tx, orgID, "agent", "push_pr_changes", payload, 5, &dedupeKey)
+	if err != nil {
+		return false, fmt.Errorf("enqueue push_pr_changes: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit PR push queue transaction: %w", err)
+	}
+	stores.Jobs.Notify(context.WithoutCancel(ctx), jobID)
+	return true, nil
+}
+
+func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, run models.Session, pushErr error, authorMode string) error {
+	if stores == nil || stores.Sessions == nil || stores.SessionThreads == nil || stores.SessionMessages == nil || stores.Jobs == nil {
+		return errors.New("PR push reconciliation stores unavailable")
+	}
+
+	threadID, err := primaryThreadIDForSession(ctx, stores, run)
+	if err != nil {
+		return fmt.Errorf("resolve primary thread for PR push reconciliation: %w", err)
+	}
+
+	var repo, headRef string
+	if stores.PullRequests != nil {
+		pr, prErr := stores.PullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+		if prErr != nil {
+			if !errors.Is(prErr, pgx.ErrNoRows) {
+				logger.Warn().Err(prErr).
+					Str("session_id", run.ID.String()).
+					Msg("failed to load PR context for push reconciliation prompt")
+			}
+		} else {
+			repo = pr.GitHubRepo
+			if pr.HeadRef != nil {
+				headRef = *pr.HeadRef
+			}
+		}
+	}
+
+	revision := run.WorkspaceRevision
+	if revision == 0 {
+		revision = int64(run.CurrentTurn)
+	}
+	clientMessageID := fmt.Sprintf("push-reconcile:%s:%d", run.ID, revision)
+	dedupeKey := fmt.Sprintf("continue_session_push_reconcile:%s:%d", run.ID, revision)
+	threadService := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	_, err = threadService.SendMessage(ctx, threadsvc.SendMessageInput{
+		SessionID:                     run.ID,
+		OrgID:                         run.OrgID,
+		ThreadID:                      threadID,
+		ClientMessageID:               clientMessageID,
+		Message:                       prPushReconciliationMessage(repo, headRef, pushErr),
+		MessageSource:                 models.SessionMessageSourceAgentTool,
+		PostSuccessAction:             continuePostSuccessActionPushPRChanges,
+		PostSuccessAuthorMode:         authorMode,
+		ContinuationDedupeKeyOverride: &dedupeKey,
+	})
+	if err != nil {
+		return fmt.Errorf("send PR push reconciliation message: %w", err)
+	}
+	return nil
+}
+
+func prPushReconciliationMessage(repo, headRef string, pushErr error) string {
+	reason := "the existing PR branch changed on GitHub before this session could push"
+	if errors.Is(pushErr, ghservice.ErrPushRejected) {
+		reason = "GitHub rejected the push after the remote PR branch changed during the attempt"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Push changes failed: %s.", reason)
+	if strings.TrimSpace(repo) != "" {
+		fmt.Fprintf(&b, " Repository: %s.", strings.TrimSpace(repo))
+	}
+	if strings.TrimSpace(headRef) != "" {
+		fmt.Fprintf(&b, " PR branch: %s.", strings.TrimSpace(headRef))
+	}
+	b.WriteString(" Preserve the current session changes, fetch the latest PR branch from origin, reapply the still-needed session changes without dropping remote commits, and stop once the session tree contains the reconciled result. Do not run git push, force-push, or open a new PR; the platform will automatically run Push changes again after this turn so PR bookkeeping stays in sync. If conflicts require a product decision, stop and explain what changed.")
+	return b.String()
 }
 
 // push_pr_changes handler pushes any uncommitted/unpushed sandbox changes up
@@ -10929,6 +11354,18 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
 			}
+			if shouldAutoReconcilePRPushError(pushErr) {
+				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr, input.AuthorMode); reconcileErr != nil {
+					logger.Warn().Err(reconcileErr).
+						Str("session_id", runID.String()).
+						Msg("failed to enqueue PR push reconciliation")
+				} else {
+					logger.Info().
+						Str("session_id", runID.String()).
+						Msg("queued PR push reconciliation after failed push")
+					return &FatalError{Err: pushErr}
+				}
+			}
 			if shouldDeadLetterPRError(pushErr) {
 				return &FatalError{Err: pushErr}
 			}
@@ -10959,6 +11396,8 @@ func shouldDeadLetterPRError(err error) bool {
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
 	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+		return true
+	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return true
 	default:
 		return false

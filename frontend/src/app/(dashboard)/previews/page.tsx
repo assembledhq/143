@@ -20,6 +20,10 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
 import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
+import {
+  ResponsiveResourceList,
+  type ResponsiveResourceListColumn,
+} from "@/components/responsive-resource-list";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -30,14 +34,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   Tooltip,
   TooltipContent,
@@ -56,7 +52,7 @@ import type {
   PreviewListMeta,
   Repository,
 } from "@/lib/types";
-import { safeExternalUrl } from "@/lib/utils";
+import { cn, safeExternalUrl } from "@/lib/utils";
 
 type PreviewScope = "running" | "resumable" | "recent";
 
@@ -249,6 +245,272 @@ function expiresIn(value?: string): string {
   return future ? `in ${amount}` : `${amount} ago`;
 }
 
+type PreviewMarkerKind = "starting" | "attention" | "resumable" | "ready" | "idle";
+
+// Single source of truth so the marker's color and glyph never disagree.
+function previewMarkerKind(
+  preview: PreviewCurrentResponse,
+  scope: PreviewScope,
+): PreviewMarkerKind {
+  if (preview.status === "starting" || preview.status === "recycling") return "starting";
+  if (previewNeedsAttention(preview)) return "attention";
+  if (scope === "resumable" || preview.resumable) return "resumable";
+  if (preview.status === "ready" || preview.status === "partially_ready") return "ready";
+  return "idle";
+}
+
+function previewMarkerClass(kind: PreviewMarkerKind): string {
+  switch (kind) {
+    case "starting":
+      return "border-primary/30 bg-primary/10 text-primary";
+    case "attention":
+      return "border-destructive/30 bg-destructive text-destructive-foreground";
+    case "resumable":
+      return "border-primary/30 bg-background text-primary";
+    case "ready":
+      return "border-primary/30 bg-primary text-primary-foreground";
+    default:
+      return "border-border bg-muted text-muted-foreground";
+  }
+}
+
+function PreviewIdentityMarker({
+  preview,
+  scope,
+}: {
+  preview: PreviewCurrentResponse;
+  scope: PreviewScope;
+}) {
+  const kind = previewMarkerKind(preview, scope);
+
+  return (
+    <span
+      className={cn(
+        "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border text-xs font-semibold leading-none",
+        previewMarkerClass(kind),
+      )}
+      aria-hidden="true"
+    >
+      {kind === "starting" ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : kind === "attention" ? (
+        "!"
+      ) : kind === "resumable" ? (
+        <span className="h-2.5 w-2.5 rounded-full border border-current" />
+      ) : kind === "ready" ? (
+        <span className="h-2.5 w-2.5 rounded-full bg-current" />
+      ) : (
+        <span className="h-2.5 w-2.5 rounded-full border border-current bg-background" />
+      )}
+    </span>
+  );
+}
+
+function PreviewPrimaryCell({
+  preview,
+  scope,
+}: {
+  preview: PreviewCurrentResponse;
+  scope: PreviewScope;
+}) {
+  return (
+    <Link href={previewDetailHref(preview)} className="flex min-w-0 items-start gap-2.5">
+      <PreviewIdentityMarker preview={preview} scope={scope} />
+      <span className="min-w-0 space-y-1">
+        <span className="block truncate text-sm font-medium text-foreground hover:underline">
+          {previewDisplayName(preview)}
+        </span>
+        <span className="block text-xs text-muted-foreground">
+          {preview.repository_full_name || preview.repository_id} ·{" "}
+          {preview.pinned ? "Pinned · " : ""}
+          {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
+        </span>
+      </span>
+    </Link>
+  );
+}
+
+function PreviewSourceCell({ preview }: { preview: PreviewCurrentResponse }) {
+  const sourceHref = safeExternalUrl(preview.source_url);
+
+  if (!sourceHref) {
+    return <span className="text-sm text-foreground">{sourceLabel(preview)}</span>;
+  }
+
+  return (
+    <a
+      href={sourceHref}
+      className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
+    >
+      {sourceLabel(preview)}
+      <ExternalLink className="h-3 w-3" />
+    </a>
+  );
+}
+
+function PreviewStatusCell({
+  preview,
+  scope,
+}: {
+  preview: PreviewCurrentResponse;
+  scope: PreviewScope;
+}) {
+  return (
+    <div className="space-y-1">
+      <PreviewStatusBadge
+        status={preview.status}
+        label={statusLabel(preview)}
+        variant={statusBadgeVariant(preview)}
+      />
+      <p className="text-xs text-muted-foreground">{statusDetail(preview, scope)}</p>
+    </div>
+  );
+}
+
+type PreviewActionsProps = {
+  preview: PreviewCurrentResponse;
+  scope: PreviewScope;
+  canMutate: boolean;
+  onStop: (preview: PreviewCurrentResponse) => void;
+  onRestart: (preview: PreviewCurrentResponse) => void;
+  onStartLatest: (preview: PreviewCurrentResponse) => void;
+  isRestartPending: (preview: PreviewCurrentResponse) => boolean;
+  isStartLatestPending: (preview: PreviewCurrentResponse) => boolean;
+};
+
+function PreviewActions({
+  preview,
+  scope,
+  canMutate,
+  onStop,
+  onRestart,
+  onStartLatest,
+  isRestartPending,
+  isStartLatestPending,
+}: PreviewActionsProps) {
+  const previewHref = safeExternalUrl(preview.preview_url);
+
+  return (
+    <div className="flex flex-wrap justify-end gap-2">
+      {previewHref ? (
+        <Button asChild size="sm">
+          <a
+            href={previewHref}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <ExternalLink className="h-4 w-4" />
+            Open
+          </a>
+        </Button>
+      ) : null}
+      {canMutate && scope === "running" && preview.current_preview_id ? (
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => onStop(preview)}
+        >
+          <Square className="h-4 w-4" />
+          Stop
+        </Button>
+      ) : null}
+      {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
+        <RestartLatestButton
+          loading={isStartLatestPending(preview)}
+          onClick={() => onStartLatest(preview)}
+        />
+      ) : null}
+      {canMutate && scope === "resumable" ? (
+        <Button
+          size="sm"
+          variant="outline"
+          loading={isRestartPending(preview)}
+          onClick={() => onRestart(preview)}
+        >
+          <Play className="h-4 w-4" />
+          Resume
+        </Button>
+      ) : null}
+      {canMutate && scope !== "running" ? (
+        <RestartLatestButton
+          loading={isStartLatestPending(preview)}
+          onClick={() => onStartLatest(preview)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function PreviewMobileRow(props: PreviewActionsProps) {
+  const { preview, scope } = props;
+
+  return (
+    <div className="space-y-3 p-4">
+      <div className="flex min-w-0 items-start gap-2.5">
+        <PreviewIdentityMarker preview={preview} scope={scope} />
+        <div className="min-w-0 flex-1">
+          <Link
+            href={previewDetailHref(preview)}
+            className="block truncate font-medium text-foreground"
+          >
+            {previewDisplayName(preview)}
+          </Link>
+          <p className="truncate text-sm text-muted-foreground">
+            {preview.repository_full_name || preview.repository_id} ·{" "}
+            {sourceLabel(preview)}
+          </p>
+        </div>
+      </div>
+      <div className="flex items-center justify-between gap-2 pl-9">
+        <PreviewStatusBadge
+          status={preview.status}
+          label={statusLabel(preview)}
+          variant={statusBadgeVariant(preview)}
+        />
+        <span className="text-xs text-muted-foreground">
+          {relativeTime(preview.created_at)}
+        </span>
+      </div>
+      <div className="pl-9">
+        <PreviewActions {...props} />
+      </div>
+    </div>
+  );
+}
+
+function previewColumns(
+  props: Omit<PreviewActionsProps, "preview">,
+): ResponsiveResourceListColumn<PreviewCurrentResponse>[] {
+  return [
+    {
+      id: "preview",
+      header: "Preview",
+      className: "w-[42%]",
+      cellClassName: "min-w-0",
+      render: (preview) => <PreviewPrimaryCell preview={preview} scope={props.scope} />,
+    },
+    {
+      id: "source",
+      header: "Source",
+      className: "w-[16%]",
+      render: (preview) => <PreviewSourceCell preview={preview} />,
+    },
+    {
+      id: "status",
+      header: "Status",
+      className: "w-[22%]",
+      render: (preview) => <PreviewStatusCell preview={preview} scope={props.scope} />,
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      className: "w-[20%] text-right",
+      cellClassName: "text-right",
+      render: (preview) => <PreviewActions preview={preview} {...props} />,
+    },
+  ];
+}
+
 function SectionRows({
   scope,
   previews,
@@ -309,199 +571,28 @@ function SectionRows({
     );
   }
 
-  return (
-    <>
-      <div className="hidden overflow-hidden rounded-md border border-border md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Preview</TableHead>
-              <TableHead>Source</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead className="text-right">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {previews.map((preview) => {
-              const sourceHref = safeExternalUrl(preview.source_url);
-              const previewHref = safeExternalUrl(preview.preview_url);
-              return (
-                <TableRow key={preview.preview_group_id}>
-                  <TableCell>
-                    <Link
-                      href={previewDetailHref(preview)}
-                      className="font-medium text-foreground hover:underline"
-                    >
-                      {previewDisplayName(preview)}
-                    </Link>
-                    <p className="text-xs text-muted-foreground">
-                      {preview.repository_full_name || preview.repository_id} ·{" "}
-                      {preview.pinned ? "Pinned · " : ""}
-                      {(preview.running_commit_sha || preview.latest_commit_sha)?.slice(0, 8) || "latest"}
-                    </p>
-                  </TableCell>
-                  <TableCell>
-                    {sourceHref ? (
-                      <a
-                        href={sourceHref}
-                        className="inline-flex items-center gap-1 text-sm text-foreground hover:underline"
-                      >
-                        {sourceLabel(preview)}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    ) : (
-                      <span className="text-sm text-foreground">
-                        {sourceLabel(preview)}
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <PreviewStatusBadge
-                      status={preview.status}
-                      label={statusLabel(preview)}
-                      variant={statusBadgeVariant(preview)}
-                    />
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {statusDetail(preview, scope)}
-                    </p>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex justify-end gap-2">
-                      {previewHref ? (
-                        <Button asChild size="sm">
-                          <a
-                            href={previewHref}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            <ExternalLink className="h-4 w-4" />
-                            Open
-                          </a>
-                        </Button>
-                      ) : null}
-                      {canMutate && scope === "running" && preview.current_preview_id ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => onStop(preview)}
-                        >
-                          <Square className="h-4 w-4" />
-                          Stop
-                        </Button>
-                      ) : null}
-                      {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                        <RestartLatestButton
-                          loading={isStartLatestPending(preview)}
-                          onClick={() => onStartLatest(preview)}
-                        />
-                      ) : null}
-                      {canMutate && scope === "resumable" ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          loading={isRestartPending(preview)}
-                          onClick={() => onRestart(preview)}
-                        >
-                          <Play className="h-4 w-4" />
-                          Resume
-                        </Button>
-                      ) : null}
-                      {canMutate && scope !== "running" ? (
-                        <RestartLatestButton
-                          loading={isStartLatestPending(preview)}
-                          onClick={() => onStartLatest(preview)}
-                        />
-                      ) : null}
-                    </div>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      </div>
+  const actionProps = {
+    scope,
+    canMutate,
+    onStop,
+    onRestart,
+    onStartLatest,
+    isRestartPending,
+    isStartLatestPending,
+  };
 
-      <div className="grid gap-3 md:hidden">
-        {previews.map((preview) => {
-          const previewHref = safeExternalUrl(preview.preview_url);
-          return (
-            <Card key={preview.preview_group_id}>
-              <CardContent className="space-y-3 py-4">
-                <div className="min-w-0">
-                  <Link
-                    href={previewDetailHref(preview)}
-                    className="block truncate font-medium text-foreground"
-                  >
-                    {previewDisplayName(preview)}
-                  </Link>
-                  <p className="truncate text-sm text-muted-foreground">
-                    {preview.repository_full_name || preview.repository_id} ·{" "}
-                    {sourceLabel(preview)}
-                  </p>
-                </div>
-                <div className="flex items-center justify-between gap-2">
-                  <PreviewStatusBadge
-                    status={preview.status}
-                    label={statusLabel(preview)}
-                    variant={statusBadgeVariant(preview)}
-                  />
-                  <span className="text-xs text-muted-foreground">
-                    {relativeTime(preview.created_at)}
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {previewHref ? (
-                    <Button asChild size="sm">
-                      <a
-                        href={previewHref}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        <ExternalLink className="h-4 w-4" />
-                        Open
-                      </a>
-                    </Button>
-                  ) : null}
-                  {canMutate && scope === "running" && preview.current_preview_id ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => onStop(preview)}
-                    >
-                      <Square className="h-4 w-4" />
-                      Stop
-                    </Button>
-                  ) : null}
-                  {canMutate && scope === "running" && previewNeedsAttention(preview) ? (
-                    <RestartLatestButton
-                      loading={isStartLatestPending(preview)}
-                      onClick={() => onStartLatest(preview)}
-                    />
-                  ) : null}
-                  {canMutate && scope === "resumable" ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      loading={isRestartPending(preview)}
-                      onClick={() => onRestart(preview)}
-                    >
-                      <Play className="h-4 w-4" />
-                      Resume
-                    </Button>
-                  ) : null}
-                  {canMutate && scope !== "running" ? (
-                    <RestartLatestButton
-                      loading={isStartLatestPending(preview)}
-                      onClick={() => onStartLatest(preview)}
-                    />
-                  ) : null}
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
-    </>
+  return (
+    <ResponsiveResourceList
+      ariaLabel={`${SECTIONS.find((section) => section.scope === scope)?.title ?? "Preview"} previews`}
+      items={previews}
+      getItemKey={(preview) => preview.preview_group_id}
+      columns={previewColumns(actionProps)}
+      emptyState={SECTIONS.find((section) => section.scope === scope)?.empty}
+      renderMobileItem={(preview) => (
+        <PreviewMobileRow preview={preview} {...actionProps} />
+      )}
+      className="rounded-md"
+    />
   );
 }
 

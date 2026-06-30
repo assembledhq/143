@@ -30,17 +30,22 @@ function TestProviders({ children }: { children: React.ReactNode }) {
 
 interface RenderWithProvidersOptions extends Omit<RenderOptions, 'wrapper'> {
   searchParams?: Record<string, string>;
+  queryClient?: QueryClient;
 }
 
 function renderWithProviders(
   ui: React.ReactElement,
   options?: RenderWithProvidersOptions,
 ) {
-  const { searchParams, ...renderOptions } = options ?? {};
+  const {
+    searchParams,
+    queryClient: providedQueryClient,
+    ...renderOptions
+  } = options ?? {};
 
-  if (searchParams) {
+  if (searchParams || providedQueryClient) {
     const wrapper = ({ children }: { children: React.ReactNode }) => {
-      const queryClient = createTestQueryClient();
+      const queryClient = providedQueryClient ?? createTestQueryClient();
       return (
         <NuqsTestingAdapter searchParams={searchParams}>
           <QueryClientProvider client={queryClient}>

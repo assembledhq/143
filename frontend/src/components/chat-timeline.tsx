@@ -473,6 +473,7 @@ const ReferenceTags = memo(function ReferenceTags({ references }: { references: 
 const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage }) {
   // Strip plan mode prefix from user messages for display.
   const isPlanModeUser = msg.role === "user" && msg.content.startsWith(PLAN_MODE_PREFIX);
+  const isSystemAutoRepair = msg.role === "user" && msg.source === "system_auto_repair";
   const displayContent = isPlanModeUser
     ? msg.content.slice(PLAN_MODE_PREFIX.length)
     : msg.content;
@@ -485,6 +486,12 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
             <div className="flex items-center gap-1.5 mb-1.5">
               <ClipboardList className="h-3 w-3 text-white/80" />
               <span className="text-xs font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
+            </div>
+          )}
+          {isSystemAutoRepair && (
+            <div className="flex items-center gap-1.5 mb-1.5">
+              <PenLine className="h-3 w-3 text-white/80" />
+              <span className="text-xs font-medium text-white/80 uppercase tracking-wide">143 auto-repair</span>
             </div>
           )}
           {displayContent && <p className="whitespace-pre-wrap break-words">{displayContent}</p>}
@@ -619,6 +626,10 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
 interface ChatTimelineProps {
   entries: TimelineEntry[];
   isRunning: boolean;
+  // When the runtime was interrupted (worker drain / deploy) and is waiting to
+  // resume, the thread is still "running" but the agent is not actively working.
+  // Show a recovery label instead of "Agent is working…" so the spinner is honest.
+  recoveryActive?: boolean;
   stoppingLabel?: string;
   stoppedLabel?: string;
   diffStats?: { added: number; removed: number; files_changed: number } | null;
@@ -637,7 +648,7 @@ interface ChatTimelineProps {
   ) => React.HTMLAttributes<HTMLDivElement> & Record<`data-${string}`, string | number | undefined>;
 }
 
-function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
+function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stoppingLabel, stoppedLabel, diffStats, onDiffClick, onApprovePlan, onAdjustPlan, humanInputSubmittingId, autoOpenHumanInputId, humanInputAnswerable = true, onAnswerHumanInput, onCancelHumanInput, onDismissHumanInputAutoOpen, getEntryContainerProps }: ChatTimelineProps) {
   // Separate visible entries (messages, tool groups, errors) from hidden logs.
   // Group consecutive hidden logs together so they share a single "Show more" toggle.
   const rendered: React.ReactNode[] = [];
@@ -817,6 +828,17 @@ function ChatTimelineImpl({ entries, isRunning, stoppingLabel, stoppedLabel, dif
         </div>
       </div>
     );
+  } else if (isRunning && recoveryActive) {
+    rendered.push(
+      <div key="recovering" className="flex justify-start">
+        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+          <span className="flex items-center gap-2 text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+            Resuming after maintenance...
+          </span>
+        </div>
+      </div>
+    );
   } else if (isRunning) {
     rendered.push(
       <div key="working" className="flex justify-start">
@@ -877,6 +899,7 @@ export const ChatTimeline = memo(ChatTimelineImpl, (prev, next) => {
   return (
     prev.entries === next.entries &&
     prev.isRunning === next.isRunning &&
+    prev.recoveryActive === next.recoveryActive &&
     prev.stoppingLabel === next.stoppingLabel &&
     prev.stoppedLabel === next.stoppedLabel &&
     prev.onDiffClick === next.onDiffClick &&

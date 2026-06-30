@@ -141,7 +141,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -152,6 +152,8 @@ import { useSessionScopedReset } from "@/hooks/use-session-scoped-reset";
 import { useDiffViewState } from "@/hooks/use-diff-view-state";
 import { CodexDeviceCodeModal } from "@/components/codex-device-code-modal";
 import { AgentBadge } from "@/components/agent-badge";
+import { FlatModelOptions } from "@/components/model-option-groups";
+import { useOpenCodeAvailability } from "@/hooks/use-opencode-models";
 import { PendingAttachmentStrip } from "@/components/pending-attachment-strip";
 import { PRHealthBanner, prHealthAllowsMerge } from "@/components/pr-health-banner";
 import { SessionKeyboardHelpOverlay } from "@/components/session-keyboard-help-overlay";
@@ -434,12 +436,31 @@ function ReadinessCheckGroup({
   );
 }
 
+function ReadinessCheckList({
+  checks,
+  onAction,
+  actionDisabled,
+}: {
+  checks: PRReadinessCheck[];
+  onAction?: (check: PRReadinessCheck) => void;
+  actionDisabled?: (check: PRReadinessCheck) => boolean;
+}) {
+  if (checks.length === 0) return null;
+  return (
+    <div className="space-y-1">
+      {checks.map((check) => (
+        <ReadinessCheckRow key={check.id || check.check_key || check.check_type} check={check} onAction={onAction} actionDisabled={actionDisabled?.(check) ?? false} />
+      ))}
+    </div>
+  );
+}
+
 function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadinessCheck; onAction?: (check: PRReadinessCheck) => void; actionDisabled: boolean }) {
   const [open, setOpen] = useState(false);
   const evidence = formatReadinessCheckDetails(check.details);
   return (
-    <div className="flex items-start gap-2 text-muted-foreground">
-      <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-current" />
+    <div className="grid grid-cols-[16px_1fr] gap-2 text-muted-foreground">
+      <ReadinessCheckStatusIcon status={check.status} className="mt-0.5 h-3.5 w-3.5" />
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-foreground">{check.title}</span>
@@ -475,6 +496,13 @@ function ReadinessCheckRow({ check, onAction, actionDisabled }: { check: PRReadi
       </div>
     </div>
   );
+}
+
+function ReadinessCheckStatusIcon({ status, className }: { status: PRReadinessCheck["status"]; className?: string }) {
+  if (status === "passed") return <CheckCircle2 className={cn("text-success", className)} />;
+  if (status === "failed" || status === "error") return <AlertTriangle className={cn("text-destructive", className)} />;
+  if (status === "warning") return <AlertTriangle className={cn("text-warning", className)} />;
+  return <Clock className={cn("text-muted-foreground", className)} />;
 }
 
 function formatReadinessCheckDetails(value: unknown) {
@@ -604,21 +632,6 @@ const ReadinessPacketSummary = forwardRef<HTMLDivElement, { packet: ReadinessPac
     </div>
   );
 });
-
-function readinessStatusLabel(status: PRReadinessRun["status"]) {
-  switch (status) {
-    case "passed":
-      return "Ready";
-    case "warnings":
-      return "Ready with warnings";
-    case "blocked":
-      return "Blocked";
-    case "failed":
-      return "Checks failed";
-    default:
-      return "Checking...";
-  }
-}
 
 function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boolean | undefined, running: boolean) {
   if (running) return <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />;
@@ -1127,6 +1140,15 @@ function SessionComposer({
   const showCommandPicker = activeCommand !== null && !triggerDismissed;
   const pickerOpen = showMentionPicker || showCommandPicker;
 
+  // Resolve the OpenCode transport ("· OpenRouter") for the selected model so
+  // the in-session picker shows the route that runs given current keys. Shares
+  // the resolved coding-credential cache with the rest of the page.
+  const { data: composerResolvedCredsResponse } = useQuery<ListResponse<CodingCredentialSummary>>({
+    queryKey: queryKeys.codingCredentials.list("resolved"),
+    queryFn: () => api.codingCredentials.list("resolved"),
+  });
+  const openCodeAvailability = useOpenCodeAvailability(composerResolvedCredsResponse?.data ?? []);
+
   const fileMentionsQuery = useQuery<ListResponse<SessionInputReference>>({
     queryKey: queryKeys.sessions.composerFiles(sessionId, deferredMentionQuery),
     queryFn: () => api.sessions.composerFiles(sessionId, deferredMentionQuery),
@@ -1437,11 +1459,12 @@ function SessionComposer({
               <SelectValue placeholder="Default model" />
             </SelectTrigger>
             <SelectContent>
-              {availableModels.map((model) => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
+              <FlatModelOptions
+                models={availableModels}
+                agentType={agentType}
+                openCodeAvailability={openCodeAvailability}
+                selectedModel={selectedModel}
+              />
             </SelectContent>
           </Select>
         </div>
@@ -1826,11 +1849,12 @@ function SessionComposer({
                       <SelectValue placeholder="Default model" />
                     </SelectTrigger>
                     <SelectContent>
-                      {availableModels.map((model) => (
-                        <SelectItem key={model} value={model}>
-                          {model}
-                        </SelectItem>
-                      ))}
+                      <FlatModelOptions
+                        models={availableModels}
+                        agentType={agentType}
+                        openCodeAvailability={openCodeAvailability}
+                        selectedModel={selectedModel}
+                      />
                     </SelectContent>
                   </Select>
                 )}
@@ -1891,7 +1915,7 @@ function SessionComposer({
             <input
               ref={uploadInputRef}
               type="file"
-              accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
+              accept="image/png,image/jpeg,image/gif,image/webp,.heic,.heif,.pdf,.txt,.md,.json,.csv"
               multiple
               className="hidden"
               onChange={onUpload}
@@ -2231,6 +2255,10 @@ function ChatPanel({
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
+  // A worker drain / deploy interruption leaves the thread "running" while the
+  // runtime waits to resume. Surface that as "Resuming after maintenance…" in the
+  // timeline spinner instead of an honest-looking "Agent is working…".
+  const recoveryActive = isRuntimeRecoveryActive(session);
   const isPending = activeThread ? activeThread.status === "pending" : session.status === "pending";
   const isSnapshotExpired = session.sandbox_state === "destroyed";
   const canSendMessage = session.status !== "skipped" && session.status !== "pending" && !isSnapshotExpired;
@@ -3133,6 +3161,7 @@ function ChatPanel({
             <ChatTimeline
               entries={timelineEntries}
               isRunning={isRunning}
+              recoveryActive={recoveryActive}
               stoppingLabel={isStopRequested ? "Stopping agent..." : undefined}
               stoppedLabel={
                 session.status === "cancelled" || activeThread?.status === "cancelled"
@@ -3602,9 +3631,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   );
   const diffRevisionKey = useMemo(() => {
     if (!session) return null;
+    const diffIdentity = session.latest_diff_snapshot_id ?? session.diff_collected_at ?? "";
     return [
-      session.diff_collected_at ?? "",
-      session.latest_diff_snapshot_id ?? "",
+      diffIdentity,
       session.diff_stats?.added ?? "",
       session.diff_stats?.removed ?? "",
       session.diff_stats?.files_changed ?? "",
@@ -4679,13 +4708,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness?.status === "running" ||
     runReadinessMutation.isPending;
   const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessHeadline = !latestReadiness
-    ? "Not reviewed yet"
-    : readinessRunning
-      ? "Checking…"
-      : readinessStale
-        ? "Stale after latest changes"
-        : latestReadiness.summary || readinessStatusLabel(latestReadiness.status);
   const readinessCheckDisabled = readinessRunning || isRunning;
 
   // Readiness findings, grouped with role-aware enforcement so the merged
@@ -4784,6 +4806,74 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
     return false;
   };
+  const readinessNeedsActionChecks = [...readinessBlockedChecks, ...readinessWarningChecks];
+  const readinessOptionalCount = readinessWarningChecks.length + readinessBypassedChecks.length;
+  const readinessDetailCount = readinessNeedsActionChecks.length + readinessPassedChecks.length + readinessBypassedChecks.length + (readinessReviewPacket ? 1 : 0);
+  const readinessPrimaryCopy = (() => {
+    if (reviewLoopRunning) {
+      return {
+        title: `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`,
+        description: `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`,
+      };
+    }
+    if (readinessRunning) {
+      return { title: "Checking readiness", description: "Reviewing the latest changes before PR." };
+    }
+    if (!latestReadiness) {
+      return { title: "Review before PR", description: "Run a quick readiness check before opening a PR." };
+    }
+    if (readinessStale) {
+      return { title: "Not ready yet", description: "Files changed since the last check." };
+    }
+    if (latestReadiness.status === "failed") {
+      return { title: "Check failed", description: "Readiness could not finish. Try running it again." };
+    }
+    if (readinessBlockedChecks.length > 0) {
+      return {
+        title: "Not ready yet",
+        description: readinessBlockedChecks.length === 1
+          ? `${readinessBlockedChecks[0].title} needs attention.`
+          : `${readinessBlockedChecks.length} readiness checks need attention.`,
+      };
+    }
+    if (readinessWarningChecks.length > 0) {
+      return {
+        title: "Ready with notes",
+        description: readinessWarningChecks.length === 1
+          ? "1 optional improvement is available."
+          : `${readinessWarningChecks.length} optional improvements are available.`,
+      };
+    }
+    return { title: "Ready for PR", description: "The latest checks passed." };
+  })();
+  const readinessPrimaryAction = (() => {
+    if (reviewLoopRunning) return null;
+    if (!latestReadiness || readinessStale || readinessRunning || latestReadiness.status === "failed") {
+      return {
+        label: latestReadiness ? "Re-check readiness" : "Check readiness",
+        icon: readinessRunning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />,
+        disabled: readinessCheckDisabled,
+        onClick: () => runReadinessMutation.mutate(),
+      };
+    }
+    if (readinessBlockedChecks.length > 0 && canUseNativeReviewLoop) {
+      return {
+        label: "Review & fix",
+        icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
+        disabled: reviewActionDisabled,
+        onClick: () => setReviewConfigOpen(true),
+      };
+    }
+    return null;
+  })();
+  const readinessSecondaryReviewAction = !reviewLoopRunning && !latestReadiness && canUseNativeReviewLoop
+    ? {
+      label: "Review & fix",
+      icon: startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />,
+      disabled: reviewActionDisabled,
+      onClick: () => setReviewConfigOpen(true),
+    }
+    : null;
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
@@ -5440,6 +5530,35 @@ export function SessionDetailContent({ id }: { id: string }) {
   const handleCancelSession = useCallback(() => {
     cancelSession();
   }, [cancelSession]);
+  const stopAutoRepairMutation = useMutation({
+    mutationFn: async ({ sessionId, threadId }: { sessionId: string; threadId?: string }) => {
+      if (threadId) {
+        await api.sessions.cancelThread(sessionId, threadId, { reason: "auto_repair_stop" });
+        return;
+      }
+      await api.sessions.cancelSession(sessionId, { reason: "auto_repair_stop" });
+    },
+    onMutate: ({ sessionId }) => {
+      if (sessionId === id) {
+        setSessionStopRequest({ sessionId: id, requestedAt: new Date().toISOString() });
+        setSessionStopOutcome(null);
+      }
+    },
+    onSuccess: (_response, { sessionId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
+      void queryClient.invalidateQueries({ queryKey: ["session", sessionId, "timeline"] });
+      if (pullRequestId) {
+        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
+      }
+      toast.info("Auto-repair stop requested");
+    },
+    onError: (error, { sessionId }) => {
+      if (sessionId === id) {
+        setSessionStopRequest(null);
+      }
+      toast.error(error instanceof ApiError ? error.message : "Failed to stop auto-repair");
+    },
+  });
   const handleComposerSend = useCallback(() => {
     queueSend();
   }, [queueSend]);
@@ -6247,11 +6366,67 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          {pullRequestId && prStatus === "open" && (
+            prHealth ? (
+              <PRHealthBanner
+                health={prHealth}
+                currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
+                pendingAction={pendingPRAction}
+                repairError={repairActionError}
+                mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
+                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
+                onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
+                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+                stopAutoRepairPending={stopAutoRepairMutation.isPending}
+                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                  disabled: reviewActionDisabled,
+                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+                  title: reviewActionDisabledReason,
+                  onClick: () => setReviewConfigOpen(true),
+                } : undefined}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => {
+                    if (pushActionRequiresBranchSync) {
+                      continueFromPRBranchMutation.mutate();
+                      return;
+                    }
+                    pushChangesMutation.mutate(undefined);
+                  },
+                } : undefined}
+              />
+            ) : isPRHealthLoading ? (
+              <Card className="border-border/60">
+                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Loading PR health...</span>
+                </CardContent>
+              </Card>
+            ) : null
+          )}
           {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
                 <div className="flex flex-col gap-3">
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
                     <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
                       {reviewLoopRunning || readinessRunning ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -6261,51 +6436,58 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground">
-                        {reviewLoopRunning
-                          ? `Fixing with ${AGENTS_BY_KEY[latestReviewLoop?.agent_type ?? ""]?.label ?? latestReviewLoop?.agent_type ?? "agent"}`
-                          : "Review before PR"}
+                        {readinessPrimaryCopy.title}
                       </p>
-                      <p className="text-xs text-muted-foreground">
-                        {reviewLoopRunning
-                          ? `Pass ${Math.min((latestReviewLoop?.completed_passes ?? 0) + 1, latestReviewLoop?.max_passes ?? 1)} of ${latestReviewLoop?.max_passes ?? 1}`
-                          : readinessHeadline}
+                      <p className="text-xs leading-relaxed text-muted-foreground">
+                        {readinessPrimaryCopy.description}
                       </p>
                     </div>
                   </div>
-                  {!reviewLoopRunning ? (
+                  {readinessPrimaryAction || readinessSecondaryReviewAction ? (
                     <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="w-full gap-1.5 sm:w-auto"
-                        disabled={readinessCheckDisabled}
-                        onClick={() => runReadinessMutation.mutate()}
-                      >
-                        {readinessRunning ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {readinessPrimaryAction ? (
+                        readinessPrimaryAction.label === "Review & fix" ? (
+                          <DisabledTooltip disabled={readinessPrimaryAction.disabled} content={reviewActionDisabledReason}>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="w-full gap-1.5 sm:w-fit"
+                              disabled={readinessPrimaryAction.disabled}
+                              title={reviewActionDisabledReason}
+                              onClick={readinessPrimaryAction.onClick}
+                            >
+                              {readinessPrimaryAction.icon}
+                              {readinessPrimaryAction.label}
+                            </Button>
+                          </DisabledTooltip>
                         ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                        {latestReadiness ? "Re-check" : "Check readiness"}
-                      </Button>
-                      {canUseNativeReviewLoop ? (
-                        <DisabledTooltip disabled={reviewActionDisabled} content={reviewActionDisabledReason}>
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
-                            className="w-full gap-1.5 sm:w-auto"
-                            disabled={reviewActionDisabled}
-                            title={reviewActionDisabledReason}
-                            onClick={() => setReviewConfigOpen(true)}
+                            className="w-full gap-1.5 sm:w-fit"
+                            disabled={readinessPrimaryAction.disabled}
+                            onClick={readinessPrimaryAction.onClick}
                           >
-                            {startReviewLoopMutation.isPending ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : (
-                              <Settings2 className="h-3.5 w-3.5" />
-                            )}
-                            Review &amp; fix
+                            {readinessPrimaryAction.icon}
+                            {readinessPrimaryAction.label}
+                          </Button>
+                        )
+                      ) : null}
+                      {readinessSecondaryReviewAction ? (
+                        <DisabledTooltip disabled={readinessSecondaryReviewAction.disabled} content={reviewActionDisabledReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="w-full gap-1.5 sm:w-fit"
+                            disabled={readinessSecondaryReviewAction.disabled}
+                            title={reviewActionDisabledReason}
+                            onClick={readinessSecondaryReviewAction.onClick}
+                          >
+                            {readinessSecondaryReviewAction.icon}
+                            {readinessSecondaryReviewAction.label}
                           </Button>
                         </DisabledTooltip>
                       ) : null}
@@ -6316,23 +6498,45 @@ export function SessionDetailContent({ id }: { id: string }) {
                   <div className="space-y-1 text-xs text-muted-foreground">
                     <div>Collecting diff</div>
                     <div>Running agent review</div>
-                    <div>Checking test evidence</div>
                     <div>Checking risk signals</div>
                   </div>
                 ) : null}
                 {!readinessRunning && latestReadiness ? (
-                  <div className="space-y-3 text-xs">
-                    <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Warnings" checks={readinessWarningChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Blocked" checks={readinessBlockedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
-                    {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
-                    {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
-                      <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
-                        Bypass blockers
-                      </Button>
-                    )}
-                  </div>
+                  <Collapsible defaultOpen={readinessBlockedChecks.length > 0 && !readinessStale}>
+                    <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                      <div className="text-xs text-muted-foreground">
+                        {readinessBlockedChecks.length === 0 && readinessOptionalCount > 0
+                          ? `${readinessOptionalCount} optional ${readinessOptionalCount === 1 ? "item" : "items"}`
+                          : readinessDetailCount > 0
+                            ? `${readinessDetailCount} readiness ${readinessDetailCount === 1 ? "detail" : "details"}`
+                            : "No additional details"}
+                      </div>
+                      <CollapsibleTrigger asChild>
+                        <Button type="button" variant="ghost" size="xs" className="gap-1.5" aria-label="Show readiness details">
+                          Details
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        </Button>
+                      </CollapsibleTrigger>
+                    </div>
+                    <CollapsibleContent className="pt-3">
+                      <div className="space-y-3 text-xs">
+                        {readinessNeedsActionChecks.length > 0 ? (
+                          <div className="space-y-1">
+                            <div className="font-medium text-foreground">Needs attention</div>
+                            <ReadinessCheckList checks={readinessNeedsActionChecks} onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                          </div>
+                        ) : null}
+                        <ReadinessCheckGroup title="Passed" checks={readinessPassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                        <ReadinessCheckGroup title="Bypassed" checks={readinessBypassedChecks} empty="None" onAction={handleReadinessCheckAction} actionDisabled={readinessCheckActionDisabled} />
+                        {readinessReviewPacket && <ReadinessPacketSummary ref={readinessPacketRef} packet={readinessReviewPacket} />}
+                        {readinessBlockedChecks.length > 0 && !readinessStale && readinessBypassableBlocked.length > 0 && (
+                          <Button size="xs" variant="outline" onClick={() => setReadinessBypassOpen(true)}>
+                            Bypass blockers
+                          </Button>
+                        )}
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
                 ) : null}
               </CardContent>
             </Card>
@@ -6373,60 +6577,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-          {pullRequestId && prStatus === "open" && (
-            prHealth ? (
-              <PRHealthBanner
-                health={prHealth}
-                currentSessionId={id}
-                currentThreadId={activeThread?.id ?? null}
-                pendingAction={pendingPRAction}
-                repairError={repairActionError}
-                mergeAuthRequired={ghBlocked}
-                mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
-                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
-                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
-                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
-                onMerge={handleMergeAction}
-                onQueueMergeWhenReady={handleQueueMergeWhenReady}
-                onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId, threadId) => {
-                  if (sessionId === id && threadId) {
-                    setActiveThreadId(threadId);
-                    return;
-                  }
-                  router.push(`/sessions/${sessionId}`);
-                }}
-                reviewAction={canManageSession && canUseNativeReviewLoop ? {
-                  disabled: reviewActionDisabled,
-                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
-                  title: reviewActionDisabledReason,
-                  onClick: () => setReviewConfigOpen(true),
-                } : undefined}
-                pushChanges={showPushAction ? {
-                  label: pushActionLabel,
-                  disabled: pushActionDisabled,
-                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
-                  showError: pushState === "failed" || !!localPushActionError,
-                  title: pushActionTitle,
-                  onClick: () => {
-                    if (pushActionRequiresBranchSync) {
-                      continueFromPRBranchMutation.mutate();
-                      return;
-                    }
-                    pushChangesMutation.mutate(undefined);
-                  },
-                } : undefined}
-              />
-            ) : isPRHealthLoading ? (
-              <Card className="border-border/60">
-                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Loading PR health…</span>
-                </CardContent>
-              </Card>
-            ) : null
-          )}
           {pullRequestId && prStatus === "closed" && (
             <Card className="border-border/60">
               <CardContent className="p-4">

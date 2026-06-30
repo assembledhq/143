@@ -27,9 +27,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
@@ -76,6 +74,11 @@ import {
   availableAgentModelGroups,
   isAgentAvailable,
 } from "@/lib/agents";
+import { ModelOptionGroups } from "@/components/model-option-groups";
+import {
+  useOpenCodeAvailability,
+  type OpenCodeModelAvailability,
+} from "@/hooks/use-opencode-models";
 import { SetupRequirementsCard } from "@/components/setup-requirements-card";
 import { useOptimisticSessionsSafe } from "@/contexts/optimistic-sessions";
 import { useAuth } from "@/hooks/use-auth";
@@ -173,6 +176,7 @@ type ComposerSettingsControlsProps = {
   selectedRepo?: Repository;
   selectedBranch: string;
   modelGroups: ReturnType<typeof availableAgentModelGroups>;
+  openCodeAvailability?: Map<string, OpenCodeModelAvailability>;
   selectedModel: string;
   showReasoningSelector: boolean;
   effectiveReasoningOverride: CodingAgentReasoningEffort;
@@ -190,6 +194,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
   selectedRepo,
   selectedBranch,
   modelGroups,
+  openCodeAvailability,
   selectedModel,
   showReasoningSelector,
   effectiveReasoningOverride,
@@ -248,16 +253,7 @@ const ComposerSettingsControls = memo(function ComposerSettingsControls({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="__default__">Default model</SelectItem>
-          {modelGroups.map((group) => (
-            <SelectGroup key={group.key}>
-              <SelectLabel>{group.label}</SelectLabel>
-              {group.models.map((model) => (
-                <SelectItem key={model} value={model}>
-                  {model}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          ))}
+          <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={selectedModel} />
         </SelectContent>
       </Select>
 
@@ -609,6 +605,7 @@ export function ManualSessionComposer({
       ),
     [defaultAgentType, resolvedCredentials, codexAuthStatus],
   );
+  const openCodeAvailability = useOpenCodeAvailability(resolvedCredentials);
 
   // Drop a previously selected model (from React state or restored draft) when
   // its agent is no longer integrated — keeps the picker value consistent with
@@ -1129,16 +1126,7 @@ export function ManualSessionComposer({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="__default__">Default model</SelectItem>
-            {modelGroups.map((group) => (
-              <SelectGroup key={group.key}>
-                <SelectLabel>{group.label}</SelectLabel>
-                {group.models.map((model) => (
-                  <SelectItem key={model} value={model}>
-                    {model}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            ))}
+            <ModelOptionGroups modelGroups={modelGroups} openCodeAvailability={openCodeAvailability} selectedModel={selectedModel} />
           </SelectContent>
         </Select>
       </div>
@@ -1487,6 +1475,7 @@ export function ManualSessionComposer({
                       selectedRepo={selectedRepo}
                       selectedBranch={selectedBranch}
                       modelGroups={modelGroups}
+                      openCodeAvailability={openCodeAvailability}
                       selectedModel={selectedModel}
                       showReasoningSelector={showReasoningSelector}
                       effectiveReasoningOverride={effectiveReasoningOverride}
@@ -1517,7 +1506,7 @@ export function ManualSessionComposer({
                 <Input
                   ref={uploadInputRef}
                   type="file"
-                  accept="image/*,.heic,.heif,.pdf,.txt,.md,.json,.csv"
+                  accept="image/png,image/jpeg,image/gif,image/webp,.heic,.heif,.pdf,.txt,.md,.json,.csv"
                   multiple
                   className="hidden"
                   onChange={onUploadChange}

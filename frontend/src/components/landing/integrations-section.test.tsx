@@ -15,4 +15,17 @@ describe("IntegrationsSection", () => {
     expect(heading.className).toContain(landingTypography.featureTitle);
     expect(heading.className).not.toContain(landingTypography.sectionTitle);
   });
+
+  it("shows agent choice and cost controls as supporting features", () => {
+    render(<IntegrationsSection isDark={false} />);
+
+    expect(
+      screen.getByRole("heading", {
+        level: 3,
+        name: "Use the best agent for the job",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/open-source models/i)).toBeInTheDocument();
+    expect(screen.getByText(/bundled coding-agent subscriptions/i)).toBeInTheDocument();
+  });
 });

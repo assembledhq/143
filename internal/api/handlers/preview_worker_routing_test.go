@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -580,6 +581,74 @@ func TestPreviewHandler_RemoteInspectorEndpoints_PropagateStructuredWorkerErrors
 			tt.handler(h, rr, req)
 			require.Equal(t, http.StatusConflict, rr.Code, "worker-routed preview handlers should propagate structured worker errors")
 			require.Contains(t, rr.Body.String(), "NO_SANDBOX", "worker-routed preview handlers should preserve structured worker error codes")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+// screenshotPNGInspector returns a fixed PNG payload (and no artifact, mimicking
+// an unconfigured upload store) so the inline-base64 default/override behaviour
+// of CaptureScreenshot can be exercised.
+type screenshotPNGInspector struct {
+	internalPreviewTestInspector
+}
+
+func (screenshotPNGInspector) CaptureScreenshot(context.Context, string, models.ScreenshotOpts) (*models.ScreenshotResult, error) {
+	return &models.ScreenshotResult{PageTitle: "Preview Title", URL: "http://preview.local", PNG: []byte("fake-png-bytes")}, nil
+}
+
+func TestPreviewHandler_CaptureScreenshot_InlineBase64Default(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		body           string
+		wantPNGPresent bool
+	}{
+		{"defaults to inline when no artifact", `{}`, true},
+		{"explicit inline true", `{"inline_base64":true}`, true},
+		{"explicit inline false omits png", `{"inline_base64":false}`, false},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should be created")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			userID := uuid.New()
+			sessionID := uuid.New()
+			previewID := uuid.New()
+			now := time.Now().UTC()
+
+			h := newPreviewHandlerWithMock(mock)
+			h.manager.SetInspector(screenshotPNGInspector{})
+
+			mock.ExpectQuery("SELECT .+ FROM preview_instances").
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(
+					pgxmock.NewRows(previewInstanceTestCols).
+						AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+				)
+
+			req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(tt.body))
+			req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+			rr := httptest.NewRecorder()
+
+			h.CaptureScreenshot(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, "screenshot capture should succeed")
+
+			var resp models.SingleResponse[captureScreenshotResponse]
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "response should decode")
+			if tt.wantPNGPresent {
+				require.NotEmpty(t, resp.Data.PNGBase64, "png_base64 should be inlined")
+			} else {
+				require.Empty(t, resp.Data.PNGBase64, "png_base64 should be omitted when inline_base64 is false")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

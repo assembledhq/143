@@ -43,6 +43,7 @@ export const queryKeys = {
   },
   codeReviews: {
     all: ["code-reviews"] as const,
+    lists: () => ["code-reviews", "list"] as const,
     list: (params?: unknown) => ["code-reviews", "list", params ?? null] as const,
     policy: (repositoryId?: string | null) => ["code-reviews", "policy", repositoryId ?? null] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,
@@ -91,6 +92,8 @@ export const queryKeys = {
     pagerDutyIncidents: (integrationId?: string | null) => ["integrations", "pagerduty", "incidents", integrationId ?? null] as const,
   },
   automations: {
+    all: ["automations"] as const,
+    detail: (id: string) => ["automation", id] as const,
     eventTriggers: (id: string) => ["automations", id, "event-triggers"] as const,
   },
   autopilot: {

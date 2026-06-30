@@ -122,6 +122,10 @@ func (m *mockInspector) InspectElement(_ context.Context, _ string, _, _ int) (*
 	return nil, nil
 }
 
+func (m *mockInspector) InspectElementBySelector(_ context.Context, _ string, _ string) (*models.ElementInfo, error) {
+	return nil, nil
+}
+
 func (m *mockInspector) StartScreencast(_ context.Context, _ string, _ int) (string, error) {
 	return "", nil
 }
@@ -4134,4 +4138,102 @@ func TestManagerServiceObserver_OnServiceFailed_DBErrorsLogged(t *testing.T) {
 
 	require.NotPanics(t, func() { obs.OnServiceFailed("web", "boom", []string{"line"}) })
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestSoftRestartPreview_UnsupportedProviderReturnsSentinel(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+
+	// mockProvider does not implement PreviewSoftRestartProvider, so the manager
+	// must return ErrSoftRestartUnsupported before mutating any preview state.
+	mgr := newTestManager(mock, &mockProvider{})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+
+	err = mgr.SoftRestartPreview(context.Background(), orgID, previewID)
+	require.ErrorIs(t, err, ErrSoftRestartUnsupported)
+	require.NoError(t, mock.ExpectationsWereMet(), "no state mutation should occur when soft restart is unsupported")
+}
+
+// softRestartCapableProvider augments mockProvider with PreviewSoftRestartProvider
+// so the manager takes the soft-restart code path.
+type softRestartCapableProvider struct {
+	*mockProvider
+	restartErr error
+	restarted  bool
+}
+
+func (p *softRestartCapableProvider) SoftRestartPreview(_ context.Context, _ string, _ ServiceObserver) (*PreviewHandle, error) {
+	p.restarted = true
+	if p.restartErr != nil {
+		return nil, p.restartErr
+	}
+	return &PreviewHandle{Handle: "handle-abc", PrimaryPort: 3000}, nil
+}
+
+// TestSoftRestartPreview_StampsRecycleRevisionSource guards the fix that a soft
+// restart stamps the runtime workspace revision with the recycle source (not
+// file_event). It re-runs the service against the current workspace, so freshness
+// must treat it like the full recycle it mirrors; using file_event would let the
+// live_updated HMR branch misclassify a soft restart. The revision is stamped
+// before the provider call, so a provider failure still exercises the stamp.
+func TestSoftRestartPreview_StampsRecycleRevisionSource(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sessionID := uuid.New()
+	userID := uuid.New()
+	now := time.Now()
+	revisionAt := now.Add(-time.Minute)
+
+	provider := &softRestartCapableProvider{
+		mockProvider: &mockProvider{},
+		restartErr:   errors.New("service exited before ready"),
+	}
+	mgr := newTestManager(mock, provider)
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances WHERE id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newPreviewInstanceRow(previewID, sessionID, orgID, userID, models.PreviewStatusReady, "handle-abc", now)...),
+		)
+	// Conditional "starting" transition (UpdatePreviewStatusIfActive).
+	mock.ExpectExec("UPDATE preview_instances SET status = @status.+NOT IN").
+		WithArgs(previewAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// The fix under test: the runtime revision is stamped with the recycle source
+	// (3rd named-arg in the expansion: revision, updated_at, source, id, org_id),
+	// not file_event.
+	mock.ExpectExec("UPDATE preview_instances\\s+SET runtime_workspace_revision").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), models.PreviewRuntimeRevisionSourceRecycle, pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	// Provider soft restart fails after the stamp, so the manager marks the
+	// preview failed.
+	expectUpdatePreviewStatusFailed(mock)
+
+	err = mgr.SoftRestartPreviewWithRevision(context.Background(), orgID, previewID, 7, revisionAt)
+	require.Error(t, err, "soft restart should surface the provider failure")
+	require.Contains(t, err.Error(), "service exited before ready")
+	require.True(t, provider.restarted, "provider soft restart should be invoked")
+	require.NoError(t, mock.ExpectationsWereMet(), "soft restart must stamp the recycle revision source before restarting")
 }

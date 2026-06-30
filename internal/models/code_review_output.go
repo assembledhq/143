@@ -1,10 +1,8 @@
 package models
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
-	"text/template"
 )
 
 type CodeReviewFinalReviewInput struct {
@@ -15,67 +13,14 @@ type CodeReviewFinalReviewInput struct {
 	PolicyVersion             int
 	HeadSHA                   string
 	Summary                   string
-	Template                  string
 	DescriptionPassed         *bool
 	AgentSummaries            []string
 	Findings                  []CodeReviewFinding
 	RecommendedHumanReviewers []string
-	Checklist                 []string
 }
 
 func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
-	if strings.TrimSpace(input.Template) != "" {
-		if rendered, ok := renderCodeReviewFinalReviewTemplate(input); ok {
-			return rendered
-		}
-	}
 	return buildDefaultCodeReviewFinalReviewBody(input)
-}
-
-type codeReviewFinalReviewTemplateData struct {
-	Decision                  string
-	Risk                      string
-	Acceptable                bool
-	RiskReasons               []string
-	SessionURL                string
-	PolicyVersion             int
-	HeadSHA                   string
-	Summary                   string
-	DescriptionPassed         *bool
-	AgentSummaries            []string
-	Findings                  []CodeReviewFinding
-	RecommendedHumanReviewers []string
-	Checklist                 []string
-}
-
-func renderCodeReviewFinalReviewTemplate(input CodeReviewFinalReviewInput) (string, bool) {
-	tmpl, err := template.New("code_review_final_review").Parse(input.Template)
-	if err != nil {
-		return "", false
-	}
-	risk := "needs human review"
-	if input.Acceptable {
-		risk = "acceptable"
-	}
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, codeReviewFinalReviewTemplateData{
-		Decision:                  string(input.Decision),
-		Risk:                      risk,
-		Acceptable:                input.Acceptable,
-		RiskReasons:               append([]string(nil), input.RiskReasons...),
-		SessionURL:                input.SessionURL,
-		PolicyVersion:             input.PolicyVersion,
-		HeadSHA:                   input.HeadSHA,
-		Summary:                   input.Summary,
-		DescriptionPassed:         input.DescriptionPassed,
-		AgentSummaries:            append([]string(nil), input.AgentSummaries...),
-		Findings:                  append([]CodeReviewFinding(nil), input.Findings...),
-		RecommendedHumanReviewers: append([]string(nil), input.RecommendedHumanReviewers...),
-		Checklist:                 append([]string(nil), input.Checklist...),
-	}); err != nil {
-		return "", false
-	}
-	return strings.TrimSpace(buf.String()), true
 }
 
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
@@ -130,12 +75,6 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		b.WriteString("\nRecommended human reviewers: " + strings.Join(reviewers, ", ") + "\n")
-	}
-	if checklist := nonEmptyStrings(input.Checklist); len(checklist) > 0 {
-		b.WriteString("\nApproval checklist:\n")
-		for _, item := range checklist {
-			b.WriteString("- " + item + "\n")
-		}
 	}
 	return strings.TrimSpace(b.String())
 }

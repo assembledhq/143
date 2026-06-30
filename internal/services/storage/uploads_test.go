@@ -253,6 +253,91 @@ func TestS3UploadStore_Serve_NonImageAttachment(t *testing.T) {
 	require.Equal(t, `attachment; filename="data.json"`, w.Header().Get("Content-Disposition"))
 }
 
+func TestS3UploadStore_Serve_SVGAttachment(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`<svg onload="alert(1)"></svg>`)
+	contentType := "image/svg+xml"
+	contentLength := int64(len(body))
+
+	mock := &mockS3Client{
+		getObjectFunc: func(_ context.Context, _ *s3.GetObjectInput, _ ...func(*s3.Options)) (*s3.GetObjectOutput, error) {
+			return &s3.GetObjectOutput{
+				Body:          io.NopCloser(bytes.NewReader(body)),
+				ContentType:   &contentType,
+				ContentLength: &contentLength,
+			}, nil
+		},
+	}
+
+	store := NewS3UploadStore(mock, "mybucket", "uploads")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/org-1/2026-01/unsafe.svg", nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, "org-1/2026-01/unsafe.svg")
+
+	require.Equal(t, http.StatusOK, w.Code, "legacy SVG objects should still be retrievable")
+	require.Equal(t, `attachment; filename="unsafe.svg"`, w.Header().Get("Content-Disposition"), "legacy SVG objects should download instead of rendering inline")
+	require.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"), "legacy SVG responses should prevent content sniffing")
+}
+
+func TestFileUploadStore_Serve_SVGAttachment(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	key := "org-1/2026-01/unsafe.svg"
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "org-1/2026-01"), 0o750), "test fixture directory should be created")
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, key), []byte(`<svg onload="alert(1)"></svg>`), 0o600), "test SVG fixture should be written")
+
+	store := NewFileUploadStore(baseDir, "/api/v1/uploads/files")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+key, nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, key)
+
+	require.Equal(t, http.StatusOK, w.Code, "legacy local SVG uploads should still be retrievable")
+	require.Equal(t, `attachment; filename="unsafe.svg"`, w.Header().Get("Content-Disposition"), "legacy local SVG uploads should download instead of rendering inline")
+	require.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"), "legacy local SVG responses should prevent content sniffing")
+}
+
+func TestFileUploadStore_Serve_HTMLAttachment(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	key := "org-1/2026-01/evil.html"
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "org-1/2026-01"), 0o750), "test fixture directory should be created")
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, key), []byte(`<script>alert(1)</script>`), 0o600), "test HTML fixture should be written")
+
+	store := NewFileUploadStore(baseDir, "/api/v1/uploads/files")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+key, nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, key)
+
+	require.Equal(t, http.StatusOK, w.Code, "HTML uploads should still be retrievable")
+	require.Equal(t, `attachment; filename="evil.html"`, w.Header().Get("Content-Disposition"), "HTML uploads must download instead of rendering inline to prevent stored XSS")
+	require.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"), "HTML responses should prevent content sniffing")
+}
+
+func TestFileUploadStore_Serve_ImageInline(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	key := "org-1/2026-01/photo.png"
+	require.NoError(t, os.MkdirAll(filepath.Join(baseDir, "org-1/2026-01"), 0o750), "test fixture directory should be created")
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, key), []byte("\x89PNG\r\n\x1a\n"), 0o600), "test PNG fixture should be written")
+
+	store := NewFileUploadStore(baseDir, "/api/v1/uploads/files")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/uploads/files/"+key, nil)
+	w := httptest.NewRecorder()
+
+	store.Serve(w, req, key)
+
+	require.Equal(t, http.StatusOK, w.Code, "image uploads should be retrievable")
+	require.Empty(t, w.Header().Get("Content-Disposition"), "safe raster images should render inline")
+	require.Equal(t, "nosniff", w.Header().Get("X-Content-Type-Options"), "all upload responses should prevent content sniffing")
+}
+
 func TestS3UploadStore_Serve_GetObjectError(t *testing.T) {
 	t.Parallel()
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -639,6 +640,8 @@ type fakePreviewStartupCache struct {
 	restoreCalled bool
 	createKey     string
 	createMeta    SnapshotMetadata
+	createExclude []string
+	createCalled  bool
 	createErr     error
 	hit           *CacheHit
 
@@ -672,9 +675,11 @@ func (f *fakePreviewStartupCache) ApplyPartialInvalidation(_ context.Context, _ 
 	return f.partialErr
 }
 
-func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata) error {
+func (f *fakePreviewStartupCache) CreateSnapshot(_ context.Context, _ *agent.Sandbox, snapshotKey string, metadata SnapshotMetadata, excludePaths []string) error {
+	f.createCalled = true
 	f.createKey = snapshotKey
 	f.createMeta = metadata
+	f.createExclude = append([]string(nil), excludePaths...)
 	return f.createErr
 }
 
@@ -1043,12 +1048,13 @@ func TestStartRunnerCreateBranchPreviewStartupCache_ReportsTooLarge(t *testing.T
 	require.Equal(t, "cache-key", cache.createKey, "startup snapshot creation should have been attempted before size classification")
 }
 
-func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testing.T) {
+func TestStartRunnerBranchPreviewStartupCache_ExcludesFileDeliveredSecrets(t *testing.T) {
 	t.Parallel()
 
-	// The current launch would overwrite restored secret files, but cache
-	// creation happens after launch and would otherwise persist plaintext
-	// generated secret files in worker-local cache blobs.
+	// Configs that deliver runtime secret files are now cached: the snapshot is
+	// created with the secret-file destinations excluded from the worker-local
+	// blob, and they are re-injected on every launch by the runtime_secret_files
+	// phase (which runs after restore). Restore is likewise no longer skipped.
 	orgID := uuid.New()
 	repoID := uuid.New()
 	cfg := &models.PreviewConfig{
@@ -1071,14 +1077,81 @@ func TestStartRunnerBranchPreviewStartupCache_SkipsFileDeliveredSecrets(t *testi
 	sb := &agent.Sandbox{ID: "sandbox-1", WorkDir: "/workspace/repo"}
 
 	keys, err := runner.maybeRestoreBranchPreviewStartupCache(context.Background(), orgID, repoID, "abc1234", sb, cfg)
-	require.NoError(t, err, "skipping secret-file configs should not surface an error")
+	require.NoError(t, err, "restoring secret-file configs should not surface an error")
+	require.NotEmpty(t, keys.SnapshotKey, "secret-file configs should now participate in the startup cache")
+	require.True(t, cache.restoreCalled, "secret-file configs should restore cached workspace files on a hit")
+
 	result := runner.createBranchPreviewStartupCache(context.Background(), orgID, repoID, branchPreviewStartupCacheKeys{SnapshotKey: "cache-key"}, sb, cfg)
 
-	require.Empty(t, keys.SnapshotKey, "branch preview startup cache should not restore snapshots for configs with generated secret files")
-	require.Empty(t, cache.findKey, "secret-file configs should not query startup cache entries")
-	require.Empty(t, cache.createKey, "secret-file configs should not write startup cache snapshots")
-	require.False(t, cache.restoreCalled, "secret-file configs should not restore cached workspace files")
-	require.Equal(t, StartupSnapshotSkippedSecretFiles, result, "secret-file configs should report the secret-file skip reason")
+	require.Equal(t, StartupSnapshotSaved, result, "secret-file configs should now be snapshotted")
+	require.True(t, cache.createCalled, "snapshot creation should run for secret-file configs")
+	require.Equal(t, "cache-key", cache.createKey)
+	require.Contains(t, cache.createExclude, ".env.local", "secret-file destinations must be excluded from the snapshot blob")
+}
+
+func TestPreviewSnapshotExcludePaths(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil config", func(t *testing.T) {
+		t.Parallel()
+		require.Nil(t, previewSnapshotExcludePaths(nil))
+	})
+
+	t.Run("collects secret files, bundle files, and build caches; deduped and sorted", func(t *testing.T) {
+		t.Parallel()
+		enabled := true
+		cfg := &models.PreviewConfig{
+			RuntimeSecretFiles: []models.PreviewRuntimeSecretFile{
+				{Path: "config/development.conf.json"},
+				{Path: "./.env.local"}, // normalizes to .env.local
+			},
+			Secrets: []models.PreviewSecretBundleRef{
+				{Bundle: "app", Files: []string{".env.local", "secrets/db.json"}},
+			},
+			Install: &models.PreviewInstallConfig{
+				Lockfiles: []string{"package-lock.json"},
+				Cache: &models.PreviewInstallCacheConfig{
+					Build: &models.PreviewBuildCacheConfig{
+						Enabled: &enabled,
+						Paths:   []string{"node_modules/.cache/turbo"},
+					},
+				},
+			},
+		}
+
+		got := previewSnapshotExcludePaths(cfg)
+
+		require.Contains(t, got, ".env.local")
+		require.Contains(t, got, "config/development.conf.json")
+		require.Contains(t, got, "secrets/db.json")
+		require.Contains(t, got, "node_modules/.cache/turbo")
+		// .env.local appears in both RuntimeSecretFiles and a bundle ref.
+		require.Equal(t, 1, countOccurrences(got, ".env.local"), "duplicate destinations must be collapsed")
+		require.True(t, sort.StringsAreSorted(got), "exclude paths should be sorted for deterministic tar commands")
+	})
+
+	t.Run("drops invalid paths", func(t *testing.T) {
+		t.Parallel()
+		cfg := &models.PreviewConfig{
+			RuntimeSecretFiles: []models.PreviewRuntimeSecretFile{
+				{Path: "/absolute/secret"}, // rejected: absolute
+				{Path: "../escape"},        // rejected: escapes workspace
+				{Path: "  "},               // rejected: empty
+				{Path: "ok/secret.json"},
+			},
+		}
+		require.Equal(t, []string{"ok/secret.json"}, previewSnapshotExcludePaths(cfg))
+	})
+}
+
+func countOccurrences(items []string, target string) int {
+	n := 0
+	for _, item := range items {
+		if item == target {
+			n++
+		}
+	}
+	return n
 }
 
 func TestSessionPreviewPrewarmStatusForCacheStatus(t *testing.T) {

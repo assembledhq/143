@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -49,6 +50,7 @@ type PreviewHandler struct {
 	sandboxCapacity   *agent.SandboxCapacityGate
 	staticEgress      agent.StaticEgressRuntimeConfig
 	snapshots         storage.SnapshotStore
+	uploads           storage.UploadStore
 	workerSelector    *preview.WorkerSelector
 	workerClient      *preview.WorkerPreviewClient
 	localNodeID       string
@@ -101,6 +103,12 @@ func (h *PreviewHandler) SetAuditEmitter(audit *db.AuditEmitter) {
 	h.audit = audit
 }
 
+// SetUploadStore injects the upload store used for user-visible preview tool
+// artifacts such as screenshots.
+func (h *PreviewHandler) SetUploadStore(store storage.UploadStore) {
+	h.uploads = store
+}
+
 // SetJobStore injects the durable job queue used for async preview startup.
 func (h *PreviewHandler) SetJobStore(jobStore *db.JobStore) {
 	h.jobStore = jobStore
@@ -127,8 +135,19 @@ type previewHTTPError struct {
 }
 
 type ensurePreviewResponse struct {
-	Action   string                  `json:"action"`
-	Instance *models.PreviewInstance `json:"instance"`
+	Action     string                  `json:"action"`
+	Instance   *models.PreviewInstance `json:"instance"`
+	PreviewURL string                  `json:"preview_url,omitempty"`
+}
+
+func (h *PreviewHandler) ensurePreviewResponse(ctx context.Context, orgID uuid.UUID, action string, instance *models.PreviewInstance) ensurePreviewResponse {
+	resp := ensurePreviewResponse{Action: action, Instance: instance}
+	if h.manager != nil && instance != nil {
+		if status, err := h.manager.GetStatus(ctx, orgID, instance.ID); err == nil && status != nil {
+			resp.PreviewURL = status.PreviewOrigin
+		}
+	}
+	return resp
 }
 
 func (e *previewHTTPError) Error() string {
@@ -206,6 +225,27 @@ func (h *PreviewHandler) getActivePreview(w http.ResponseWriter, r *http.Request
 	}
 
 	return instance, true
+}
+
+func (h *PreviewHandler) getPreviewTarget(w http.ResponseWriter, r *http.Request) (*models.PreviewInstance, bool) {
+	if previewIDParam := chi.URLParam(r, "preview_id"); previewIDParam != "" {
+		previewID, err := uuid.Parse(previewIDParam)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PREVIEW_ID", "invalid preview id")
+			return nil, false
+		}
+		instance, err := h.store.GetPreviewInstance(r.Context(), middleware.OrgIDFromContext(r.Context()), previewID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, r, http.StatusNotFound, "PREVIEW_NOT_FOUND", "preview not found")
+			} else {
+				writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+			}
+			return nil, false
+		}
+		return instance, true
+	}
+	return h.getActivePreview(w, r)
 }
 
 func (h *PreviewHandler) lookupActivePreviewForRequest(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID) (*models.PreviewInstance, *previewHTTPError) {
@@ -1152,6 +1192,7 @@ func (h *PreviewHandler) GetPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status.Freshness = h.previewFreshness(r.Context(), orgID, sessionID, status.Instance)
+	status.RecommendedUpdateMode = h.recommendedPreviewUpdateMode(status.Instance, status.Freshness, true)
 	status.Prewarm = h.sessionPreviewPrewarmStatus(r.Context(), orgID, sessionID)
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewStatusResponse]{Data: status})
@@ -1376,6 +1417,30 @@ func (h *PreviewHandler) previewFreshness(ctx context.Context, orgID, sessionID 
 	return computePreviewFreshness(&session, instance, restartReasons)
 }
 
+func (h *PreviewHandler) recommendedPreviewUpdateMode(instance *models.PreviewInstance, freshness *models.PreviewFreshness, reloadBrowser bool) models.PreviewUpdateMode {
+	if h.restartClassifier == nil || instance == nil {
+		return ""
+	}
+	return h.restartClassifier.SelectUpdateMode(instance.Status, freshness, reloadBrowser, previewPrimaryServiceSupportsHMR(instance))
+}
+
+// previewPrimaryServiceSupportsHMR reports whether the preview's primary service
+// declared HMR support in its config. The config is read from the instance's
+// persisted recycle config (already loaded with the instance row), so this adds
+// no query and runs only on the cold update/status path. A missing or
+// unparseable config is treated as no-HMR so the classifier falls back to the
+// safe soft-restart contract.
+func previewPrimaryServiceSupportsHMR(instance *models.PreviewInstance) bool {
+	if instance == nil || len(instance.RecycleConfig) <= 2 {
+		return false
+	}
+	var cfg models.PreviewConfig
+	if err := json.Unmarshal(instance.RecycleConfig, &cfg); err != nil {
+		return false
+	}
+	return cfg.PrimaryServiceSupportsHMR()
+}
+
 func (h *PreviewHandler) previewRestartReasons(ctx context.Context, orgID uuid.UUID, session *models.Session, instance *models.PreviewInstance) []models.PreviewRestartReason {
 	if h.restartClassifier == nil || h.sessionStore == nil || session == nil || instance == nil {
 		return nil
@@ -1479,7 +1544,7 @@ func (h *PreviewHandler) StopPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -1576,6 +1641,48 @@ func (h *PreviewHandler) recyclePreviewByID(ctx context.Context, orgID, previewI
 	return h.recyclePreviewInstance(ctx, orgID, instance, body)
 }
 
+// softRestartPreviewByID performs a soft restart on the worker that owns the
+// preview, loading the instance's session to stamp the runtime workspace
+// revision. It mirrors recyclePreviewByID so that worker-routed (remote) soft
+// restarts advance the runtime revision the same way the local path does;
+// without this, freshness would stay out_of_date and `preview update` would
+// never converge for multi-worker deployments.
+func (h *PreviewHandler) softRestartPreviewByID(ctx context.Context, orgID, previewID uuid.UUID) *previewHTTPError {
+	instance, err := h.store.GetPreviewInstance(ctx, orgID, previewID)
+	if err != nil {
+		return newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get preview", err)
+	}
+	var revision int64
+	var revisionUpdatedAt time.Time
+	if h.sessionStore != nil {
+		session, err := h.sessionStore.GetByID(ctx, orgID, instance.SessionID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return newPreviewHTTPError(http.StatusNotFound, "SESSION_NOT_FOUND", "session not found", err)
+			}
+			return newPreviewHTTPError(http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load session for soft restart", err)
+		}
+		revision = session.WorkspaceRevision
+		revisionUpdatedAt = session.WorkspaceRevisionUpdatedAt
+	}
+	if revisionUpdatedAt.IsZero() {
+		if err := h.manager.SoftRestartPreview(ctx, orgID, previewID); err != nil {
+			if errors.Is(err, preview.ErrSoftRestartUnsupported) {
+				return newPreviewHTTPError(http.StatusNotImplemented, preview.PreviewSoftRestartUnsupportedCode, "preview provider does not support soft restart", err)
+			}
+			return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_SOFT_RESTART_FAILED", "failed to soft restart preview", err)
+		}
+		return nil
+	}
+	if err := h.manager.SoftRestartPreviewWithRevision(ctx, orgID, previewID, revision, revisionUpdatedAt); err != nil {
+		if errors.Is(err, preview.ErrSoftRestartUnsupported) {
+			return newPreviewHTTPError(http.StatusNotImplemented, preview.PreviewSoftRestartUnsupportedCode, "preview provider does not support soft restart", err)
+		}
+		return newPreviewHTTPError(http.StatusInternalServerError, "PREVIEW_SOFT_RESTART_FAILED", "failed to soft restart preview", err)
+	}
+	return nil
+}
+
 func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 	clearWriteDeadline(w, r)
 	clickStarted := time.Now()
@@ -1618,7 +1725,7 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 				refreshed = warmInstance
 			}
 			writeJSON(w, http.StatusOK, models.SingleResponse[ensurePreviewResponse]{
-				Data: ensurePreviewResponse{Action: "resumed", Instance: refreshed},
+				Data: h.ensurePreviewResponse(r.Context(), orgID, "resumed", refreshed),
 			})
 			return
 		}
@@ -1629,14 +1736,14 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 		}
 		metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), h.sessionPreviewStartMetricPath(r.Context(), orgID, sessionID), time.Since(clickStarted))
 		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "started", Instance: started},
+			Data: h.ensurePreviewResponse(r.Context(), orgID, "started", started),
 		})
 		return
 	}
 	if instance.Status == models.PreviewStatusStarting {
 		metrics.RecordSessionPrewarmClickToReady(r.Context(), orgID.String(), "live_reuse", time.Since(clickStarted))
 		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: "already_starting", Instance: instance},
+			Data: h.ensurePreviewResponse(r.Context(), orgID, "already_starting", instance),
 		})
 		return
 	}
@@ -1669,7 +1776,7 @@ func (h *PreviewHandler) ensurePreview(w http.ResponseWriter, r *http.Request) {
 		refreshed = instance
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[ensurePreviewResponse]{
-		Data: ensurePreviewResponse{Action: "restarted", Instance: refreshed},
+		Data: h.ensurePreviewResponse(r.Context(), orgID, "restarted", refreshed),
 	})
 }
 
@@ -1716,7 +1823,7 @@ func (h *PreviewHandler) RestartPreview(w http.ResponseWriter, r *http.Request) 
 	switch action {
 	case sessionPreviewRestartStarted, sessionPreviewRestartAlreadyStarting:
 		writeJSON(w, http.StatusAccepted, models.SingleResponse[ensurePreviewResponse]{
-			Data: ensurePreviewResponse{Action: action, Instance: instance},
+			Data: h.ensurePreviewResponse(r.Context(), orgID, action, instance),
 		})
 	default:
 		writeJSON(w, http.StatusOK, models.SingleResponse[map[string]string]{Data: map[string]string{"status": "restarting"}})
@@ -1783,6 +1890,358 @@ func (h *PreviewHandler) RestartSessionPreview(ctx context.Context, orgID, userI
 	return instance, sessionPreviewRestartRestarting, nil
 }
 
+func (h *PreviewHandler) UpdatePreview(w http.ResponseWriter, r *http.Request) {
+	clearWriteDeadline(w, r)
+
+	if !h.requireManager(w, r) {
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, ok := parsePreviewSessionID(w, r)
+	if !ok {
+		return
+	}
+	userID, ok := previewRequestUserID(r.Context(), middleware.UserFromContext(r.Context()))
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+
+	var body models.PreviewUpdateRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+			return
+		}
+	}
+	reloadBrowser := true
+	if body.ReloadBrowser != nil {
+		reloadBrowser = *body.ReloadBrowser
+	}
+	if body.Path == "" {
+		body.Path = "/"
+	}
+	if body.ForceMode != "" && body.ForceMode.Validate() != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_UPDATE_MODE_UNSUPPORTED", "requested force_mode is not supported")
+		return
+	}
+
+	instance, activeErr := h.lookupActivePreviewForRequest(r.Context(), orgID, sessionID)
+	if activeErr != nil {
+		writePreviewHTTPError(w, r, activeErr)
+		return
+	}
+	if instance == nil {
+		if body.ForceMode == models.PreviewUpdateModeBrowserReload {
+			writeError(w, r, http.StatusConflict, "PREVIEW_NOT_READY", "preview is not ready for browser reload")
+			return
+		}
+		started, _, startErr := h.startPreviewFromRequest(r.Context(), orgID, userID, sessionID, startPreviewRequest{Config: body.Config})
+		if startErr != nil {
+			writePreviewHTTPError(w, r, startErr)
+			return
+		}
+		resp := models.PreviewUpdateResponse{
+			PreviewID: started.ID,
+			SessionID: sessionID,
+			Mode:      models.PreviewUpdateModeColdRelaunch,
+			Action:    models.PreviewUpdateActionStarted,
+			Status:    started.Status,
+			Message:   "preview cold relaunch started",
+		}
+		h.recordPreviewUpdateLog(r.Context(), orgID, started.ID, "info", "preview cold relaunch started for update", map[string]any{
+			"mode": models.PreviewUpdateModeColdRelaunch,
+			"path": body.Path,
+		})
+		h.emitPreviewToolAudit(r, models.AuditActionPreviewUpdated, started, map[string]any{
+			"tool":   "preview_update",
+			"mode":   models.PreviewUpdateModeColdRelaunch,
+			"action": resp.Action,
+		})
+		if body.Wait {
+			h.waitForPreviewReady(r.Context(), orgID, resp.PreviewID, &resp)
+		}
+		writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PreviewUpdateResponse]{Data: resp})
+		return
+	}
+	if instance.Status == models.PreviewStatusStarting {
+		writeError(w, r, http.StatusConflict, "PREVIEW_UPDATE_CONFLICT", "preview start or update is already in progress")
+		return
+	}
+
+	freshness := h.previewFreshness(r.Context(), orgID, sessionID, instance)
+	if freshness != nil && freshness.State == models.PreviewFreshnessUpdating {
+		writeError(w, r, http.StatusConflict, "PREVIEW_UPDATE_CONFLICT", "preview start or update is already in progress")
+		return
+	}
+	mode := h.recommendedPreviewUpdateMode(instance, freshness, reloadBrowser)
+	if body.ForceMode != "" {
+		mode = body.ForceMode
+	}
+	if mode == models.PreviewUpdateModeSoftServiceRestart && body.Config != nil {
+		mode = models.PreviewUpdateModeFullRecycle
+	}
+
+	resp := models.PreviewUpdateResponse{
+		PreviewID: instance.ID,
+		SessionID: sessionID,
+		Mode:      mode,
+		Status:    instance.Status,
+		Freshness: freshness,
+	}
+	status, statusErr := h.manager.GetStatus(r.Context(), orgID, instance.ID)
+	if statusErr == nil && status != nil {
+		resp.PreviewURL = status.PreviewOrigin
+	}
+	h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "info", "preview update requested", map[string]any{
+		"mode":           mode,
+		"force_mode":     body.ForceMode,
+		"reload_browser": reloadBrowser,
+		"path":           body.Path,
+		"freshness":      freshness,
+	})
+
+	switch mode {
+	case models.PreviewUpdateModeNoopCurrent:
+		resp.Action = models.PreviewUpdateActionAlreadyCurrent
+		resp.Message = "preview is already current"
+		h.emitPreviewToolAudit(r, models.AuditActionPreviewUpdated, instance, map[string]any{
+			"tool":   "preview_update",
+			"mode":   mode,
+			"action": resp.Action,
+		})
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewUpdateResponse]{Data: resp})
+		return
+	case models.PreviewUpdateModeBrowserReload:
+		if !previewStatusBrowserReady(instance.Status) {
+			h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "warn", "preview update browser reload rejected", map[string]any{
+				"mode":   mode,
+				"status": instance.Status,
+			})
+			writeError(w, r, http.StatusConflict, "PREVIEW_NOT_READY", "preview is not ready for browser reload")
+			return
+		}
+		if reloadBrowser {
+			if err := h.reloadPreviewBrowser(r.Context(), orgID, instance, body.Path); err != nil {
+				if _, ok := preview.AsWorkerRequestError(err); ok {
+					h.writeWorkerClientError(w, r, err)
+					return
+				}
+				writeError(w, r, http.StatusInternalServerError, "PREVIEW_UPDATE_FAILED", "failed to reload preview browser", err)
+				return
+			}
+		}
+		resp.Action = models.PreviewUpdateActionUpdated
+		resp.Message = "browser reloaded"
+		h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "info", "preview browser reloaded", map[string]any{
+			"mode": mode,
+			"path": body.Path,
+		})
+		h.emitPreviewToolAudit(r, models.AuditActionPreviewUpdated, instance, map[string]any{
+			"tool":   "preview_update",
+			"mode":   mode,
+			"action": resp.Action,
+		})
+		writeJSON(w, http.StatusOK, models.SingleResponse[models.PreviewUpdateResponse]{Data: resp})
+		return
+	case models.PreviewUpdateModeSoftServiceRestart:
+		if err := h.softRestartPreviewForUpdate(r.Context(), orgID, instance, sessionID); err != nil {
+			if errors.Is(err, preview.ErrSoftRestartUnsupported) {
+				h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "info", "preview soft restart unsupported, falling back to full recycle", map[string]any{
+					"requested_mode": mode,
+				})
+				h.executePreviewRecycleUpdate(w, r, orgID, userID, sessionID, instance, body, resp, models.PreviewUpdateModeFullRecycle)
+				return
+			}
+			h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "warn", "preview soft restart failed", map[string]any{
+				"mode":  mode,
+				"error": err.Error(),
+			})
+			if _, ok := preview.AsWorkerRequestError(err); ok {
+				h.writeWorkerClientError(w, r, err)
+				return
+			}
+			writeError(w, r, http.StatusInternalServerError, "PREVIEW_UPDATE_FAILED", "failed to soft restart preview", err)
+			return
+		}
+		if refreshed, err := h.store.GetPreviewInstance(r.Context(), orgID, instance.ID); err == nil {
+			resp.Status = refreshed.Status
+		}
+		resp.Action = models.PreviewUpdateActionRestarting
+		resp.Message = "preview service restart started"
+		if body.Wait {
+			h.waitForPreviewReady(r.Context(), orgID, resp.PreviewID, &resp)
+		}
+		h.recordPreviewUpdateLog(r.Context(), orgID, instance.ID, "info", "preview soft restart started", map[string]any{
+			"mode": mode,
+		})
+		h.emitPreviewToolAudit(r, models.AuditActionPreviewUpdated, instance, map[string]any{
+			"tool":   "preview_update",
+			"mode":   mode,
+			"action": resp.Action,
+		})
+		writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PreviewUpdateResponse]{Data: resp})
+		return
+	case models.PreviewUpdateModeFullRecycle, models.PreviewUpdateModeColdRelaunch:
+		h.executePreviewRecycleUpdate(w, r, orgID, userID, sessionID, instance, body, resp, mode)
+		return
+	default:
+		writeError(w, r, http.StatusUnprocessableEntity, "PREVIEW_UPDATE_MODE_UNSUPPORTED", "requested update mode is not supported")
+	}
+}
+
+// executePreviewRecycleUpdate performs a full recycle of the session preview
+// and writes the update response. It is shared by the full_recycle/cold_relaunch
+// update modes and by the soft_service_restart fallback path when the active
+// provider does not support soft restarts.
+func (h *PreviewHandler) executePreviewRecycleUpdate(
+	w http.ResponseWriter,
+	r *http.Request,
+	orgID, userID, sessionID uuid.UUID,
+	instance *models.PreviewInstance,
+	body models.PreviewUpdateRequest,
+	resp models.PreviewUpdateResponse,
+	mode models.PreviewUpdateMode,
+) {
+	resp.Mode = mode
+	restarted, _, restartErr := h.RestartSessionPreview(r.Context(), orgID, userID, sessionID, startPreviewRequest{Config: body.Config})
+	if restartErr != nil {
+		writePreviewHTTPError(w, r, restartErr)
+		return
+	}
+	if restarted != nil {
+		resp.PreviewID = restarted.ID
+		resp.Status = restarted.Status
+		refreshedFreshness := h.previewFreshness(r.Context(), orgID, sessionID, restarted)
+		resp.Freshness = refreshedFreshness
+	}
+	resp.Action = models.PreviewUpdateActionRestarting
+	resp.Message = "preview restart started"
+	if body.Wait {
+		h.waitForPreviewReady(r.Context(), orgID, resp.PreviewID, &resp)
+	}
+	h.recordPreviewUpdateLog(r.Context(), orgID, resp.PreviewID, "info", "preview restart started for update", map[string]any{
+		"mode": mode,
+	})
+	auditInstance := instance
+	if restarted != nil {
+		auditInstance = restarted
+	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewUpdated, auditInstance, map[string]any{
+		"tool":   "preview_update",
+		"mode":   mode,
+		"action": resp.Action,
+	})
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[models.PreviewUpdateResponse]{Data: resp})
+}
+
+func previewStatusBrowserReady(status models.PreviewStatus) bool {
+	switch status {
+	case models.PreviewStatusReady, models.PreviewStatusPartiallyReady, models.PreviewStatusUnhealthy:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *PreviewHandler) recordPreviewUpdateLog(ctx context.Context, orgID, previewID uuid.UUID, level, message string, metadata map[string]any) {
+	if h.store == nil {
+		return
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("preview update log metadata marshal failed")
+		raw = json.RawMessage(`{}`)
+	}
+	if err := h.store.CreatePreviewLog(ctx, &models.PreviewLog{
+		PreviewInstanceID: previewID,
+		OrgID:             orgID,
+		Level:             level,
+		Step:              models.PreviewLogStepUpdate,
+		Message:           message,
+		Metadata:          raw,
+	}); err != nil {
+		h.logger.Warn().Err(err).Str("preview_id", previewID.String()).Msg("failed to create preview update log")
+	}
+}
+
+func (h *PreviewHandler) softRestartPreviewForUpdate(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance, sessionID uuid.UUID) error {
+	var revision int64
+	var revisionUpdatedAt time.Time
+	if h.sessionStore != nil {
+		if session, err := h.sessionStore.GetByID(ctx, orgID, sessionID); err == nil {
+			revision = session.WorkspaceRevision
+			revisionUpdatedAt = session.WorkspaceRevisionUpdatedAt
+		} else {
+			h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("soft restart: failed to load session revision; restarting without revision stamp")
+		}
+	}
+	if h.workerRoutingEnabled() {
+		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
+		if err != nil {
+			return err
+		}
+		if !h.isLocalWorker(worker) {
+			return h.workerClient.SoftRestartPreview(ctx, worker, orgID, instance.ID)
+		}
+	}
+	if revisionUpdatedAt.IsZero() {
+		return h.manager.SoftRestartPreview(ctx, orgID, instance.ID)
+	}
+	return h.manager.SoftRestartPreviewWithRevision(ctx, orgID, instance.ID, revision, revisionUpdatedAt)
+}
+
+func (h *PreviewHandler) reloadPreviewBrowser(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance, path string) error {
+	step := models.InteractionStep{Action: "navigate", Value: path, WaitFor: "load", Timeout: 10 * time.Second}
+	if h.workerRoutingEnabled() {
+		worker, err := h.resolvePreviewWorker(ctx, instance.WorkerNodeID)
+		if err != nil {
+			return err
+		}
+		if h.isLocalWorker(worker) {
+			inspector := h.manager.Inspector()
+			if inspector == nil {
+				return fmt.Errorf("preview inspector is not configured")
+			}
+			_, err = inspector.ExecuteInteraction(ctx, instance.ID.String(), []models.InteractionStep{step})
+			return err
+		}
+		_, err = h.workerClient.ExecuteInteraction(ctx, worker, orgID, instance.ID, []models.InteractionStep{step})
+		return err
+	}
+	inspector := h.manager.Inspector()
+	if inspector == nil {
+		return fmt.Errorf("preview inspector is not configured")
+	}
+	_, err := inspector.ExecuteInteraction(ctx, instance.ID.String(), []models.InteractionStep{step})
+	return err
+}
+
+func (h *PreviewHandler) waitForPreviewReady(ctx context.Context, orgID, previewID uuid.UUID, resp *models.PreviewUpdateResponse) {
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-waitCtx.Done():
+			return
+		case <-ticker.C:
+			status, err := h.manager.GetStatus(waitCtx, orgID, previewID)
+			if err != nil || status == nil || status.Instance == nil {
+				continue
+			}
+			resp.Status = status.Instance.Status
+			resp.PreviewURL = status.PreviewOrigin
+			if status.Instance.Status == models.PreviewStatusReady ||
+				status.Instance.Status == models.PreviewStatusPartiallyReady ||
+				status.Instance.Status.IsTerminal() {
+				return
+			}
+		}
+	}
+}
+
 // =============================================================================
 // GET /api/v1/sessions/{id}/preview/logs — Get preview logs
 // =============================================================================
@@ -1832,7 +2291,7 @@ func (h *PreviewHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 
 func (h *PreviewHandler) GetServices(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -1856,7 +2315,7 @@ func (h *PreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http.Reque
 	}
 	orgID := middleware.OrgIDFromContext(r.Context())
 	user := middleware.UserFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -1880,7 +2339,7 @@ func (h *PreviewHandler) MintBootstrapToken(w http.ResponseWriter, r *http.Reque
 
 func (h *PreviewHandler) GetSnapshots(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -1922,7 +2381,7 @@ func (h *PreviewHandler) SetLifetime(w http.ResponseWriter, r *http.Request) {
 	}
 
 	orgID := middleware.OrgIDFromContext(r.Context())
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2007,19 +2466,77 @@ func (h *PreviewHandler) DetectReadiness(w http.ResponseWriter, r *http.Request)
 // =============================================================================
 
 type captureScreenshotRequest struct {
-	Path      string `json:"path"`
-	ViewportW int    `json:"viewport_w"`
-	ViewportH int    `json:"viewport_h"`
-	FullPage  bool   `json:"full_page"`
-	DelayMS   int    `json:"delay_ms"`
+	Path         string `json:"path"`
+	ViewportW    int    `json:"viewport_w"`
+	ViewportH    int    `json:"viewport_h"`
+	FullPage     bool   `json:"full_page"`
+	DelayMS      int    `json:"delay_ms"`
+	InlineBase64 *bool  `json:"inline_base64"`
 }
 
 type captureScreenshotResponse struct {
 	PageTitle     string                  `json:"page_title"`
 	ConsoleErrors []models.ConsoleMessage `json:"console_errors,omitempty"`
 	URL           string                  `json:"url"`
+	Viewport      models.ViewportSpec     `json:"viewport"`
+	Artifact      *models.PreviewArtifact `json:"artifact,omitempty"`
 	CapturedAt    time.Time               `json:"captured_at"`
-	PNGBase64     string                  `json:"png_base64"`
+	PNGBase64     string                  `json:"png_base64,omitempty"`
+}
+
+func (h *PreviewHandler) persistPreviewScreenshotArtifact(ctx context.Context, orgID, previewID uuid.UUID, kind string, result *models.ScreenshotResult) *models.PreviewArtifact {
+	if h.uploads == nil || result == nil || len(result.PNG) == 0 {
+		return nil
+	}
+	artifactID := uuid.NewString()
+	now := time.Now()
+	key := fmt.Sprintf("%s/%s/preview-artifacts/%s/%s.png", orgID, now.Format("2006-01"), previewID, artifactID)
+	url, err := h.uploads.Save(ctx, key, bytes.NewReader(result.PNG), "image/png")
+	if err != nil {
+		h.logger.Warn().Err(err).
+			Str("preview_id", previewID.String()).
+			Str("artifact_kind", kind).
+			Msg("failed to persist preview screenshot artifact")
+		return nil
+	}
+	artifact := &models.PreviewArtifact{
+		ID:          artifactID,
+		Kind:        kind,
+		ContentType: "image/png",
+		URL:         url,
+		StorageKey:  key,
+		Bytes:       len(result.PNG),
+		CreatedAt:   now,
+	}
+	result.Artifact = artifact
+	return artifact
+}
+
+func attachPreviewArtifacts(ctx context.Context, h *PreviewHandler, orgID uuid.UUID, instance *models.PreviewInstance, result *models.ScreenshotResult, kind string) {
+	if instance == nil || result == nil {
+		return
+	}
+	h.persistPreviewScreenshotArtifact(ctx, orgID, instance.ID, kind, result)
+}
+
+func (h *PreviewHandler) emitPreviewToolAudit(r *http.Request, action models.AuditAction, instance *models.PreviewInstance, details map[string]any) {
+	if h.audit == nil || instance == nil {
+		return
+	}
+	if details == nil {
+		details = map[string]any{}
+	}
+	details["preview_id"] = instance.ID.String()
+	if instance.SessionID != uuid.Nil {
+		details["session_id"] = instance.SessionID.String()
+	}
+	resourceID := instance.ID.String()
+	raw := marshalAuditDetails(h.logger, details)
+	var sessionID *uuid.UUID
+	if instance.SessionID != uuid.Nil {
+		sessionID = &instance.SessionID
+	}
+	emitUserAuditWithSession(h.audit, r, action, models.AuditResourcePreview, &resourceID, sessionID, nil, raw)
 }
 
 func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Request) {
@@ -2028,7 +2545,7 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2092,14 +2609,37 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "SCREENSHOT_FAILED", "failed to capture screenshot", err)
 		return
 	}
+	if result.Viewport.Width == 0 && result.Viewport.Height == 0 {
+		result.Viewport = models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH}
+	}
+	attachPreviewArtifacts(r.Context(), h, middleware.OrgIDFromContext(r.Context()), instance, result, "screenshot")
+
+	// When an artifact was persisted, callers get a stable reference and don't
+	// need the full PNG inlined; defaulting it off keeps large base64 blobs out
+	// of agent context. Without an artifact (upload store unconfigured) we still
+	// inline for compatibility. An explicit inline_base64 always wins.
+	inlineBase64 := result.Artifact == nil
+	if body.InlineBase64 != nil {
+		inlineBase64 = *body.InlineBase64
+	}
 
 	resp := captureScreenshotResponse{
 		PageTitle:     result.PageTitle,
 		ConsoleErrors: result.ConsoleErrors,
 		URL:           result.URL,
+		Viewport:      result.Viewport,
+		Artifact:      result.Artifact,
 		CapturedAt:    result.CapturedAt,
-		PNGBase64:     base64.StdEncoding.EncodeToString(result.PNG),
 	}
+	if inlineBase64 {
+		resp.PNGBase64 = base64.StdEncoding.EncodeToString(result.PNG)
+	}
+	auditDetails := map[string]any{"tool": "preview_screenshot"}
+	if result.Artifact != nil {
+		auditDetails["artifact_id"] = result.Artifact.ID
+		auditDetails["artifact_url"] = result.Artifact.URL
+	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewScreenshotCaptured, instance, auditDetails)
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[captureScreenshotResponse]{Data: resp})
 }
@@ -2109,8 +2649,9 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 // =============================================================================
 
 type inspectElementRequest struct {
-	X int `json:"x"`
-	Y int `json:"y"`
+	X        int    `json:"x"`
+	Y        int    `json:"y"`
+	Selector string `json:"selector,omitempty"`
 }
 
 func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
@@ -2119,7 +2660,7 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2129,12 +2670,15 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
-	// Max coordinate is generous but prevents obviously absurd values.
-	const maxCoordinate = 10000
-	if body.X < 0 || body.Y < 0 || body.X > maxCoordinate || body.Y > maxCoordinate {
-		writeError(w, r, http.StatusBadRequest, "INVALID_COORDINATES",
-			fmt.Sprintf("x and y must be between 0 and %d", maxCoordinate))
-		return
+	body.Selector = strings.TrimSpace(body.Selector)
+	if body.Selector == "" {
+		// Max coordinate is generous but prevents obviously absurd values.
+		const maxCoordinate = 10000
+		if body.X < 0 || body.Y < 0 || body.X > maxCoordinate || body.Y > maxCoordinate {
+			writeError(w, r, http.StatusBadRequest, "INVALID_COORDINATES",
+				fmt.Sprintf("x and y must be between 0 and %d", maxCoordinate))
+			return
+		}
 	}
 
 	var element *models.ElementInfo
@@ -2151,16 +2695,28 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 			if !inspectorOK {
 				return
 			}
-			element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+			if body.Selector != "" {
+				element, err = inspector.InspectElementBySelector(r.Context(), instance.ID.String(), body.Selector)
+			} else {
+				element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+			}
 		} else {
-			element, err = h.workerClient.InspectElement(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.X, body.Y)
+			if body.Selector != "" {
+				element, err = h.workerClient.InspectElementBySelector(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Selector)
+			} else {
+				element, err = h.workerClient.InspectElement(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.X, body.Y)
+			}
 		}
 	} else {
 		inspector, inspectorOK := h.requireInspector(w, r)
 		if !inspectorOK {
 			return
 		}
-		element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+		if body.Selector != "" {
+			element, err = inspector.InspectElementBySelector(r.Context(), instance.ID.String(), body.Selector)
+		} else {
+			element, err = inspector.InspectElement(r.Context(), instance.ID.String(), body.X, body.Y)
+		}
 	}
 	if err != nil {
 		if _, ok := preview.AsWorkerRequestError(err); ok {
@@ -2171,6 +2727,9 @@ func (h *PreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool": "preview_inspect",
+	})
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.ElementInfo]{Data: element})
 }
 
@@ -2184,7 +2743,7 @@ func (h *PreviewHandler) ReadConsole(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2221,7 +2780,20 @@ func (h *PreviewHandler) ReadConsole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "CONSOLE_READ_FAILED", "failed to read console messages", err)
 		return
 	}
+	if level := strings.TrimSpace(r.URL.Query().Get("level")); level != "" {
+		filtered := messages[:0]
+		for _, msg := range messages {
+			if strings.EqualFold(msg.Level, level) {
+				filtered = append(filtered, msg)
+			}
+		}
+		messages = filtered
+	}
 
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool":  "preview_console",
+		"count": len(messages),
+	})
 	writeJSON(w, http.StatusOK, models.ListResponse[preview.ConsoleMessage]{Data: messages})
 }
 
@@ -2290,7 +2862,7 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2310,6 +2882,7 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 			fmt.Sprintf("at most %d interaction steps allowed", maxInteractionSteps))
 		return
 	}
+	normalizeInteractionStepTimeouts(body.Steps)
 
 	// Enforce the max total duration per the design doc (60 seconds).
 	ctx, cancel := context.WithTimeout(r.Context(), maxInteractionDuration)
@@ -2348,8 +2921,26 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusInternalServerError, "INTERACTION_FAILED", "failed to execute interaction", err)
 		return
 	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	for i := range result.Steps {
+		if result.Steps[i].Screenshot != nil {
+			attachPreviewArtifacts(r.Context(), h, orgID, instance, result.Steps[i].Screenshot, "interaction_screenshot")
+		}
+	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool":       "preview_interact",
+		"step_count": len(body.Steps),
+	})
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.InteractionResult]{Data: result})
+}
+
+func normalizeInteractionStepTimeouts(steps []models.InteractionStep) {
+	for i := range steps {
+		if steps[i].Timeout == 0 && steps[i].TimeoutMS > 0 {
+			steps[i].Timeout = time.Duration(steps[i].TimeoutMS) * time.Millisecond
+		}
+	}
 }
 
 // =============================================================================
@@ -2370,7 +2961,7 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2436,6 +3027,15 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "MULTI_VIEWPORT_FAILED", "failed to capture multi-viewport screenshots", err)
 		return
 	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	for i := range result.Captures {
+		result.Captures[i].Screenshot.Viewport = result.Captures[i].Viewport
+		attachPreviewArtifacts(r.Context(), h, orgID, instance, &result.Captures[i].Screenshot, "multi_viewport_screenshot")
+	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool":          "preview_multi_viewport",
+		"capture_count": len(result.Captures),
+	})
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.MultiViewportResult]{Data: result})
 }
@@ -2455,7 +3055,7 @@ func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2505,6 +3105,10 @@ func (h *PreviewHandler) ComputeVisualDiff(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "VISUAL_DIFF_FAILED", "failed to compute visual diff", err)
 		return
 	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool":               "preview_visual_diff",
+		"pixel_diff_percent": diff.PixelDiffPercent,
+	})
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.VisualDiff]{Data: diff})
 }
@@ -2523,7 +3127,7 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	instance, ok := h.getActivePreview(w, r)
+	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
 		return
 	}
@@ -2578,6 +3182,12 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "ASSERTIONS_FAILED", "failed to run assertions", err)
 		return
 	}
+	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
+		"tool":            "preview_assert",
+		"assertion_count": len(body.Assertions),
+		"passed":          result.Passed,
+		"failed":          result.Failed,
+	})
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[*preview.AssertionResult]{Data: result})
 }

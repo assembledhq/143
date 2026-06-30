@@ -732,6 +732,7 @@ function SessionsAndCleanupSection() {
       DEFAULT_EXECUTION_SETTINGS.max_session_duration_seconds) / 60,
   );
   const tabToolsEnabled = settings.coding_agent_tab_tools_enabled ?? true;
+  const requireOpenRouter = settings.opencode_routing?.require_openrouter ?? false;
   const completedRetentionMinutes =
     lifecycle.completed_session_retention_minutes ??
     DEFAULT_COMPLETED_SESSION_RETENTION_MINUTES;
@@ -920,6 +921,24 @@ function SessionsAndCleanupSection() {
                     });
                   }}
                   aria-label="Agent tab tools"
+                  className="sm:ml-auto"
+                />
+              </SettingRow>
+              <SettingRow
+                id="opencode-require-openrouter"
+                label="OpenCode: require OpenRouter routing"
+                description="Route OpenCode models only through OpenRouter (audited US-only providers). When off, models fall back to the OpenCode-native gateway if no OpenRouter key is available."
+                tooltip="The native gateway lacks OpenRouter's US-only provider guarantee. Enable this for US/data-sensitive orgs. Pinned native model ids always bypass this."
+              >
+                <Switch
+                  id="opencode-require-openrouter"
+                  checked={requireOpenRouter}
+                  onCheckedChange={(checked) => {
+                    autosave.save({
+                      settings: { opencode_routing: { require_openrouter: checked } },
+                    });
+                  }}
+                  aria-label="Require OpenRouter routing for OpenCode"
                   className="sm:ml-auto"
                 />
               </SettingRow>

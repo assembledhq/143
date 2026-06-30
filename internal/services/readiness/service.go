@@ -48,7 +48,6 @@ func (e *Evaluator) Evaluate(_ context.Context, input EvaluationInput) (Evaluati
 		{models.PRReadinessCheckTypeFreshness, e.freshnessCheck},
 		{models.PRReadinessCheckTypeAgentReviewClean, e.agentReviewCheck},
 		{models.PRReadinessCheckTypeDiffCollected, e.diffCollectedCheck},
-		{models.PRReadinessCheckTypeTestEvidencePresent, e.testEvidenceCheck},
 		{models.PRReadinessCheckTypeRiskFlags, e.riskFlagsCheck},
 		{models.PRReadinessCheckTypeDependencyConfigRisk, e.dependencyConfigRiskCheck},
 		{models.PRReadinessCheckTypeGeneratedFileChurn, e.generatedFileChurnCheck},
@@ -105,11 +104,11 @@ func (e *Evaluator) checkBase(checkType models.PRReadinessCheckType, status mode
 }
 
 func (e *Evaluator) freshnessCheck(input EvaluationInput) models.PRReadinessCheck {
-	if input.Session.WorkspaceGeneration == input.EvaluatedWorkspaceRevision && stringValue(input.Session.SnapshotKey) == input.EvaluatedSnapshotKey {
+	if input.Session.WorkspaceRevision == input.EvaluatedWorkspaceRevision && stringValue(input.Session.SnapshotKey) == input.EvaluatedSnapshotKey {
 		return e.checkBase(models.PRReadinessCheckTypeFreshness, models.PRReadinessCheckStatusPassed, "Readiness is fresh", "Checked against the latest workspace revision.", "Re-run", nil)
 	}
 	return e.checkBase(models.PRReadinessCheckTypeFreshness, models.PRReadinessCheckStatusFailed, "Readiness is stale", "Workspace files changed after this readiness result was produced.", "Re-run", map[string]any{
-		"current_workspace_revision":   input.Session.WorkspaceGeneration,
+		"current_workspace_revision":   input.Session.WorkspaceRevision,
 		"evaluated_workspace_revision": input.EvaluatedWorkspaceRevision,
 	})
 }
@@ -129,27 +128,6 @@ func (e *Evaluator) diffCollectedCheck(input EvaluationInput) models.PRReadiness
 		return e.checkBase(models.PRReadinessCheckTypeDiffCollected, models.PRReadinessCheckStatusPassed, "Diff collected", "Diff stats are available for this session.", "View changes", nil)
 	}
 	return e.checkBase(models.PRReadinessCheckTypeDiffCollected, models.PRReadinessCheckStatusWarning, "Diff not collected", "No diff stats were available when readiness ran.", "View changes", nil)
-}
-
-var (
-	testEvidencePattern = regexp.MustCompile(`(?i)\b(go test|npm (run )?test|pnpm test|yarn test|pytest|vitest|cargo test|mvn test|gradle test|make test)\b`)
-	testSuccessPattern  = regexp.MustCompile(`(?i)\b(pass(ed|es)?|success(ful)?|ok|exit code 0|0 failed|tests? passed)\b`)
-	testFailurePattern  = regexp.MustCompile(`(?i)\b(fail(ed|ure|ing)?|error|exit code [1-9][0-9]*)\b`)
-)
-
-func (e *Evaluator) testEvidenceCheck(input EvaluationInput) models.PRReadinessCheck {
-	revisionUpdatedAt := input.Session.WorkspaceRevisionUpdatedAt
-	for _, log := range input.Logs {
-		if !revisionUpdatedAt.IsZero() && log.Timestamp.Before(revisionUpdatedAt) {
-			continue
-		}
-		if testEvidencePattern.MatchString(log.Message) && testSuccessPattern.MatchString(log.Message) && !testFailurePattern.MatchString(log.Message) {
-			return e.checkBase(models.PRReadinessCheckTypeTestEvidencePresent, models.PRReadinessCheckStatusPassed, "Test evidence found", "A test or verification command was captured after the session changed files.", "View logs", map[string]any{
-				"log_id": log.ID,
-			})
-		}
-	}
-	return e.checkBase(models.PRReadinessCheckTypeTestEvidencePresent, models.PRReadinessCheckStatusWarning, "No test evidence found", "No captured test or verification command output was found.", "Run tests", nil)
 }
 
 func (e *Evaluator) riskFlagsCheck(input EvaluationInput) models.PRReadinessCheck {

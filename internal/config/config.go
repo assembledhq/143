@@ -665,5 +665,9 @@ func (c *Config) ValidateSecrets() error {
 		return errors.New("CSRF_SIGNING_KEY must be set to a strong random value in production (min 32 characters)")
 	}
 
+	if c.GitHubWebhookSecret == "" {
+		return errors.New("GITHUB_WEBHOOK_SECRET must be set in production")
+	}
+
 	return nil
 }

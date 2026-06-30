@@ -67,6 +67,23 @@ func (d CodeReviewDecision) Validate() error {
 	}
 }
 
+// CodeReviewUpdatedEvent is fanned out over the org-scoped code review SSE
+// stream whenever a review row is created or its status/decision changes. The
+// frontend treats it as a "the list moved, refetch" signal rather than reading
+// individual fields off it (Redis pub/sub is at-most-once and unordered, so the
+// canonical record is whatever the list endpoint returns on invalidation).
+type CodeReviewUpdatedEvent struct {
+	OrgID uuid.UUID `json:"org_id"`
+	// SessionID is nil for batch transitions that touch many rows at once
+	// (e.g. marking a PR's prior reviews stale on a new head), which have no
+	// single session. A pointer is required for omitempty to actually fire —
+	// uuid.UUID is a fixed-size array and never counts as "empty" to encoding/json.
+	SessionID *uuid.UUID              `json:"session_id,omitempty"`
+	Status    CodeReviewSessionStatus `json:"status,omitempty"`
+	Decision  *CodeReviewDecision     `json:"decision,omitempty"`
+	UpdatedAt time.Time               `json:"updated_at"`
+}
+
 type CodeReviewTriggerSource string
 
 const (
@@ -294,40 +311,70 @@ type CodeReviewDescriptionPolicy struct {
 }
 
 type CodeReviewRiskPolicy struct {
-	MaxFilesChanged       int      `json:"max_files_changed"`
-	MaxLinesChanged       int      `json:"max_lines_changed"`
-	RequirePassingChecks  bool     `json:"require_passing_checks"`
-	ExcludeSensitivePaths bool     `json:"exclude_sensitive_paths"`
-	SensitivePaths        []string `json:"sensitive_paths,omitempty"`
-	AllowedPathPatterns   []string `json:"allowed_path_patterns,omitempty"`
-	BlockedPathPatterns   []string `json:"blocked_path_patterns,omitempty"`
-	ExcludeCategories     []string `json:"exclude_categories,omitempty"`
-	RequireMergeable      bool     `json:"require_mergeable"`
-	RequireUpToDate       bool     `json:"require_up_to_date"`
-	AllowForks            bool     `json:"allow_forks"`
-	AllowPolicyChanges    bool     `json:"allow_policy_changes"`
-	EligibleAuthors       []string `json:"eligible_authors,omitempty"`
-	RequiredChecks        []string `json:"required_checks,omitempty"`
+	MaxFilesChanged       int                   `json:"max_files_changed"`
+	MaxLinesChanged       int                   `json:"max_lines_changed"`
+	RequirePassingChecks  bool                  `json:"require_passing_checks"`
+	ExcludeSensitivePaths bool                  `json:"exclude_sensitive_paths"`
+	SensitivePaths        []string              `json:"sensitive_paths,omitempty"`
+	AllowedPathPatterns   []string              `json:"allowed_path_patterns,omitempty"`
+	BlockedPathPatterns   []string              `json:"blocked_path_patterns,omitempty"`
+	ExcludeCategories     []string              `json:"exclude_categories,omitempty"`
+	RequireUpToDate       bool                  `json:"require_up_to_date"`
+	AllowForks            bool                  `json:"allow_forks"`
+	AllowPolicyChanges    bool                  `json:"allow_policy_changes"`
+	EligibleAuthors       []string              `json:"eligible_authors,omitempty"`
+	RequiredChecks        []string              `json:"required_checks,omitempty"`
+	LowRiskLane           CodeReviewLowRiskLane `json:"low_risk_lane,omitempty"`
+}
+
+// CodeReviewLowRiskLane relaxes a subset of approval prerequisites for changes
+// whose risk categories all fall within a low-risk allowlist (e.g. docs-only
+// changes). It never bypasses the substantive gates (sensitive/blocked paths,
+// description policy, passing checks, mergeability, prompt injection, blocking
+// findings); it only raises the churn ceiling and, optionally, waives the
+// reviewer-quorum requirement so a clean low-risk change can approve on the
+// heuristic gates even when the review agents time out.
+type CodeReviewLowRiskLane struct {
+	Enabled             bool     `json:"enabled"`
+	Categories          []string `json:"categories,omitempty"`
+	MaxLinesChanged     int      `json:"max_lines_changed,omitempty"`
+	WaiveReviewerQuorum bool     `json:"waive_reviewer_quorum,omitempty"`
+}
+
+// CodeReviewLowRiskLaneApplies reports whether the lane is enabled and every
+// risk category present in the change is contained in the lane's allowlist. An
+// empty category set never qualifies — we only relax changes we can positively
+// classify as low risk.
+func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []string) bool {
+	if !lane.Enabled || len(lane.Categories) == 0 || len(categories) == 0 {
+		return false
+	}
+	for _, category := range categories {
+		if !stringInSlice(category, lane.Categories) {
+			return false
+		}
+	}
+	return true
 }
 
 type CodeReviewAgentRoster struct {
 	Reviewers             []AgentType `json:"reviewers"`
 	Orchestrator          AgentType   `json:"orchestrator"`
+	ReviewerModels        []string    `json:"reviewer_models,omitempty"`
+	OrchestratorModel     *string     `json:"orchestrator_model,omitempty"`
 	DisagreementBlocks    bool        `json:"disagreement_blocks"`
 	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
 	TimeoutSeconds        int         `json:"timeout_seconds"`
-	MaxCostCents          int         `json:"max_cost_cents"`
 }
 
 type CodeReviewPolicyConfig struct {
-	Enabled             bool                        `json:"enabled"`
-	ApprovalMode        CodeReviewApprovalMode      `json:"approval_mode"`
-	DescriptionPolicy   CodeReviewDescriptionPolicy `json:"description_policy"`
-	RiskPolicy          CodeReviewRiskPolicy        `json:"risk_policy"`
-	AgentRoster         CodeReviewAgentRoster       `json:"agent_roster"`
-	InlineCommentLimit  int                         `json:"inline_comment_limit"`
-	FinalReviewTemplate string                      `json:"final_review_template,omitempty"`
-	Inheritance         CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
+	Enabled            bool                        `json:"enabled"`
+	ApprovalMode       CodeReviewApprovalMode      `json:"approval_mode"`
+	DescriptionPolicy  CodeReviewDescriptionPolicy `json:"description_policy"`
+	RiskPolicy         CodeReviewRiskPolicy        `json:"risk_policy"`
+	AgentRoster        CodeReviewAgentRoster       `json:"agent_roster"`
+	InlineCommentLimit int                         `json:"inline_comment_limit"`
+	Inheritance        CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
 }
 
 type CodeReviewPolicyInheritance struct {
@@ -381,24 +428,34 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			ExcludeSensitivePaths: true,
 			SensitivePaths:        defaultPRReadinessSensitivePaths(),
 			ExcludeCategories:     []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
-			RequireMergeable:      true,
 			RequireUpToDate:       false,
 			AllowForks:            false,
 			AllowPolicyChanges:    false,
+			LowRiskLane: CodeReviewLowRiskLane{
+				Enabled:             true,
+				Categories:          []string{"docs"},
+				MaxLinesChanged:     1000,
+				WaiveReviewerQuorum: true,
+			},
 		},
 		AgentRoster: CodeReviewAgentRoster{
 			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
 			Orchestrator:          AgentTypeOpenCode,
+			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
+			OrchestratorModel:     strPtr(OpenCodeModelGPT55),
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,
-			MaxCostCents:          500,
 		},
 		InlineCommentLimit: 4,
 		Inheritance: CodeReviewPolicyInheritance{
 			InheritOrgDefaults: false,
 		},
 	}
+}
+
+func strPtr(value string) *string {
+	return &value
 }
 
 func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPolicyConfig {
@@ -433,7 +490,6 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.ExcludeCategories) > 0 {
 		defaults.RiskPolicy.ExcludeCategories = config.RiskPolicy.ExcludeCategories
 	}
-	defaults.RiskPolicy.RequireMergeable = config.RiskPolicy.RequireMergeable
 	defaults.RiskPolicy.RequireUpToDate = config.RiskPolicy.RequireUpToDate
 	defaults.RiskPolicy.AllowForks = config.RiskPolicy.AllowForks
 	defaults.RiskPolicy.AllowPolicyChanges = config.RiskPolicy.AllowPolicyChanges
@@ -443,14 +499,19 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if len(config.RiskPolicy.RequiredChecks) > 0 {
 		defaults.RiskPolicy.RequiredChecks = config.RiskPolicy.RequiredChecks
 	}
+	// Only override the low-risk lane when the stored policy specifies one;
+	// otherwise inherit the default docs lane so existing policies pick up the
+	// relaxed handling without needing to be re-saved.
+	if config.RiskPolicy.LowRiskLane.Enabled ||
+		len(config.RiskPolicy.LowRiskLane.Categories) > 0 ||
+		config.RiskPolicy.LowRiskLane.MaxLinesChanged != 0 {
+		defaults.RiskPolicy.LowRiskLane = config.RiskPolicy.LowRiskLane
+	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
 	}
 	if config.InlineCommentLimit != 0 {
 		defaults.InlineCommentLimit = config.InlineCommentLimit
-	}
-	if config.FinalReviewTemplate != "" {
-		defaults.FinalReviewTemplate = config.FinalReviewTemplate
 	}
 	defaults.Inheritance = config.Inheritance
 	defaults.DescriptionPolicy = normalizeCodeReviewDescriptionPolicy(defaults.DescriptionPolicy)
@@ -519,11 +580,28 @@ func (c CodeReviewPolicyConfig) Validate() error {
 			return fmt.Errorf("agent %q does not support native review", agentType)
 		}
 	}
+	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
+		return fmt.Errorf("reviewer_models must match reviewer count")
+	}
+	for idx, model := range c.AgentRoster.ReviewerModels {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			return fmt.Errorf("reviewer model %d must be non-empty", idx+1)
+		}
+		if err := ValidateModelForAgentType(c.AgentRoster.Reviewers[idx], model); err != nil {
+			return fmt.Errorf("invalid reviewer model %d: %w", idx+1, err)
+		}
+	}
 	if err := c.AgentRoster.Orchestrator.Validate(); err != nil {
 		return err
 	}
 	if !AgentSupportsNativeReview(c.AgentRoster.Orchestrator) {
 		return fmt.Errorf("orchestrator %q does not support native review", c.AgentRoster.Orchestrator)
+	}
+	if c.AgentRoster.OrchestratorModel != nil && strings.TrimSpace(*c.AgentRoster.OrchestratorModel) != "" {
+		if err := ValidateModelForAgentType(c.AgentRoster.Orchestrator, strings.TrimSpace(*c.AgentRoster.OrchestratorModel)); err != nil {
+			return fmt.Errorf("invalid orchestrator model: %w", err)
+		}
 	}
 	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
 		return fmt.Errorf("require_reviewer_quorum must be between 1 and reviewer count")
@@ -531,40 +609,35 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if c.AgentRoster.TimeoutSeconds < 60 {
 		return fmt.Errorf("timeout_seconds must be at least 60")
 	}
-	if c.AgentRoster.MaxCostCents < 0 {
-		return fmt.Errorf("max_cost_cents must not be negative")
-	}
 	return nil
 }
 
 type CodeReviewPolicyRecord struct {
-	ID                  uuid.UUID                   `db:"id" json:"id"`
-	OrgID               uuid.UUID                   `db:"org_id" json:"org_id"`
-	RepositoryID        *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
-	Active              bool                        `db:"active" json:"active"`
-	Version             int                         `db:"version" json:"version"`
-	Enabled             bool                        `db:"enabled" json:"enabled"`
-	ApprovalMode        CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
-	DescriptionPolicy   CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
-	RiskPolicy          CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
-	AgentRoster         CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
-	InlineCommentLimit  int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	FinalReviewTemplate string                      `db:"final_review_template" json:"final_review_template,omitempty"`
-	Inheritance         CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
-	CreatedByUserID     *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
-	CreatedAt           time.Time                   `db:"created_at" json:"created_at"`
+	ID                 uuid.UUID                   `db:"id" json:"id"`
+	OrgID              uuid.UUID                   `db:"org_id" json:"org_id"`
+	RepositoryID       *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
+	Active             bool                        `db:"active" json:"active"`
+	Version            int                         `db:"version" json:"version"`
+	Enabled            bool                        `db:"enabled" json:"enabled"`
+	ApprovalMode       CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
+	DescriptionPolicy  CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
+	RiskPolicy         CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
+	AgentRoster        CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
+	InlineCommentLimit int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
+	Inheritance        CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
+	CreatedByUserID    *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt          time.Time                   `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
-		ApprovalMode:        r.ApprovalMode,
-		Enabled:             r.Enabled,
-		DescriptionPolicy:   r.DescriptionPolicy,
-		RiskPolicy:          r.RiskPolicy,
-		AgentRoster:         r.AgentRoster,
-		InlineCommentLimit:  r.InlineCommentLimit,
-		FinalReviewTemplate: r.FinalReviewTemplate,
-		Inheritance:         r.Inheritance,
+		ApprovalMode:       r.ApprovalMode,
+		Enabled:            r.Enabled,
+		DescriptionPolicy:  r.DescriptionPolicy,
+		RiskPolicy:         r.RiskPolicy,
+		AgentRoster:        r.AgentRoster,
+		InlineCommentLimit: r.InlineCommentLimit,
+		Inheritance:        r.Inheritance,
 	}
 }
 
@@ -576,13 +649,12 @@ type CodeReviewResolvedPolicy struct {
 }
 
 const (
-	CodeReviewPolicyFieldEnabled             = "enabled"
-	CodeReviewPolicyFieldApprovalMode        = "approval_mode"
-	CodeReviewPolicyFieldDescriptionPolicy   = "description_policy"
-	CodeReviewPolicyFieldRiskPolicy          = "risk_policy"
-	CodeReviewPolicyFieldAgentRoster         = "agent_roster"
-	CodeReviewPolicyFieldInlineCommentLimit  = "inline_comment_limit"
-	CodeReviewPolicyFieldFinalReviewTemplate = "final_review_template"
+	CodeReviewPolicyFieldEnabled            = "enabled"
+	CodeReviewPolicyFieldApprovalMode       = "approval_mode"
+	CodeReviewPolicyFieldDescriptionPolicy  = "description_policy"
+	CodeReviewPolicyFieldRiskPolicy         = "risk_policy"
+	CodeReviewPolicyFieldAgentRoster        = "agent_roster"
+	CodeReviewPolicyFieldInlineCommentLimit = "inline_comment_limit"
 )
 
 func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
@@ -615,9 +687,6 @@ func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeRevi
 	if apply(CodeReviewPolicyFieldInlineCommentLimit) {
 		merged.InlineCommentLimit = override.InlineCommentLimit
 	}
-	if apply(CodeReviewPolicyFieldFinalReviewTemplate) {
-		merged.FinalReviewTemplate = override.FinalReviewTemplate
-	}
 	merged.Inheritance = override.Inheritance
 	return ResolveCodeReviewPolicyConfig(&merged)
 }
@@ -625,7 +694,7 @@ func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeRevi
 func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []string {
 	base = ResolveCodeReviewPolicyConfig(&base)
 	override = ResolveCodeReviewPolicyConfig(&override)
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 6)
 	if base.Enabled != override.Enabled {
 		fields = append(fields, CodeReviewPolicyFieldEnabled)
 	}
@@ -644,9 +713,6 @@ func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []str
 	if base.InlineCommentLimit != override.InlineCommentLimit {
 		fields = append(fields, CodeReviewPolicyFieldInlineCommentLimit)
 	}
-	if base.FinalReviewTemplate != override.FinalReviewTemplate {
-		fields = append(fields, CodeReviewPolicyFieldFinalReviewTemplate)
-	}
 	return fields
 }
 
@@ -663,8 +729,7 @@ func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct
 			CodeReviewPolicyFieldDescriptionPolicy,
 			CodeReviewPolicyFieldRiskPolicy,
 			CodeReviewPolicyFieldAgentRoster,
-			CodeReviewPolicyFieldInlineCommentLimit,
-			CodeReviewPolicyFieldFinalReviewTemplate:
+			CodeReviewPolicyFieldInlineCommentLimit:
 			out[field] = struct{}{}
 		}
 	}
@@ -885,7 +950,6 @@ type CodeReviewRiskInput struct {
 	ChecksPassing          bool
 	RequiredChecksPassing  map[string]bool
 	DescriptionPassed      bool
-	Mergeable              bool
 	UpToDate               bool
 	Author                 string
 	AuthorClass            string
@@ -893,7 +957,6 @@ type CodeReviewRiskInput struct {
 	UnresolvedHumanThreads int
 	BlockingFindings       int
 	ReviewerDisagreement   bool
-	ReviewCostCents        float64
 	ScopeMismatch          bool
 	UnresolvedUncertainty  bool
 	PromptInjectionFound   bool
@@ -938,11 +1001,16 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		reasons = append(reasons, "PR head changed after review started")
 	}
+	lowRisk := CodeReviewLowRiskLaneApplies(policy.RiskPolicy.LowRiskLane, input.Categories)
 	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
 		reasons = append(reasons, fmt.Sprintf("changed files %d exceeds policy limit %d", input.FilesChanged, policy.RiskPolicy.MaxFilesChanged))
 	}
-	if input.LinesChanged > policy.RiskPolicy.MaxLinesChanged {
-		reasons = append(reasons, fmt.Sprintf("changed lines %d exceeds policy limit %d", input.LinesChanged, policy.RiskPolicy.MaxLinesChanged))
+	maxLinesChanged := policy.RiskPolicy.MaxLinesChanged
+	if lowRisk && policy.RiskPolicy.LowRiskLane.MaxLinesChanged > maxLinesChanged {
+		maxLinesChanged = policy.RiskPolicy.LowRiskLane.MaxLinesChanged
+	}
+	if input.LinesChanged > maxLinesChanged {
+		reasons = append(reasons, fmt.Sprintf("changed lines %d exceeds policy limit %d", input.LinesChanged, maxLinesChanged))
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		reasons = append(reasons, "required GitHub checks are not passing")
@@ -954,9 +1022,6 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	}
 	if !input.DescriptionPassed {
 		reasons = append(reasons, "PR description policy did not pass")
-	}
-	if policy.RiskPolicy.RequireMergeable && !input.Mergeable {
-		reasons = append(reasons, "PR is not mergeable")
 	}
 	if policy.RiskPolicy.RequireUpToDate && !input.UpToDate {
 		reasons = append(reasons, "PR branch is not up to date")
@@ -975,9 +1040,6 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	}
 	if input.ReviewerDisagreement && policy.AgentRoster.DisagreementBlocks {
 		reasons = append(reasons, "reviewer agents disagreed on material risk")
-	}
-	if policy.AgentRoster.MaxCostCents > 0 && input.ReviewCostCents > float64(policy.AgentRoster.MaxCostCents) {
-		reasons = append(reasons, fmt.Sprintf("review cost %.2f cents exceeds policy limit %d cents", input.ReviewCostCents, policy.AgentRoster.MaxCostCents))
 	}
 	if input.ScopeMismatch {
 		reasons = append(reasons, "orchestrator reported the change may not match the stated intent")

@@ -609,8 +609,8 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/end`),
     retry: (sessionId: string, body?: import('./types').RetrySessionRequest) =>
       post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/retry`, body ?? {}),
-    cancelSession: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`),
+    cancelSession: (sessionId: string, body?: { reason?: string }) =>
+      post<import('./types').SingleResponse<import('./types').Session>>(`/api/v1/sessions/${sessionId}/cancel`, body),
     archive: (sessionId: string) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/archive`, {}),
     unarchive: (sessionId: string) =>
@@ -643,8 +643,8 @@ export const api = {
       ),
     endThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/end`),
-    cancelThread: (sessionId: string, threadId: string) =>
-      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/cancel`),
+    cancelThread: (sessionId: string, threadId: string, body?: { reason?: string }) =>
+      post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/cancel`, body),
     forkThread: (sessionId: string, threadId: string, body: { label?: string } = {}) =>
       post<import('./types').SingleResponse<import('./types').ForkResult>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/fork`, body),
     revertThread: (sessionId: string, threadId: string) =>
@@ -765,6 +765,8 @@ export const api = {
     getRuntimeStatus: () => get<import('./types').SingleResponse<import('./types').RuntimeSettingsStatus>>('/api/v1/settings/runtime/status'),
     getLLMDefaults: () => get<{ data: Record<string, string> }>('/api/v1/settings/llm-defaults'),
     getLLMModels: () => get<{ data: Record<string, string[]> }>('/api/v1/settings/llm-models'),
+    getOpenCodeModels: () =>
+      get<{ data: import('./types').OpenCodeModelInfo[] }>('/api/v1/settings/opencode-models'),
     getPRReadinessPolicy: (repositoryId?: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResolvedPolicy>>(
         `/api/v1/pr-readiness-policies${repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : ''}`,

@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Sync authorized public keys from deploy/authorized_keys/*.pub to remote servers.
+# Sync authorized public keys from $SECRETS_DIR/deploy/authorized_keys/*.pub to remote servers.
 # Usage: ./sync-keys.sh [--apply] <ssh-key-path> <host1> [host2] ...
 #
 # Replaces /home/deploy/.ssh/authorized_keys on each target host with the keys
-# from deploy/authorized_keys/*.pub. By default runs in dry-run mode (shows diff
+# from the private secrets repo. By default runs in dry-run mode (shows diff
 # without changing anything). Pass --apply to actually push changes.
 
 APPLY=false
 if [ "${1:-}" = "--apply" ]; then
   APPLY=true
   shift
+fi
+
+if [ "$#" -lt 2 ]; then
+  echo "Usage: $0 [--apply] <ssh-key-path> <host1> [host2] ..."
+  exit 1
 fi
 
 SSH_KEY="$1"
@@ -24,13 +29,15 @@ if [ ${#HOSTS[@]} -eq 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KEYS_DIR="$SCRIPT_DIR/../authorized_keys"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
+KEYS_DIR="$SECRETS_DIR/deploy/authorized_keys"
 
 # Collect all .pub files
 PUB_FILES=("$KEYS_DIR"/*.pub)
 if [ ! -e "${PUB_FILES[0]}" ]; then
   echo "ERROR: No .pub files found in $KEYS_DIR"
-  echo "Add public key files to deploy/authorized_keys/ first."
+  echo "Add public key files to deploy/authorized_keys/ in the private 143-infra repo, or set SECRETS_DIR."
   exit 1
 fi
 
@@ -42,7 +49,7 @@ done
 AUTHORIZED_KEYS="$(printf '%s' "$AUTHORIZED_KEYS" | sort)"
 
 KEY_COUNT=$(printf '%s' "$AUTHORIZED_KEYS" | grep -c . || true)
-echo "Found $KEY_COUNT key(s) in deploy/authorized_keys/"
+echo "Found $KEY_COUNT key(s) in $KEYS_DIR"
 echo "Using SSH_KEY=$SSH_KEY"
 
 if [ "$APPLY" = false ]; then

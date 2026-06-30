@@ -3,12 +3,15 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -186,6 +189,7 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 		if err := services.Orchestrator.RevertThread(ctx, &session, &thread); err != nil {
 			return fmt.Errorf("revert thread: %w", err)
 		}
+		recordAutoRepairThreadRevertRegret(ctx, stores, logger, orgID, sessionID, threadID)
 
 		if stores.SessionMessages != nil {
 			msg := &models.SessionMessage{
@@ -209,6 +213,27 @@ func newRevertSessionThreadHandler(stores *Stores, services *Services, logger ze
 			Msg("reverted session thread")
 		return nil
 	}
+}
+
+func recordAutoRepairThreadRevertRegret(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID, threadID uuid.UUID) {
+	if stores == nil || stores.PullRequests == nil {
+		return
+	}
+	run, err := stores.PullRequests.GetAutoRepairRunByThread(ctx, orgID, sessionID, threadID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to load automatic repair run for revert regret metric")
+		}
+		return
+	}
+	repository := ""
+	pr, err := stores.PullRequests.GetByID(ctx, orgID, run.PullRequestID)
+	if err == nil {
+		repository = pr.GitHubRepo
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		logger.Warn().Err(err).Str("pull_request_id", run.PullRequestID.String()).Msg("failed to load pull request for revert regret metric")
+	}
+	metrics.RecordPRAutoRepairRegret(ctx, orgID.String(), repository, string(run.ActionType), "thread_revert")
 }
 
 // truncateDiffForDisplay caps the inline patch posted into the chat so a

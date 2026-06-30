@@ -658,7 +658,11 @@ describe('TeamSettingsPage', () => {
     );
     await user.type(commandInput, 'octo');
 
-    const suggestion = await screen.findByRole('option', { name: '@octocat' });
+    const suggestion = await screen.findByRole(
+      'option',
+      { name: '@octocat' },
+      { timeout: 5000 },
+    );
     await user.click(suggestion);
 
     expect(await screen.findByText('Invite setup')).toBeInTheDocument();

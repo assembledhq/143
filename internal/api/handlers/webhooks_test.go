@@ -42,6 +42,14 @@ func setupWebhookHandler(t *testing.T, mock pgxmock.PgxPoolIface, secret string)
 	return NewWebhookHandler(cfg, orgStore, userStore, repoStore, integrationStore, nil)
 }
 
+func TestWebhook_VerifySignature_ProductionRequiresConfiguredSecret(t *testing.T) {
+	t.Parallel()
+
+	handler := &WebhookHandler{cfg: &config.Config{Env: "production"}}
+
+	require.False(t, handler.verifySignature([]byte(`{"ok":true}`), ""), "production webhooks should fail closed when no secret is configured")
+}
+
 func TestWebhook_HandleGitHub(t *testing.T) {
 	t.Parallel()
 
@@ -788,15 +796,14 @@ type codeReviewWebhookPolicyStore struct {
 
 func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	record := models.CodeReviewPolicyRecord{
-		ID:                  s.policyID,
-		Version:             1,
-		Enabled:             s.config.Enabled,
-		ApprovalMode:        s.config.ApprovalMode,
-		DescriptionPolicy:   s.config.DescriptionPolicy,
-		RiskPolicy:          s.config.RiskPolicy,
-		AgentRoster:         s.config.AgentRoster,
-		InlineCommentLimit:  s.config.InlineCommentLimit,
-		FinalReviewTemplate: s.config.FinalReviewTemplate,
+		ID:                 s.policyID,
+		Version:            1,
+		Enabled:            s.config.Enabled,
+		ApprovalMode:       s.config.ApprovalMode,
+		DescriptionPolicy:  s.config.DescriptionPolicy,
+		RiskPolicy:         s.config.RiskPolicy,
+		AgentRoster:        s.config.AgentRoster,
+		InlineCommentLimit: s.config.InlineCommentLimit,
 	}
 	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "repository", Policy: &record}, nil
 }

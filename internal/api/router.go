@@ -44,6 +44,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
+	prreadinesssvc "github.com/assembledhq/143/internal/services/prreadiness"
 	"github.com/assembledhq/143/internal/services/reviewartifact"
 	reviewloopservice "github.com/assembledhq/143/internal/services/reviewloop"
 	"github.com/assembledhq/143/internal/services/sandbox"
@@ -348,7 +349,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
 	prReadinessStore := db.NewPRReadinessStore(pool)
+	prReadinessRunner := prreadinesssvc.NewService(prReadinessStore, jobStore)
 	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
+	codeReviewStore.SetStreams(codeReviewStreams)
+	codeReviewStore.SetLogger(logger)
 	codeReviewSvc := codereviewsvc.NewService(codeReviewStore, codeReviewStore, sessionStore, jobStore, logger, codereviewsvc.Config{
 		AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
 		AliasLogins:       cfg.CodeReviewAliasLogins,
@@ -384,6 +389,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetReviewCommentStore(sessionReviewCommentStore)
 	sessionHandler.SetReviewLoopStore(reviewLoopStore)
 	sessionHandler.SetReadinessStore(prReadinessStore)
+	sessionHandler.SetReadinessRunner(prReadinessRunner)
 	if prService != nil {
 		prService.SetReadinessStore(prReadinessStore)
 	}
@@ -466,6 +472,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionHandler.SetMembershipStore(membershipStore)
 	pullRequestHandler.SetStreams(prHealthStreams)
 	pullRequestHandler.SetMembershipStore(membershipStore)
+	codeReviewHandler.SetStreams(codeReviewStreams)
+	codeReviewHandler.SetMembershipStore(membershipStore)
 	if prService != nil {
 		sessionHandler.SetPRTitleSyncer(prService)
 	}
@@ -518,7 +526,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
 		Sessions: sessionStore,
 		Threads:  threadSvc,
-	})
+	}, reviewloopservice.WithAutoReadinessDependencies(orgStore, userStore, pool, jobStore))
 	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	pmHandler := handlers.NewPMHandler(pmPlanStore, pmDecisionLogStore, jobStore, orgStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
@@ -934,6 +942,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	} else {
 		uploadStore = storage.NewFileUploadStore(cfg.UploadStorageDir, uploadFilesURLPrefix)
 	}
+	previewHandler.SetUploadStore(uploadStore)
 	uploadHandler := handlers.NewUploadHandler(uploadStore)
 	uploadHandler.SetMembershipStore(membershipStore)
 
@@ -957,6 +966,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		r.Post("/internal/preview/start", internalPreviewHandler.StartPreview)
 		r.Post("/internal/preview/stop-session", internalPreviewHandler.StopActivePreviewForSession)
 		r.Post("/internal/preview/{previewID}/stop", internalPreviewHandler.StopPreview)
+		r.Post("/internal/preview/{previewID}/soft-restart", internalPreviewHandler.SoftRestartPreview)
 		r.Post("/internal/preview/{previewID}/recycle", internalPreviewHandler.RecyclePreview)
 		r.Post("/internal/preview/{previewID}/screenshot", internalPreviewHandler.CaptureScreenshot)
 		r.Post("/internal/preview/{previewID}/inspect", internalPreviewHandler.InspectElement)
@@ -1173,6 +1183,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
+				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/templates", codeReviewHandler.Templates)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
@@ -1255,6 +1266,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
 				r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+				r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)
+				r.Get("/api/v1/previews/{preview_id}/services", previewHandler.GetServices)
+				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)
 				r.Get("/api/v1/pull-requests/stream", pullRequestHandler.StreamUpdates)
 				r.Get("/api/v1/pull-requests/{id}/health", pullRequestHandler.GetHealth)
 				r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
@@ -1268,6 +1282,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/settings/runtime/status", settingsHandler.GetRuntimeStatus)
 				r.Get("/api/v1/settings/llm-defaults", settingsHandler.GetLLMDefaults)
 				r.Get("/api/v1/settings/llm-models", settingsHandler.GetLLMModels)
+				r.Get("/api/v1/settings/opencode-models", settingsHandler.GetOpenCodeModels)
 				r.Get("/api/v1/agent-capabilities", agentCapabilitiesHandler.Catalog)
 				r.Get("/api/v1/settings/agent/capabilities", agentCapabilitiesHandler.GetSessionDefault)
 				r.Get("/api/v1/pm/current", pmHandler.Current)
@@ -1417,15 +1432,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Delete("/api/v1/sessions/{id}/preview", previewHandler.StopPreview)
 				r.Post("/api/v1/sessions/{id}/preview/ensure", previewHandler.EnsurePreview)
 				r.Post("/api/v1/sessions/{id}/preview/restart", previewHandler.RestartPreview)
+				r.Post("/api/v1/sessions/{id}/preview/update", previewHandler.UpdatePreview)
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
 				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)
 				r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
 				r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
-				r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)
 				r.Post("/api/v1/sessions/{id}/preview/interact", previewHandler.ExecuteInteraction)
 				r.Post("/api/v1/sessions/{id}/preview/multi-viewport", previewHandler.CaptureMultiViewport)
 				r.Post("/api/v1/sessions/{id}/preview/visual-diff", previewHandler.ComputeVisualDiff)
 				r.Post("/api/v1/sessions/{id}/preview/assert", previewHandler.RunAssertions)
+				r.Post("/api/v1/previews/{preview_id}/screenshot", previewHandler.CaptureScreenshot)
+				r.Post("/api/v1/previews/{preview_id}/inspect", previewHandler.InspectElement)
+				r.Post("/api/v1/previews/{preview_id}/interact", previewHandler.ExecuteInteraction)
+				r.Post("/api/v1/previews/{preview_id}/multi-viewport", previewHandler.CaptureMultiViewport)
+				r.Post("/api/v1/previews/{preview_id}/visual-diff", previewHandler.ComputeVisualDiff)
+				r.Post("/api/v1/previews/{preview_id}/assert", previewHandler.RunAssertions)
+				r.Post("/api/v1/sessions/{id}/preview/design-feedback", previewHandler.SubmitDesignFeedback)
 				r.Post("/api/v1/sessions/{id}/review-comments/send", sessionReviewCommentHandler.SendToAgent)
 				r.Patch("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Update)
 				r.Delete("/api/v1/sessions/{id}/review-comments/{commentId}", sessionReviewCommentHandler.Delete)
