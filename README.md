@@ -54,7 +54,7 @@ make dev
 
 `setup.sh` installs missing dependencies (Homebrew on macOS, apt/NodeSource on Linux), creates the local database, copies `.env.example` to `.env`, and runs migrations. `make dev` brings up Postgres, the Go API, and the Next.js frontend through Docker Compose.
 
-For production deployment, start with [docs/self-hosting/](docs/self-hosting/README.md). See the [development setup guide](docs/contributing/development-setup.md) for environment variables and the full list of Make targets.
+For production deployment, start with the [self-hosting docs](https://www.143.dev/docs/self-hosting). See [Environment variables](https://www.143.dev/docs/reference/environment-variables) for deployment configuration.
 
 The hosted service at [143.dev](https://www.143.dev) is the managed path.
 
