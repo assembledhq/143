@@ -1,6 +1,6 @@
 # Design: Preview Command Header
 
-> Status: Implemented | Last reviewed: 2026-06-13
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 The Preview tab should present preview access as the primary action, not as one peer button in a lifecycle-control strip.
 

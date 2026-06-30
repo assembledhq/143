@@ -323,6 +323,15 @@ func (s *PreviewSecretBundleStore) decryptJSON(raw json.RawMessage, out any) err
 	var plaintext []byte
 	switch blob.Alg {
 	case "dev-plaintext":
+		// dev-plaintext is only ever written when no encryption key is
+		// configured (s.crypto == nil), which cannot happen in production
+		// because ENCRYPTION_MASTER_KEY is required and is the KEK fallback.
+		// If we have a key but encounter a plaintext blob, it is anomalous
+		// (e.g. data copied from a dev/staging environment) — refuse it rather
+		// than silently consuming an unencrypted secret.
+		if s.crypto != nil {
+			return fmt.Errorf("refusing to read dev-plaintext preview secret bundle while encryption is configured")
+		}
 		plaintext, err = crypto.DevDecrypt(data)
 	case "aes-256-gcm-envelope":
 		if s.crypto == nil {

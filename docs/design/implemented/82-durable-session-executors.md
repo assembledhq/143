@@ -1,6 +1,6 @@
 # Durable Session Executors
 
-> **Status:** Enabled by default for worker-dispatched session turns | **Last reviewed:** 2026-06-26
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 Long-running `run_agent` and `continue_session` jobs should not be owned by the deployable worker process for the full turn. The durable executor design splits workers into short-lived dispatchers and per-session executor containers that own one active session turn until it completes, checkpoints, drains, or fails.
 

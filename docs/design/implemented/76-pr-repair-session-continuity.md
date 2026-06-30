@@ -1,9 +1,7 @@
 # 76 - PR Overview Command Continuity
 
-> **Status:** Implemented
->
-> **Last reviewed:** 2026-05-18
->
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
+
 > **Depends on:** [../overall.md](../overall.md), [../implemented/61-pr-state-sync-and-repair-actions.md](../implemented/61-pr-state-sync-and-repair-actions.md), [../implemented/74-pr-repair-in-progress-ux.md](../implemented/74-pr-repair-in-progress-ux.md)
 
 ## Summary

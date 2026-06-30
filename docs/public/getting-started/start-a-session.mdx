@@ -14,13 +14,21 @@ llm_summary: Start a 143 coding-agent session by choosing a repo, branch, agent,
 
 Use a session when you have a concrete repository change that should move from instruction to reviewable diff. The session owns the sandbox, transcript, branch, validation output, preview, and eventual PR.
 
+<Screenshot
+  src="/product/docs-sessions-list.webp"
+  alt="143 sessions workspace showing recent sessions and the new session composer"
+  width={1440}
+  height={840}
+  caption="Start from the sessions workspace, then keep follow-ups in the same session instead of starting over."
+/>
+
 ## Before you start
 
-Have a clear task:
+Have a clear task before you start:
 
 - What should change?
-- Which repo and branch should the agent work from?
-- What files, screenshots, issues, or product context matter?
+- Which repo and branch should the agent use?
+- What files, screenshots, issue links, or product context matter?
 - How will you know the result is correct?
 
 ## Start the run
@@ -35,7 +43,7 @@ Have a clear task:
 
 ## Prompt shape
 
-Good prompts include outcome, constraints, and verification:
+Good prompts state the outcome, constraints, and verification:
 
 ```text
 Fix the mobile overflow in the session detail header.

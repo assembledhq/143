@@ -1,6 +1,6 @@
 # Versioned Coding Credentials and Runtime State
 
-> Status: Implemented 2026-06-06
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 Coding-agent credentials are split into stable credential config and mutable runtime state, and both use the repo's insert-only active-row versioning pattern.
 

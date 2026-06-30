@@ -1,6 +1,6 @@
 # Static Egress Gateway
 
-> Status: Implemented baseline | Last reviewed: 2026-05-19
+> **Status:** Implemented | **Last reviewed:** 2026-06-30
 
 143 keeps Tailscale as the private control-plane overlay for app, worker, db, and Redis routing. Static customer allowlisting uses a separate opt-in data plane so worker host traffic and ordinary sandbox traffic do not inherit a global exit node.
 
