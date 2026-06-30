@@ -199,7 +199,6 @@ func DefaultPRReadinessPolicyConfig() PRReadinessPolicyConfig {
 	advisory := map[PRReadinessCheckType]PRReadinessEnforcement{
 		PRReadinessCheckTypeAgentReviewClean:      PRReadinessEnforcementAdvisory,
 		PRReadinessCheckTypeDiffCollected:         PRReadinessEnforcementAdvisory,
-		PRReadinessCheckTypeTestEvidencePresent:   PRReadinessEnforcementAdvisory,
 		PRReadinessCheckTypeRiskFlags:             PRReadinessEnforcementAdvisory,
 		PRReadinessCheckTypeDependencyConfigRisk:  PRReadinessEnforcementAdvisory,
 		PRReadinessCheckTypeGeneratedFileChurn:    PRReadinessEnforcementAdvisory,
@@ -257,7 +256,6 @@ func allPRReadinessCheckTypes() []PRReadinessCheckType {
 		PRReadinessCheckTypeFreshness,
 		PRReadinessCheckTypeAgentReviewClean,
 		PRReadinessCheckTypeDiffCollected,
-		PRReadinessCheckTypeTestEvidencePresent,
 		PRReadinessCheckTypeRiskFlags,
 		PRReadinessCheckTypeDependencyConfigRisk,
 		PRReadinessCheckTypeGeneratedFileChurn,
