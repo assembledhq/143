@@ -40,19 +40,6 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
         </Link>
 
         <div className="flex items-center gap-4">
-          {demoURL && (
-            <Button
-              asChild
-              variant="ghost"
-              className={`hidden ${type.button} px-3 sm:inline-flex ${
-                isDark
-                  ? "text-white/60 hover:bg-white/5 hover:text-white"
-                  : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
-              }`}
-            >
-              <a href={demoURL}>Try demo</a>
-            </Button>
-          )}
           <Button
             asChild
             variant="ghost"
@@ -84,7 +71,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
             }`}
           >
             <Link href="/login?tab=signup">
-              Start
+              Start building
               <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
             </Link>
           </Button>
@@ -125,24 +112,21 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
                 </a>
               </Button>
             )}
-            <Button
-              asChild
-              variant={demoURL ? "outline" : "default"}
-              className={`${type.button} ${demoURL ? "rounded-md shadow-sm" : "rounded-full"} transition-all ${
-                isDark
-                  ? demoURL
-                    ? "border-white/15 bg-white/[0.04] text-white/80 hover:border-white/35 hover:bg-white/[0.08] hover:text-white"
-                    : "bg-white text-[#08080f] hover:bg-white/90"
-                  : demoURL
-                    ? "border-slate-300 bg-white text-slate-900 hover:border-slate-500 hover:bg-slate-50"
+            {!demoURL && (
+              <Button
+                asChild
+                className={`${type.button} rounded-full transition-all ${
+                  isDark
+                    ? "bg-white text-[#08080f] hover:bg-white/90"
                     : "bg-slate-900 text-white hover:bg-slate-800"
-              }`}
-            >
-              <Link href="/login?tab=signup">
-                Get started
-                <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
-              </Link>
-            </Button>
+                }`}
+              >
+                <Link href="/login?tab=signup">
+                  Start building
+                  <ArrowRight className="ml-2 size-3.5" aria-hidden="true" />
+                </Link>
+              </Button>
+            )}
             <Button
               asChild
               variant="outline"
