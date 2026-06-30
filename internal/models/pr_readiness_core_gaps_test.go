@@ -17,7 +17,7 @@ func TestPRReadinessPolicyConfigResolution(t *testing.T) {
 	t.Parallel()
 
 	orgPolicy := DefaultPRReadinessPolicyConfig()
-	orgPolicy.Checks[PRReadinessCheckTypeTestEvidencePresent] = PRReadinessCheckPolicy{
+	orgPolicy.Checks[PRReadinessCheckTypeGeneratedFileChurn] = PRReadinessCheckPolicy{
 		Enforcement: PRReadinessEnforcementByRole{
 			Builder:  PRReadinessEnforcementBlocking,
 			Engineer: PRReadinessEnforcementAdvisory,
@@ -36,7 +36,7 @@ func TestPRReadinessPolicyConfigResolution(t *testing.T) {
 
 	resolved := ResolvePRReadinessPolicyConfig(&orgPolicy, &repoPolicy)
 	require.Equal(t, PRReadinessEnforcementBlocking, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeRiskFlags), "repository policy should override org policy for the same repository")
-	require.Equal(t, PRReadinessEnforcementAdvisory, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeTestEvidencePresent), "repository policy should replace org check overrides rather than merge stale org settings")
+	require.Equal(t, PRReadinessEnforcementAdvisory, resolved.EffectivePolicy().EnforcementFor(RoleBuilder, PRReadinessCheckTypeGeneratedFileChurn), "repository policy should replace org check overrides rather than merge stale org settings")
 	require.True(t, resolved.AutoRun.OnCreatePR, "repository policy should carry repository auto-run settings")
 
 	resolved = ResolvePRReadinessPolicyConfig(nil, nil)

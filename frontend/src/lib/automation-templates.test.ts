@@ -25,6 +25,22 @@ describe("automation template catalog", () => {
     }
   });
 
+  it("defaults automation templates to scheduled runs", () => {
+    for (const template of automationTemplates) {
+      expect(template.scheduleEnabled).toBe(true);
+    }
+  });
+
+  it("does not define event-trigger defaults on templates", () => {
+    const disallowedDefaultKeyPattern = /trigger|event|pagerduty|linear/i;
+
+    for (const template of automationTemplates) {
+      expect(
+        Object.keys(template).filter((key) => disallowedDefaultKeyPattern.test(key)),
+      ).toEqual([]);
+    }
+  });
+
   it("can look up templates by id", () => {
     expect(getAutomationTemplate("security-sweep")?.name).toBe("Security sweep");
     expect(getAutomationTemplate("missing-template")).toBeUndefined();

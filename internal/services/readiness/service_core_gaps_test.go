@@ -55,8 +55,6 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	require.NoError(t, err, "Evaluate should produce readiness checks for the current revision")
 
 	checks := checksByType(t, result.Checks)
-	require.Equal(t, models.PRReadinessCheckStatusPassed, checks[models.PRReadinessCheckTypeTestEvidencePresent].Status, "test evidence should pass only when a successful command is captured after the workspace revision timestamp")
-	require.JSONEq(t, `{"log_id":2}`, string(checks[models.PRReadinessCheckTypeTestEvidencePresent].Details), "test evidence should identify the fresh successful command")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeDependencyConfigRisk].Status, "dependency and runtime config changes should be called out")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeGeneratedFileChurn].Status, "generated file churn should be called out")
 	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeRiskFlags].Status, "large diffs, migrations, and sensitive configured paths should be risk flags")
@@ -69,37 +67,6 @@ func TestEvaluator_CoreGapChecks(t *testing.T) {
 	require.Contains(t, packet, "why_changed", "review packet should include issue or issue-less context")
 	require.Contains(t, packet, "risk_flags", "review packet should surface risk flags")
 	require.Contains(t, packet, "unknowns", "review packet should disclose unknowns for reviewers")
-}
-
-func TestEvaluator_IgnoresStaleTestEvidence(t *testing.T) {
-	t.Parallel()
-
-	snapshotKey := "snap-current"
-	revisionUpdatedAt := time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC)
-	session := models.Session{
-		ID:                         uuid.New(),
-		OrgID:                      uuid.New(),
-		WorkspaceRevision:          12,
-		WorkspaceRevisionUpdatedAt: revisionUpdatedAt,
-		SnapshotKey:                &snapshotKey,
-		DiffStats:                  json.RawMessage(`{"files_changed":1,"additions":1,"deletions":0}`),
-	}
-
-	result, err := NewEvaluator(models.DefaultPRReadinessPolicy()).Evaluate(context.Background(), EvaluationInput{
-		Session:                    session,
-		EvaluatedWorkspaceRevision: session.WorkspaceRevision,
-		EvaluatedSnapshotKey:       snapshotKey,
-		Logs: []models.SessionLog{
-			{ID: 1, Timestamp: revisionUpdatedAt.Add(-time.Minute), Message: "go test ./... passed exit code 0"},
-			{ID: 2, Timestamp: revisionUpdatedAt.Add(time.Minute), Message: "go test ./... failed exit code 1"},
-		},
-		ChangedFiles:     []string{"internal/api/foo.go"},
-		LinkedIssueCount: 1,
-	})
-	require.NoError(t, err, "Evaluate should complete even when no fresh successful test evidence exists")
-
-	checks := checksByType(t, result.Checks)
-	require.Equal(t, models.PRReadinessCheckStatusWarning, checks[models.PRReadinessCheckTypeTestEvidencePresent].Status, "stale success and fresh failure output should not satisfy test evidence")
 }
 
 func TestEvaluator_LargeDiffUsesPersistedAddedRemovedStats(t *testing.T) {

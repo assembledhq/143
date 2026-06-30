@@ -3831,9 +3831,25 @@ type slackNotificationSubscriptionConfig struct {
 	DMUserIDs    []string `json:"dm_user_ids"`
 }
 
-func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
+// slackNotificationEventDisabled reports whether an event kind has been retired
+// from Slack notifications. Disabled kinds are never delivered regardless of a
+// channel's preset or custom subscription.
+func slackNotificationEventDisabled(eventKind string) bool {
 	switch eventKind {
-	case string(models.SlackNotificationPreviewReady), string(models.SlackNotificationPreviewFailed):
+	case string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationPROpened),
+		string(models.SlackNotificationPreviewReady),
+		string(models.SlackNotificationPreviewFailed),
+		string(models.SlackNotificationPreviewStale),
+		string(models.SlackNotificationPRAutoRepairAttention),
+		string(models.SlackNotificationPRReadinessAttention):
+		return true
+	}
+	return false
+}
+
+func slackNotificationSubscriptionMatches(raw json.RawMessage, preset *models.SlackNotificationPreset, eventKind string, automationID *uuid.UUID) bool {
+	if slackNotificationEventDisabled(eventKind) {
 		return false
 	}
 	if len(raw) == 0 || string(raw) == "null" {
@@ -3866,19 +3882,13 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
-			string(models.SlackNotificationPRAutoRepairAttention),
-			string(models.SlackNotificationPRReadinessAttention),
 		}
 	case models.SlackNotificationPresetBalanced:
 		return []string{
-			string(models.SlackNotificationSessionCompleted),
 			string(models.SlackNotificationSessionFailed),
 			string(models.SlackNotificationAutomationFailed),
 			string(models.SlackNotificationAutomationFailureStreak),
-			string(models.SlackNotificationPROpened),
 			string(models.SlackNotificationHumanInputRequested),
-			string(models.SlackNotificationPRAutoRepairAttention),
-			string(models.SlackNotificationPRReadinessAttention),
 		}
 	case models.SlackNotificationPresetVerbose:
 		return []string{"*"}
@@ -3946,6 +3956,9 @@ func slackNotificationDestinations(setting models.SlackChannelSettings, input sl
 
 func enqueueSlackNotificationSubscribers(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID uuid.UUID, input slackNotificationFanoutInput) {
 	if stores == nil || stores.SlackChannels == nil || stores.Jobs == nil || input.EventKind == "" {
+		return
+	}
+	if slackNotificationEventDisabled(input.EventKind) {
 		return
 	}
 	settings, err := stores.SlackChannels.ListNotificationSubscriptions(ctx, orgID)
@@ -4104,13 +4117,17 @@ func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logge
 		return
 	}
 	automationKind := string(models.SlackNotificationAutomationCompleted)
+	automationTitle := "Automation completed"
+	automationBody := "An automation run completed."
 	if eventKind == string(models.SlackNotificationSessionFailed) {
 		automationKind = string(models.SlackNotificationAutomationFailed)
+		automationTitle = title
+		automationBody = body
 	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind:       automationKind,
-		Title:           title,
-		Body:            body,
+		Title:           automationTitle,
+		Body:            automationBody,
 		SessionID:       &sessionID,
 		AutomationID:    &run.AutomationID,
 		AutomationRunID: automationRunID,
@@ -4930,12 +4947,10 @@ func slackConfigureChannelModal(input models.SlackInteractionJobPayload, repos [
 				"type":      "checkboxes",
 				"action_id": "selected",
 				"options": []map[string]any{
-					{"text": map[string]string{"type": "plain_text", "text": "Session completed"}, "value": "session.completed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Session failed"}, "value": "session.failed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation completed"}, "value": "automation.run.completed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation failed"}, "value": "automation.run.failed"},
 					{"text": map[string]string{"type": "plain_text", "text": "Automation failure streak"}, "value": "automation.run.failure_streak"},
-					{"text": map[string]string{"type": "plain_text", "text": "All preview events (ready, failed, stale)"}, "value": "preview.*"},
 				},
 			},
 		}},

@@ -45,7 +45,7 @@ func TestDefaultPRReadinessPolicy(t *testing.T) {
 
 	require.Equal(t, PRReadinessEnforcementBlocking, policy.EnforcementFor(RoleBuilder, PRReadinessCheckTypeAgentReviewClean), "builder policy should block on agent review by default")
 	require.Equal(t, PRReadinessEnforcementBlocking, policy.EnforcementFor(RoleBuilder, PRReadinessCheckTypeFreshness), "builder policy should block stale readiness by default")
-	require.Equal(t, PRReadinessEnforcementAdvisory, policy.EnforcementFor(RoleBuilder, PRReadinessCheckTypeTestEvidencePresent), "builder policy should start test evidence as advisory")
+	require.Equal(t, PRReadinessEnforcementOff, policy.EnforcementFor(RoleBuilder, PRReadinessCheckTypeTestEvidencePresent), "builder policy should not include test evidence by default")
 	require.Equal(t, PRReadinessEnforcementAdvisory, policy.EnforcementFor(RoleMember, PRReadinessCheckTypeAgentReviewClean), "engineer policy should be advisory by default")
 	require.Equal(t, PRReadinessEnforcementOff, policy.EnforcementFor(RoleViewer, PRReadinessCheckTypeAgentReviewClean), "viewer policy should not evaluate PR readiness")
 }

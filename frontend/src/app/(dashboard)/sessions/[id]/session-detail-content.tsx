@@ -1463,6 +1463,7 @@ function SessionComposer({
                 models={availableModels}
                 agentType={agentType}
                 openCodeAvailability={openCodeAvailability}
+                selectedModel={selectedModel}
               />
             </SelectContent>
           </Select>
@@ -1852,6 +1853,7 @@ function SessionComposer({
                         models={availableModels}
                         agentType={agentType}
                         openCodeAvailability={openCodeAvailability}
+                        selectedModel={selectedModel}
                       />
                     </SelectContent>
                   </Select>
@@ -6364,6 +6366,62 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          {pullRequestId && prStatus === "open" && (
+            prHealth ? (
+              <PRHealthBanner
+                health={prHealth}
+                currentSessionId={id}
+                currentThreadId={activeThread?.id ?? null}
+                pendingAction={pendingPRAction}
+                repairError={repairActionError}
+                mergeAuthRequired={ghBlocked}
+                mergeWhenReadyPending={pendingMergeWhenReady}
+                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
+                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
+                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
+                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
+                onMerge={handleMergeAction}
+                onQueueMergeWhenReady={handleQueueMergeWhenReady}
+                onCancelMergeWhenReady={handleCancelMergeWhenReady}
+                onOpenRepairSession={(sessionId, threadId) => {
+                  if (sessionId === id && threadId) {
+                    setActiveThreadId(threadId);
+                    return;
+                  }
+                  router.push(`/sessions/${sessionId}`);
+                }}
+                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
+                stopAutoRepairPending={stopAutoRepairMutation.isPending}
+                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                  disabled: reviewActionDisabled,
+                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+                  title: reviewActionDisabledReason,
+                  onClick: () => setReviewConfigOpen(true),
+                } : undefined}
+                pushChanges={showPushAction ? {
+                  label: pushActionLabel,
+                  disabled: pushActionDisabled,
+                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
+                  showError: pushState === "failed" || !!localPushActionError,
+                  title: pushActionTitle,
+                  onClick: () => {
+                    if (pushActionRequiresBranchSync) {
+                      continueFromPRBranchMutation.mutate();
+                      return;
+                    }
+                    pushChangesMutation.mutate(undefined);
+                  },
+                } : undefined}
+              />
+            ) : isPRHealthLoading ? (
+              <Card className="border-border/60">
+                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Loading PR health...</span>
+                </CardContent>
+              </Card>
+            ) : null
+          )}
           {canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
@@ -6440,7 +6498,6 @@ export function SessionDetailContent({ id }: { id: string }) {
                   <div className="space-y-1 text-xs text-muted-foreground">
                     <div>Collecting diff</div>
                     <div>Running agent review</div>
-                    <div>Checking test evidence</div>
                     <div>Checking risk signals</div>
                   </div>
                 ) : null}
@@ -6520,62 +6577,6 @@ export function SessionDetailContent({ id }: { id: string }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-          {pullRequestId && prStatus === "open" && (
-            prHealth ? (
-              <PRHealthBanner
-                health={prHealth}
-                currentSessionId={id}
-                currentThreadId={activeThread?.id ?? null}
-                pendingAction={pendingPRAction}
-                repairError={repairActionError}
-                mergeAuthRequired={ghBlocked}
-                mergeWhenReadyPending={pendingMergeWhenReady}
-                onFixTests={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: true })}
-                onFixTestsWithoutPushing={() => startRepairMutation.mutate({ action: "fix_tests", pushChanges: false })}
-                onResolveConflicts={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: true })}
-                onResolveConflictsWithoutPushing={() => startRepairMutation.mutate({ action: "resolve_conflicts", pushChanges: false })}
-                onMerge={handleMergeAction}
-                onQueueMergeWhenReady={handleQueueMergeWhenReady}
-                onCancelMergeWhenReady={handleCancelMergeWhenReady}
-                onOpenRepairSession={(sessionId, threadId) => {
-                  if (sessionId === id && threadId) {
-                    setActiveThreadId(threadId);
-                    return;
-                  }
-                  router.push(`/sessions/${sessionId}`);
-                }}
-                onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
-                stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={canManageSession && canUseNativeReviewLoop ? {
-                  disabled: reviewActionDisabled,
-                  spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
-                  title: reviewActionDisabledReason,
-                  onClick: () => setReviewConfigOpen(true),
-                } : undefined}
-                pushChanges={showPushAction ? {
-                  label: pushActionLabel,
-                  disabled: pushActionDisabled,
-                  spinning: pushActionSpinning || (pushActionRequiresBranchSync && continueFromPRBranchMutation.isPending),
-                  showError: pushState === "failed" || !!localPushActionError,
-                  title: pushActionTitle,
-                  onClick: () => {
-                    if (pushActionRequiresBranchSync) {
-                      continueFromPRBranchMutation.mutate();
-                      return;
-                    }
-                    pushChangesMutation.mutate(undefined);
-                  },
-                } : undefined}
-              />
-            ) : isPRHealthLoading ? (
-              <Card className="border-border/60">
-                <CardContent className="flex items-center gap-2 p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  <span>Loading PR health…</span>
-                </CardContent>
-              </Card>
-            ) : null
-          )}
           {pullRequestId && prStatus === "closed" && (
             <Card className="border-border/60">
               <CardContent className="p-4">

@@ -2566,11 +2566,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	}
 	// Apply per-run model override before the auth pre-flight so the sandbox
 	// sees the effective model/mode selection rather than only the org default.
-	if run.ModelOverride != nil && *run.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(run.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *run.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(run.AgentType, run.ModelOverride, sandboxCfg.Env)
 	if designatedWorkingBranch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = designatedWorkingBranch
 	}
@@ -3096,6 +3092,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		})
 		return nil
 	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, run, sandbox, result)
+		o.failRunWithResult(ctx, run, runResult, agentErr.Error())
+		logAgentRunFailed(log, run, agentErr, "failed", runStartedAt, nil)
+		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+			"session_id": run.ID.String(),
+			"org_id":     run.OrgID.String(),
+		})
+		return fmt.Errorf("execute agent: %w", agentErr)
+	}
 
 	// 11b. Snapshot workspace for multi-turn support (does not change session status).
 	currentRuntimeID := uuid.Nil
@@ -3490,11 +3498,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	// Apply the per-session model override before the auth pre-flight so the
 	// sandbox sees the effective model/mode selection.
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			sandboxCfg.Env[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, sandboxCfg.Env)
 	if branch := sessionWorkingBranch(session, promptIssue); branch != "" {
 		sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -4515,6 +4519,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if handled {
 			return nil
 		}
+	}
+	if result != nil && strings.TrimSpace(result.Error) != "" {
+		agentErr := errors.New(strings.TrimSpace(result.Error))
+		err = agentErr
+		runResult := o.buildRunResult(ctx, session, sandbox, result)
+		o.failRunWithResult(ctx, session, runResult, agentErr.Error())
+		o.failNonPrimaryThreadWithResult(ctx, session, threadID, runResult, log)
+		return fmt.Errorf("execute agent on continue: %w", agentErr)
 	}
 
 	// 7. Create assistant message with result summary.
@@ -5646,6 +5658,16 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	result := &models.SessionResult{
 		Error: strPtr(errMsg),
 	}
+	o.failRunWithResult(ctx, run, result, errMsg)
+}
+
+func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Session, result *models.SessionResult, errMsg string) {
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
+		result.Error = strPtr(errMsg)
+	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
 		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
 	}
@@ -5672,6 +5694,20 @@ func (o *Orchestrator) failRun(ctx context.Context, run *models.Session, errMsg 
 	}
 	o.notifyPagerDutySessionComplete(ctx, run, models.SessionStatusFailed, errMsg)
 	o.enqueueLinearMilestone(ctx, run, "failed")
+}
+
+func (o *Orchestrator) failNonPrimaryThreadWithResult(ctx context.Context, run *models.Session, threadID *uuid.UUID, result *models.SessionResult, log zerolog.Logger) {
+	if o.sessionThreads == nil || run == nil || threadID == nil || *threadID == uuid.Nil {
+		return
+	}
+	if run.PrimaryThreadID != nil && *run.PrimaryThreadID == *threadID {
+		return
+	}
+	if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *threadID, models.ThreadStatusFailed, result); err != nil {
+		log.Warn().Err(err).
+			Str("thread_id", threadID.String()).
+			Msg("failed to update active thread terminal status")
+	}
 }
 
 func (o *Orchestrator) notifyPagerDutySessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus, summary string) {
@@ -7777,11 +7813,7 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
-	if session.ModelOverride != nil && *session.ModelOverride != "" {
-		if envVar := models.ModelEnvVarForAgentType(session.AgentType); envVar != "" {
-			refreshedEnv[envVar] = *session.ModelOverride
-		}
-	}
+	applyDirectModelOverrideEnv(session.AgentType, session.ModelOverride, refreshedEnv)
 	if branch := sandboxCfg.Env[sandboxauth.WorkingBranchEnvVar]; branch != "" {
 		refreshedEnv[sandboxauth.WorkingBranchEnvVar] = branch
 	}
@@ -7789,6 +7821,21 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 		refreshedEnv["HOME"] = sandboxCfg.HomeDir
 	}
 	return refreshedEnv
+}
+
+func applyDirectModelOverrideEnv(agentType models.AgentType, modelOverride *string, env map[string]string) {
+	if env == nil || modelOverride == nil || strings.TrimSpace(*modelOverride) == "" {
+		return
+	}
+	if agentType == models.AgentTypeOpenCode {
+		// OpenCode accepts logical model IDs in stored session config, but its
+		// CLI requires the resolved physical provider/model route. ResolveForModel
+		// has already translated the override into OPENCODE_MODEL.
+		return
+	}
+	if envVar := models.ModelEnvVarForAgentType(agentType); envVar != "" {
+		env[envVar] = *modelOverride
+	}
 }
 
 func refreshAgentCredentialEnv(current, resolved map[string]string, agentType models.AgentType) map[string]string {

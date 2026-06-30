@@ -353,6 +353,7 @@ export function RepoPMSettingsEditor({ repository }: RepoPMSettingsProps) {
                         <ModelOptionGroups
                           modelGroups={pmModelGroups}
                           openCodeAvailability={openCodeAvailability}
+                          selectedModel={effectiveModel}
                         />
                       )}
                     </SelectContent>
