@@ -6001,7 +6001,7 @@ func TestUserFacingPRError(t *testing.T) {
 		{
 			name: "base branch unrelated",
 			err:  ghservice.ErrBaseBranchUnrelated,
-			want: "The repository's base branch could not be found or no longer shares history with this session. Recreate or rebase the session on the current base branch, then create the PR again.",
+			want: ghservice.BaseBranchUnrelatedPRMessage,
 		},
 		{
 			name: "sandbox auth unavailable",

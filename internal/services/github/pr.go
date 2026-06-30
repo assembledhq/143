@@ -354,11 +354,10 @@ const (
 	// someone else's commits through --force-with-lease.
 	PushBranchDivergedPRMessage = "The PR branch has changes that are not in this session checkpoint. Pull the latest PR branch into the session before pushing again."
 	// BaseBranchUnrelatedPRMessage is shown when the repository's current PR
-	// base branch no longer shares git history with the session checkpoint.
-	// This usually means the repo history was rewritten after the session
-	// started. Refuse before pushing so stale private-history branches do not
-	// get published only to fail at GitHub's create-PR API.
-	BaseBranchUnrelatedPRMessage = "The repository's base branch could not be found or no longer shares history with this session. Recreate or rebase the session on the current base branch, then create the PR again."
+	// base branch no longer shares git history with the session checkpoint and
+	// 143 could not replay the session diff onto the current base. This usually
+	// means the repo history was rewritten after the session started.
+	BaseBranchUnrelatedPRMessage = "The repository's base branch no longer shares history with this session, and 143 could not replay the session changes onto the current base branch. Recreate or rebase the session, then create the PR again."
 	// SandboxAuthUnavailablePRMessage is shown when 143 cannot prepare the
 	// sandbox credential socket needed for git push. Keep it distinct from the
 	// GitHub permissions fallback because these failures are often runtime or
@@ -430,9 +429,10 @@ var ErrPushRejected = errors.New("git push rejected by remote")
 var ErrPushBranchDiverged = errors.New("remote branch diverged from session snapshot")
 
 // ErrBaseBranchUnrelated is returned before pushing when the repository's
-// current PR base branch has no merge-base with the hydrated session branch.
-// GitHub would reject the PR after the push with "no history in common"; this
-// sentinel prevents publishing the stale branch first.
+// current PR base branch has no merge-base with the hydrated session branch and
+// the session diff cannot be replayed onto the current base. GitHub would
+// reject an unreplayed PR branch with "no history in common"; this sentinel
+// prevents publishing that stale branch.
 var ErrBaseBranchUnrelated = errors.New("base branch has no history in common with session branch")
 
 // ErrSandboxAuthUnavailable is returned when the host cannot prepare the
@@ -1319,7 +1319,11 @@ func (s *PRService) pushSessionBranch(
 	}
 
 	pushURL := fmt.Sprintf("https://github.com/%s.git", repo.FullName)
-	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, pushURL)
+	baseCommitSHA := ""
+	if run.BaseCommitSHA != nil {
+		baseCommitSHA = strings.TrimSpace(*run.BaseCommitSHA)
+	}
+	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL)
 
 	var stdout, stderr bytes.Buffer
 	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
@@ -1487,9 +1491,10 @@ const pushExitNoChanges = 77
 const pushExitBranchDiverged = 78
 
 // pushExitBaseUnrelated is the sentinel exit code the push script uses when
-// the current remote base branch has no merge-base with the session branch.
-// This prevents publishing stale-history session branches that GitHub will
-// reject as PR heads after the push.
+// the current remote base branch cannot be resolved or has no merge-base with
+// the session branch and the session diff cannot be replayed onto it. This
+// prevents publishing stale-history session branches that GitHub will reject
+// as PR heads after the push.
 const pushExitBaseUnrelated = 79
 
 // pushHeadSHASentinel is a well-known prefix the push script writes to stdout
@@ -1500,7 +1505,7 @@ const pushHeadSHASentinel = "__143_HEAD_SHA="
 
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
 
-const pushBaseUnrelatedMessage = "remote base branch could not be found or has no history in common with this session checkpoint; refusing to push"
+const pushBaseUnrelatedMessage = "remote base branch could not be found or session changes could not be replayed onto the current base branch; refusing to push"
 
 // pushScriptTemplate is the shell script executed inside the restored
 // sandbox. All variable interpolations are pre-quoted by the caller (see
@@ -1530,15 +1535,24 @@ const pushBaseUnrelatedMessage = "remote base branch could not be found or has n
 // remote_sha is empty, and `--force-with-lease=<ref>:` resolves to "expect
 // the ref to not exist" — a safe creation push.
 const pushScriptTemplate = `set -eu
-cleanup() { rm -f %[1]s; }
+cleanup() {
+    rm -f %[1]s
+    if [ -n "${transplant_patch:-}" ]; then
+        rm -f "$transplant_patch"
+    fi
+}
 trap cleanup EXIT
 branch=%[7]s
 base_branch=%[8]s
+base_commit=%[9]s
 push_url=%[6]s
 remote_ref="refs/heads/$branch"
 remote_guard_ref="refs/remotes/__143_push_guard/$branch"
 base_ref="refs/heads/$base_branch"
 base_guard_ref="refs/remotes/__143_base_guard/$base_branch"
+transplant_patch=
+transplanted=0
+original_head=
 cd %[2]s
 git config user.name %[3]s
 git config user.email %[4]s
@@ -1555,34 +1569,57 @@ fi
 if [ -n "$base_branch" ]; then
     base_sha=$(git ls-remote "$push_url" "$base_ref" | awk 'NR==1 {print $1}')
     if [ -z "$base_sha" ]; then
-        echo "%[10]s" >&2
-        exit %[11]d
+        echo "%[11]s" >&2
+        exit %[12]d
     fi
     git fetch --no-tags --quiet "$push_url" "+${base_ref}:${base_guard_ref}"
     if ! git merge-base "$base_guard_ref" HEAD >/dev/null 2>&1; then
-        echo "%[10]s" >&2
-        exit %[11]d
+        if [ -z "$base_commit" ] || ! git cat-file -e "${base_commit}^{commit}" >/dev/null 2>&1; then
+            echo "%[11]s" >&2
+            exit %[12]d
+        fi
+        original_head=$(git rev-parse HEAD)
+        transplant_patch=$(mktemp)
+        if ! git diff --binary --full-index "$base_commit" HEAD > "$transplant_patch"; then
+            echo "%[11]s" >&2
+            exit %[12]d
+        fi
+        git checkout -B "$branch" "$base_guard_ref"
+        if ! git apply --index --3way "$transplant_patch"; then
+            echo "%[11]s" >&2
+            exit %[12]d
+        fi
+        if git diff --cached --quiet; then
+            exit %[5]d
+        fi
+        git commit -F %[1]s
+        transplanted=1
     fi
 fi
 remote_sha=$(git ls-remote "$push_url" "$remote_ref" | awk 'NR==1 {print $1}')
 if [ -n "$remote_sha" ]; then
     git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
     if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
-        if ! git diff --quiet HEAD "$remote_guard_ref"; then
-            echo "%[12]s" >&2
-            exit %[13]d
+        if [ "$transplanted" = 1 ]; then
+            if ! git diff --quiet "$original_head" "$remote_guard_ref"; then
+                echo "%[13]s" >&2
+                exit %[14]d
+            fi
+        elif ! git diff --quiet HEAD "$remote_guard_ref"; then
+            echo "%[13]s" >&2
+            exit %[14]d
         fi
     fi
 fi
 git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"
-echo "%[9]s$(git rev-parse HEAD)"
+echo "%[10]s$(git rev-parse HEAD)"
 `
 
 // buildPushScript renders pushScriptTemplate with caller-supplied values.
 // Every %s interpolation is passed through shellQuote, which correctly
 // handles embedded single quotes (via the `'\”` trick) — so any UTF-8
 // string is safe to interpolate.
-func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, pushURL string) string {
+func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName, baseBranch, baseCommitSHA, pushURL string) string {
 	return fmt.Sprintf(
 		pushScriptTemplate,
 		shellQuote(commitMsgPath),
@@ -1593,6 +1630,7 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		shellQuote(pushURL),
 		shellQuote(branchName),
 		shellQuote(baseBranch),
+		shellQuote(baseCommitSHA),
 		// pushHeadSHASentinel is a compile-time string literal containing only
 		// safe shell characters ("__143_HEAD_SHA="), so it's intentionally
 		// interpolated raw — no shellQuote. Anyone who later changes the
