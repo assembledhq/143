@@ -59,7 +59,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2G
+          memory: 4G
           cpus: "4.0"
 
   frontend:
@@ -84,7 +84,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 2G
           cpus: "2.0"
 
 volumes:
