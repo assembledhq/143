@@ -4089,6 +4089,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 		"Test User",
 		"test@example.com",
 		"143/abc123/fix-typo",
+		"main",
 		"https://github.com/owner/repo.git",
 	)
 
@@ -4108,6 +4109,7 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// referenced via variables so every later git command handles branch names
 	// and URLs consistently.
 	require.Contains(t, script, "branch='143/abc123/fix-typo'", "push script should assign the branch through shellQuote")
+	require.Contains(t, script, "base_branch='main'", "push script should assign the base branch through shellQuote")
 	require.Contains(t, script, "push_url='https://github.com/owner/repo.git'", "push script should assign the push URL through shellQuote")
 
 	// Hydrated snapshots may have been captured while the repo was on a stale
@@ -4124,6 +4126,13 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	// already contains it. That still allows metadata-only retry rewrites.
 	require.Contains(t, script, `remote_ref="refs/heads/$branch"`, "push script should derive the remote branch ref from the persisted branch")
 	require.Contains(t, script, `remote_guard_ref="refs/remotes/__143_push_guard/$branch"`, "push script should derive a local guard ref for the remote branch")
+	require.Contains(t, script, `base_ref="refs/heads/$base_branch"`, "push script should derive the base branch ref from the persisted target branch")
+	require.Contains(t, script, `base_guard_ref="refs/remotes/__143_base_guard/$base_branch"`, "push script should derive a local guard ref for the base branch")
+	require.Contains(t, script, `git ls-remote "$push_url" "$base_ref"`, "push script should read the current base branch SHA before pushing")
+	require.Contains(t, script, `if [ -z "$base_sha" ]; then`, "push script should refuse to push when the base branch cannot be resolved")
+	require.Contains(t, script, `git fetch --no-tags --quiet "$push_url" "+${base_ref}:${base_guard_ref}"`, "push script should fetch the current base branch before pushing")
+	require.Contains(t, script, `git merge-base "$base_guard_ref" HEAD`, "push script should refuse unrelated base-branch history before pushing")
+	require.Contains(t, script, "exit 79", "push script should use the unrelated-base sentinel exit code")
 	require.Contains(t, script, `git ls-remote "$push_url" "$remote_ref"`, "push script should read the current remote SHA before pushing")
 	require.Contains(t, script, `git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"`, "push script should fetch the current PR branch before force pushing")
 	require.Contains(t, script, `git merge-base --is-ancestor "$remote_guard_ref" HEAD`, "push script should allow pushes that include the remote PR head")
@@ -4152,13 +4161,53 @@ func TestBuildPushScript_QuotesHostileBranchName(t *testing.T) {
 		"Bot",
 		"bot@example.com",
 		"143/abc/it's-fine",
+		"release/2026.06",
 		"https://github.com/o/r.git",
 	)
 	// The branch is assigned through shellQuote once, so the embedded quote
 	// cannot break out and corrupt later variable-based git commands.
 	require.Contains(t, script, `branch='143/abc/it'\''s-fine'`, "push script should quote hostile branch names in the branch variable")
+	require.Contains(t, script, `base_branch='release/2026.06'`, "push script should quote the base branch in a variable")
 	require.Contains(t, script, `git checkout -B "$branch"`, "push script should use the safely assigned branch variable")
 	require.Contains(t, script, `--force-with-lease="${remote_ref}:${remote_sha}"`, "push script should lease through the safely derived remote ref")
+}
+
+func TestTargetBranchForPR(t *testing.T) {
+	t.Parallel()
+
+	ptr := func(s string) *string { return &s }
+	tests := []struct {
+		name string
+		run  *models.Session
+		repo *models.Repository
+		want string
+	}{
+		{
+			name: "session target branch wins",
+			run:  &models.Session{TargetBranch: ptr("release")},
+			repo: &models.Repository{DefaultBranch: "main"},
+			want: "release",
+		},
+		{
+			name: "repo default fallback",
+			run:  &models.Session{},
+			repo: &models.Repository{DefaultBranch: "main"},
+			want: "main",
+		},
+		{
+			name: "hard default",
+			run:  &models.Session{},
+			repo: &models.Repository{},
+			want: "main",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.want, targetBranchForPR(tt.run, tt.repo), "targetBranchForPR should resolve the base branch used for PR creation")
+		})
+	}
 }
 
 func TestIsPushRejection(t *testing.T) {
@@ -4406,6 +4455,13 @@ func TestPushSessionBranch(t *testing.T) {
 			wantDestroyCnt: 1,
 		},
 		{
+			name:           "unrelated base branch guard maps to ErrBaseBranchUnrelated",
+			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
+			provider:       &prTestSandboxProvider{execExit: pushExitBaseUnrelated, execStderr: pushBaseUnrelatedMessage},
+			wantErrIs:      ErrBaseBranchUnrelated,
+			wantDestroyCnt: 1,
+		},
+		{
 			name:           "missing head sha sentinel returns parse error",
 			snapshots:      &prTestSnapshotStore{payload: []byte("snapshot")},
 			provider:       &prTestSandboxProvider{execStdout: "no sentinel here\n"},
@@ -4451,6 +4507,7 @@ func TestPushSessionBranch(t *testing.T) {
 				models.OrgSettings{},
 				"snapshots/key.tar",
 				"143/abc123/fix",
+				"main",
 				"commit message",
 				"Test User",
 				"test@example.com",
@@ -4550,6 +4607,7 @@ func TestPushSessionBranch_RetryOnRejection_Succeeds(t *testing.T) {
 		models.OrgSettings{},
 		"snapshots/key.tar",
 		"143/abc/fix",
+		"main",
 		"commit message",
 		"Bot",
 		"bot@example.com",
@@ -4592,6 +4650,7 @@ func TestPushSessionBranch_RetryOnRejection_PersistentRejection(t *testing.T) {
 		models.OrgSettings{},
 		"snapshots/key.tar",
 		"143/abc/fix",
+		"main",
 		"commit message",
 		"Bot",
 		"bot@example.com",
@@ -4621,6 +4680,7 @@ func TestPushSessionBranch_NoRetryOnNonRejection(t *testing.T) {
 		models.OrgSettings{},
 		"snapshots/key.tar",
 		"143/abc/fix",
+		"main",
 		"commit message",
 		"Bot",
 		"bot@example.com",
@@ -4655,6 +4715,7 @@ func TestPushSessionBranch_AuthSocketWired(t *testing.T) {
 		models.OrgSettings{},
 		"snapshots/key.tar",
 		"143/abc/fix",
+		"main",
 		"commit message",
 		"Bot",
 		"bot@example.com",
@@ -4703,6 +4764,7 @@ func TestPushSessionBranch_AuthSocketListenFailureWrapsSentinel(t *testing.T) {
 		models.OrgSettings{},
 		"snapshots/key.tar",
 		"143/abc/fix",
+		"main",
 		"commit message",
 		"Bot",
 		"bot@example.com",
@@ -4728,7 +4790,7 @@ func TestPushSessionBranch_RequiresSandboxAuth(t *testing.T) {
 		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
 		&models.Repository{FullName: "o/r"},
 		models.OrgSettings{},
-		"k", "b", "m", "n", "e@x",
+		"k", "b", "main", "m", "n", "e@x",
 	)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrSandboxAuthUnavailable, "pushSessionBranch should preserve the sandbox auth sentinel")
