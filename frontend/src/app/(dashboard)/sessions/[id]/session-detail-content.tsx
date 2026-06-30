@@ -1463,6 +1463,7 @@ function SessionComposer({
                 models={availableModels}
                 agentType={agentType}
                 openCodeAvailability={openCodeAvailability}
+                selectedModel={selectedModel}
               />
             </SelectContent>
           </Select>
@@ -1852,6 +1853,7 @@ function SessionComposer({
                         models={availableModels}
                         agentType={agentType}
                         openCodeAvailability={openCodeAvailability}
+                        selectedModel={selectedModel}
                       />
                     </SelectContent>
                   </Select>
