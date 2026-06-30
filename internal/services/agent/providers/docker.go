@@ -1062,13 +1062,22 @@ func (d *DockerProvider) ExecWithStdin(ctx context.Context, sb *agent.Sandbox, c
 		<-writeErrCh
 		return -1, fmt.Errorf("read exec output: %w", err)
 	}
-	if err := <-writeErrCh; err != nil {
-		return -1, fmt.Errorf("write exec stdin: %w", err)
-	}
+	writeErr := <-writeErrCh
 
 	inspectResp, err := d.client.ContainerExecInspect(ctx, execResp.ID)
 	if err != nil {
 		return -1, fmt.Errorf("inspect exec: %w", err)
+	}
+
+	// A stdin copy error (typically EPIPE) usually means the process closed its
+	// stdin and exited before consuming the whole stream — e.g. tar aborting on a
+	// corrupt archive or being OOM-killed mid-extract. In that case the exec's
+	// real exit code is the authoritative signal, so return it (callers inspect
+	// non-zero codes alongside captured stderr) instead of masking it behind a
+	// generic "broken pipe". Only when the process exited cleanly does a write
+	// error indicate a genuine streaming failure worth surfacing on its own.
+	if writeErr != nil && inspectResp.ExitCode == 0 {
+		return 0, fmt.Errorf("write exec stdin: %w", writeErr)
 	}
 
 	return inspectResp.ExitCode, nil
