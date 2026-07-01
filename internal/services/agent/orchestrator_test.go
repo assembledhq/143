@@ -4567,7 +4567,7 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 		snapshotKey: []byte("restored-snapshot"),
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		require.Equal(t, "Please continue the work.", prompt.UserMessage, "ContinueSession should use the latest user message")
+		require.Equal(t, agent.FollowUpIntentPreamble+"Please continue the work.", prompt.UserMessage, "ContinueSession should use the latest user message with intent framing")
 		return &agent.AgentResult{
 			Summary:        "done",
 			Diff:           "--- a/main.go\n+++ b/main.go\n",
@@ -4588,6 +4588,116 @@ func TestContinueSession_UsesBuildRunResultInUpdateTurnComplete(t *testing.T) {
 	require.NotEmpty(t, updates[0].snapshotKey, "ContinueSession should persist a snapshot key")
 	require.NotNil(t, updates[0].result, "ContinueSession should build a session result for UpdateTurnComplete")
 	require.NotNil(t, updates[0].result.Diff, "ContinueSession should pass the diff through to UpdateTurnComplete")
+}
+
+func TestContinueSession_FollowUpIntentFraming(t *testing.T) {
+	t.Parallel()
+
+	answerOnlyManifest := json.RawMessage(`{"slack":{"routing_mode":"answer_only"}}`)
+
+	cases := []struct {
+		name          string
+		content       string
+		source        models.SessionMessageSource
+		origin        models.SessionOrigin
+		inputManifest json.RawMessage
+		wantPrefix    string
+		wantNoPrefix  []string
+	}{
+		{
+			name:       "human follow-up gets intent preamble",
+			content:    "how risky is this change?",
+			origin:     models.SessionOriginManual,
+			wantPrefix: agent.FollowUpIntentPreamble,
+		},
+		{
+			name:         "leading slash command skips preamble",
+			content:      "/compact",
+			origin:       models.SessionOriginManual,
+			wantNoPrefix: []string{agent.FollowUpIntentPreamble, agent.AnswerOnlyResumeReminder},
+		},
+		{
+			name:         "plan mode message skips intent preamble",
+			content:      "[PLAN_MODE]\nplan the refactor",
+			origin:       models.SessionOriginManual,
+			wantPrefix:   "You are in PLAN MODE.",
+			wantNoPrefix: []string{agent.FollowUpIntentPreamble},
+		},
+		{
+			name:         "agent tool message skips intent preamble",
+			content:      "automated follow-up",
+			source:       models.SessionMessageSourceAgentTool,
+			origin:       models.SessionOriginManual,
+			wantNoPrefix: []string{agent.FollowUpIntentPreamble},
+		},
+		{
+			name:          "answer-only session gets reminder before preamble",
+			content:       "what does the deploy pipeline do?",
+			origin:        models.SessionOriginSlack,
+			inputManifest: answerOnlyManifest,
+			wantPrefix:    agent.AnswerOnlyResumeReminder,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			issue.Source = models.IssueSourceManual
+			session := testRun(orgID, issue.ID)
+			session.Origin = tc.origin
+			session.InputManifest = tc.inputManifest
+			session.InteractionMode = models.SessionInteractionModeInteractive
+			session.ValidationPolicy = models.SessionValidationPolicyOnSessionEnd
+			agentSessionID := "existing-agent-session"
+			snapshotKey := "existing-snapshot"
+			session.Status = models.SessionStatusIdle
+			session.AgentSessionID = &agentSessionID
+			session.SnapshotKey = &snapshotKey
+			session.CurrentTurn = 1
+
+			d := defaultDeps()
+			d.issues.issue = issue
+			d.messages.messages = []models.SessionMessage{{
+				ID:         1,
+				SessionID:  session.ID,
+				OrgID:      orgID,
+				TurnNumber: 2,
+				Role:       models.MessageRoleUser,
+				Content:    tc.content,
+				Source:     tc.source,
+			}}
+			d.provider.RestoreFn = func(ctx context.Context, sb *agent.Sandbox, reader io.Reader) error {
+				_, err := io.ReadAll(reader)
+				return err
+			}
+			d.provider.SnapshotFn = func(ctx context.Context, sb *agent.Sandbox) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
+			}
+			d.snapshots.data = map[string][]byte{
+				snapshotKey: []byte("restored-snapshot"),
+			}
+			var promptSeen *agent.AgentPrompt
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				promptSeen = prompt
+				return &agent.AgentResult{Summary: "done", ExitCode: 0}, nil
+			}
+
+			orch := buildOrchestrator(d)
+			err := orch.ContinueSession(context.Background(), session, nil)
+			require.NoError(t, err, "ContinueSession should succeed")
+			require.NotNil(t, promptSeen, "adapter should have been executed")
+
+			if tc.wantPrefix != "" {
+				require.True(t, strings.HasPrefix(promptSeen.UserMessage, tc.wantPrefix), "expected prompt to start with %q, got: %q", tc.wantPrefix, promptSeen.UserMessage)
+			}
+			for _, absent := range tc.wantNoPrefix {
+				require.NotContains(t, promptSeen.UserMessage, absent)
+			}
+		})
+	}
 }
 
 func TestContinueSession_ThreadScopedAssistantUsesThreadTurnWhileSessionAdvancesSharedTurn(t *testing.T) {
@@ -5289,7 +5399,7 @@ func TestContinueSession_RepairedSlashCommandsOnReusePath(t *testing.T) {
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.Equal(
 			t,
-			agent.EnsureSlashCommandsInPrompt("follow-up", []models.SessionInputCommand{missingCommand}),
+			agent.EnsureSlashCommandsInPrompt(agent.FollowUpIntentPreamble+"follow-up", []models.SessionInputCommand{missingCommand}),
 			prompt.UserMessage,
 			"ContinueSession should repair slash commands before executing a reused session",
 		)
@@ -6483,7 +6593,7 @@ func TestContinueSession_PersistsTurnResultAndReturnsToIdle(t *testing.T) {
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		require.True(t, prompt.Continuation, "continue_session should execute the adapter in continuation mode")
-		require.Equal(t, "Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message")
+		require.Equal(t, agent.FollowUpIntentPreamble+"Please add regression coverage too.", prompt.UserMessage, "continue_session should pass the latest user message with intent framing")
 		require.Equal(t, models.ReasoningEffortHigh, prompt.ReasoningEffort, "continue_session should preserve the stored reasoning effort on snapshot-backed turns")
 		logCh <- agent.LogEntry{Timestamp: time.Now(), Level: "output", Message: "Added the regression test"}
 		return &agent.AgentResult{
@@ -6793,7 +6903,7 @@ func TestContinueSession_RoutesToRequestedThreadAcrossSiblingTurns(t *testing.T)
 		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		require.Equal(t, "please fix the tests", prompt.UserMessage,
+		require.Equal(t, agent.FollowUpIntentPreamble+"please fix the tests", prompt.UserMessage,
 			"continue_session for Codex 2 must run with Codex 2's user message, not the higher-turn Main message that sorts last in the (turn_number, id) ordering")
 		return &agent.AgentResult{
 			Summary:  "Codex 2 reply",
@@ -6850,7 +6960,7 @@ func TestContinueSession_UsesQueuedMessageIDAsExactCarrier(t *testing.T) {
 		return io.NopCloser(bytes.NewReader([]byte("next-snapshot"))), nil
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
-		require.Equal(t, "change the code from this queued message", prompt.UserMessage, "queued_message_id should make ContinueSession use the exact queued message instead of inferring the newest row")
+		require.Equal(t, agent.FollowUpIntentPreamble+"change the code from this queued message", prompt.UserMessage, "queued_message_id should make ContinueSession use the exact queued message instead of inferring the newest row")
 		return &agent.AgentResult{
 			Summary:  "queued reply",
 			ExitCode: 0,

@@ -48,6 +48,19 @@ const (
 	mentionIndexWarmTimeout = 60 * time.Second
 	planModePrefix          = "[PLAN_MODE]\n"
 
+	// FollowUpIntentPreamble frames user messages on continuation turns.
+	// Resume-by-id turns deliver the user message verbatim as the entire
+	// prompt (no system prompt is re-sent), on top of a conversation history
+	// framed as a coding task to complete — without this, agents tend to
+	// treat analytical questions as requests for more code changes.
+	FollowUpIntentPreamble = "The user sent a new message in this ongoing session. Determine what this message is asking for — an answer, an assessment, a plan, or code changes — and deliver exactly that. If it asks a question, answer it directly in your final message rather than assuming more code changes are wanted.\n\nUser's message:\n\n"
+
+	// AnswerOnlyResumeReminder restates the answer-only constraint on
+	// continuation turns. The answer-only system preamble is only sent on
+	// the first turn; resume paths bypass PreparePrompt, so the constraint
+	// must ride along with the message itself.
+	AnswerOnlyResumeReminder = "Reminder: this session is answer-only. Do not modify files or repository state; answer using read-only inspection only.\n\n"
+
 	// Claude Code access tokens are short-lived. A sandbox credential with an
 	// expiration far beyond this bound is more likely corrupted or synthetic
 	// than a valid CLI refresh result.
@@ -3466,6 +3479,22 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			return fmt.Errorf("human input request is %s", request.Status)
 		}
 		humanInputAnswer = humanInputAnswerFromRequest(request)
+	}
+
+	// Frame ordinary human follow-up messages so the agent reads the
+	// message's intent instead of defaulting to more code changes. Skip
+	// turns that already carry their own framing (plan mode, revision or
+	// repair context, human-input answers), non-human messages, orchestrated
+	// thread executions (e.g. code review), and messages leading with a
+	// slash command, which some agent CLIs only honor at the start of the
+	// prompt.
+	leadsWithSlashCommand := strings.HasPrefix(strings.TrimSpace(userMessage), "/")
+	if !planMode && revisionContext == nil && humanInputAnswer == nil &&
+		latestMsg.Source == "" && !threadScopedExecution && !leadsWithSlashCommand {
+		userMessage = FollowUpIntentPreamble + userMessage
+	}
+	if sessionPromptStyle(session) == PromptStyleAnswerOnly && !leadsWithSlashCommand {
+		userMessage = AnswerOnlyResumeReminder + userMessage
 	}
 
 	// Two distinct turn counters in one ContinueSession run:
