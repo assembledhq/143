@@ -72,6 +72,20 @@ describe("PMStatusBanner", () => {
     ).toBeInTheDocument();
   });
 
+  it("explains why the run action is disabled", async () => {
+    mockUseAnalyze.mockReturnValue(defaultAnalyze({ isAnalyzing: true }));
+
+    renderWithProviders(<PMStatusBanner hasActivePlanSession={false} />);
+
+    const user = userEvent.setup();
+    const runButton = screen.getByRole("button", { name: /Running/i });
+    await user.hover(runButton.parentElement ?? runButton);
+
+    expect(
+      await screen.findAllByText("Wait for the current PM agent run to finish.")
+    ).not.toHaveLength(0);
+  });
+
   it("renders completed/active state", async () => {
     mockUseAnalyze.mockReturnValue(defaultAnalyze());
 

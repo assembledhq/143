@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { RefreshCw, Plus } from "lucide-react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
+import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { api } from "@/lib/api";
 import { useAnalyze } from "@/hooks/use-analyze";
@@ -25,6 +26,12 @@ export function PMStatusBanner({ hasActivePlanSession, canMutate = true }: PMSta
   const { isAnalyzing, isPending, analyzeError, handleAnalyze, dismissError } = useAnalyze(hasActivePlanSession);
 
   const agentStatus = deriveAgentStatus(pmStatus, isAnalyzing);
+  const runNowDisabled = isPending || isAnalyzing;
+  const runNowDisabledReason = isPending
+    ? "Wait for the PM agent run to start."
+    : isAnalyzing
+      ? "Wait for the current PM agent run to finish."
+      : undefined;
 
   return (
     <div className="space-y-2">
@@ -41,16 +48,21 @@ export function PMStatusBanner({ hasActivePlanSession, canMutate = true }: PMSta
                 Manual Session
               </Link>
             </Button>
-            <Button
-              size="sm"
-              className="h-7 text-xs"
-              onClick={handleAnalyze}
-              disabled={isPending || isAnalyzing}
-              title="Run the PM agent now without waiting for the next scheduled run"
+            <DisabledTooltip
+              disabled={runNowDisabled}
+              content={runNowDisabledReason}
             >
-              <RefreshCw className={`mr-1 h-3 w-3 ${isPending || isAnalyzing ? "animate-spin" : ""}`} />
-              {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
-            </Button>
+              <Button
+                size="sm"
+                className="h-7 text-xs"
+                onClick={handleAnalyze}
+                disabled={runNowDisabled}
+                title="Run the PM agent now without waiting for the next scheduled run"
+              >
+                <RefreshCw className={`mr-1 h-3 w-3 ${runNowDisabled ? "animate-spin" : ""}`} />
+                {isPending ? "Starting..." : isAnalyzing ? "Running..." : "Run now"}
+              </Button>
+            </DisabledTooltip>
           </>
         )}
       </AgentStatusBar>
