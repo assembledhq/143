@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -305,13 +306,16 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	t.Parallel()
 
-	prompt := "/review"
+	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
 
-	require.Equal(t, "/review", codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil), "code review reviewer prompt should stay as the bare native review command")
-	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke only native /review")
-	require.Len(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), 1, "native reviewer command metadata should be persisted")
-	require.Equal(t, "", codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)[0].Arguments, "native reviewer command should not carry extra review arguments")
-	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
+	require.True(t, strings.HasPrefix(prompt, "/review"), "code review reviewer prompt should invoke the native review command")
+	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
+	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
+	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
+	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
+	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
