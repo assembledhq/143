@@ -269,10 +269,13 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Acceptable")).toBeInTheDocument();
     expect(screen.getByText("Approved")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Evidence/i }));
-    expect(await screen.findByText(/Evidence for #428/i)).toBeInTheDocument();
-    expect(screen.getByText("No blocking issues found.")).toBeInTheDocument();
-    expect(screen.getByText("Clarify branch name")).toBeInTheDocument();
-    expect(screen.getByText("Review this PR.")).toBeInTheDocument();
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(evidenceSheet).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Clarify branch name")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
     await user.click(screen.getByRole("combobox", { name: /Repository/i }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
