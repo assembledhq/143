@@ -217,6 +217,49 @@ func TestStartRunnerRetryBranchPreviewStartupInterruptionResetsAndDestroysSandbo
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestStartRunnerRetryBranchPreviewStartupInterruptionDoesNotFailTransitionedReservation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now()
+	provider := &destroyRecordingSandboxProvider{}
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(uuid.New(), previewID, orgID, "warn", "start", "interrupted", json.RawMessage(`{}`), now))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+
+	store := db.NewPreviewStore(mock)
+	runner := &StartRunner{
+		manager:         &Manager{store: store, logger: zerolog.Nop()},
+		previews:        store,
+		sandboxProvider: provider,
+		logger:          zerolog.Nop(),
+	}
+	reservation := &models.PreviewInstance{ID: previewID, OrgID: orgID, PreviewTargetID: &targetID, Status: models.PreviewStatusStarting}
+	payload := StartBranchPreviewJobPayload{OrgID: orgID, PreviewID: previewID, PreviewTargetID: targetID}
+	sb := &agent.Sandbox{ID: "sandbox-1", Provider: ProviderDocker}
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	err = runner.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
+
+	require.NoError(t, err, "stale branch preview startup reset should complete without dead-lettering the job")
+	require.Equal(t, []string{"sandbox-1"}, provider.destroyed, "stale branch preview startup should still destroy the transient sandbox")
+	jobctx.RunDeadLetterHooks(ctx, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartRunnerEnsureReservationRuntimeForClaimingWorkerCreatesRuntimeForSameWorkerRetry(t *testing.T) {
 	t.Parallel()
 

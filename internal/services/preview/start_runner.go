@@ -1318,6 +1318,15 @@ func (r *StartRunner) retryBranchPreviewStartupInterruption(ctx context.Context,
 		"stage": phase,
 	})
 	if err := r.previews.ResetStartingBranchPreviewForRetry(ctx, payload.OrgID, payload.PreviewID, reason, models.PreviewUnavailableReasonOwnerLost); err != nil {
+		if errors.Is(err, db.ErrPreviewReservationNotStarting) {
+			r.destroyBranchPreviewSandboxAfterInterruption(ctx, payload.PreviewID, sb)
+			r.logger.Warn().
+				Err(err).
+				Str("preview_id", payload.PreviewID.String()).
+				Str("preview_target_id", payload.PreviewTargetID.String()).
+				Msg("branch preview startup interruption reset skipped; reservation already transitioned")
+			return nil
+		}
 		r.abort(ctx, reservation, sandboxID(sb), fmt.Sprintf("reset preview startup after interruption: %v", err))
 		return fmt.Errorf("reset branch preview after startup interruption: %w", err)
 	}

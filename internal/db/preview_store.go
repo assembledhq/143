@@ -25,6 +25,11 @@ import (
 // run but the repository has no successful preview recorded yet.
 var ErrPreviewNotReady = errors.New("repository preview is not ready")
 
+// ErrPreviewReservationNotStarting is returned when a retry-only startup reset
+// cannot claim the reservation because another lifecycle transition already
+// moved it out of the starting state.
+var ErrPreviewReservationNotStarting = errors.New("branch preview reservation not found or no longer starting")
+
 // PreviewStore manages preview_instances and related tables.
 // It uses TxStarter because stop operations need transactional consistency
 // (stop preview + revoke all access sessions atomically).
@@ -1278,7 +1283,7 @@ func (s *PreviewStore) ResetStartingBranchPreviewForRetry(ctx context.Context, o
 		return fmt.Errorf("reset branch preview reservation: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("branch preview reservation not found or no longer starting")
+		return ErrPreviewReservationNotStarting
 	}
 
 	if _, err := tx.Exec(ctx,
