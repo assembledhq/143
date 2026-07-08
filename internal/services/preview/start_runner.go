@@ -1325,7 +1325,7 @@ func (r *StartRunner) retryBranchPreviewStartupInterruption(ctx context.Context,
 				Str("preview_id", payload.PreviewID.String()).
 				Str("preview_target_id", payload.PreviewTargetID.String()).
 				Msg("branch preview startup interruption reset skipped; reservation already transitioned")
-			return fmt.Errorf("reset branch preview after startup interruption: %w", err)
+			return nil
 		}
 		r.abort(ctx, reservation, sandboxID(sb), fmt.Sprintf("reset preview startup after interruption: %v", err))
 		return fmt.Errorf("reset branch preview after startup interruption: %w", err)

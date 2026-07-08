@@ -254,7 +254,7 @@ func TestStartRunnerRetryBranchPreviewStartupInterruptionDoesNotFailTransitioned
 
 	err = runner.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
 
-	require.ErrorIs(t, err, db.ErrPreviewReservationNotStarting, "stale branch preview startup reset should return the reservation-state sentinel")
+	require.NoError(t, err, "stale branch preview startup reset should complete without dead-lettering the job")
 	require.Equal(t, []string{"sandbox-1"}, provider.destroyed, "stale branch preview startup should still destroy the transient sandbox")
 	jobctx.RunDeadLetterHooks(ctx, err)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
