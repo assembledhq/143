@@ -6,9 +6,9 @@ This guide is specifically about the `preview` section inside `.143/config.json`
 
 This guide covers how to add preview support to a repo. For the underlying architecture (preview gateway, trust split, isolation model), see [`design/implemented/44-sandbox-preview-server.md`](design/implemented/44-sandbox-preview-server.md).
 
-## Dogfood preview and public demo
+## Dogfood Preview
 
-143 ships its own `.143/config.json`, `.143/preview-start.sh`, and `.143/seed/` fragments so a reviewer can spin up 143 inside 143 to click through the UI. The same seed data powers the public direct-entry demo at `demo.143.dev`.
+143 ships its own `.143/config.json`, `.143/preview-start.sh`, and `.143/seed/` fragments so a reviewer can spin up 143 inside 143 to click through the UI.
 
 **How to launch it locally:**
 
@@ -16,9 +16,9 @@ This guide covers how to add preview support to a repo. For the underlying archi
 2. Open a session against the 143 repo (or anything on `main`).
 3. Click **Start Preview**.
 
-**Demo entry:** demo environments no longer expose seeded email/password credentials. When `DEMO_MODE=true`, the login page renders **Enter demo**, which calls `POST /api/v1/auth/demo` and signs in as `DEMO_ENTRY_EMAIL` (default `preview-viewer@143.dev`).
+**Demo sign-in:** when `DEMO_MODE=true`, the login page renders a credential banner for the seeded preview admin.
 
-Seeded users remain in the database for fixture coverage:
+Seeded users:
 
 | Email | Role |
 |---|---|
@@ -27,25 +27,25 @@ Seeded users remain in the database for fixture coverage:
 | `preview-builder@143.dev` | `builder` |
 | `preview-viewer@143.dev` | `viewer` |
 
-Seeded preview users have `password_hash = NULL`; direct entry is the only demo auth path.
+The shared preview password is `preview`.
 
 **What you can and cannot do in the dogfood:**
 
 | Works | Does not work |
 |---|---|
 | Browse seeded sessions / PR previews / activity | **Start session** (no Docker socket — the button will error) |
-| Enter directly as the seeded viewer | **Connect GitHub** on Settings → Integrations (no OAuth app; button is hidden) |
+| Sign in with seeded preview credentials | **Connect GitHub** on Settings → Integrations (no OAuth app; button is hidden) |
 | Open the session detail, messages, logs | **Import repositories** (no GitHub App; install-redirect no-ops) |
 | View the seeded PR preview panel and its linked PR | **Comment on a PR / retry CI / merge** (all route through the GitHub API) |
 | Navigate projects, sessions list, activity feed | **Start Preview** from a new session (needs a live sandbox) |
 
-The UI is populated by fixed rows in `.143/seed/`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface far beyond what's warranted for a public demo. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
+The UI is populated by fixed rows in `.143/seed/`; the preview system itself is not actually running underneath them. This is a deliberate tradeoff — giving the dogfood a Docker socket would expand the attack surface beyond what is warranted for a seeded preview. If you need a real end-to-end test, run 143 on your own machine with a configured GitHub App.
 
-Set `DEMO_MODE=true` on the server when launching a dogfood environment. This enables direct demo entry and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing. Public demos also set `DEMO_READ_ONLY=true` so state-changing API routes are blocked even if a UI affordance is missed.
+Set `DEMO_MODE=true` on the server when launching a dogfood environment. This displays the seeded-credentials banner and short-circuits GitHub client construction so stubbed handlers return cleanly instead of 500-ing.
 
 The dogfood frontend runs as a production Next build inside the preview (`npm run build`, then the generated standalone server). The launch script stages `.next/static` and `public` into the standalone output before booting so generated CSS, JavaScript chunks, fonts, and public images are served by the production server. Avoid `next dev` here: its HMR stream is not useful for reviewers and can interact badly with the preview gateway's HTML instrumentation on App Router pages.
 
-**How the dogfood handles `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets, so the secret is generated at boot from `/dev/urandom` and cached at `/tmp/143-preview/session_secret`. Server restarts within the same sandbox reuse the cached value, so a reviewer stays signed in. A full sandbox recycle generates a fresh secret; reviewers just click **Enter demo** again.
+**How the dogfood handles `SESSION_SECRET`:** The preview runs inside a 143 session sandbox, which has no access to sops-encrypted production secrets, so the secret is generated at boot from `/dev/urandom` and cached at `$HOME/.cache/143-preview/session_secret`. Server restarts within the same sandbox reuse the cached value, so a reviewer stays signed in. A full sandbox recycle generates a fresh secret; reviewers sign in again with the seeded credentials.
 
 **Why `MODE=api` and not `MODE=all`:** The dogfood sandbox has no Docker socket, so the background worker mode (which spawns session sandboxes and previews) cannot function. Running it would only produce worker-loop errors in the logs. Any UI that polls job status will therefore show the seeded snapshot forever — no background processing advances it.
 
