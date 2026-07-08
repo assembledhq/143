@@ -664,9 +664,8 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	payload := map[string]any{}
-	if len(reviewers) > 0 {
-		payload["reviewers"] = reviewers
+	payload := map[string]any{
+		"reviewers": reviewers,
 	}
 	if len(teams) > 0 {
 		payload["team_reviewers"] = teams
