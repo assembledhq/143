@@ -711,15 +711,6 @@ func tempDatabaseName() (string, error) {
 	return fmt.Sprintf("oft_demo_seed_check_%d_%s", os.Getpid(), hex.EncodeToString(randomBytes[:])), nil
 }
 
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "1", "t", "true", "yes", "y":
-		return true
-	default:
-		return false
-	}
-}
-
 func defaultString(value, fallback string) string {
 	if value != "" {
 		return value
