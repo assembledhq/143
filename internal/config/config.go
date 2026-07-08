@@ -14,7 +14,16 @@ import (
 	"github.com/rs/zerolog"
 )
 
-const defaultDemoEntryEmail = "preview-viewer@143.dev"
+// Default demo credentials. Must stay in sync with the envDefault tags on
+// Config.DemoEmail / Config.DemoPassword and with the seeded admin row in
+// .143/seed/10_identity.sql, where the password is stored as a bcrypt hash.
+// Overriding DemoPassword via env without regenerating the seed hash results
+// in a login-page banner that advertises credentials that won't actually sign
+// in, so LogStatus warns about this at boot.
+const (
+	defaultDemoEmail    = "preview-admin@143.dev"
+	defaultDemoPassword = "preview"
+)
 
 type Config struct {
 	// Environment
@@ -34,18 +43,15 @@ type Config struct {
 	FrontendURL             string        `env:"FRONTEND_URL"`
 	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
 	Mode                    string        `env:"MODE"                  envDefault:"all"`
-	// DemoMode tells the server it is running a public demo/dogfood preview
-	// with seeded data and no real GitHub App. Enables direct demo entry and
-	// short-circuits GitHub client construction.
+	// DemoMode tells the server it is running a dogfood preview with seeded
+	// data and no real GitHub App. Enables a credential banner on the login
+	// page and short-circuits GitHub client construction.
 	DemoMode bool `env:"DEMO_MODE" envDefault:"false"`
-	// DemoReadOnly blocks state-changing API routes that are unnecessary for
-	// a seeded public demo. Keep separate from DemoMode so internal dogfood
-	// previews can still exercise write paths when explicitly configured.
-	DemoReadOnly bool `env:"DEMO_READ_ONLY" envDefault:"false"`
-	// DemoEntryEmail is the seeded user that POST /api/v1/auth/demo signs in.
-	// Public demos use the viewer by default; no password is configured or
-	// exposed for demo entry.
-	DemoEntryEmail string `env:"DEMO_ENTRY_EMAIL" envDefault:"preview-viewer@143.dev"`
+	// DemoEmail / DemoPassword are the credentials rendered in the login-page
+	// banner when DemoMode is on. Defaults must match the seeded admin in
+	// .143/seed/10_identity.sql and the constants above.
+	DemoEmail    string `env:"DEMO_EMAIL"    envDefault:"preview-admin@143.dev"`
+	DemoPassword string `env:"DEMO_PASSWORD" envDefault:"preview"`
 	// CLIDistDir is the directory holding the cross-compiled 143-tools
 	// binaries plus checksums.txt, baked into the server image by the
 	// Dockerfile cli stage. The /install.sh and /download/143-tools/*
@@ -610,10 +616,15 @@ func (c *Config) LogStatus(logger zerolog.Logger) {
 	}
 
 	if c.DemoMode {
-		logger.Warn().
-			Bool("read_only", c.DemoReadOnly).
-			Str("entry_email", c.DemoEntryEmail).
-			Msg("DEMO_MODE is enabled — GitHub integrations are stubbed and direct demo entry is enabled. Do not use this configuration for production data.")
+		logger.Warn().Msg("DEMO_MODE is enabled — GitHub integrations are stubbed, seeded credentials are public. Do not use this configuration for production data.")
+		// The seeded admin in .143/seed/10_identity.sql stores a bcrypt hash of
+		// defaultDemoPassword. Overriding DEMO_PASSWORD without regenerating
+		// the hash leaves the login-page banner pointing at credentials that
+		// do not log in.
+		if c.DemoPassword != defaultDemoPassword || c.DemoEmail != defaultDemoEmail {
+			logger.Warn().
+				Msg("DEMO_EMAIL or DEMO_PASSWORD overridden but the seeded admin in .143/seed/10_identity.sql still uses the defaults — the login banner will advertise credentials that don't sign in. Regenerate the bcrypt hash in the seed, or unset the override.")
+		}
 		// Operators enabling DemoMode on top of real GitHub App credentials
 		// will see integrations silently no-op. Call that out so the cause
 		// is easy to find in logs.

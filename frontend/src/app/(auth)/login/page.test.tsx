@@ -28,7 +28,6 @@ function createLocationMock() {
 const loginMock = vi.hoisted(() => vi.fn());
 const loginGoogleMock = vi.hoisted(() => vi.fn());
 const loginEmailMock = vi.hoisted(() => vi.fn());
-const enterDemoMock = vi.hoisted(() => vi.fn());
 const registerMock = vi.hoisted(() => vi.fn());
 
 const useAuthMock = vi.hoisted(() => vi.fn());
@@ -41,7 +40,6 @@ vi.mock('@/lib/api', () => ({
       login: loginMock,
       loginGoogle: loginGoogleMock,
       loginEmail: loginEmailMock,
-      enterDemo: enterDemoMock,
       register: registerMock,
     },
   },
@@ -67,7 +65,6 @@ describe('LoginPage', () => {
     loginMock.mockReset();
     loginGoogleMock.mockReset();
     loginEmailMock.mockReset();
-    enterDemoMock.mockReset();
     registerMock.mockReset();
     pushMock.mockReset();
     replaceMock.mockReset();
@@ -161,56 +158,34 @@ describe('LoginPage', () => {
     expect(screen.queryByRole('button', { name: 'Continue with Google' })).not.toBeInTheDocument();
   });
 
-  it('shows direct demo entry when demo mode is on', () => {
+  it('shows seeded demo credentials when demo mode is on', () => {
     useAuthProvidersMock.mockReturnValue({
       providers: {
         github: false,
         google: false,
-        email: false,
+        email: true,
         demo: true,
-        demo_read_only: true,
+        demo_email: 'preview-admin@143.dev',
+        demo_password: 'preview',
       },
       isLoading: false,
     });
 
     renderWithProviders(<LoginPage />);
 
-    const entry = screen.getByTestId('demo-entry');
-    expect(entry).toHaveTextContent('Public demo');
-    expect(screen.getByRole('button', { name: 'Enter demo' })).toBeInTheDocument();
-    expect(screen.queryByRole('tab', { name: 'Sign in' })).not.toBeInTheDocument();
+    const banner = screen.getByTestId('demo-banner');
+    expect(banner).toHaveTextContent('Demo environment');
+    expect(banner).toHaveTextContent('preview-admin@143.dev');
+    expect(banner).toHaveTextContent('preview');
+    expect(screen.getByRole('tab', { name: 'Sign in' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Continue with GitHub' })).not.toBeInTheDocument();
-    expect(screen.queryByText('preview-admin@143.dev')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Password')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
-  it('enters demo directly without credentials', async () => {
-    enterDemoMock.mockResolvedValue({ data: { id: 'viewer' } });
-    useAuthProvidersMock.mockReturnValue({
-      providers: {
-        github: false,
-        google: false,
-        email: false,
-        demo: true,
-        demo_read_only: true,
-      },
-      isLoading: false,
-    });
-
-    const user = userEvent.setup();
-    renderWithProviders(<LoginPage />);
-    const locationMock = window.location as unknown as ReturnType<typeof createLocationMock>;
-
-    await user.click(screen.getByRole('button', { name: 'Enter demo' }));
-
-    expect(enterDemoMock).toHaveBeenCalledTimes(1);
-    expect(new URL(locationMock.href).pathname).toBe('/demo');
-  });
-
-  it('hides direct demo entry when demo mode is off', () => {
+  it('hides seeded demo credentials when demo mode is off', () => {
     renderWithProviders(<LoginPage />);
 
-    expect(screen.queryByTestId('demo-entry')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('demo-banner')).not.toBeInTheDocument();
   });
 
   it('calls login on GitHub button click', async () => {

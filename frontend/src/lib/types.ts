@@ -372,33 +372,8 @@ export interface AuthProviders {
   google: boolean;
   email: boolean;
   demo?: boolean;
-  demo_read_only?: boolean;
-}
-
-export interface DemoManifest {
-  org: {
-    id: string;
-    name: string;
-  };
-  primary: {
-    session_id: string;
-    preview_group_id: string;
-    preview_target_id: string;
-  };
-  pull_request: {
-    id: string;
-    repository: string;
-    number: number;
-    url: string;
-  };
-  routes: {
-    demo: string;
-    sessions: string;
-    primary_session: string;
-    primary_preview: string;
-    pull_request: string;
-  };
-  read_only: boolean;
+  demo_email?: string;
+  demo_password?: string;
 }
 
 export type RepositoryStatus = "active" | "paused" | "disconnected";

@@ -1352,65 +1352,12 @@ describe('api client', () => {
     it('auth providers fetches provider info', async () => {
       server.use(
         http.get('/api/v1/auth/providers', () => {
-          return HttpResponse.json({ data: { github: true, google: false, email: true, demo: false, demo_read_only: false } });
+          return HttpResponse.json({ data: { github: true, google: false, email: true, demo: false } });
         }),
       );
 
       const result = await api.auth.providers();
       expect(result.data.github).toBe(true);
-    });
-
-    it('enters demo without a request body', async () => {
-      let body = 'not-read';
-      server.use(
-        http.post('/api/v1/auth/demo', async ({ request }) => {
-          body = await request.text();
-          return HttpResponse.json({ data: { id: 'viewer-1', email: 'preview-viewer@143.dev' } });
-        }),
-      );
-
-      const result = await api.auth.enterDemo();
-
-      expect(body).toBe('');
-      expect(result.data.email).toBe('preview-viewer@143.dev');
-    });
-  });
-
-  describe('demo', () => {
-    it('fetches demo manifest', async () => {
-      server.use(
-        http.get('/api/v1/demo/manifest', () => {
-          return HttpResponse.json({
-            data: {
-              org: { id: 'org-1', name: '143 Dogfood' },
-              primary: {
-                session_id: 'session-1',
-                preview_group_id: 'group-1',
-                preview_target_id: 'target-1',
-              },
-              pull_request: {
-                id: 'pr-1',
-                repository: 'assembledhq/143',
-                number: 42,
-                url: 'https://github.com/assembledhq/143/pull/42',
-              },
-              routes: {
-                demo: '/demo',
-                sessions: '/sessions',
-                primary_session: '/sessions/session-1',
-                primary_preview: '/previews/target-1',
-                pull_request: 'https://github.com/assembledhq/143/pull/42',
-              },
-              read_only: true,
-            },
-          });
-        }),
-      );
-
-      const result = await api.demo.manifest();
-
-      expect(result.data.primary.session_id).toBe('session-1');
-      expect(result.data.read_only).toBe(true);
     });
   });
 

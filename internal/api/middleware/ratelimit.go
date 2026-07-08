@@ -236,42 +236,6 @@ func ClaimRateLimit(perMinute int) func(http.Handler) http.Handler {
 	}
 }
 
-// DemoEntryRateLimit caps public direct-entry demo logins per forwarded
-// client IP. Unlike ClaimRateLimit, this route is not protecting an opaque
-// token from brute-force guessing; it must stay usable behind the demo Caddy
-// proxy, so it uses the normal X-Forwarded-For-aware client extraction.
-func DemoEntryRateLimit(perMinute int) func(http.Handler) http.Handler {
-	ipBuckets := &sync.Map{}
-	refillPerSecond := float64(perMinute) / 60.0
-
-	getBucket := func(key string) *tokenBucket {
-		if existing, ok := ipBuckets.Load(key); ok {
-			return existing.(*tokenBucket)
-		}
-		fresh := &tokenBucket{
-			tokens:     float64(perMinute),
-			maxTokens:  float64(perMinute),
-			refillRate: refillPerSecond,
-			lastRefill: time.Now(),
-		}
-		actual, _ := ipBuckets.LoadOrStore(key, fresh)
-		return actual.(*tokenBucket)
-	}
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractIP(r)
-			if !getBucket(ip).allow() {
-				zerolog.Ctx(r.Context()).Warn().Str("ip", ip).Msg("demo entry rate limit exceeded")
-				writeRateLimited(w, "DEMO_ENTRY_RATE_LIMITED", "too many demo entry attempts; try again in a minute", "60")
-				return
-			}
-
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 // CreateOrgRateLimit returns a per-hour rate limiter for POST /organizations.
 // Sized much tighter than ClaimRateLimit: a legitimate user creates an org
 // maybe once per onboarding and then never again, so any bucket that refills

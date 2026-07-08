@@ -49,7 +49,6 @@ function LoginPageContent() {
   const searchParams = useSearchParams();
   const { isAuthenticated, isLoading: authLoading } = useAuth();
   const { providers, isLoading: providersLoading } = useAuthProviders();
-  const isDemoMode = providers?.demo === true;
 
   const invitation = searchParams.get("invitation") ?? undefined;
   const invitedEmail = searchParams.get("email") ?? "";
@@ -82,9 +81,9 @@ function LoginPageContent() {
 
   useEffect(() => {
     if (!isSwitchAccount && !authLoading && isAuthenticated) {
-      router.replace(isDemoMode ? "/demo" : "/onboarding");
+      router.replace("/onboarding");
     }
-  }, [authLoading, isAuthenticated, isDemoMode, isSwitchAccount, router]);
+  }, [authLoading, isAuthenticated, isSwitchAccount, router]);
 
   useEffect(() => {
     if (identityEmail) {
@@ -127,25 +126,6 @@ function LoginPageContent() {
     } catch (err: unknown) {
       captureError(err, { feature: "auth-signup" });
       const message = err instanceof Error ? err.message : "Sign up failed";
-      setError(message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleEnterDemo = async () => {
-    setError(null);
-    if (!emailAuthReady) {
-      setError("Secure demo entry is still initializing. Try again in a moment.");
-      return;
-    }
-    setLoading(true);
-    try {
-      await api.auth.enterDemo();
-      window.location.href = "/demo";
-    } catch (err: unknown) {
-      captureError(err, { feature: "auth-demo-entry" });
-      const message = err instanceof Error ? err.message : "Demo entry failed";
       setError(message);
     } finally {
       setLoading(false);
@@ -232,28 +212,24 @@ function LoginPageContent() {
             </div>
           )}
 
-          {isDemoMode && (
-            <div className="space-y-3" data-testid="demo-entry">
-              <div className="rounded-md border border-border bg-muted/35 px-3 py-2 text-sm text-muted-foreground">
-                <div className="font-medium text-foreground">Public demo</div>
-                <div className="mt-1">
-                  Enter directly as a read-only viewer.
-                </div>
+          {providers?.demo && providers.demo_email && providers.demo_password && (
+            <div
+              className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-muted-foreground"
+              data-testid="demo-banner"
+            >
+              <div className="font-medium text-foreground">Demo environment</div>
+              <div className="mt-1">
+                Sign in with <code className="font-mono">{providers.demo_email}</code>
+                {" / "}
+                <code className="font-mono">{providers.demo_password}</code>.
               </div>
-              <Button
-                type="button"
-                className="w-full"
-                loading={loading}
-                disabled={loading || !emailAuthReady}
-                onClick={handleEnterDemo}
-              >
-                Enter demo
-              </Button>
+              <div className="mt-1 text-xs">
+                Data resets when the preview recycles. GitHub actions are stubbed.
+              </div>
             </div>
           )}
 
           {/* Social login buttons */}
-          {!isDemoMode && (
           <div className="space-y-2">
             {providers?.github !== false && (
               <Button
@@ -278,9 +254,8 @@ function LoginPageContent() {
               </Button>
             )}
           </div>
-          )}
 
-          {!isDemoMode && (providers?.github !== false || providers?.google) && (
+          {(providers?.github !== false || providers?.google) && (
             <div className="relative">
               <div className="absolute inset-0 flex items-center">
                 <span className="w-full border-t" />
@@ -299,13 +274,13 @@ function LoginPageContent() {
             </ErrorText>
           )}
 
-          {!isDemoMode && !emailAuthReady && !emailAuthPending && (
+          {!emailAuthReady && !emailAuthPending && (
             <CardDescription className="text-center text-xs">
               Secure email authentication could not be initialized. Refresh and try again.
             </CardDescription>
           )}
 
-          {!isDemoMode && (emailAuthPending ? (
+          {emailAuthPending ? (
             <EmailAuthSkeleton />
           ) : (
             <Tabs value={tab} onValueChange={setTab}>
@@ -397,7 +372,7 @@ function LoginPageContent() {
                 </form>
               </TabsContent>
             </Tabs>
-          ))}
+          )}
         </CardContent>
       </Card>
       <p className="relative mt-6 text-center text-xs text-muted-foreground">

@@ -36,7 +36,6 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AuthHandler.GoogleCallback":   "public, pre-auth (Google OAuth callback)",
 		"AuthHandler.Register":         "public, pre-auth",
 		"AuthHandler.EmailLogin":       "public, pre-auth",
-		"AuthHandler.DemoLogin":        "public, pre-auth direct demo entry; validates the seeded demo org membership explicitly before creating a session",
 		"TeamHandler.AcceptInvitation": "public, token-based (no auth middleware)",
 		"AuthHandler.CLIStart":         "public, pre-auth (CLI browser-login start; chains into GitHub OAuth)",
 		"AuthHandler.CLIExchange":      "public, pre-auth (one-time code + verifier exchange; org comes from the code row)",
@@ -103,7 +102,6 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"AgentCapabilitiesHandler.Catalog":     "returns static capability catalog",
 		"ProjectGenerateHandler.Generate":      "calls LLM only, no org-scoped data",
 		"GitHubStatusHandler.StartConnect":     "OAuth redirect only, no store calls",
-		"DemoHandler.Manifest":                 "authenticated static seeded demo manifest; route URLs are fixed seed metadata rather than request-org data",
 
 		// OAuth start handlers — just redirect to external provider, no org data access.
 		"IntegrationHandler.StartLinearOAuth":  "OAuth redirect only",
