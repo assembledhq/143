@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { parseAsString, useQueryState } from "nuqs";
 import {
+  AlertTriangle,
   ExternalLink,
   GitBranch,
   Loader2,
@@ -54,7 +55,7 @@ import type {
 } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 
-type PreviewScope = "running" | "resumable" | "recent";
+type PreviewScope = "running" | "attention" | "resumable" | "recent";
 
 const RESTART_LATEST_LABEL = "Start latest";
 const RESTART_LATEST_TOOLTIP = "Start a new preview from the latest source state";
@@ -70,6 +71,12 @@ const SECTIONS: {
     title: "Running",
     empty: "No previews are running.",
     interval: 5000,
+  },
+  {
+    scope: "attention",
+    title: "Needs attention",
+    empty: "No previews need attention.",
+    interval: 30000,
   },
   {
     scope: "resumable",
@@ -111,16 +118,6 @@ function previewNeedsAttention(preview: PreviewCurrentResponse): boolean {
   );
 }
 
-function previewIsRunning(preview: PreviewCurrentResponse): boolean {
-  return (
-    preview.status === "starting" ||
-    preview.status === "ready" ||
-    preview.status === "partially_ready" ||
-    preview.status === "unhealthy" ||
-    preview.status === "recycling"
-  );
-}
-
 function sortAttentionFirst(
   previews: PreviewCurrentResponse[],
 ): PreviewCurrentResponse[] {
@@ -132,20 +129,6 @@ function sortAttentionFirst(
     if (a.status !== "failed" && b.status === "failed") return 1;
     return 0;
   });
-}
-
-function mergePreviewRows(
-  primary: PreviewCurrentResponse[],
-  additions: PreviewCurrentResponse[],
-): PreviewCurrentResponse[] {
-  const seen = new Set(primary.map((preview) => preview.preview_group_id));
-  const merged = [...primary];
-  for (const preview of additions) {
-    if (seen.has(preview.preview_group_id)) continue;
-    seen.add(preview.preview_group_id);
-    merged.push(preview);
-  }
-  return merged;
 }
 
 function stoppedReasonLabel(
@@ -199,7 +182,9 @@ function statusDetail(preview: PreviewCurrentResponse, scope: PreviewScope): str
   if (scope === "resumable" && preview.resume_estimate_seconds) {
     return capitalizeStatusDetail(`resumes in ~${preview.resume_estimate_seconds}s`);
   }
-  if (scope === "recent") return capitalizeStatusDetail(stoppedReasonLabel(preview.stopped_reason));
+  if (scope === "recent" || scope === "attention") {
+    return capitalizeStatusDetail(stoppedReasonLabel(preview.stopped_reason));
+  }
   if (preview.expires_at) return capitalizeStatusDetail(`expires ${expiresIn(preview.expires_at)}`);
   return preview.current_phase ? formatPreviewStatus(preview.current_phase) : "";
 }
@@ -634,8 +619,8 @@ export default function PreviewsPage() {
     refetchInterval: pollMs(30000),
     placeholderData: (previous) => previous,
   });
-  const allSectionQueries = [runningQuery, resumableQuery, attentionQuery, recentQuery];
-  const visibleSectionQueries = [runningQuery, resumableQuery, recentQuery];
+  const allSectionQueries = [runningQuery, attentionQuery, resumableQuery, recentQuery];
+  const visibleSectionQueries = [runningQuery, attentionQuery, resumableQuery, recentQuery];
 
   const firstMeta = allSectionQueries.find((item) => item.data?.meta)?.data?.meta;
   // A query that has only ever errored holds no data, and React Query resets
@@ -662,45 +647,33 @@ export default function PreviewsPage() {
   );
 
   const attentionPreviews = useMemo(
-    () => attentionQuery.data?.data ?? [],
+    () => sortAttentionFirst(attentionQuery.data?.data ?? []),
     [attentionQuery.data?.data],
   );
+  const attentionPreviewIds = useMemo(
+    () => new Set(attentionPreviews.map((preview) => preview.preview_group_id)),
+    [attentionPreviews],
+  );
   const runningPreviews = useMemo(
-    () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          runningQuery.data?.data ?? [],
-          attentionPreviews.filter(previewIsRunning),
-        ),
-      ),
-    [attentionPreviews, runningQuery.data?.data],
+    () => sortAttentionFirst(runningQuery.data?.data ?? []),
+    [runningQuery.data?.data],
   );
   const resumablePreviews = useMemo(
-    () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          resumableQuery.data?.data ?? [],
-          attentionPreviews.filter(
-            (preview) => preview.resumable && !previewIsRunning(preview),
-          ),
-        ),
-      ),
-    [attentionPreviews, resumableQuery.data?.data],
+    () => sortAttentionFirst(resumableQuery.data?.data ?? []),
+    [resumableQuery.data?.data],
   );
   const recentPreviews = useMemo(
     () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          recentQuery.data?.data ?? [],
-          attentionPreviews.filter(
-            (preview) => !previewIsRunning(preview) && !preview.resumable,
-          ),
-        ),
+      (recentQuery.data?.data ?? []).filter(
+        (preview) =>
+          !previewNeedsAttention(preview) &&
+          !attentionPreviewIds.has(preview.preview_group_id),
       ),
-    [attentionPreviews, recentQuery.data?.data],
+    [attentionPreviewIds, recentQuery.data?.data],
   );
   const previewsByScope: Record<PreviewScope, PreviewCurrentResponse[]> = {
     running: runningPreviews,
+    attention: attentionPreviews,
     resumable: resumablePreviews,
     recent: recentPreviews,
   };
@@ -819,6 +792,8 @@ export default function PreviewsPage() {
                     <div className="flex items-center gap-2">
                       {section.scope === "running" ? (
                         <MonitorPlay className="h-4 w-4 text-muted-foreground" />
+                      ) : section.scope === "attention" ? (
+                        <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                       ) : section.scope === "resumable" ? (
                         <Play className="h-4 w-4 text-muted-foreground" />
                       ) : (

@@ -132,7 +132,7 @@ describe("PreviewsPage", () => {
     currentUserRole.value = "member";
   });
 
-  it("renders running, resumable, and recent sections with counts and pool usage", async () => {
+  it("renders running, attention, resumable, and recent sections with counts and pool usage", async () => {
     installPreviewHandlers({
       running: [
         preview({
@@ -166,15 +166,26 @@ describe("PreviewsPage", () => {
           preview_url: undefined,
         }),
       ],
+      attention: [
+        preview({
+          preview_group_id: "attention-group",
+          current_target_id: "attention-target",
+          current_preview_id: "attention-preview",
+          branch: "fix/startup-error",
+          status: "failed",
+          stopped_reason: "error",
+          error: "install failed",
+          preview_url: undefined,
+        }),
+      ],
       recent: [
         preview({
           preview_group_id: "recent-group",
           current_target_id: "recent-target",
           current_preview_id: "recent-preview",
-          branch: "fix/startup-error",
-          status: "failed",
-          stopped_reason: "error",
-          error: "install failed",
+          branch: "feature/stopped-cleanly",
+          status: "stopped",
+          stopped_reason: "warm_policy",
           preview_url: undefined,
         }),
       ],
@@ -190,14 +201,14 @@ describe("PreviewsPage", () => {
       screen.getByRole("heading", { level: 2, name: "Running (1)" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("heading", { level: 2, name: "Needs attention (1)" }),
+    ).toBeInTheDocument();
+    expect(
       screen.getByRole("heading", { level: 2, name: "Ready to resume (1)" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", { level: 2, name: "Recent (1)" }),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("region", { name: /needs attention/i }),
-    ).not.toBeInTheDocument();
     expect(screen.getByText("Pool: 3 of 10 previews")).toBeInTheDocument();
     expect(screen.getAllByText("PR #17 - feature/warm-link")[0]).toBeInTheDocument();
     expect(screen.getAllByText("Ready")[0]).toBeInTheDocument();
@@ -205,6 +216,7 @@ describe("PreviewsPage", () => {
     expect(screen.getAllByText("Failed")[0]).toBeInTheDocument();
     expect(screen.getByText("Resumes in ~30s")).toBeInTheDocument();
     expect(screen.getByText("Stopped after error")).toBeInTheDocument();
+    expect(screen.getByText("Hibernated by policy")).toBeInTheDocument();
     expect(screen.getAllByText("PR #17")[0]).toBeInTheDocument();
   });
 
@@ -413,7 +425,7 @@ describe("PreviewsPage", () => {
     renderWithProviders(<PreviewsPage />);
 
     expect(await screen.findAllByText("Failed to load previews.")).toHaveLength(
-      3,
+      4,
     );
     expect(screen.queryByText("No previews yet")).not.toBeInTheDocument();
     expect(screen.queryByText("Loading previews...")).not.toBeInTheDocument();
@@ -493,9 +505,6 @@ describe("PreviewsPage", () => {
     const runningSection = await screen.findByRole("region", {
       name: /running/i,
     });
-    expect(
-      screen.queryByRole("region", { name: /needs attention/i }),
-    ).not.toBeInTheDocument();
     expect(within(runningSection).getAllByText("Out of date")[0]).toBeInTheDocument();
     expect(
       within(runningSection).getAllByText(/Running aabb1122, branch is ccdd3344/)[0],
@@ -532,15 +541,15 @@ describe("PreviewsPage", () => {
     }
   });
 
-  it("shows a spinner on the start-latest button in the recent section while request is in flight", async () => {
+  it("shows a spinner on the start-latest button in the attention section while request is in flight", async () => {
     const restartReleased = deferred<void>();
     const mutationPaths: string[] = [];
     installPreviewHandlers({
       running: [],
       resumable: [],
-      recent: [
+      attention: [
         preview({
-          preview_group_id: "recent-group",
+          preview_group_id: "attention-group",
           branch: "fix/startup-error",
           status: "failed",
           stopped_reason: "error",
@@ -558,10 +567,10 @@ describe("PreviewsPage", () => {
 
     renderWithProviders(<PreviewsPage />);
 
-    const recentSection = await screen.findByRole("region", {
-      name: /recent/i,
+    const attentionSection = await screen.findByRole("region", {
+      name: /needs attention/i,
     });
-    const restartButton = within(recentSection).getAllByRole("button", {
+    const restartButton = within(attentionSection).getAllByRole("button", {
       name: /start a new preview from the latest source state/i,
     })[0];
 
@@ -569,7 +578,7 @@ describe("PreviewsPage", () => {
 
     await waitFor(() => {
       expect(mutationPaths).toEqual([
-        "/api/v1/previews/current/recent-group/start-latest",
+        "/api/v1/previews/current/attention-group/start-latest",
       ]);
     });
     expect(restartButton).toHaveAttribute("data-loading", "true");
@@ -731,7 +740,7 @@ describe("PreviewsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("promotes attention previews inside Recent ahead of ordinary recent activity", async () => {
+  it("shows attention previews separately from ordinary recent activity", async () => {
     installPreviewHandlers({
       attention: [
         preview({
@@ -759,15 +768,17 @@ describe("PreviewsPage", () => {
     const recentSection = await screen.findByRole("region", {
       name: /recent/i,
     });
-    expect(
-      screen.queryByRole("region", { name: /needs attention/i }),
-    ).not.toBeInTheDocument();
-    expect(within(recentSection).getAllByText("Failed")[0]).toBeInTheDocument();
+    const attentionSection = await screen.findByRole("region", {
+      name: /needs attention/i,
+    });
+    expect(within(attentionSection).getAllByText("Failed")[0]).toBeInTheDocument();
     expect(within(recentSection).getAllByText("Stopped")[0]).toBeInTheDocument();
+    expect(within(recentSection).queryByText("feature/failed")).not.toBeInTheDocument();
 
-    const rows = within(recentSection).getAllByRole("row");
-    expect(rows[1]).toHaveTextContent("feature/failed");
-    expect(rows[2]).toHaveTextContent("feature/stopped");
+    const attentionRows = within(attentionSection).getAllByRole("row");
+    const recentRows = within(recentSection).getAllByRole("row");
+    expect(attentionRows[1]).toHaveTextContent("feature/failed");
+    expect(recentRows[1]).toHaveTextContent("feature/stopped");
   });
 
   it("keeps mobile stacked row metadata available alongside the desktop table", async () => {
