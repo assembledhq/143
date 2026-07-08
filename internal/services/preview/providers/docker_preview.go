@@ -37,6 +37,7 @@ import (
 
 // Compile-time check.
 var _ preview.PreviewCapableProvider = (*DockerPreviewProvider)(nil)
+var _ preview.PreviewBuildSnapshotPrewarmProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewCachePrewarmProvider = (*DockerPreviewProvider)(nil)
 var _ preview.PreviewSoftRestartProvider = (*DockerPreviewProvider)(nil)
 
@@ -624,6 +625,31 @@ func (d *DockerPreviewProvider) PrewarmPreviewInstallCaches(ctx context.Context,
 		infra:   map[string]*preview.InfraHandle{},
 	}
 	return d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false)
+}
+
+func (d *DockerPreviewProvider) PrewarmPreviewBuildSnapshot(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts preview.StartPreviewOptions, observer preview.ServiceObserver) error {
+	if cfg == nil {
+		return nil
+	}
+	state := &previewState{
+		handle:   "preview-build-prewarm-" + uuid.NewString(),
+		sandbox:  sb,
+		config:   cfg,
+		opts:     opts,
+		infra:    map[string]*preview.InfraHandle{},
+		services: map[string]*serviceState{},
+	}
+	if err := d.runPreviewInstallWithSaveMode(ctx, state, cfg.Install, opts, observer, false); err != nil {
+		return fmt.Errorf("%w: %v", preview.ErrInstallFailed, err)
+	}
+	d.restorePreviewBuildCache(ctx, state, cfg.Install, opts, observer)
+	d.restorePreviewBuildCacheHome(ctx, state, cfg.Install, opts, observer)
+	if err := d.runServiceBuilds(ctx, state, cfg, opts, observer); err != nil {
+		d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
+		return fmt.Errorf("%w: %v", preview.ErrServiceBuildFailed, err)
+	}
+	d.flushBuildCachesBeforeCleanup(ctx, state, cfg.Install, opts, observer)
+	return nil
 }
 
 // SoftRestartPreview restarts application service processes in-place while

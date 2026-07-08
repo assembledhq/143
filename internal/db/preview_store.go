@@ -100,6 +100,7 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
+	peak_memory_bytes, peak_memory_sampled_at, peak_memory_phase,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
 	source_workspace_revision, source_workspace_revision_updated_at,
 	runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source,
@@ -4560,6 +4561,64 @@ func (s *PreviewStore) UpdatePreviewCachePrewarmRunStatus(ctx context.Context, o
 	)
 	if err != nil {
 		return fmt.Errorf("update preview cache prewarm run status: %w", err)
+	}
+	return nil
+}
+
+func (s *PreviewStore) RecordPreviewResourceSample(ctx context.Context, orgID uuid.UUID, sample *models.PreviewResourceSample) error {
+	if sample == nil {
+		return fmt.Errorf("preview resource sample is nil")
+	}
+	processes := sample.Processes
+	if len(processes) == 0 {
+		processes = json.RawMessage(`[]`)
+	}
+	sampledAt := sample.SampledAt
+	if sampledAt.IsZero() {
+		sampledAt = time.Now()
+	}
+	_, err := s.db.Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO preview_resource_samples (
+				org_id, preview_instance_id, worker_node_id, phase,
+				memory_bytes, memory_limit_bytes, cpu_cores, cpu_limit_millis,
+				processes, sampled_at
+			)
+			SELECT
+				@org_id, @preview_instance_id, @worker_node_id, @phase,
+				@memory_bytes, @memory_limit_bytes, @cpu_cores, @cpu_limit_millis,
+				@processes, @sampled_at
+			WHERE EXISTS (
+				SELECT 1
+				FROM preview_instances
+				WHERE id = @preview_instance_id AND org_id = @org_id
+			)
+			RETURNING preview_instance_id, memory_bytes, sampled_at, phase
+		)
+		UPDATE preview_instances p
+		SET peak_memory_bytes = inserted.memory_bytes,
+			peak_memory_sampled_at = inserted.sampled_at,
+			peak_memory_phase = inserted.phase,
+			updated_at = now()
+		FROM inserted
+		WHERE p.id = inserted.preview_instance_id
+			AND p.org_id = @org_id
+			AND inserted.memory_bytes > p.peak_memory_bytes`,
+		pgx.NamedArgs{
+			"org_id":              orgID,
+			"preview_instance_id": sample.PreviewInstanceID,
+			"worker_node_id":      sample.WorkerNodeID,
+			"phase":               sample.Phase,
+			"memory_bytes":        sample.MemoryBytes,
+			"memory_limit_bytes":  sample.MemoryLimitBytes,
+			"cpu_cores":           sample.CPUCores,
+			"cpu_limit_millis":    sample.CPULimitMillis,
+			"processes":           processes,
+			"sampled_at":          sampledAt,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("record preview resource sample: %w", err)
 	}
 	return nil
 }

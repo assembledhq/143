@@ -36,6 +36,9 @@ type PreviewInstance struct {
 	MemoryLimitMB                     int                          `db:"memory_limit_mb" json:"memory_limit_mb"`
 	CPULimitMillis                    int                          `db:"cpu_limit_millis" json:"cpu_limit_millis"`
 	DiskLimitMB                       int                          `db:"disk_limit_mb" json:"disk_limit_mb"`
+	PeakMemoryBytes                   int64                        `db:"peak_memory_bytes" json:"peak_memory_bytes"`
+	PeakMemorySampledAt               *time.Time                   `db:"peak_memory_sampled_at" json:"peak_memory_sampled_at,omitempty"`
+	PeakMemoryPhase                   string                       `db:"peak_memory_phase" json:"peak_memory_phase,omitempty"`
 	RecycleConfig                     json.RawMessage              `db:"recycle_config" json:"-"`
 	RecycleSandbox                    json.RawMessage              `db:"recycle_sandbox" json:"-"`
 	CurrentPhase                      string                       `db:"current_phase" json:"current_phase,omitempty"`
@@ -55,6 +58,24 @@ type PreviewInstance struct {
 	// sandbox container. It pairs with Session.TurnHoldingContainer as the
 	// durable refcount that keeps the container alive between turns.
 	PreviewHoldingContainer bool `db:"preview_holding_container" json:"preview_holding_container"`
+}
+
+// PreviewResourceSample is one persisted runtime resource sample for a preview
+// sandbox. Processes is a best-effort JSON array with the heaviest processes at
+// sample time.
+type PreviewResourceSample struct {
+	ID                uuid.UUID       `db:"id" json:"id"`
+	OrgID             uuid.UUID       `db:"org_id" json:"org_id"`
+	PreviewInstanceID uuid.UUID       `db:"preview_instance_id" json:"preview_instance_id"`
+	WorkerNodeID      string          `db:"worker_node_id" json:"worker_node_id"`
+	Phase             string          `db:"phase" json:"phase"`
+	MemoryBytes       int64           `db:"memory_bytes" json:"memory_bytes"`
+	MemoryLimitBytes  int64           `db:"memory_limit_bytes" json:"memory_limit_bytes"`
+	CPUCores          float64         `db:"cpu_cores" json:"cpu_cores"`
+	CPULimitMillis    int             `db:"cpu_limit_millis" json:"cpu_limit_millis"`
+	Processes         json.RawMessage `db:"processes" json:"processes"`
+	SampledAt         time.Time       `db:"sampled_at" json:"sampled_at"`
+	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
 }
 
 // PreviewRuntime is the live worker attachment for a preview instance. Preview
