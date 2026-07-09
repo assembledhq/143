@@ -2123,7 +2123,7 @@ func TestProductionPostgresConnectionHeadroom(t *testing.T) {
 	conf, err := os.ReadFile("../deploy/postgres/postgresql.conf")
 	require.NoError(t, err, "test should read production PostgreSQL config")
 
-	require.Contains(t, string(conf), "max_connections = 200", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
+	require.Contains(t, string(conf), "max_connections = 300", "production Postgres should leave headroom for blue/green worker overlap and deploy-control clients")
 }
 
 func TestDBDeploySyncsMountedPostgresConfig(t *testing.T) {

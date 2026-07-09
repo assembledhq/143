@@ -107,7 +107,9 @@ var branchPreviewInstanceTestCols = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
+	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
+	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
@@ -863,7 +865,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -928,7 +930,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1001,7 +1003,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1096,7 +1098,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 			oldPreviewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusFailed,
 			"docker", workerID, "", "webserver", 0,
 			"sha256:old", head, now, now.Add(30*time.Minute), &now,
-			"", 0, 0, 10240, nil, nil, "failed", nil, "build failed", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "failed", nil, "build failed", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1142,7 +1144,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 			newPreviewID, uuid.Nil, &targetID, orgID, userID, models.PreviewProfileBootstrap, "app", models.PreviewStatusStarting,
 			"docker", workerID, "", "app", 0,
 			"sha256:reservation", head, now, now.Add(30*time.Minute), nil,
-			"/", 1024, 500, 10*1024, nil, nil, "reserved", nil, "", now, now, nil, nil,
+			"/", 1024, 500, 10*1024, nil, nil, int64(0), (*time.Time)(nil), "", "reserved", nil, "", now, now, nil, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1196,7 +1198,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1462,7 +1464,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			instanceID, sessionID, nil, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "hdl-session-1", "", 0,
 			"", head, now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -1474,7 +1476,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			instanceID, sessionID, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", head, now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -2542,7 +2544,7 @@ func TestBranchPreviewHandler_StopFailsClosedOnPreviewTargetDBError(t *testing.T
 			previewID, uuid.Nil, &targetID, orgID, userID, "", "", models.PreviewStatusReady,
 			"", "", "", "", 0,
 			"", "", now, now, nil,
-			"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 			false,
 		))
@@ -2658,7 +2660,7 @@ func sessionPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, st
 		previewID, sessionID, (*uuid.UUID)(nil), orgID, userID, "", "", status,
 		"", "", "", "", 0,
 		"", "", now, now, stoppedAt,
-		"", 0, 0, 10240, nil, nil, "", nil, "", now, now, now, nil,
+		"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
 		false,
