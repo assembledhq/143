@@ -18,6 +18,12 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
 
 export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_48;
 
+export const CODEX_MODEL_GPT_5_6_SOL = "gpt-5.6-sol";
+export const CODEX_MODEL_GPT_5_6_SOL_FAST = "gpt-5.6-sol-fast";
+export const CODEX_MODEL_GPT_5_6_TERRA = "gpt-5.6-terra";
+export const CODEX_MODEL_GPT_5_6_TERRA_FAST = "gpt-5.6-terra-fast";
+export const CODEX_MODEL_GPT_5_6_LUNA = "gpt-5.6-luna";
+export const CODEX_MODEL_GPT_5_6_LUNA_FAST = "gpt-5.6-luna-fast";
 export const CODEX_MODEL_GPT_5_5 = "gpt-5.5";
 export const CODEX_MODEL_GPT_5_5_FAST = "gpt-5.5-fast";
 export const CODEX_MODEL_GPT_5_4 = "gpt-5.4";
@@ -29,6 +35,12 @@ export const CODEX_MODEL_GPT_5_CODEX = "gpt-5-codex";
 export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 
 export const AVAILABLE_CODEX_MODELS = [
+  CODEX_MODEL_GPT_5_6_SOL,
+  CODEX_MODEL_GPT_5_6_SOL_FAST,
+  CODEX_MODEL_GPT_5_6_TERRA,
+  CODEX_MODEL_GPT_5_6_TERRA_FAST,
+  CODEX_MODEL_GPT_5_6_LUNA,
+  CODEX_MODEL_GPT_5_6_LUNA_FAST,
   CODEX_MODEL_GPT_5_5,
   CODEX_MODEL_GPT_5_5_FAST,
   CODEX_MODEL_GPT_5_4,
