@@ -821,6 +821,54 @@ func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_RestoresMatchingSnapsh
 	require.Empty(t, cache.baseFindKey, "an exact hit should not consult base snapshots")
 }
 
+func TestStartRunnerPreviewCachePrewarmStartupSnapshotStatusDetectsExactHit(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cache := &fakePreviewStartupCache{hit: &CacheHit{}}
+	runner := &StartRunner{
+		sandboxProvider: fakeStartRunnerSandboxProvider{
+			files: map[string][]byte{
+				"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`),
+			},
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	cfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{Lockfiles: []string{"package-lock.json"}},
+	}
+	payload := PreviewCachePrewarmJobPayload{
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		Source:       PreviewCachePrewarmSourceBranch,
+		CommitSHA:    "0123456789abcdef0123456789abcdef01234567",
+	}
+
+	keys, warm, possible, err := runner.previewCachePrewarmStartupSnapshotStatus(context.Background(), payload, &agent.Sandbox{WorkDir: "/workspace/repo"}, cfg)
+
+	require.NoError(t, err, "startup snapshot status should compute the exact key")
+	require.True(t, possible, "branch prewarm should consider startup snapshots possible when lockfiles exist")
+	require.True(t, warm, "startup snapshot status should report an exact snapshot hit as warm")
+	require.NotEmpty(t, keys.SnapshotKey, "startup snapshot status should return the computed exact key")
+	require.Equal(t, orgID, cache.findOrgID, "startup snapshot lookup should be scoped to org")
+	require.Equal(t, repoID, cache.findRepoID, "startup snapshot lookup should be scoped to repository")
+	require.Equal(t, keys.SnapshotKey, cache.findKey, "startup snapshot lookup should use the exact target commit key")
+}
+
+func TestPreviewBuildPrewarmPlatformEnv(t *testing.T) {
+	t.Parallel()
+
+	env := previewBuildPrewarmPlatformEnv()
+
+	require.Equal(t, map[string]string{
+		"ONEFORTYTHREE":     "true",
+		"ONEFORTYTHREE_ENV": "preview",
+	}, env, "build snapshot prewarm should expose stable preview-mode markers")
+	require.NotContains(t, env, "PREVIEW_ORIGIN", "build snapshot prewarm should not bake an instance-specific origin before a preview instance exists")
+}
+
 func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_PartialInvalidationOnExactMiss(t *testing.T) {
 	t.Parallel()
 

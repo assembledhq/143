@@ -628,7 +628,9 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
+	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
+	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
@@ -672,7 +674,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "default", "starting",
 		"docker", "test-worker", "", "app", 3000,
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil, nil, nil, "",
+		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), int64(0), (*time.Time)(nil), "", "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil, nil, nil, "",
 		"",
 		false,
 	}
@@ -940,7 +942,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		previewID, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "ready",
 		"docker", "test-worker", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, 10240, recycleConfig, recycleSandbox, "ready", strPtr("req-1"), "", now, now, now, nil,
+		"/", 512, 500, 10240, recycleConfig, recycleSandbox, int64(0), (*time.Time)(nil), "", "ready", strPtr("req-1"), "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
 		false,
 	}

@@ -2827,6 +2827,57 @@ func TestStartPreview_DoesNotReportInstallBuildPhaseWithoutInstall(t *testing.T)
 	require.NoError(t, d.StopPreview(context.Background(), handle.Handle), "StopPreview should clean up the started preview")
 }
 
+func TestPrewarmPreviewBuildSnapshotRunsBuildWithoutStartingServices(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var buildCalls int
+	var serviceCalls int
+	var buildCmd string
+	exec := &fakeServiceExecutor{
+		execStreamFn: func(_ context.Context, cmd string, _ func([]byte)) (int, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.Contains(cmd, "build") {
+				buildCalls++
+				buildCmd = cmd
+			}
+			if strings.Contains(cmd, "start") {
+				serviceCalls++
+			}
+			return 0, nil
+		},
+	}
+	d := NewDockerPreviewProvider(previewReachableClient(), exec, zerolog.Nop(), WithPreviewDialer(successfulPreviewDialer))
+	cfg := &models.PreviewConfig{
+		Name:    "test-app",
+		Primary: "web",
+		Services: map[string]models.ServiceConfig{
+			"web": {
+				Build:   []string{"npm", "run", "build"},
+				Command: []string{"npm", "start"},
+				Port:    3000,
+				Ready:   models.ReadinessProbe{HTTPPath: "/"},
+			},
+		},
+	}
+
+	err := d.PrewarmPreviewBuildSnapshot(context.Background(), &agent.Sandbox{ID: "sb", WorkDir: "/workspace/repo"}, cfg, preview.StartPreviewOptions{
+		ExtraEnv: map[string]string{
+			"ONEFORTYTHREE":     "true",
+			"ONEFORTYTHREE_ENV": "preview",
+		},
+	}, nil)
+	require.NoError(t, err, "PrewarmPreviewBuildSnapshot should complete service builds")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, buildCalls, "PrewarmPreviewBuildSnapshot should run the service build command")
+	require.Equal(t, 0, serviceCalls, "PrewarmPreviewBuildSnapshot should not start runtime services")
+	require.Contains(t, buildCmd, "ONEFORTYTHREE_ENV='preview'", "build prewarm should expose preview mode to service build commands")
+	require.Contains(t, buildCmd, "ONEFORTYTHREE='true'", "build prewarm should expose the 143 platform marker to service build commands")
+}
+
 func TestStartPreview_FailsWhenPrimaryPortNotExternallyReachable(t *testing.T) {
 	t.Parallel()
 

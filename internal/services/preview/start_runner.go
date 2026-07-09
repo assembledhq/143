@@ -452,26 +452,35 @@ func (r *StartRunner) PrewarmPreviewCaches(ctx context.Context, payload PreviewC
 	}
 	dependencyPaths, dependencyEnabled := ResolvePreviewInstallCachePaths(cfg.Install)
 	packageManagerPaths, packageManagers, packageManagerEnabled := ResolvePreviewInstallPackageManagerCachePaths(cfg.Install)
-	if (!dependencyEnabled || len(dependencyPaths) == 0) && (!packageManagerEnabled || len(packageManagerPaths) == 0) {
-		r.logger.Debug().Msg("preview cache prewarm skipped because no effective cache paths were found")
-		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_no_paths", "", "", "", "", true)
-		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_no_paths", time.Since(started))
-		return nil
-	}
+	noEffectiveCachePaths := (!dependencyEnabled || len(dependencyPaths) == 0) && (!packageManagerEnabled || len(packageManagerPaths) == 0)
 	opts := StartPreviewOptions{
 		OrgID:        payload.OrgID,
 		RepositoryID: payload.RepositoryID,
 		SessionID:    payload.SessionID,
 		ConfigDigest: payload.ConfigDigest,
+		ExtraEnv:     previewBuildPrewarmPlatformEnv(),
 	}
 	if opts.ConfigDigest == "" {
 		opts.ConfigDigest = computeConfigDigest(cfg)
+	}
+	startupCacheKeys, startupSnapshotWarm, startupSnapshotPossible, snapshotWarmErr := r.previewCachePrewarmStartupSnapshotStatus(runCtx, payload, sb, cfg)
+	if snapshotWarmErr != nil {
+		r.logger.Warn().Err(snapshotWarmErr).
+			Str("repository_id", payload.RepositoryID.String()).
+			Str("source", string(payload.Source)).
+			Msg("preview cache prewarm startup snapshot warm-check failed; continuing")
+	}
+	if noEffectiveCachePaths && !startupSnapshotPossible {
+		r.logger.Debug().Msg("preview cache prewarm skipped because no effective cache paths were found")
+		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_no_paths", "", "", "", "", true)
+		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_no_paths", time.Since(started))
+		return nil
 	}
 	dependencyCacheKey, packageManagerCacheKey := r.previewCachePrewarmKeys(runCtx, sb, cfg, dependencyEnabled, dependencyPaths, packageManagerEnabled, packageManagerPaths, packageManagers)
 	r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "running", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", false)
 	if warm, warmErr := r.previewCachesAlreadyWarm(runCtx, sb, cfg, opts, dependencyEnabled, dependencyPaths, packageManagerEnabled, packageManagerPaths, packageManagers); warmErr != nil {
 		r.logger.Warn().Err(warmErr).Msg("preview cache prewarm warm-check failed; continuing")
-	} else if warm {
+	} else if warm && (!startupSnapshotPossible || startupSnapshotWarm) {
 		r.logger.Info().
 			Str("repository_id", payload.RepositoryID.String()).
 			Str("source", string(payload.Source)).
@@ -479,6 +488,29 @@ func (r *StartRunner) PrewarmPreviewCaches(ctx context.Context, payload PreviewC
 		r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "skipped_warm", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", true)
 		metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "skipped_warm", time.Since(started))
 		return nil
+	}
+	if startupSnapshotPossible && !startupSnapshotWarm {
+		if buildProvider, ok := r.manager.provider.(PreviewBuildSnapshotPrewarmProvider); ok && buildProvider != nil {
+			if err := buildProvider.PrewarmPreviewBuildSnapshot(runCtx, sb, cfg, opts, nil); err != nil {
+				r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "failed", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, err.Error(), true)
+				metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "failed", time.Since(started))
+				return fmt.Errorf("prewarm preview build snapshot: %w", err)
+			}
+			if result := r.createBranchPreviewStartupCache(ctx, payload.OrgID, payload.RepositoryID, startupCacheKeys, sb, cfg); result == StartupSnapshotSaved {
+				if err := r.previews.UpdatePreviewTargetSnapshotKey(ctx, payload.OrgID, payload.PreviewTargetID, startupCacheKeys.SnapshotKey); err != nil {
+					r.logger.Warn().Err(err).
+						Str("preview_target_id", payload.PreviewTargetID.String()).
+						Str("snapshot_key", startupCacheKeys.SnapshotKey).
+						Msg("failed to persist branch preview prewarm startup snapshot key")
+				}
+			}
+			r.updatePreviewCachePrewarmRun(ctx, payload, scopeKey, "succeeded", packageManagerCacheKey, dependencyCacheKey, opts.ConfigDigest, "", true)
+			metrics.RecordPreviewCachePrewarmRun(ctx, payload.OrgID.String(), string(payload.Source), "succeeded", time.Since(started))
+			return nil
+		}
+		r.logger.Debug().
+			Str("repository_id", payload.RepositoryID.String()).
+			Msg("preview provider does not support build snapshot prewarm; falling back to install cache prewarm")
 	}
 	prewarmProvider, ok := r.manager.provider.(PreviewCachePrewarmProvider)
 	if !ok || prewarmProvider == nil {
@@ -763,6 +795,35 @@ func (r *StartRunner) previewCachesAlreadyWarm(ctx context.Context, sb *agent.Sa
 		packageManagerWarm = hit != nil
 	}
 	return dependencyWarm && packageManagerWarm, nil
+}
+
+func (r *StartRunner) previewCachePrewarmStartupSnapshotStatus(ctx context.Context, payload PreviewCachePrewarmJobPayload, sb *agent.Sandbox, cfg *models.PreviewConfig) (branchPreviewStartupCacheKeys, bool, bool, error) {
+	if r == nil || r.snapshotCache == nil || payload.Source != PreviewCachePrewarmSourceBranch || sb == nil || cfg == nil || payload.CommitSHA == "" {
+		return branchPreviewStartupCacheKeys{}, false, false, nil
+	}
+	keys, err := r.computeBranchPreviewStartupCacheKeys(ctx, sb, cfg, payload.CommitSHA)
+	if err != nil {
+		return branchPreviewStartupCacheKeys{}, false, false, err
+	}
+	if keys.SnapshotKey == "" {
+		return keys, false, false, nil
+	}
+	hit, err := r.snapshotCache.FindSnapshot(ctx, payload.OrgID, payload.RepositoryID, keys.SnapshotKey)
+	if err != nil {
+		return keys, false, true, err
+	}
+	return keys, hit != nil, true, nil
+}
+
+func previewBuildPrewarmPlatformEnv() map[string]string {
+	// Branch cache prewarm has no runtime preview instance yet, so it cannot
+	// safely set PREVIEW_ORIGIN without baking a fake per-instance URL into
+	// static build artifacts. Keep the stable preview-mode markers in parity
+	// with real launches and let runtime-specific env arrive on actual start.
+	return map[string]string{
+		previewPlatformNameEnv:    previewPlatformNameValue,
+		previewPlatformContextEnv: previewPlatformContextValue,
+	}
 }
 
 func previewInstallPrewarmEnabled(install *models.PreviewInstallConfig) bool {
