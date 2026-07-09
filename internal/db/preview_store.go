@@ -4623,6 +4623,37 @@ func (s *PreviewStore) RecordPreviewResourceSample(ctx context.Context, orgID uu
 	return nil
 }
 
+// DeleteExpiredPreviewResourceSamples removes old resource samples in bounded batches.
+// lint:allow-no-orgid reason="system-wide retention cleanup across all orgs"
+func (s *PreviewStore) DeleteExpiredPreviewResourceSamples(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("preview resource sample retention cutoff is zero")
+	}
+	if limit <= 0 {
+		limit = 10000
+	}
+	tag, err := s.db.Exec(ctx, `
+		WITH expired AS (
+			SELECT id
+			FROM preview_resource_samples
+			WHERE sampled_at < @cutoff
+			ORDER BY sampled_at ASC
+			LIMIT @limit
+		)
+		DELETE FROM preview_resource_samples prs
+		USING expired
+		WHERE prs.id = expired.id`,
+		pgx.NamedArgs{
+			"cutoff": cutoff,
+			"limit":  limit,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired preview resource samples: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // =============================================================================
 // PR Preview State
 // =============================================================================

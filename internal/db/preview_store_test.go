@@ -917,6 +917,24 @@ func TestPreviewStore_RecordPreviewResourceSample(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPreviewStore_DeleteExpiredPreviewResourceSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	cutoff := time.Now().UTC()
+	mock.ExpectExec("WITH expired AS").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 42))
+
+	deleted, err := NewPreviewStore(mock).DeleteExpiredPreviewResourceSamples(context.Background(), cutoff, 500)
+	require.NoError(t, err, "DeleteExpiredPreviewResourceSamples should delete stale samples")
+	require.Equal(t, int64(42), deleted, "DeleteExpiredPreviewResourceSamples should return the deleted row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestPreviewStore_UpdatePreviewRuntimeWorkspaceRevision(t *testing.T) {
 	t.Parallel()
 

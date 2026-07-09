@@ -20,3 +20,6 @@ CREATE TABLE preview_resource_samples (
 
 CREATE INDEX idx_preview_resource_samples_preview
     ON preview_resource_samples (org_id, preview_instance_id, sampled_at DESC);
+
+CREATE INDEX idx_preview_resource_samples_sampled_at
+    ON preview_resource_samples (sampled_at);

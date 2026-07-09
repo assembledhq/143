@@ -21,7 +21,9 @@ current launch/runtime phase, memory bytes, memory limit, CPU usage, worker
 node, and a best-effort JSON process snapshot. `preview_instances` keeps
 `peak_memory_bytes`, `peak_memory_sampled_at`, and `peak_memory_phase` so
 failure triage can quickly distinguish install/build/startup/runtime pressure
-without replaying all samples.
+without replaying all samples. Detailed samples are retained for the recent
+triage window only; the preview cleanup worker prunes
+`preview_resource_samples` after 24 hours in bounded batches.
 
 The provisioned dashboard lives at
 `deploy/grafana/provisioning/dashboards/preview-health.json` and intentionally

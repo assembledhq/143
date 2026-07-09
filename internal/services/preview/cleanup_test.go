@@ -19,17 +19,23 @@ func TestNewCleanupWorker_Defaults(t *testing.T) {
 	})
 	require.Equal(t, 1*time.Minute, w.interval)
 	require.Equal(t, DefaultIdleTimeout, w.idleTimeout)
+	require.Equal(t, DefaultPreviewResourceSampleRetention, w.resourceSampleRetention, "cleanup worker should default resource sample retention")
+	require.Equal(t, DefaultPreviewResourceSampleDeleteLimit, w.resourceSampleDeleteLimit, "cleanup worker should default resource sample delete limit")
 }
 
 func TestNewCleanupWorker_CustomConfig(t *testing.T) {
 	t.Parallel()
 	w := NewCleanupWorker(CleanupWorkerConfig{
-		Logger:      zerolog.Nop(),
-		Interval:    30 * time.Second,
-		IdleTimeout: 5 * time.Minute,
+		Logger:                    zerolog.Nop(),
+		Interval:                  30 * time.Second,
+		IdleTimeout:               5 * time.Minute,
+		ResourceSampleRetention:   2 * time.Hour,
+		ResourceSampleDeleteLimit: 250,
 	})
 	require.Equal(t, 30*time.Second, w.interval)
 	require.Equal(t, 5*time.Minute, w.idleTimeout)
+	require.Equal(t, 2*time.Hour, w.resourceSampleRetention, "cleanup worker should use custom resource sample retention")
+	require.Equal(t, 250, w.resourceSampleDeleteLimit, "cleanup worker should use custom resource sample delete limit")
 }
 
 func TestCleanupWorker_StartStop(t *testing.T) {
@@ -164,6 +170,10 @@ func TestCleanupWorker_CleanupExpiredAndIdle(t *testing.T) {
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectCommit()
 
+	mock.ExpectExec("WITH expired AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 3))
+
 	// Call cleanup directly.
 	w.cleanup()
 
@@ -199,6 +209,9 @@ func TestCleanupWorker_CleanupNoResults(t *testing.T) {
 	mock.ExpectQuery("worker_node_id = @worker_node_id.+last_accessed_at").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(previewInstanceTestCols))
+	mock.ExpectExec("WITH expired AS").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
 
 	w.cleanup()
 
