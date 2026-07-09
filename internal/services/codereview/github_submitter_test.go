@@ -455,6 +455,32 @@ func TestGitHubSubmitter_RemoveRequestedReviewers(t *testing.T) {
 	require.Equal(t, []any{"ai-reviewers"}, gotPayload["team_reviewers"], "RemoveRequestedReviewers should include team reviewers")
 }
 
+func TestGitHubSubmitter_RemoveRequestedReviewersIncludesEmptyReviewersForTeamOnlyRemoval(t *testing.T) {
+	t.Parallel()
+
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPayload), "request body should decode")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	err := submitter.RemoveRequestedReviewers(context.Background(), RequestedReviewersRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		TeamReviewers:  []string{"ai-reviewers"},
+	})
+
+	require.NoError(t, err, "RemoveRequestedReviewers should remove a team-only review request")
+	require.Equal(t, []any{}, gotPayload["reviewers"], "RemoveRequestedReviewers should include the required empty reviewers array")
+	require.Equal(t, []any{"ai-reviewers"}, gotPayload["team_reviewers"], "RemoveRequestedReviewers should include team reviewers")
+}
+
 func TestGitHubSubmitter_SubmitReviewRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
