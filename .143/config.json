@@ -16,12 +16,13 @@
     },
     "services": {
       "frontend": {
+        "build": ["sh", ".143/preview-build-frontend.sh"],
         "command": ["sh", ".143/preview-frontend.sh"],
         "port": 3000,
         "env": {
           "API_PROXY_TARGET": "http://localhost:8080",
           "NEXT_PUBLIC_API_URL": "",
-          "NODE_OPTIONS": "--max-old-space-size=1280"
+          "NODE_OPTIONS": "--max-old-space-size=4096"
         },
         "ready": {
           "http_path": "/",
@@ -58,6 +59,16 @@
     },
     "network": {
       "mode": "managed"
+    },
+    "resources": {
+      "limits": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "requests": {
+        "cpu": "1",
+        "memory": "4Gi"
+      }
     }
   }
 }
