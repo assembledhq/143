@@ -64,6 +64,20 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
 }
 
+func TestResolveCodeReviewPolicyConfigDoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.DescriptionPolicy.Requirements[1].AppliesWhen = CodeReviewDescriptionApplicability{}
+
+	resolved := ResolveCodeReviewPolicyConfig(&config)
+
+	require.True(t, config.DescriptionPolicy.Requirements[1].AppliesWhen.Empty(), "resolving legacy applicability should leave the input policy unchanged")
+	require.Equal(t, CodeReviewDescriptionApplicabilityNontrivial, resolved.DescriptionPolicy.Requirements[1].AppliesWhen.Kind, "resolving legacy applicability should populate the typed rule")
+	resolved.DescriptionPolicy.Requirements[1].Title = "changed"
+	require.Equal(t, "Testing evidence", config.DescriptionPolicy.Requirements[1].Title, "the resolved requirements should not share mutable slice storage with the input policy")
+}
+
 func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	t.Parallel()
 

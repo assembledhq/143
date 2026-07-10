@@ -519,6 +519,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 }
 
 func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) CodeReviewDescriptionPolicy {
+	// Policy configs are frequently copied by value, so clone the slice before
+	// normalizing its elements to avoid mutating a caller's shared backing array.
+	policy.Requirements = append([]CodeReviewDescriptionRequirement(nil), policy.Requirements...)
 	for i := range policy.Requirements {
 		if !policy.Requirements[i].AppliesWhen.Empty() {
 			continue

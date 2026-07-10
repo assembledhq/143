@@ -38,7 +38,23 @@ func TestCodexModelConstants(t *testing.T) {
 
 	require.Equal(t, CodexModelGPT55, DefaultCodexModel, "DefaultCodexModel should use GPT 5.5")
 	require.Equal(t,
-		[]string{CodexModelGPT55, CodexModelGPT55Fast, CodexModelGPT54, CodexModelGPT54Fast, CodexModelGPT54Mini, CodexModelGPT53Codex, CodexModelGPT52Codex, CodexModelGPT5Codex, CodexModelGPT53CodexSpark},
+		[]string{
+			CodexModelGPT56Sol,
+			CodexModelGPT56SolFast,
+			CodexModelGPT56Terra,
+			CodexModelGPT56TerraFast,
+			CodexModelGPT56Luna,
+			CodexModelGPT56LunaFast,
+			CodexModelGPT55,
+			CodexModelGPT55Fast,
+			CodexModelGPT54,
+			CodexModelGPT54Fast,
+			CodexModelGPT54Mini,
+			CodexModelGPT53Codex,
+			CodexModelGPT52Codex,
+			CodexModelGPT5Codex,
+			CodexModelGPT53CodexSpark,
+		},
 		AvailableCodexModels,
 		"AvailableCodexModels should include the latest Codex model family and fast tiers",
 	)
@@ -130,8 +146,12 @@ func TestCodexRuntimeModel(t *testing.T) {
 		expected     string
 		priorityTier bool
 	}{
+		{name: "gpt 5.6 sol fast maps to gpt 5.6 sol priority", model: CodexModelGPT56SolFast, expected: CodexModelGPT56Sol, priorityTier: true},
+		{name: "gpt 5.6 terra fast maps to gpt 5.6 terra priority", model: CodexModelGPT56TerraFast, expected: CodexModelGPT56Terra, priorityTier: true},
+		{name: "gpt 5.6 luna fast maps to gpt 5.6 luna priority", model: CodexModelGPT56LunaFast, expected: CodexModelGPT56Luna, priorityTier: true},
 		{name: "gpt 5.5 fast maps to gpt 5.5 priority", model: CodexModelGPT55Fast, expected: CodexModelGPT55, priorityTier: true},
 		{name: "gpt 5.4 fast maps to gpt 5.4 priority", model: CodexModelGPT54Fast, expected: CodexModelGPT54, priorityTier: true},
+		{name: "regular gpt 5.6 sol stays unchanged", model: CodexModelGPT56Sol, expected: CodexModelGPT56Sol},
 		{name: "regular gpt 5.5 stays unchanged", model: CodexModelGPT55, expected: CodexModelGPT55},
 		{name: "unknown model stays unchanged", model: "custom-model", expected: "custom-model"},
 	}
@@ -281,6 +301,8 @@ func TestAgentTypeForModel(t *testing.T) {
 		want  AgentType
 	}{
 		{"", ""},
+		{CodexModelGPT56Sol, AgentTypeCodex},
+		{CodexModelGPT56LunaFast, AgentTypeCodex},
 		{CodexModelGPT54, AgentTypeCodex},
 		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
 		{AmpModeSmart, AgentTypeAmp},
