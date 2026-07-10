@@ -147,6 +147,13 @@ function statusVariant(status: string): "success" | "secondary" | "destructive" 
   return "outline";
 }
 
+function statusLabel(status: string): string {
+  return status
+    .split("_")
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
   return JSON.parse(JSON.stringify(config)) as CodeReviewPolicyConfig;
 }
@@ -526,7 +533,9 @@ export default function CodeReviewsPage() {
                             <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(review.status)}>{review.stale ? "stale" : review.status}</Badge>
+                            <Badge variant={statusVariant(review.stale ? "stale" : review.status)}>
+                              {statusLabel(review.stale ? "stale" : review.status)}
+                            </Badge>
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
@@ -566,14 +575,16 @@ export default function CodeReviewsPage() {
                   </Table>
                 </CardContent>
               </Card>
-              {selectedEvidenceReview ? (
-                <CodeReviewEvidencePanel
-                  review={selectedEvidenceReview}
-                  evidence={evidenceQuery.data?.data}
-                  isLoading={evidenceQuery.isLoading}
-                  error={evidenceQuery.error}
-                />
-              ) : null}
+              <CodeReviewEvidenceSheet
+                review={selectedEvidenceReview}
+                evidence={evidenceQuery.data?.data}
+                isLoading={evidenceQuery.isLoading}
+                error={evidenceQuery.error}
+                open={Boolean(selectedEvidenceReview)}
+                onOpenChange={(open) => {
+                  if (!open) setSelectedEvidenceSessionId(null);
+                }}
+              />
               </>
             )}
           </TabsContent>
@@ -2048,117 +2059,152 @@ function FineTuningSection({
   );
 }
 
-function CodeReviewEvidencePanel({
+function CodeReviewEvidenceSheet({
   review,
   evidence,
   isLoading,
   error,
+  open,
+  onOpenChange,
 }: {
-  review: CodeReviewListItem;
+  review: CodeReviewListItem | null;
   evidence?: CodeReviewEvidence;
   isLoading: boolean;
   error: Error | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
   const artifacts = evidence?.prompt_artifacts ?? [];
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <CardTitle>
-            Evidence for #{review.github_pr_number} {review.pull_request_title}
-          </CardTitle>
-          <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
-        {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
-        {!isLoading && !error && !evidence ? (
-          <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
-        ) : null}
-        {evidence ? (
-          <>
-            <div className="grid gap-3 lg:grid-cols-2">
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-foreground">Agent results</div>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
+        <SheetHeader className="border-b border-border px-6 py-5">
+          <div className="flex items-start justify-between gap-4 pr-8">
+            <div className="min-w-0 space-y-1">
+              <SheetTitle>Evidence for #{review?.github_pr_number}</SheetTitle>
+              <SheetDescription className="line-clamp-2">
+                {review?.pull_request_title ?? "Review evidence"}
+              </SheetDescription>
+            </div>
+            {review ? <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge> : null}
+          </div>
+        </SheetHeader>
+        <div className="space-y-6 px-6 py-5">
+          {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
+          {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
+          {!isLoading && !error && !evidence ? (
+            <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
+          ) : null}
+          {evidence ? (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <EvidenceMetric label="Agents" value={agentResults.length} />
+                <EvidenceMetric label="Findings" value={findings.length} />
+                <EvidenceMetric label="Prompts" value={artifacts.length} />
+              </div>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
                 {agentResults.length === 0 ? (
                   <div className="text-sm text-muted-foreground">No agent results recorded.</div>
                 ) : (
                   agentResults.map((result) => (
-                    <div key={result.id} className="rounded-md border border-border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium text-foreground">
-                            {result.agent_provider} · {result.role}
+                    <div key={result.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="truncate text-sm font-medium text-foreground">{result.agent_provider}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {result.role}
+                            {result.agent_model ? ` · ${result.agent_model}` : ""}
                           </div>
-                          {result.agent_model ? (
-                            <div className="mt-1 text-xs text-muted-foreground">{result.agent_model}</div>
-                          ) : null}
                         </div>
-                        <Badge variant={statusVariant(result.status)}>{result.status}</Badge>
+                        <Badge variant={statusVariant(result.status)}>{statusLabel(result.status)}</Badge>
                       </div>
                       {result.raw_output ? (
-                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                           {result.raw_output}
                         </pre>
                       ) : null}
                       {result.structured_result ? (
-                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                           {formatEvidenceJSON(result.structured_result)}
                         </pre>
                       ) : null}
                     </div>
                   ))
                 )}
-              </div>
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-foreground">Findings</div>
+              </section>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Findings" empty={findings.length === 0} />
                 {findings.length === 0 ? (
                   <div className="text-sm text-muted-foreground">No findings recorded.</div>
                 ) : (
                   findings.map((finding) => (
-                    <div key={finding.id} className="rounded-md border border-border p-3">
+                    <div key={finding.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
+                        <div className="min-w-0 space-y-1">
                           <div className="text-sm font-medium text-foreground">{finding.summary}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
+                          <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
                         </div>
                         <Badge variant={finding.severity === "critical" || finding.severity === "high" ? "destructive" : "outline"}>
-                          {finding.severity}
+                          {statusLabel(finding.severity)}
                         </Badge>
                       </div>
-                      <div className="mt-2 text-sm text-muted-foreground">{finding.body}</div>
+                      <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
                     </div>
                   ))
                 )}
-              </div>
-            </div>
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-foreground">Prompt artifacts</div>
-              {artifacts.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
-              ) : (
-                <div className="grid gap-3 lg:grid-cols-2">
-                  {artifacts.map((artifact) => (
-                    <div key={artifact.id} className="rounded-md border border-border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
+              </section>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Prompt artifacts" empty={artifacts.length === 0} />
+                {artifacts.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+                ) : (
+                  artifacts.map((artifact) => (
+                    <div key={artifact.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
+                          {artifact.agent_provider ? (
+                            <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div>
+                          ) : null}
+                        </div>
                         <Badge variant="outline">{artifact.role}</Badge>
                       </div>
-                      <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                         {artifact.content}
                       </pre>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        ) : null}
-      </CardContent>
-    </Card>
+                  ))
+                )}
+              </section>
+            </>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border px-3 py-2">
+      <div className="text-lg font-medium text-foreground">{value}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function EvidenceSectionHeader({ title, empty }: { title: string; empty: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="text-sm font-medium text-foreground">{title}</div>
+      {empty ? <div className="text-xs text-muted-foreground">None</div> : null}
+    </div>
   );
 }
 
