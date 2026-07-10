@@ -3,6 +3,7 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -144,7 +145,7 @@ func TestCodexModelArgs(t *testing.T) {
 		{
 			name:     "uses the Codex default when no env model is set",
 			env:      map[string]string{},
-			expected: ` -m 'gpt-5.5'`,
+			expected: fmt.Sprintf(" -m '%s'", models.DefaultCodexModel),
 		},
 		{
 			name:           "uses resolved effective model when env model is absent",

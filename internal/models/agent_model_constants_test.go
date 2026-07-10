@@ -36,7 +36,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 func TestCodexModelConstants(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, CodexModelGPT55, DefaultCodexModel, "DefaultCodexModel should use GPT 5.5")
+	require.Equal(t, CodexModelGPT56Sol, DefaultCodexModel, "DefaultCodexModel should use GPT 5.6 Sol")
 	require.Equal(t,
 		[]string{
 			CodexModelGPT56Sol,
