@@ -193,6 +193,29 @@ Every service receives:
 | `ONEFORTYTHREE_ENV` | Always `preview` for preview runtimes. Use this to disable background consumers, schedulers, profilers, telemetry exporters, and other work that is not required to serve the preview. This name is reserved; preview configs and secret bundle env outputs that declare it fail validation. |
 | `PREVIEW_ORIGIN` | Public preview URL. Use this for external base URLs, redirects, callbacks, and absolute links. |
 
+## Browser and verification policy
+
+The optional `preview.browser` policy controls the session-owned browser:
+
+- `persist_session` defaults to `true`.
+- `default_viewport` defaults to 1440×900.
+- `allowed_paths` defaults to `["/**"]` and can narrow agent navigation within
+  the preview origin.
+
+The optional `preview.verification` policy reserves the settings used by the
+automatic verification coordinator. The coordinator is a later delivery phase;
+these settings do not yet trigger checks by themselves:
+
+- `auto` defaults to `true`.
+- `max_attempts` defaults to `3`.
+- `timeout_seconds` defaults to `300`.
+- `viewports` defaults to the browser viewport.
+- `smoke_paths` defaults to the primary service readiness path.
+- `fail_on_console_error` defaults to `true`.
+
+These fields define bounded policy, not a test DSL. Keep complex deterministic
+workflows in repository Playwright tests.
+
 ## Trust rules
 
 Preview config is repository content. For fields that can expose secrets or network access, 143 reads from the base branch rather than an agent diff.

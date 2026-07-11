@@ -178,6 +178,24 @@ type RemoteExecuteInteractionRequest struct {
 	Steps []models.InteractionStep `json:"steps"`
 }
 
+type RemoteObserveRequest struct {
+	SessionID uuid.UUID                     `json:"session_id"`
+	Policy    BrowserSessionPolicy          `json:"policy"`
+	Options   models.PreviewObservationOpts `json:"options"`
+}
+
+type RemoteActRequest struct {
+	SessionID uuid.UUID                     `json:"session_id"`
+	Policy    BrowserSessionPolicy          `json:"policy"`
+	Steps     []models.InteractionStep      `json:"steps"`
+	Options   models.PreviewObservationOpts `json:"options"`
+}
+
+type RemoteHumanActRequest struct {
+	RemoteActRequest
+	UserID uuid.UUID `json:"user_id"`
+}
+
 // RemoteComputeVisualDiffRequest computes a visual diff between two snapshots.
 type RemoteComputeVisualDiffRequest struct {
 	BeforeSnapshotID string `json:"before_snapshot_id"`
@@ -467,6 +485,43 @@ func (c *WorkerPreviewClient) ExecuteInteraction(ctx context.Context, worker Wor
 		return nil, fmt.Errorf("execute interaction: %w", err)
 	}
 	return decodeWorkerResponse[models.InteractionResult](resp)
+}
+
+func (c *WorkerPreviewClient) Observe(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteObserveRequest) (*models.PreviewObservation, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/observe", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "observe", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("observe preview: %w", err)
+	}
+	return decodeWorkerResponse[models.PreviewObservation](resp)
+}
+
+func (c *WorkerPreviewClient) Act(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, body)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("act on preview: %w", err)
+	}
+	return decodeWorkerResponse[models.PreviewActResult](resp)
+}
+
+func (c *WorkerPreviewClient) ActAsHuman(ctx context.Context, worker WorkerNode, orgID, sessionID, previewID, userID uuid.UUID, body RemoteActRequest) (*models.PreviewActResult, error) {
+	payload := RemoteHumanActRequest{RemoteActRequest: body, UserID: userID}
+	req, err := c.newRequest(ctx, http.MethodPost, fmt.Sprintf("%s/internal/preview/%s/human-act", worker.BaseURL, previewID), auth.PreviewTokenClaims{OrgID: orgID, TargetNodeID: worker.ID, PreviewID: &previewID, SessionID: &sessionID, Action: "human_act", ExpiresAt: time.Now().Add(previewWorkerTokenTTL)}, payload)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("act as human on preview: %w", err)
+	}
+	return decodeWorkerResponse[models.PreviewActResult](resp)
 }
 
 func (c *WorkerPreviewClient) CaptureMultiViewport(ctx context.Context, worker WorkerNode, orgID, previewID uuid.UUID, opts models.MultiViewportOpts) (*models.MultiViewportResult, error) {

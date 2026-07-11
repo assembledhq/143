@@ -1181,21 +1181,21 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	var scopes []string
+	scopes := []string{"preview:read", "preview:interact", "preview:manage"}
 	sessionOrigin := string(session.Origin)
 	var evalBootstrapRunID *uuid.UUID
 	if session.Origin == models.SessionOriginEvalBootstrap {
 		if o.evalBootstraps != nil && threadID != nil && *threadID != uuid.Nil {
 			if run, err := o.evalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, *threadID); err == nil {
 				evalBootstrapRunID = &run.ID
-				scopes = []string{"eval:add"}
+				scopes = append(scopes, "eval:add")
 			} else {
 				log.Warn().Err(err).Str("session_id", session.ID.String()).Str("thread_id", threadID.String()).Msg("failed to resolve eval bootstrap run for internal token claim; eval:add tool will be unavailable")
 			}
 		}
 	}
 	if session.Origin == models.SessionOriginAutomationGoalImprovement {
-		scopes = []string{"automation-goal-improvement:complete"}
+		scopes = append(scopes, "automation-goal-improvement:complete")
 	}
 	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {

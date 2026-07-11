@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -381,6 +382,7 @@ func (h *InternalPreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *htt
 	if !ok {
 		return
 	}
+	bindClaimedSessionBrowser(inspector, previewID, claims)
 	var opts models.ScreenshotOpts
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
@@ -392,6 +394,103 @@ func (h *InternalPreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.ScreenshotResult]{Data: result})
+}
+
+func (h *InternalPreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
+	previewID, claims, ok := h.authorizePreviewAction(w, r, "observe")
+	if !ok {
+		return
+	}
+	r = r.WithContext(middleware.WithOrgID(r.Context(), claims.OrgID))
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var body previewsvc.RemoteObserveRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	if claims.SessionID == nil || *claims.SessionID != body.SessionID {
+		writeError(w, r, http.StatusForbidden, "SESSION_MISMATCH", "preview token does not match browser session")
+		return
+	}
+	if h.preview == nil || h.preview.browserSessions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
+		return
+	}
+	result, err := h.preview.browserSessions.Observe(r.Context(), orgID, body.SessionID, previewID, body.Policy, body.Options)
+	if err != nil {
+		writeBrowserSessionError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewObservation]{Data: result})
+}
+
+func (h *InternalPreviewHandler) Act(w http.ResponseWriter, r *http.Request) {
+	previewID, claims, ok := h.authorizePreviewAction(w, r, "act")
+	if !ok {
+		return
+	}
+	r = r.WithContext(middleware.WithOrgID(r.Context(), claims.OrgID))
+	orgID := middleware.OrgIDFromContext(r.Context())
+	var body previewsvc.RemoteActRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	if claims.SessionID == nil || *claims.SessionID != body.SessionID {
+		writeError(w, r, http.StatusForbidden, "SESSION_MISMATCH", "preview token does not match browser session")
+		return
+	}
+	if h.preview == nil || h.preview.browserSessions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
+		return
+	}
+	result, err := h.preview.browserSessions.Act(r.Context(), orgID, body.SessionID, previewID, body.Policy, body.Steps, body.Options)
+	if err != nil {
+		writeBrowserSessionError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewActResult]{Data: result})
+}
+
+func (h *InternalPreviewHandler) HumanAct(w http.ResponseWriter, r *http.Request) {
+	middleware.OrgIDFromContext(r.Context())
+	previewID, claims, ok := h.authorizePreviewAction(w, r, "human_act")
+	if !ok {
+		return
+	}
+	r = r.WithContext(middleware.WithOrgID(r.Context(), claims.OrgID))
+	var body previewsvc.RemoteHumanActRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	if claims.SessionID == nil || *claims.SessionID != body.SessionID || body.UserID == uuid.Nil {
+		writeError(w, r, http.StatusForbidden, "SESSION_MISMATCH", "preview token does not match browser session")
+		return
+	}
+	if h.preview == nil || h.preview.browserSessions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
+		return
+	}
+	result, err := h.preview.browserSessions.ActAsHuman(r.Context(), claims.OrgID, body.SessionID, previewID, body.UserID, body.Policy, body.Steps, body.Options)
+	if err != nil {
+		writeBrowserSessionError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[*models.PreviewActResult]{Data: result})
+}
+
+func writeBrowserSessionError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, previewsvc.ErrBrowserUnavailable):
+		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable", err)
+	case errors.Is(err, previewsvc.ErrNavigationNotAllowed):
+		writeError(w, r, http.StatusForbidden, "PREVIEW_NAVIGATION_NOT_ALLOWED", "preview navigation is not allowed", err)
+	case errors.Is(err, previewsvc.ErrBrowserControlHeld), errors.Is(err, previewsvc.ErrBrowserControlBusy):
+		writeError(w, r, http.StatusConflict, "PREVIEW_BROWSER_CONTROL_UNAVAILABLE", err.Error(), err)
+	default:
+		writeError(w, r, http.StatusInternalServerError, "BROWSER_OPERATION_FAILED", "preview browser operation failed", err)
+	}
 }
 
 func (h *InternalPreviewHandler) InspectElement(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +553,7 @@ func (h *InternalPreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *ht
 	if !ok {
 		return
 	}
+	bindClaimedSessionBrowser(inspector, previewID, claims)
 	var body previewsvc.RemoteExecuteInteractionRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
@@ -465,6 +565,15 @@ func (h *InternalPreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *ht
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[*models.InteractionResult]{Data: result})
+}
+
+func bindClaimedSessionBrowser(inspector previewsvc.PreviewInspector, previewID uuid.UUID, claims *auth.PreviewTokenClaims) {
+	if claims == nil || claims.SessionID == nil {
+		return
+	}
+	if binder, ok := inspector.(previewsvc.SessionBrowserBinder); ok {
+		binder.BindSessionBrowser(previewID.String(), claims.SessionID.String())
+	}
 }
 
 func (h *InternalPreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Request) {

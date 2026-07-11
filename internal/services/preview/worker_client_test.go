@@ -75,6 +75,23 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 					Steps:    []models.StepResult{{StepIndex: 0, Action: "click", Success: true}},
 				},
 			}), "ExecuteInteraction should decode an interaction response")
+		case "/internal/preview/" + previewID.String() + "/observe":
+			require.Equal(t, "observe", claims.Action, "Observe should sign the observe action")
+			require.NotNil(t, claims.SessionID, "Observe should scope its token to the session")
+			require.Equal(t, sessionID, *claims.SessionID, "Observe should preserve the session scope")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewObservation]{Data: &models.PreviewObservation{URL: "http://preview.local/app", Ready: true}}), "Observe should decode an observation response")
+		case "/internal/preview/" + previewID.String() + "/act":
+			require.Equal(t, "act", claims.Action, "Act should sign the act action")
+			require.NotNil(t, claims.SessionID, "Act should scope its token to the session")
+			require.Equal(t, sessionID, *claims.SessionID, "Act should preserve the session scope")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewActResult]{Data: &models.PreviewActResult{Observation: &models.PreviewObservation{URL: "http://preview.local/app", Ready: true}}}), "Act should decode an act response")
+		case "/internal/preview/" + previewID.String() + "/human-act":
+			require.Equal(t, "human_act", claims.Action, "ActAsHuman should sign the human action")
+			require.NotNil(t, claims.SessionID, "ActAsHuman should scope its token to the session")
+			var body RemoteHumanActRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&body), "human action body should decode")
+			require.Equal(t, userID, body.UserID, "human action should preserve the lease owner")
+			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.PreviewActResult]{Data: &models.PreviewActResult{Observation: &models.PreviewObservation{URL: "http://preview.local/human", Ready: true}}}), "ActAsHuman should decode an act response")
 		case "/internal/preview/" + previewID.String() + "/multi-viewport":
 			require.Equal(t, "multi_viewport", claims.Action, "CaptureMultiViewport should sign the multi_viewport action")
 			require.NoError(t, json.NewEncoder(w).Encode(models.SingleResponse[*models.MultiViewportResult]{
@@ -146,6 +163,18 @@ func TestWorkerPreviewClient_SendsSignedRequestsAndDecodesResponses(t *testing.T
 	interaction, err := client.ExecuteInteraction(context.Background(), worker, orgID, previewID, []models.InteractionStep{{Action: "click"}})
 	require.NoError(t, err, "ExecuteInteraction should succeed")
 	require.Equal(t, "http://preview.local/final", interaction.FinalURL, "ExecuteInteraction should decode the interaction response")
+
+	observation, err := client.Observe(context.Background(), worker, orgID, sessionID, previewID, RemoteObserveRequest{SessionID: sessionID})
+	require.NoError(t, err, "Observe should succeed")
+	require.Equal(t, "http://preview.local/app", observation.URL, "Observe should decode the observation response")
+
+	actResult, err := client.Act(context.Background(), worker, orgID, sessionID, previewID, RemoteActRequest{SessionID: sessionID, Steps: []models.InteractionStep{{Action: "click"}}})
+	require.NoError(t, err, "Act should succeed")
+	require.Equal(t, "http://preview.local/app", actResult.Observation.URL, "Act should decode the final observation")
+
+	humanResult, err := client.ActAsHuman(context.Background(), worker, orgID, sessionID, previewID, userID, RemoteActRequest{SessionID: sessionID, Steps: []models.InteractionStep{{Action: "click"}}})
+	require.NoError(t, err, "ActAsHuman should succeed")
+	require.Equal(t, "http://preview.local/human", humanResult.Observation.URL, "ActAsHuman should decode the shared browser state")
 
 	multiViewport, err := client.CaptureMultiViewport(context.Background(), worker, orgID, previewID, models.MultiViewportOpts{})
 	require.NoError(t, err, "CaptureMultiViewport should succeed")

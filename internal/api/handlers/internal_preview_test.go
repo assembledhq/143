@@ -823,6 +823,35 @@ func TestInternalPreviewHandler_InspectorUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusNotImplemented, rr.Code, "InspectElement should report when no inspector is configured")
 }
 
+func TestInternalPreviewHandler_BrowserSessionMismatch(t *testing.T) {
+	t.Parallel()
+	previewID, orgID, tokenSessionID, bodySessionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	manager := previewsvc.NewManager(previewsvc.ManagerConfig{Logger: zerolog.Nop(), WorkerNodeID: "worker-1"})
+	handler := newInternalPreviewTestHandler(manager)
+	tests := []struct {
+		name, path, action, body string
+		handler                  http.HandlerFunc
+	}{
+		{name: "observe", path: "/internal/preview/" + previewID.String() + "/observe", action: "observe", body: `{"session_id":"` + bodySessionID.String() + `"}`, handler: handler.Observe},
+		{name: "act", path: "/internal/preview/" + previewID.String() + "/act", action: "act", body: `{"session_id":"` + bodySessionID.String() + `","steps":[{"action":"click","selector":"button"}]}`, handler: handler.Act},
+		{name: "human act", path: "/internal/preview/" + previewID.String() + "/human-act", action: "human_act", body: `{"session_id":"` + bodySessionID.String() + `","user_id":"` + uuid.NewString() + `","steps":[{"action":"click","selector":"button"}]}`, handler: handler.HumanAct},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			req = withPreviewRouteParam(req, previewID.String())
+			req.Header.Set("Authorization", internalPreviewAuthHeader(t, auth.PreviewTokenClaims{OrgID: orgID, PreviewID: &previewID, SessionID: &tokenSessionID, TargetNodeID: "worker-1", Action: tt.action, ExpiresAt: time.Now().Add(time.Minute)}))
+			rr := httptest.NewRecorder()
+			tt.handler(rr, req)
+			require.Equal(t, http.StatusForbidden, rr.Code, "worker browser operation should reject a mismatched session")
+			var resp models.ErrorResponse
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp), "session mismatch should return JSON")
+			require.Equal(t, "SESSION_MISMATCH", resp.Error.Code, "session mismatch should use the stable error code")
+		})
+	}
+}
+
 func TestInternalPreviewHandler_InspectorEndpoints_RejectInvalidBodiesAndSurfaceFailures(t *testing.T) {
 	t.Parallel()
 
