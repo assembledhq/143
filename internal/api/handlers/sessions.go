@@ -72,6 +72,7 @@ type SessionHandler struct {
 	humanInputService  *humaninputsvc.Service
 	capabilityService  *agentcapabilities.Service
 	pullRequestStore   *db.PullRequestStore
+	changesetStore     *db.SessionChangesetStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
@@ -557,6 +558,21 @@ func (h *SessionHandler) SetUserStore(store *db.UserStore) {
 	h.userStore = store
 }
 
+func (h *SessionHandler) SetChangesetStore(store *db.SessionChangesetStore) {
+	h.changesetStore = store
+}
+
+func (h *SessionHandler) primaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
+	if h.changesetStore == nil {
+		return sessionID, nil
+	}
+	changeset, err := h.changesetStore.GetPrimary(ctx, orgID, sessionID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return changeset.ID, nil
+}
+
 type publishActionTxError struct {
 	phase string
 	err   error
@@ -584,7 +600,7 @@ func (h *SessionHandler) enqueuePublishActionInTx(
 	jobType string,
 	payload any,
 	dedupeKey string,
-	markQueued func(context.Context, *db.SessionStore) (bool, error),
+	markQueued func(context.Context, *db.SessionStore, *db.SessionChangesetStore) (bool, error),
 ) (bool, error) {
 	if h.txStarter == nil {
 		return false, &publishActionTxError{phase: "begin", err: errors.New("transaction starter not configured")}
@@ -597,7 +613,7 @@ func (h *SessionHandler) enqueuePublishActionInTx(
 
 	txSessions := db.NewSessionStore(tx)
 	txSessions.SetLogger(h.logger)
-	queued, err := markQueued(ctx, txSessions)
+	queued, err := markQueued(ctx, txSessions, db.NewSessionChangesetStore(tx))
 	if err != nil {
 		return false, &publishActionTxError{phase: "state", err: err}
 	}
@@ -773,7 +789,7 @@ func (h *SessionHandler) List(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.pullRequestStore != nil && len(sessionIDs) > 0 {
-		prMap, err := h.pullRequestStore.BatchGetBySessionIDs(r.Context(), orgID, sessionIDs)
+		prMap, err := h.pullRequestStore.BatchGetPrimaryBySessionIDs(r.Context(), orgID, sessionIDs)
 		if err != nil {
 			h.logger.Warn().Err(err).Msg("failed to fetch PR summaries")
 		} else {
@@ -1968,7 +1984,7 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	pr, err := h.pullRequestStore.GetBySessionID(r.Context(), orgID, runID)
+	pr, err := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, runID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: nil})
@@ -2530,7 +2546,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check whether a PR already exists for this session.
-	_, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	_, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
 	if prErr == nil {
 		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
 		return
@@ -2601,8 +2617,14 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	changesetID, err := h.primaryChangesetID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", err)
+		return
+	}
 	payload := map[string]any{
 		"session_id":     sessionID.String(),
+		"changeset_id":   changesetID.String(),
 		"org_id":         orgID.String(),
 		"requested_role": middleware.ActiveRoleFromContext(r.Context()),
 	}
@@ -2621,7 +2643,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		payload["merge_when_ready"] = true
 		payload["requested_by_user_id"] = user.ID.String()
 	}
-	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	dedupeKey := db.OpenPRDedupeKey(changesetID)
 	queued, err := h.enqueuePublishActionInTx(
 		r.Context(),
 		orgID,
@@ -2630,7 +2652,10 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		"open_pr",
 		payload,
 		dedupeKey,
-		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+		func(ctx context.Context, sessions *db.SessionStore, changesets *db.SessionChangesetStore) (bool, error) {
+			if h.changesetStore != nil {
+				return changesets.TryMarkPRCreationQueued(ctx, orgID, sessionID, changesetID)
+			}
 			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
 		},
 	)
@@ -2791,7 +2816,7 @@ func (h *SessionHandler) CreateBranch(w http.ResponseWriter, r *http.Request) {
 		"create_branch",
 		payload,
 		dedupeKey,
-		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+		func(ctx context.Context, sessions *db.SessionStore, _ *db.SessionChangesetStore) (bool, error) {
 			return sessions.TryMarkBranchCreationQueued(ctx, orgID, sessionID)
 		},
 	)
@@ -2866,7 +2891,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	pr, prErr := h.pullRequestStore.GetBySessionID(r.Context(), orgID, sessionID)
+	pr, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
 	if prErr != nil {
 		if errors.Is(prErr, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "NO_PR", "this session has no pull request to push to; create one first")
@@ -2947,7 +2972,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		"push_pr_changes",
 		payload,
 		dedupeKey,
-		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+		func(ctx context.Context, sessions *db.SessionStore, _ *db.SessionChangesetStore) (bool, error) {
 			return sessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
 		},
 	)
@@ -3774,16 +3799,22 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	changesetID, err := h.primaryChangesetID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", err)
+		return
+	}
 	payload := map[string]string{
-		"session_id": sessionID.String(),
-		"org_id":     orgID.String(),
+		"session_id":   sessionID.String(),
+		"changeset_id": changesetID.String(),
+		"org_id":       orgID.String(),
 	}
 	if h.issueSnapshots != nil && session.CurrentTurn > 0 {
 		if issueSnapshot, snapErr := h.issueSnapshots.GetByTurn(r.Context(), orgID, sessionID, session.CurrentTurn); snapErr == nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
 	}
-	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
+	dedupeKey := db.OpenPRDedupeKey(changesetID)
 	queued, err := h.enqueuePublishActionInTx(
 		r.Context(),
 		orgID,
@@ -3792,7 +3823,10 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		"open_pr",
 		payload,
 		dedupeKey,
-		func(ctx context.Context, sessions *db.SessionStore) (bool, error) {
+		func(ctx context.Context, sessions *db.SessionStore, changesets *db.SessionChangesetStore) (bool, error) {
+			if h.changesetStore != nil {
+				return changesets.TryMarkPRCreationQueued(ctx, orgID, sessionID, changesetID)
+			}
 			return sessions.TryMarkPRCreationQueued(ctx, orgID, sessionID)
 		},
 	)

@@ -31,6 +31,7 @@ var (
 const MaxReviewPasses = 5
 
 type Store interface {
+	GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error)
 	CreateLoopWithInitialPass(ctx context.Context, loop *models.SessionReviewLoop, pass *models.SessionReviewLoopPass) error
 	CreatePass(ctx context.Context, pass *models.SessionReviewLoopPass) error
 	SetPassReviewMessage(ctx context.Context, orgID, passID uuid.UUID, messageID int64) error
@@ -248,7 +249,11 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		decision, err := parseDecision(summary)
 		if err == nil && decision == models.ReviewLoopDecisionClean {
 			if loop.AutomationRunID != nil {
-				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+				payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+				if targetErr != nil {
+					return targetErr
+				}
+				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
 			}
 			return s.markPassCleanAndMaybeEnqueueReadiness(ctx, orgID, loop, pass, decision, summary)
 		}
@@ -263,7 +268,11 @@ func (s *Service) OnThreadTurnComplete(ctx context.Context, orgID, threadID uuid
 		switch {
 		case err == nil && decision == models.ReviewLoopDecisionClean:
 			if loop.AutomationRunID != nil {
-				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+				payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+				if targetErr != nil {
+					return targetErr
+				}
+				return s.store.MarkPassCleanAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, summary, payload, dedupeKey)
 			}
 			return s.markPassCleanAndMaybeEnqueueReadiness(ctx, orgID, loop, pass, decision, summary)
 		case err == nil && decision == models.ReviewLoopDecisionNeedsFix:
@@ -366,7 +375,11 @@ func (s *Service) autoReadinessEnabled(ctx context.Context, orgID uuid.UUID, ter
 func (s *Service) startLegacyFixPass(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, pass models.SessionReviewLoopPass, decision models.ReviewLoopDecision) error {
 	if pass.PassIndex >= loop.MaxPasses {
 		if loop.AutomationRunID != nil {
-			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+			payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+			if targetErr != nil {
+				return targetErr
+			}
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues.", payload, dedupeKey)
 		}
 		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, decision, "Review pass limit reached with remaining issues."); err != nil {
 			return err
@@ -388,7 +401,11 @@ func (s *Service) completeFixAndStartNextReview(ctx context.Context, orgID uuid.
 	if pass.PassIndex >= loop.MaxPasses {
 		terminalSummary := "Review pass limit reached after fixes; confirmation review is still needed."
 		if loop.AutomationRunID != nil {
-			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+			payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+			if targetErr != nil {
+				return targetErr
+			}
+			return s.store.MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary, payload, dedupeKey)
 		}
 		if err := s.store.MarkPassNeedsHumanDecision(ctx, orgID, loop.ID, pass.ID, models.ReviewLoopDecisionNeedsFix, terminalSummary); err != nil {
 			return err
@@ -426,20 +443,33 @@ func (s *Service) OnThreadTurnFailed(ctx context.Context, orgID, threadID uuid.U
 
 func (s *Service) failLoop(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop, summary string) error {
 	if loop.AutomationRunID != nil {
-		return s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, automationOpenPRPayload(loop), automationOpenPRDedupeKey(loop.SessionID))
+		payload, dedupeKey, targetErr := s.automationOpenPRTarget(ctx, orgID, loop)
+		if targetErr != nil {
+			return targetErr
+		}
+		return s.store.MarkLoopFailedAndEnqueueOpenPR(ctx, orgID, loop.ID, summary, payload, dedupeKey)
 	}
 	return s.store.MarkLoopFailed(ctx, orgID, loop.ID, summary)
 }
 
-func automationOpenPRPayload(loop models.SessionReviewLoop) map[string]any {
+func (s *Service) automationOpenPRTarget(ctx context.Context, orgID uuid.UUID, loop models.SessionReviewLoop) (map[string]any, string, error) {
+	changesetID, err := s.store.GetPrimaryChangesetID(ctx, orgID, loop.SessionID)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve automation review primary changeset: %w", err)
+	}
+	return automationOpenPRPayload(loop, changesetID), automationOpenPRDedupeKey(changesetID), nil
+}
+
+func automationOpenPRPayload(loop models.SessionReviewLoop, changesetID uuid.UUID) map[string]any {
 	return map[string]any{
-		"session_id": loop.SessionID.String(),
-		"org_id":     loop.OrgID.String(),
+		"session_id":   loop.SessionID.String(),
+		"changeset_id": changesetID.String(),
+		"org_id":       loop.OrgID.String(),
 	}
 }
 
-func automationOpenPRDedupeKey(sessionID uuid.UUID) string {
-	return "open_pr:review_loop:" + sessionID.String()
+func automationOpenPRDedupeKey(changesetID uuid.UUID) string {
+	return db.OpenPRDedupeKey(changesetID)
 }
 
 type sendOption func(*threadsvc.SendMessageInput)

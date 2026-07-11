@@ -724,6 +724,7 @@ func (s PullRequestCIStatus) Validate() error {
 type PullRequest struct {
 	ID             uuid.UUID               `db:"id" json:"id"`
 	SessionID      *uuid.UUID              `db:"session_id" json:"session_id,omitempty"`
+	ChangesetID    *uuid.UUID              `db:"changeset_id" json:"changeset_id,omitempty"`
 	OrgID          uuid.UUID               `db:"org_id" json:"org_id"`
 	GitHubPRNumber int                     `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string                  `db:"github_pr_url" json:"github_pr_url"`

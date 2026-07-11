@@ -186,6 +186,14 @@ func (s *runtimeTestSessionStore) ContainerHoldState(context.Context, uuid.UUID,
 	return true, false, nil
 }
 
+func (s *runtimeTestSessionStore) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+
+func (s *runtimeTestSessionStore) UpdatePRCreationState(context.Context, uuid.UUID, uuid.UUID, models.PRCreationState, string) error {
+	return nil
+}
+
 type runtimeTestJobStore struct{}
 
 func (s *runtimeTestJobStore) Enqueue(context.Context, uuid.UUID, string, string, any, int, *string) (uuid.UUID, error) {
@@ -198,6 +206,10 @@ func (s *runtimeTestJobStore) EnqueueWithTarget(context.Context, uuid.UUID, stri
 
 func (s *runtimeTestJobStore) OldestPendingSessionJobAge(context.Context) (time.Duration, bool, error) {
 	return 0, false, nil
+}
+
+func (s *runtimeTestJobStore) QueueChangesetPRCreation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, any, int) (uuid.UUID, bool, error) {
+	return uuid.New(), true, nil
 }
 
 type runtimeTestJobBacklogStore struct {
@@ -218,6 +230,10 @@ func (s *runtimeTestJobBacklogStore) EnqueueWithTarget(context.Context, uuid.UUI
 func (s *runtimeTestJobBacklogStore) OldestPendingSessionJobAge(context.Context) (time.Duration, bool, error) {
 	s.calls++
 	return s.age, s.ok, s.err
+}
+
+func (s *runtimeTestJobBacklogStore) QueueChangesetPRCreation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, any, int) (uuid.UUID, bool, error) {
+	return uuid.New(), true, nil
 }
 
 type runtimeTestOrgStore struct {
