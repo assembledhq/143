@@ -76,7 +76,7 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		return returnDecision(autoRepairDecision(AutoRepairDecisionNotResumable, nil, "", "", "session is not idle or resumable"))
 	}
 
-	pr, err := s.pullRequests.GetBySessionID(ctx, orgID, sessionID)
+	pr, err := s.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return returnDecision(autoRepairDecision(AutoRepairDecisionNoPullRequest, nil, "", "", "session has no linked pull request"))

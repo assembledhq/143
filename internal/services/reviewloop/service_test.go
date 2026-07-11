@@ -645,6 +645,10 @@ type fakeReviewLoopStore struct {
 	events                       []string
 }
 
+func (f *fakeReviewLoopStore) GetPrimaryChangesetID(_ context.Context, _ uuid.UUID, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+
 func (f *fakeReviewLoopStore) CreateLoop(_ context.Context, loop *models.SessionReviewLoop) error {
 	loop.ID = uuid.New()
 	loop.StartedAt = time.Now().UTC()

@@ -99,6 +99,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	slackSessionLinkStore := db.NewSlackSessionLinkStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
+	sessionChangesetStore := db.NewSessionChangesetStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 	pagerDutyIntegrationStore := db.NewPagerDutyIntegrationStore(pool)
@@ -186,6 +187,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
 			)
+			prService.SetChangesetStore(sessionChangesetStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -382,6 +384,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		llmClient,
 		logger,
 	)
+	sessionHandler.SetChangesetStore(sessionChangesetStore)
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
@@ -1009,6 +1012,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Internal API routes (token-based auth — called by sandbox agents)
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
+		internalPullRequestHandler.SetChangesetStore(sessionChangesetStore)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)

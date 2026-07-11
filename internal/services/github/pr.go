@@ -83,6 +83,7 @@ type sessionThreadLister interface {
 type PRService struct {
 	tokenProvider   *Service
 	pullRequests    *db.PullRequestStore
+	changesets      *db.SessionChangesetStore
 	sessions        *db.SessionStore
 	issues          *db.IssueStore
 	deploys         *db.DeployStore
@@ -155,6 +156,10 @@ func (s *PRService) SetLinearMilestoneEnqueuer(enq LinearMilestoneEnqueuer) {
 
 func (s *PRService) SetAutomationEventTriggerer(triggerer AutomationEventTriggerer) {
 	s.automationEventTriggers = triggerer
+}
+
+func (s *PRService) SetChangesetStore(store *db.SessionChangesetStore) {
+	s.changesets = store
 }
 
 func NewPRService(
@@ -589,7 +594,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	// created, but state update crashed) would otherwise create a duplicate
 	// PR. If a PR already exists for this session, return it without
 	// re-pushing.
-	if existing, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID); err == nil {
+	if existing, err := s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID); err == nil {
 		// If the original CreatePR crashed mid-upload, the session may
 		// still carry a pending_snapshot_key with no in-flight uploader.
 		// Surface that here so the stuck-resume case is observable; the
@@ -604,6 +609,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		return &existing, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing pull request: %w", err)
+	}
+	var changesetID *uuid.UUID
+	if s.changesets != nil {
+		primary, primaryErr := s.changesets.GetPrimary(ctx, run.OrgID, run.ID)
+		if primaryErr != nil {
+			return nil, fmt.Errorf("resolve primary changeset for PR creation: %w", primaryErr)
+		}
+		changesetID = &primary.ID
 	}
 
 	if s.sandboxProvider == nil || s.snapshots == nil {
@@ -770,6 +783,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	headRef := branchName
 	pr := &models.PullRequest{
 		SessionID:      &run.ID,
+		ChangesetID:    changesetID,
 		OrgID:          run.OrgID,
 		GitHubPRNumber: prNumber,
 		GitHubPRURL:    prURL,
@@ -981,7 +995,7 @@ var ErrLegacyPRMissingHeadRef = errors.New("pull request was created before head
 // persisted branch name, ErrNoChanges when there is nothing to push, and the
 // same snapshot sentinels as CreatePR when the sandbox is unavailable.
 func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
-	pr, err := s.pullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+	pr, err := s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoPullRequest
@@ -1085,6 +1099,15 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
 		return nil, fmt.Errorf("update pull request head sha: %w", err)
 	}
+	if s.changesets != nil {
+		primary, primaryErr := s.changesets.GetPrimary(ctx, run.OrgID, run.ID)
+		if primaryErr != nil {
+			return nil, fmt.Errorf("resolve pushed PR changeset: %w", primaryErr)
+		}
+		if recordErr := s.changesets.RecordPushedHead(ctx, run.OrgID, run.ID, primary.ID, pushed.HeadSHA); recordErr != nil {
+			return nil, fmt.Errorf("record pushed changeset head: %w", recordErr)
+		}
+	}
 	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
 		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
 	}
@@ -1181,7 +1204,7 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 		return fmt.Errorf("PRService: title sync dependencies not configured")
 	}
 
-	pr, err := s.pullRequests.GetBySessionID(ctx, session.OrgID, session.ID)
+	pr, err := s.pullRequests.GetPrimaryBySessionID(ctx, session.OrgID, session.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
