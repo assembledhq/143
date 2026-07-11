@@ -626,7 +626,7 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 
 func updateChangesetPRCreationState(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, changesetID *uuid.UUID, state models.PRCreationState, errMsg string) error {
 	if stores != nil && stores.SessionChangesets != nil {
-		targetID := uuid.Nil
+		var targetID uuid.UUID
 		if changesetID != nil {
 			targetID = *changesetID
 		} else {
