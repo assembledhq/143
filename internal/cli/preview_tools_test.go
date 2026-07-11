@@ -150,8 +150,8 @@ func TestPreviewArgsWithSessionDefault(t *testing.T) {
 
 func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {
 	t.Parallel()
-	dir, err := os.MkdirTemp("/home/sandbox", "preview-observe-test-")
-	require.NoError(t, err, "rootfs-backed image directory should be created")
+	dir, err := os.MkdirTemp(".", "preview-observe-test-")
+	require.NoError(t, err, "repository-backed image directory should be created")
 	defer func() { require.NoError(t, os.RemoveAll(dir), "image test directory should be removed") }()
 	output := filepath.Join(dir, "observation.png")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
