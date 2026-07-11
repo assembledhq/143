@@ -573,6 +573,10 @@ func (h *SessionHandler) primaryChangesetID(ctx context.Context, orgID, sessionI
 	return changeset.ID, nil
 }
 
+// errInvalidChangesetID marks a malformed changeset_id query parameter so
+// callers can distinguish a client error (400) from a store/DB failure (500).
+var errInvalidChangesetID = errors.New("invalid changeset ID")
+
 func (h *SessionHandler) requestedChangeset(ctx context.Context, orgID, sessionID uuid.UUID, raw string) (models.SessionChangeset, error) {
 	if h.changesetStore == nil {
 		return models.SessionChangeset{ID: sessionID, OrgID: orgID, SessionID: sessionID, IsPrimary: true}, nil
@@ -582,7 +586,7 @@ func (h *SessionHandler) requestedChangeset(ctx context.Context, orgID, sessionI
 	}
 	id, err := uuid.Parse(raw)
 	if err != nil {
-		return models.SessionChangeset{}, fmt.Errorf("invalid changeset ID: %w", err)
+		return models.SessionChangeset{}, fmt.Errorf("%w: %v", errInvalidChangesetID, err)
 	}
 	return h.changesetStore.GetByID(ctx, orgID, sessionID, id)
 }
@@ -2685,10 +2689,13 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 	targetChangeset, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
-		} else {
+		switch {
+		case errors.Is(err, errInvalidChangesetID):
 			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target", err)
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CHANGESET_LOOKUP_FAILED", "failed to resolve the pull request target", err)
 		}
 		return
 	}
@@ -2709,24 +2716,20 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if targetChangeset.IsPrimary {
-		switch session.PRCreationState {
-		case models.PRCreationStateQueued, models.PRCreationStatePushing:
-			writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
-			return
-		case models.PRCreationStateSucceeded:
-			// Succeeded means a PR row should exist; fall through to the
-			// PR_EXISTS check below so the 409 path is consistent.
-		}
+	// Non-primary changesets are rejected above with CHANGESET_NOT_MATERIALIZED,
+	// so from here the target is always the primary changeset and only the
+	// legacy session-scoped creation guards apply.
+	switch session.PRCreationState {
+	case models.PRCreationStateQueued, models.PRCreationStatePushing:
+		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+		return
+	case models.PRCreationStateSucceeded:
+		// Succeeded means a PR row should exist; fall through to the
+		// PR_EXISTS check below so the 409 path is consistent.
 	}
 
 	// Check whether a PR already exists for this session.
-	var prErr error
-	if targetChangeset.IsPrimary {
-		_, prErr = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
-	} else {
-		_, prErr = h.pullRequestStore.GetByChangesetID(r.Context(), orgID, sessionID, targetChangeset.ID)
-	}
+	_, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
 	if prErr == nil {
 		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
 		return
@@ -2735,7 +2738,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
-	if targetChangeset.PRCreationState == models.PRCreationStateSucceeded || (targetChangeset.IsPrimary && session.PRCreationState == models.PRCreationStateSucceeded) {
+	if targetChangeset.PRCreationState == models.PRCreationStateSucceeded || session.PRCreationState == models.PRCreationStateSucceeded {
 		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
 		return
 	}

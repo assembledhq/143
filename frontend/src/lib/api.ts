@@ -549,12 +549,12 @@ export const api = {
     getPR: (sessionId: string, changesetId?: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(
       `/api/v1/sessions/${sessionId}/pr${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`,
     ),
-	listChangesets: (sessionId: string) =>
-	  get<import('./types').ListResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`),
-	createChangeset: (sessionId: string, body: { title: string; summary?: string; stacked_on_changeset_id?: string }) =>
-	  post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
-	updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
-	  patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
+    listChangesets: (sessionId: string) =>
+      get<import('./types').ListResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`),
+    createChangeset: (sessionId: string, body: { title: string; summary?: string; stacked_on_changeset_id?: string }) =>
+      post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
+    updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
+      patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
     getReadiness: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest`),
     runReadiness: (sessionId: string) =>

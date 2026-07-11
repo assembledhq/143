@@ -3679,6 +3679,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
   const hasMultipleChangesets = changesets.length > 1;
   const selectedIsPrimary = selectedChangeset?.is_primary !== false;
+  // The primary changeset keeps the legacy null-tolerant PR lookup: sending a
+  // changeset_id would route the backend to GetByChangesetID, which cannot
+  // match legacy PR rows whose changeset_id is still NULL. Only non-primary
+  // slots, whose PRs always carry a changeset_id, are looked up by changeset.
+  const selectedChangesetPRParam = selectedIsPrimary ? undefined : selectedChangeset?.id;
   const changesetSessionIDRef = useRef(id);
   useEffect(() => {
     const syncSelectionFromURL = () => setSelectedChangesetID(new URL(window.location.href).searchParams.get("changeset"));
@@ -4166,8 +4171,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // transition within milliseconds, and the SSE polling fallback re-reads the
   // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
-    queryKey: queryKeys.sessions.pr(id, selectedChangeset?.id),
-    queryFn: () => api.sessions.getPR(id, selectedChangeset?.id),
+    queryKey: queryKeys.sessions.pr(id, selectedChangesetPRParam),
+    queryFn: () => api.sessions.getPR(id, selectedChangesetPRParam),
     enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
