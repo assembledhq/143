@@ -88,6 +88,37 @@ func TestApplyAutoRepairPreference(t *testing.T) {
 	}
 }
 
+func TestPRServiceMaybeStartAutoRepairForPullRequestDelegatesToLinkedSession(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	row := handlerPRRow(prID, &sessionID, orgID, "org/repo", now)
+	headSHA := "head-from-github"
+	setAutoRepairPRRowValue(row, "head_sha", &headSHA)
+	mock.ExpectQuery("FROM pull_requests").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(row...))
+	expectAutoRepairSession(mock, orgID, sessionID, now, models.SessionStatusRunning)
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		orgs:         db.NewOrganizationStore(mock),
+	}
+	decision, err := service.MaybeStartAutoRepairForPullRequest(context.Background(), orgID, prID, "github_pr_health_updated")
+
+	require.NoError(t, err, "pull-request-triggered auto-repair evaluation should delegate without error")
+	require.Equal(t, AutoRepairDecisionNotResumable, decision.Status, "delegation should apply the existing session eligibility checks")
+	require.NoError(t, mock.ExpectationsWereMet(), "all pull request and session lookup expectations should be met")
+}
+
 func expectAutoRepairCount(mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, action models.PullRequestRepairActionType, headSHA string, count int) {
 	mock.ExpectQuery("SELECT count.+ FROM pull_request_repair_runs").
 		WithArgs(pgx.NamedArgs{
