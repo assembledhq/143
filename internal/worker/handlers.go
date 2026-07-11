@@ -553,6 +553,7 @@ func hasServiceHandlersDependencies(services *Services) bool {
 type Stores struct {
 	Issues              *db.IssueStore
 	Sessions            *db.SessionStore
+	SessionChangesets   *db.SessionChangesetStore
 	Jobs                *db.JobStore
 	Integrations        *db.IntegrationStore
 	Users               *db.UserStore
@@ -621,6 +622,35 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 		return &RetryableError{Err: fmt.Errorf("session %s has %d active thread runtime holder(s); snapshot is not quiescent", run.ID, active), RetryAfter: &delay}
 	}
 	return nil
+}
+
+func updateChangesetPRCreationState(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, changesetID *uuid.UUID, state models.PRCreationState, errMsg string) error {
+	if stores != nil && stores.SessionChangesets != nil {
+		targetID := uuid.Nil
+		if changesetID != nil {
+			targetID = *changesetID
+		} else {
+			primary, err := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
+			if err != nil {
+				return err
+			}
+			targetID = primary.ID
+		}
+		// Publish through SessionStore FIRST so the session-status SSE fires while
+		// the publish-state row is still in its prior value. If the changeset were
+		// written first, its changeset->session_publish_state mirror trigger would
+		// pre-set the terminal 'succeeded' value, tripping UpdatePRCreationState's
+		// `<> 'succeeded'` terminal guard so the guarded upsert matches zero rows
+		// and silently skips publishStatus — dropping the success SSE the one-PR
+		// UI depends on. The changeset write below then reconciles the changeset
+		// row (idempotent under the bidirectional mirror triggers) and remains the
+		// source of truth.
+		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg); err != nil {
+			return err
+		}
+		return stores.SessionChangesets.UpdatePRCreationState(ctx, orgID, sessionID, targetID, state, errMsg)
+	}
+	return stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg)
 }
 
 func enqueueRunAgentForSession(ctx context.Context, stores *Stores, session models.Session) error {
@@ -4055,7 +4085,7 @@ func notifyPRAutoRepairAttention(ctx context.Context, stores *Stores, logger zer
 func notifyPRAutoReadinessAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, status models.PRReadinessRunStatus, summary string) {
 	var pullRequestID *uuid.UUID
 	if stores != nil && stores.PullRequests != nil {
-		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 		if err == nil {
 			id := pr.ID
 			pullRequestID = &id
@@ -5618,14 +5648,33 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		if stores == nil || stores.Jobs == nil {
 			return fmt.Errorf("slack PR creation dependencies are not configured")
 		}
+		changesetID := sessionID
+		if stores.SessionChangesets != nil {
+			primary, primaryErr := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
+			if primaryErr != nil {
+				return fmt.Errorf("resolve Slack PR primary changeset: %w", primaryErr)
+			}
+			changesetID = primary.ID
+		}
 		payload := map[string]string{
 			"org_id":               orgID.String(),
 			"session_id":           sessionID.String(),
+			"changeset_id":         changesetID.String(),
 			"requested_by_user_id": auth.ActorUserID.String(),
 		}
-		dedupeKey := "slack_create_pr:" + sessionID.String()
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-			return fmt.Errorf("enqueue Slack PR creation: %w", err)
+		if stores.SessionChangesets != nil {
+			_, queued, queueErr := stores.Jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changesetID, "default", payload, 5)
+			if queueErr != nil {
+				return fmt.Errorf("enqueue Slack PR creation: %w", queueErr)
+			}
+			if !queued {
+				return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation is already in progress for this branch.")
+			}
+		} else {
+			dedupeKey := "slack_create_pr:" + changesetID.String()
+			if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+				return fmt.Errorf("enqueue Slack PR creation: %w", err)
+			}
 		}
 		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation requested for this session.")
 	case "slack_repair_pr", "slack_start_work":
@@ -5649,7 +5698,7 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		if stores == nil || stores.PullRequests == nil || services == nil || services.PR == nil {
 			return fmt.Errorf("slack PR merge dependencies are not configured")
 		}
-		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 		if err != nil {
 			return fmt.Errorf("load pull request for Slack merge: %w", err)
 		}
@@ -6395,7 +6444,7 @@ func loadSlackSessionOutcomeDetails(ctx context.Context, stores *Stores, service
 		return details
 	}
 	if stores.PullRequests != nil {
-		pr, err := stores.PullRequests.GetBySessionID(ctx, session.OrgID, session.ID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, session.OrgID, session.ID)
 		if err == nil {
 			details.PullRequest = &pr
 		} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -10221,6 +10270,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID         string `json:"session_id"`
+			ChangesetID       string `json:"changeset_id,omitempty"`
 			OrgID             string `json:"org_id"`
 			IssueSnapshotID   string `json:"issue_snapshot_id,omitempty"`
 			Draft             *bool  `json:"draft,omitempty"`
@@ -10245,6 +10295,23 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		run, err := stores.Sessions.GetByID(ctx, orgID, runID)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
+		}
+		var changesetID *uuid.UUID
+		if stores.SessionChangesets != nil {
+			primary, primaryErr := stores.SessionChangesets.GetPrimary(ctx, orgID, runID)
+			if primaryErr != nil {
+				return fmt.Errorf("resolve open_pr primary changeset: %w", primaryErr)
+			}
+			if input.ChangesetID != "" {
+				parsed, parseErr := uuid.Parse(input.ChangesetID)
+				if parseErr != nil {
+					return fmt.Errorf("parse changeset ID: %w", parseErr)
+				}
+				if parsed != primary.ID {
+					return fmt.Errorf("changeset %s is not the primary changeset for session %s", parsed, runID)
+				}
+			}
+			changesetID = &primary.ID
 		}
 		if run.SnapshotKey == nil || *run.SnapshotKey == "" {
 			if run.Status == models.SessionStatusRunning {
@@ -10273,7 +10340,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		if input.RequestedRole == string(models.RoleBuilder) {
 			if err := ensureBuilderReadinessFresh(ctx, stores, run); err != nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by readiness")
 				}
 				return err
@@ -10315,7 +10382,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			}
 		}
 
-		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStatePushing, ""); err != nil {
+		if err := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStatePushing, ""); err != nil {
 			logger.Error().Err(err).Msg("failed to mark PR creation as pushing")
 		}
 
@@ -10345,7 +10412,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					Msg("open_pr failed")
 			}
 			msg := userFacingPRError(createErr)
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 			}
 			// PR creation failures happen after the agent run has already
@@ -10367,7 +10434,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		if input.MergeWhenReady {
 			if pr == nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return fmt.Errorf("open_pr merge_when_ready requested but PRService returned nil pull request")
@@ -10375,19 +10442,19 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
 			if err != nil {
 				queueErr := fmt.Errorf("parse merge_when_ready requesting user id: %w", err)
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return queueErr
 			}
 			if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, requestedByUserID); err != nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return fmt.Errorf("queue merge when ready after open_pr: %w", err)
 			}
 		}
-		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
+		if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		if services.PagerDutyWrites != nil && pr != nil {
@@ -11041,12 +11108,12 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 				RetryAfter: &retryAfter,
 			}
 		case models.ReviewLoopStatusNeedsHumanDecision:
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, nil, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
 				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
 			}
 			return false, nil
 		default:
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, nil, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
 				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
 			}
 			return false, nil
@@ -11204,7 +11271,7 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 
 	var repo, headRef string
 	if stores.PullRequests != nil {
-		pr, prErr := stores.PullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+		pr, prErr := stores.PullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
 		if prErr != nil {
 			if !errors.Is(prErr, pgx.ErrNoRows) {
 				logger.Warn().Err(prErr).

@@ -21,6 +21,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -3213,7 +3214,44 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
-		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
+		var dedupeKey *string
+		shouldEnqueue := true
+		var changesetID uuid.UUID
+		if resolver, ok := o.sessions.(interface {
+			GetPrimaryChangesetID(context.Context, uuid.UUID, uuid.UUID) (uuid.UUID, error)
+		}); ok {
+			var changesetErr error
+			changesetID, changesetErr = resolver.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
+			if changesetErr != nil {
+				o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
+				shouldEnqueue = false
+			} else {
+				payload["changeset_id"] = changesetID.String()
+				key := db.OpenPRDedupeKey(changesetID)
+				dedupeKey = &key
+			}
+		}
+		if shouldEnqueue {
+			if atomicJobs, ok := o.jobs.(interface {
+				QueueChangesetPRCreation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, any, int) (uuid.UUID, bool, error)
+			}); ok && changesetID != uuid.Nil {
+				_, queued, queueErr := atomicJobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0)
+				if queueErr != nil {
+					o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to atomically queue automatic PR creation")
+				} else if !queued {
+					o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
+				}
+			} else if _, enqueueErr := o.jobs.Enqueue(ctx, run.OrgID, "default", "open_pr", payload, 0, dedupeKey); enqueueErr != nil {
+				if stateStore, ok := o.sessions.(interface {
+					UpdatePRCreationState(context.Context, uuid.UUID, uuid.UUID, models.PRCreationState, string) error
+				}); ok {
+					if stateErr := stateStore.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
+						o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
+					}
+				}
+				o.logger.Error().Err(enqueueErr).Msg("failed to enqueue automatic PR creation")
+			}
+		}
 	}
 
 	if run.PMPlanID != nil && o.decisionLog != nil {

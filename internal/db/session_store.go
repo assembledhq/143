@@ -1625,7 +1625,8 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 // sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
-	if !shouldPersistDiffSnapshot(result) {
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
 		return s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
 	}
 
@@ -1638,14 +1639,19 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
 		return err
 	}
-	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-	if err != nil {
-		return err
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+		if err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
 	return nil
 }
 
@@ -1703,6 +1709,9 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		return err
 	}
 	hydrateSessionPolicy(&session)
+	if err := s.recordPrimaryChangesetHead(ctx, db, orgID, runID, result.DiffHeadCommitSHA); err != nil {
+		return err
+	}
 	s.publishStatus(ctx, &session)
 	return nil
 }
@@ -2066,7 +2075,8 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 // a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	diffStats := computeDiffStatsForResult(result)
-	if !shouldPersistDiffSnapshot(result) {
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
 		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats)
 	}
 
@@ -2079,14 +2089,19 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
 		return err
 	}
-	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-	if err != nil {
-		return err
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+		if err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
 	return nil
 }
 
@@ -2163,11 +2178,33 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		"diff_collected_at": result.DiffCollectedAt,
 		"diff_stats":        diffStats,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordPrimaryChangesetHead(ctx, db, orgID, sessionID, result.DiffHeadCommitSHA)
+}
+
+func (s *SessionStore) recordPrimaryChangesetHead(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, headSHA *string) error {
+	if headSHA == nil || strings.TrimSpace(*headSHA) == "" {
+		return nil
+	}
+	_, err := db.Exec(ctx, `UPDATE session_changesets
+		SET head_sha = @head_sha, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "head_sha": *headSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("record primary changeset turn head: %w", err)
+	}
+	return nil
 }
 
 func shouldPersistDiffSnapshot(result *models.SessionResult) bool {
 	return result != nil && result.Diff != nil && result.DiffBaseCommitSHA != nil && *result.DiffBaseCommitSHA != ""
+}
+
+func shouldPersistChangesetHead(result *models.SessionResult) bool {
+	return result != nil && result.DiffHeadCommitSHA != nil && strings.TrimSpace(*result.DiffHeadCommitSHA) != ""
 }
 
 func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) (workspaceRevisionUpdate, error) {
@@ -3523,6 +3560,18 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 		"working_branch": branch,
 	})
 	return err
+}
+
+func (s *SessionStore) GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
+	var changesetID uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&changesetID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("get primary session changeset id: %w", err)
+	}
+	return changesetID, nil
 }
 
 // ListStalePendingSessions returns pending sessions whose latest pending-state

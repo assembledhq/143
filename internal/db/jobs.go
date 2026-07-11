@@ -27,6 +27,13 @@ func RunAgentDedupeKey(sessionID uuid.UUID) string {
 	return "run_agent:" + sessionID.String()
 }
 
+// OpenPRDedupeKey scopes PR creation to the changeset PR slot. Every entry
+// point must use this key so UI, agent, automation, and Slack requests collapse
+// onto one active publish job for the same changeset.
+func OpenPRDedupeKey(changesetID uuid.UUID) string {
+	return "open_pr:" + changesetID.String()
+}
+
 func RunAgentPayload(run *models.Session) map[string]string {
 	payload := map[string]string{
 		"session_id": run.ID.String(),
@@ -198,6 +205,53 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 		Priority:  priority,
 		DedupeKey: dedupeKey,
 	})
+}
+
+// QueueChangesetPRCreation atomically reserves a changeset's PR slot and
+// inserts its open_pr job. A false queued result means another caller already
+// owns the slot or PR creation has completed; it is not an error.
+func (s *JobStore) QueueChangesetPRCreation(
+	ctx context.Context,
+	orgID, sessionID, changesetID uuid.UUID,
+	queue string,
+	payload any,
+	priority int,
+) (jobID uuid.UUID, queued bool, err error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return uuid.Nil, false, fmt.Errorf("job store does not support transactions")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("begin changeset PR enqueue: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	result, err := tx.Exec(ctx, `UPDATE session_changesets
+		SET pr_creation_state = 'queued', pr_creation_error = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND pr_creation_state NOT IN ('queued', 'pushing', 'succeeded')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("reserve changeset PR creation: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return uuid.Nil, false, nil
+	}
+
+	dedupeKey := OpenPRDedupeKey(changesetID)
+	jobID, err = enqueueOn(ctx, tx, orgID, EnqueueOpts{
+		Queue: queue, JobType: "open_pr", Payload: payload, Priority: priority, DedupeKey: &dedupeKey,
+	})
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("enqueue changeset PR creation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, false, fmt.Errorf("commit changeset PR enqueue: %w", err)
+	}
+	s.notify(ctx, jobID)
+	return jobID, true, nil
 }
 
 // EnqueueWithTarget is the positional-args wrapper for callers (typically
