@@ -23,6 +23,7 @@ function makeSessionDetail(overrides: Partial<SessionDetail> = {}): SessionDetai
   return {
     ...makeSession(overrides),
     threads: [],
+    changesets: [],
     ...overrides,
   };
 }

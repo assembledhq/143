@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { QueryClient } from '@tanstack/react-query';
+import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers, mockPR } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { queryKeys } from '@/lib/query-keys';
 import { markProvisionalSessionDetail } from '@/lib/session-detail-cache';
@@ -94,6 +95,7 @@ describe('SessionDetailPage overview and review loop', () => {
         ...mockSessions[0],
         result_summary: 'Provisional list title',
         threads: [],
+        changesets: [],
       }),
     } satisfies SingleResponse<Session>);
     let detailRequests = 0;
@@ -840,4 +842,92 @@ describe('SessionDetailPage overview and review loop', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
   });
+
+  it('keeps the legacy full-page layout when the session has one pull request slot', async () => {
+    const primaryChangesetID = '11111111-1111-4111-8111-111111111111';
+    server.use(http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+      data: {
+        ...mockSessions[0],
+        changesets: [{
+          id: primaryChangesetID, is_primary: true, order_index: 0, title: 'Foundation', summary: '',
+          status: 'planned', target_branch: 'main', base_branch: 'main',
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        }],
+      },
+    })));
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByTestId('pull-request-list')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('selected-pull-request-panel')).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
+  });
+
+  it('scopes the full PR details surface when a different pull request is selected', async () => {
+    const primaryChangesetID = '11111111-1111-4111-8111-111111111111';
+    const childChangesetID = '22222222-2222-4222-8222-222222222222';
+    const primaryPR = { ...mockPR, id: 'pr-primary', changeset_id: primaryChangesetID, github_pr_number: 101, title: 'Foundation' };
+    const childPR = {
+      ...mockPR,
+      id: 'pr-child',
+      changeset_id: childChangesetID,
+      github_pr_number: 102,
+      github_pr_url: 'https://github.com/org/repo/pull/102',
+      title: 'API integration',
+      branch_name: '143/api',
+      head_ref: '143/api',
+      ci_status: 'failure' as const,
+      review_status: 'changes_requested' as const,
+    };
+    const multiPRSession = {
+      ...mockSessions[0],
+      changesets: [
+        {
+          id: primaryChangesetID, is_primary: true, order_index: 0, title: 'Foundation', summary: 'Shared types',
+          status: 'pr_open', target_branch: 'main', base_branch: 'main', working_branch: '143/foundation',
+          pull_request: primaryPR, created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+        {
+          id: childChangesetID, is_primary: false, order_index: 1, title: 'API integration', summary: 'Connect the API',
+          status: 'pr_open', target_branch: 'main', base_branch: '143/foundation', working_branch: '143/api',
+          stacked_on_changeset_id: primaryChangesetID, pull_request: childPR,
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+      ],
+    };
+    const requestedChangesets: string[] = [];
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: multiPRSession })),
+      http.get('/api/v1/sessions/:id/pr', ({ request }) => {
+        const selected = new URL(request.url).searchParams.get('changeset_id') ?? primaryChangesetID;
+        requestedChangesets.push(selected);
+        return HttpResponse.json({ data: selected === childChangesetID ? childPR : primaryPR });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={multiPRSession.id} />);
+    expect(await screen.findByTestId('pull-request-list')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /API integration/ }));
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('selected-pull-request-panel')).getByText('Connect the API')).toBeInTheDocument();
+    });
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).getByText('143/foundation')).toBeInTheDocument();
+    expect(within(selectedPanel).getByText('changes requested')).toBeInTheDocument();
+    expect(screen.getByTestId('branch-actions-unavailable')).toBeInTheDocument();
+    await waitFor(() => expect(requestedChangesets).toContain(childChangesetID));
+    expect(screen.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', childPR.github_pr_url);
+
+    act(() => {
+      window.history.replaceState({}, '', window.location.pathname);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await waitFor(() => {
+      expect(within(screen.getByTestId('selected-pull-request-panel')).getByText('Shared types')).toBeInTheDocument();
+    });
+  }, 10_000);
 });

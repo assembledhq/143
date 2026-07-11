@@ -1232,6 +1232,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions", sessionHandler.List)
 				r.Get("/api/v1/sessions/counts", sessionHandler.Counts)
 				r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
+				r.Get("/api/v1/sessions/{id}/changesets", sessionHandler.ListChangesets)
 				r.Get("/api/v1/sessions/{id}/diff", sessionHandler.GetDiff)
 				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
@@ -1465,6 +1466,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
 				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/changesets", sessionHandler.CreateChangeset)
+				r.Patch("/api/v1/sessions/{id}/changesets/{changeset_id}", sessionHandler.UpdateChangeset)
 				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
 				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
 			})

@@ -2332,6 +2332,30 @@ func TestSessionHandler_GetPullRequest_Success(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionHandler_GetPullRequest_TargetsChangeset(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create pgxmock pool without error")
+	defer mock.Close()
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery(`SELECT .+ FROM pull_requests.+changeset_id =`).
+		WithArgs(orgID, sessionID, changesetID).
+		WillReturnError(pgx.ErrNoRows)
+	handler := newSessionHandler(t, mock)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions/"+sessionID.String()+"/pr?changeset_id="+changesetID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	req = req.WithContext(middleware.WithOrgID(ctx, orgID))
+	w := httptest.NewRecorder()
+
+	handler.GetPullRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, "missing PR in selected changeset should be a normal empty state")
+	require.JSONEq(t, `{"data":null}`, w.Body.String(), "response should preserve the nullable PR contract")
+	require.NoError(t, mock.ExpectationsWereMet(), "selected changeset lookup should be tenant and session scoped")
+}
+
 func TestSessionHandler_GetPullRequest_NoPR_Returns200Null(t *testing.T) {
 	t.Parallel()
 

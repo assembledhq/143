@@ -1,6 +1,14 @@
 # Design: Session Changesets and Stacked PRs
 
-> **Status:** Future
+> **Status:** Partially Implemented
+
+> **Implementation note (2026-07-11):** Phases 1 and 2 are complete. Session
+> detail exposes ordered, PR-hydrated changeset summaries and shows a pull
+> request selector only for multi-PR sessions. PR-native actions (health,
+> repair, and merge) follow the selected PR. Until Phase 3 materializes a
+> non-primary branch/worktree, its Changes, Preview, readiness, Create PR, and
+> push surfaces are explicitly unavailable rather than falling back to the
+> primary session workspace. The one-PR compatibility path is unchanged.
 
 ## Summary
 
@@ -624,6 +632,13 @@ Tasks:
 
 Goal: let the app represent multiple changesets, but avoid branch splitting and
 restack behavior.
+
+Phase 2 selection is deliberately safe for planned, non-primary changesets:
+PR-native read/actions that already have a PR identity follow the selected
+changeset, while Changes, Preview, readiness, review, push, and Create PR show
+an explicit materialization-required state. They must never fall through to the
+primary session workspace. Making those branch-backed actions executable is
+owned by Phases 3 and 4.
 
 Tasks:
 

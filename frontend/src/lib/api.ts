@@ -546,7 +546,15 @@ export const api = {
     getLogDetail: (sessionId: string, logId: number) =>
       get<import('./types').SingleResponse<import('./types').SessionLogDetail>>(`/api/v1/sessions/${sessionId}/logs/${logId}`),
     getTimeline: (sessionId: string) => get<import('./types').ListResponse<import('./types').SessionTimelineEntry>>(`/api/v1/sessions/${sessionId}/timeline`),
-    getPR: (sessionId: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(`/api/v1/sessions/${sessionId}/pr`),
+    getPR: (sessionId: string, changesetId?: string) => get<import('./types').SingleResponse<import('./types').PullRequest | null>>(
+      `/api/v1/sessions/${sessionId}/pr${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`,
+    ),
+	listChangesets: (sessionId: string) =>
+	  get<import('./types').ListResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`),
+	createChangeset: (sessionId: string, body: { title: string; summary?: string; stacked_on_changeset_id?: string }) =>
+	  post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
+	updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
+	  patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
     getReadiness: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest`),
     runReadiness: (sessionId: string) =>
@@ -557,8 +565,8 @@ export const api = {
       get<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`),
     updateReadinessContext: (sessionId: string, issueLessReason: string) =>
       post<import('./types').SingleResponse<import('./types').PRReadinessContext>>(`/api/v1/sessions/${sessionId}/pr-readiness-context`, { issue_less_reason: issueLessReason }),
-    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean }) =>
-      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr`, options ? {
+    createPR: (sessionId: string, options?: { draft?: boolean; authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; mergeWhenReady?: boolean; changesetId?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr${options?.changesetId ? `?changeset_id=${encodeURIComponent(options.changesetId)}` : ''}`, options ? {
         ...(options.draft !== undefined ? { draft: options.draft } : {}),
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),

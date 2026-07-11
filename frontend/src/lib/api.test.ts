@@ -1486,6 +1486,19 @@ describe('api client', () => {
       expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123', merge_when_ready: true });
     });
 
+    it('targets the selected pull request slot', async () => {
+      let capturedUrl = '';
+      server.use(
+        http.post('/api/v1/sessions/:id/pr', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ status: 'queued' }, { status: 202 });
+        }),
+      );
+
+      await api.sessions.createPR('session-abc', { changesetId: 'changeset-2' });
+      expect(capturedUrl).toContain('changeset_id=changeset-2');
+    });
+
     it('throws on conflict when PR already exists', async () => {
       server.use(
         http.post('/api/v1/sessions/:id/pr', () => {
@@ -1526,6 +1539,42 @@ describe('api client', () => {
           resume_token: 'resume-123',
         }),
       });
+    });
+  });
+
+  describe('sessions - changesets', () => {
+    it('lists, creates, updates, and selects pull request slots', async () => {
+      const calls: string[] = [];
+      server.use(
+        http.get('/api/v1/sessions/:id/changesets', ({ request }) => {
+          calls.push(new URL(request.url).pathname);
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+        http.post('/api/v1/sessions/:id/changesets', async ({ request }) => {
+          calls.push(JSON.stringify(await request.json()));
+          return HttpResponse.json({ data: { id: 'changeset-2' } }, { status: 201 });
+        }),
+        http.patch('/api/v1/sessions/:id/changesets/:changesetId', async ({ request }) => {
+          calls.push(JSON.stringify(await request.json()));
+          return HttpResponse.json({ data: { id: 'changeset-2' } });
+        }),
+        http.get('/api/v1/sessions/:id/pr', ({ request }) => {
+          calls.push(new URL(request.url).search);
+          return HttpResponse.json({ data: null });
+        }),
+      );
+
+      await api.sessions.listChangesets('session-1');
+      await api.sessions.createChangeset('session-1', { title: 'API', summary: 'Endpoints' });
+      await api.sessions.updateChangeset('session-1', 'changeset-2', { title: 'API integration' });
+      await api.sessions.getPR('session-1', 'changeset-2');
+
+      expect(calls).toEqual([
+        '/api/v1/sessions/session-1/changesets',
+        JSON.stringify({ title: 'API', summary: 'Endpoints' }),
+        JSON.stringify({ title: 'API integration' }),
+        '?changeset_id=changeset-2',
+      ]);
     });
   });
 

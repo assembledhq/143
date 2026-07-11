@@ -22,6 +22,7 @@ export function provisionalSessionDetailFromListItem(session: Session): SingleRe
     data: markProvisionalSessionDetail({
       ...session,
       threads: session.threads ?? [],
+      changesets: [],
     }),
   };
 }
