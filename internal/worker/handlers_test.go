@@ -4704,6 +4704,7 @@ type stubPRService struct {
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	maybeStartAutoRepairFn         func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error)
+	maybeStartAutoRepairForPRFn    func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error)
 	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 	syncPRPreviewSurfacesFn        func(context.Context, ghservice.SyncPRPreviewSurfacesPayload) error
@@ -4761,6 +4762,13 @@ func (s *stubPRService) CompletePullRequestRepairRun(ctx context.Context, orgID,
 func (s *stubPRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
 	if s.maybeStartAutoRepairFn != nil {
 		return s.maybeStartAutoRepairFn(ctx, orgID, sessionID, reason)
+	}
+	return nil, nil
+}
+
+func (s *stubPRService) MaybeStartAutoRepairForPullRequest(ctx context.Context, orgID uuid.UUID, pullRequestID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+	if s.maybeStartAutoRepairForPRFn != nil {
+		return s.maybeStartAutoRepairForPRFn(ctx, orgID, pullRequestID, reason)
 	}
 	return nil, nil
 }
@@ -5434,6 +5442,13 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.prID = gotPRID
 						return nil
 					},
+					maybeStartAutoRepairForPRFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+						called.autoRepairCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						called.autoRepairReason = reason
+						return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
+					},
 					reconcilePullRequestFn: func(_ context.Context, gotOrgID uuid.UUID, gotLimit int) error {
 						called.reconcileCalls++
 						called.orgID = gotOrgID
@@ -5472,8 +5487,10 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			switch tt.name {
 			case "sync pull request state passes parsed ids":
 				require.Equal(t, 1, called.syncCalls, "sync handler should invoke the PR service once")
+				require.Equal(t, 1, called.autoRepairCalls, "sync handler should evaluate automatic repair after fresh GitHub health is persisted")
 				require.Equal(t, orgID, called.orgID, "sync handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "sync handler should parse and pass the pull request ID")
+				require.Equal(t, "github_pr_health_updated", called.autoRepairReason, "sync handler should identify GitHub health as the automatic repair trigger")
 			case "reconcile pull request state defaults the limit":
 				require.Equal(t, 1, called.reconcileCalls, "reconcile handler should invoke the PR service once")
 				require.Equal(t, orgID, called.orgID, "reconcile handler should parse and pass the org ID")
@@ -5525,8 +5542,31 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
+func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return nil
+			},
+			maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
+				return nil, fmt.Errorf("policy lookup failed")
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	require.NoError(t, err, "persisted GitHub health should remain successful when follow-through evaluation fails")
+}
+
 type prHandlerCalls struct {
 	syncCalls           int
+	autoRepairCalls     int
 	reconcileCalls      int
 	enrichCalls         int
 	mergeWhenReadyCalls int
@@ -5535,6 +5575,7 @@ type prHandlerCalls struct {
 	prID                uuid.UUID
 	limit               int
 	version             int64
+	autoRepairReason    string
 	surfacePayload      ghservice.SyncPRPreviewSurfacesPayload
 }
 

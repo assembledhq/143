@@ -43,7 +43,7 @@ Defaults remain off for existing orgs. New orgs default automatic conflict repai
 
 ## Implementation Status
 
-All implementation phases are complete. The org/user settings contracts and UI shell exist, PR readiness enqueueing is extracted into a reusable runner, clean review-loop completion can atomically enqueue readiness behind the org policy, session messages support `system_auto_repair` attribution, repair runs persist automatic-attempt accounting fields, auto-repair evaluates after successful `continue_session`, and the PR health UI shows automatic progress, exhausted attempt state, and a stop path.
+All implementation phases are complete. The org/user settings contracts and UI shell exist, PR readiness enqueueing is extracted into a reusable runner, clean review-loop completion can atomically enqueue readiness behind the org policy, session messages support `system_auto_repair` attribution, repair runs persist automatic-attempt accounting fields, auto-repair evaluates after successful `continue_session` and GitHub-backed PR health synchronization, and the PR health UI shows automatic progress, exhausted attempt state, and a stop path.
 
 Outcome notifications cover automatic repair failures, exhausted attempt budgets, and blocked/failed automatic readiness checks. Metrics cover auto-repair decisions, outcomes, explicit user stop requests, and repair-regret signals for user reverts of automatic repair work and PR-head changes while automatic repair is running.
 
@@ -106,7 +106,7 @@ Readiness evaluates the current session revision/snapshot. If a new turn changes
 
 ### Auto-Repair
 
-Evaluate after a successful `continue_session` completion when the session has a linked open PR. This is the highest-signal v1 trigger: the session just became available for a continuation. PR-health-sync-triggered repair can be added later.
+Evaluate after a successful `continue_session` completion when the session has a linked open PR, and after a GitHub event produces a successful `sync_pull_request_state` health refresh. Both paths delegate to the same auto-repair coordinator; health synchronization resolves the PR's linked session before evaluation. This closes the window where CI fails only after the session turn and PR publication have completed.
 
 Because this hook runs on the hot path of session completion, do cheap local checks before calling `GetPullRequestHealth` or GitHub: policy enabled, linked open PR present, automatic budget available, and session idle/resumable. Only then read fresh enough PR health.
 
