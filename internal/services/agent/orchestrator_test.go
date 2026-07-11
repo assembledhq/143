@@ -1185,6 +1185,14 @@ func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Org
 	return m.org, nil
 }
 
+func (m *mockSessionStore) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+
+func (m *mockSessionStore) UpdatePRCreationState(_ context.Context, _, _ uuid.UUID, _ models.PRCreationState, _ string) error {
+	return nil
+}
+
 // mockJobStore implements agent.JobStore.
 type mockJobStore struct {
 	mu               sync.Mutex
@@ -1234,6 +1242,16 @@ func (m *mockJobStore) getPayload(jobType string) any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.payloads[jobType]
+}
+
+// QueueChangesetPRCreation records the open_pr enqueue through the same maps as
+// Enqueue so assertions on getEnqueued/getPayload observe the queued job.
+func (m *mockJobStore) QueueChangesetPRCreation(ctx context.Context, orgID, _, _ uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error) {
+	id, err := m.Enqueue(ctx, orgID, queue, "open_pr", payload, priority, nil)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
 }
 
 // --- Helpers ---

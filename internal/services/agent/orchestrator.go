@@ -21,7 +21,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/auth"
-	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/observability"
@@ -436,6 +435,13 @@ type SessionStore interface {
 	// COALESCE loss so an alive preview hydrate is retried rather than
 	// misclassified as a duplicate agent job.
 	ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error)
+	// GetPrimaryChangesetID resolves the session's primary changeset, the
+	// changeset-scoped target for automatic PR creation.
+	GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error)
+	// UpdatePRCreationState records the session's PR-creation state so the
+	// automatic-PR enqueue path can surface a failure when the job cannot be
+	// queued.
+	UpdatePRCreationState(ctx context.Context, orgID, sessionID uuid.UUID, state models.PRCreationState, errMsg string) error
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -519,6 +525,10 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error)
 	OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error)
+	// QueueChangesetPRCreation atomically reserves a changeset's PR slot and
+	// enqueues its open_pr job. queued is false when another caller already
+	// owns the slot or PR creation has completed; that is not an error.
+	QueueChangesetPRCreation(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error)
 }
 
 // UsageRecorder tracks container lifecycle events for billing.
@@ -3214,42 +3224,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
-		var dedupeKey *string
-		shouldEnqueue := true
-		var changesetID uuid.UUID
-		if resolver, ok := o.sessions.(interface {
-			GetPrimaryChangesetID(context.Context, uuid.UUID, uuid.UUID) (uuid.UUID, error)
-		}); ok {
-			var changesetErr error
-			changesetID, changesetErr = resolver.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
-			if changesetErr != nil {
-				o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
-				shouldEnqueue = false
-			} else {
-				payload["changeset_id"] = changesetID.String()
-				key := db.OpenPRDedupeKey(changesetID)
-				dedupeKey = &key
-			}
-		}
-		if shouldEnqueue {
-			if atomicJobs, ok := o.jobs.(interface {
-				QueueChangesetPRCreation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, any, int) (uuid.UUID, bool, error)
-			}); ok && changesetID != uuid.Nil {
-				_, queued, queueErr := atomicJobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0)
-				if queueErr != nil {
-					o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to atomically queue automatic PR creation")
-				} else if !queued {
-					o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
+		changesetID, changesetErr := o.sessions.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
+		if changesetErr != nil {
+			o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
+		} else {
+			payload["changeset_id"] = changesetID.String()
+			if _, queued, queueErr := o.jobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0); queueErr != nil {
+				if stateErr := o.sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
+					o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
 				}
-			} else if _, enqueueErr := o.jobs.Enqueue(ctx, run.OrgID, "default", "open_pr", payload, 0, dedupeKey); enqueueErr != nil {
-				if stateStore, ok := o.sessions.(interface {
-					UpdatePRCreationState(context.Context, uuid.UUID, uuid.UUID, models.PRCreationState, string) error
-				}); ok {
-					if stateErr := stateStore.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
-						o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
-					}
-				}
-				o.logger.Error().Err(enqueueErr).Msg("failed to enqueue automatic PR creation")
+				o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to enqueue automatic PR creation")
+			} else if !queued {
+				o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
 			}
 		}
 	}
