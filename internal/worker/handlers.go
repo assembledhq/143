@@ -702,6 +702,7 @@ type prCreator interface {
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
 	MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
+	MaybeStartAutoRepairForPullRequest(ctx context.Context, orgID uuid.UUID, pullRequestID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
@@ -10146,6 +10147,23 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 				return nil
 			}
 			return err
+		}
+		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_health_updated")
+		if autoRepairErr != nil {
+			logger.Warn().
+				Err(autoRepairErr).
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Msg("failed to evaluate automatic pull request repair after GitHub health update")
+			return nil
+		}
+		if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Str("auto_repair_action", string(decision.Action)).
+				Str("head_sha", decision.HeadSHA).
+				Msg("started automatic pull request repair after GitHub health update")
 		}
 		return nil
 	}
