@@ -368,6 +368,7 @@ describe("AuthenticatedLayout", () => {
     await waitFor(() => {
       expect(container.querySelector('[data-testid="repo-context-switcher"]')).not.toBeInTheDocument();
     });
+    expect(screen.getByTestId("repo-context-switcher-slot")).toHaveClass("empty:hidden");
   });
 
   // --- New nav header tests ---
