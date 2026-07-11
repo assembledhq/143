@@ -15,6 +15,18 @@ type SessionReviewLoopStore struct {
 	db DBTX
 }
 
+func (s *SessionReviewLoopStore) GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
+	var changesetID uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&changesetID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("get primary changeset for review loop: %w", err)
+	}
+	return changesetID, nil
+}
+
 func NewSessionReviewLoopStore(db DBTX) *SessionReviewLoopStore {
 	return &SessionReviewLoopStore{db: db}
 }

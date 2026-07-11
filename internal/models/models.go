@@ -724,6 +724,7 @@ func (s PullRequestCIStatus) Validate() error {
 type PullRequest struct {
 	ID             uuid.UUID               `db:"id" json:"id"`
 	SessionID      *uuid.UUID              `db:"session_id" json:"session_id,omitempty"`
+	ChangesetID    *uuid.UUID              `db:"changeset_id" json:"changeset_id,omitempty"`
 	OrgID          uuid.UUID               `db:"org_id" json:"org_id"`
 	GitHubPRNumber int                     `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string                  `db:"github_pr_url" json:"github_pr_url"`
@@ -756,6 +757,9 @@ type PullRequest struct {
 	MergeWhenReadyHealthVersion *int64                         `db:"merge_when_ready_health_version" json:"merge_when_ready_health_version,omitempty"`
 	MergeWhenReadyError         string                         `db:"merge_when_ready_error" json:"merge_when_ready_error,omitempty"`
 	MergeWhenReadyUpdatedAt     *time.Time                     `db:"merge_when_ready_updated_at" json:"merge_when_ready_updated_at,omitempty"`
+	FeedbackMonitoring          PRFeedbackMonitoring           `db:"feedback_monitoring" json:"feedback_monitoring"`
+	FeedbackBotEpoch            int64                          `db:"feedback_bot_epoch" json:"feedback_bot_epoch"`
+	FeedbackBotCyclesInEpoch    int                            `db:"feedback_bot_cycles_in_epoch" json:"feedback_bot_cycles_in_epoch"`
 	MergedAt                    *time.Time                     `db:"merged_at" json:"merged_at,omitempty"`
 	CreatedAt                   time.Time                      `db:"created_at" json:"created_at"`
 	UpdatedAt                   time.Time                      `db:"updated_at" json:"updated_at"`
@@ -809,11 +813,12 @@ type SessionMessageSource string
 const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
+	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)

@@ -88,7 +88,7 @@ func (s *PullRequestStore) ListOpenStaleForHealthSync(ctx context.Context, orgID
 	if err != nil {
 		return nil, fmt.Errorf("list stale pull requests for health sync: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) UpsertHealthSummary(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA, baseSHA string, summary models.PullRequestHealthSummary, preview json.RawMessage) (models.PullRequestHealthCurrent, error) {

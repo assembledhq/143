@@ -123,6 +123,64 @@ func TestJobStore_Enqueue(t *testing.T) {
 	}
 }
 
+func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		reserveRows int64
+		enqueueErr  error
+		wantQueued  bool
+		wantErr     bool
+	}{
+		{name: "commits reservation and job together", reserveRows: 1, wantQueued: true},
+		{name: "does not enqueue when reservation is held", reserveRows: 0},
+		{name: "rolls back reservation when enqueue fails", reserveRows: 1, enqueueErr: errors.New("insert failed"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			defer mock.Close()
+
+			orgID, sessionID, changesetID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			mock.ExpectBegin()
+			mock.ExpectExec(`UPDATE session_changesets SET pr_creation_state = 'queued'.+WHERE org_id = .+ AND session_id = .+ AND id =`).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.reserveRows))
+			if tt.reserveRows == 1 {
+				query := mock.ExpectQuery("INSERT INTO jobs").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg())
+				if tt.enqueueErr != nil {
+					query.WillReturnError(tt.enqueueErr)
+				} else {
+					query.WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+					mock.ExpectCommit()
+				}
+			}
+			mock.ExpectRollback()
+
+			gotJobID, queued, err := NewJobStore(mock).QueueChangesetPRCreation(
+				context.Background(), orgID, sessionID, changesetID, "default",
+				map[string]any{"changeset_id": changesetID.String()}, 5,
+			)
+			if tt.wantErr {
+				require.Error(t, err, "atomic enqueue should report the failed transaction")
+			} else {
+				require.NoError(t, err, "atomic enqueue should complete without an error")
+			}
+			require.Equal(t, tt.wantQueued, queued, "result should identify whether this caller reserved the changeset")
+			if tt.wantQueued {
+				require.Equal(t, jobID, gotJobID, "committed enqueue should return its durable job ID")
+			} else {
+				require.Equal(t, uuid.Nil, gotJobID, "non-committed enqueue should not return a job ID")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all transaction boundaries and scoped statements should be verified")
+		})
+	}
+}
+
 func TestJobStore_WorkerLoadSamples(t *testing.T) {
 	t.Parallel()
 
@@ -1093,4 +1151,10 @@ func TestJobStore_SelectWorkerWithSandboxCapacity_NoAvailableWorker(t *testing.T
 
 func jobDedupeKeyPtr(s string) *string {
 	return &s
+}
+
+func TestOpenPRDedupeKeyUsesChangesetScope(t *testing.T) {
+	t.Parallel()
+	changesetID := uuid.New()
+	require.Equal(t, "open_pr:"+changesetID.String(), OpenPRDedupeKey(changesetID), "open PR jobs should deduplicate by changeset PR slot")
 }

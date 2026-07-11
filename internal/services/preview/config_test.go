@@ -2271,16 +2271,20 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			raw, err := os.ReadFile(candidate)
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
-			require.Contains(t, string(raw), "sh .143/preview-build-frontend.sh", "dogfood Next preview should rebuild when the build-phase output is unavailable")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
+			require.Contains(t, string(raw), "sh .143/preview-build-frontend.sh", "dogfood Next preview run phase should rebuild via the build script as a restart fallback when standalone output is missing")
+			require.NotContains(t, string(raw), "npm run build", "dogfood Next preview must not run the multi-GB next build in the run phase; it belongs in the build phase to avoid OOM")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
 
+			// The production build moved out of the run-phase entrypoint into the
+			// build-phase script (see PR #1800). Assert the moved responsibilities
+			// still live there so we don't silently lose build coverage.
 			buildScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-build-frontend.sh"))
 			require.NoError(t, err, "test should read committed dogfood frontend build script")
-			require.Contains(t, string(buildScript), "npm run build", "dogfood preview build phase should produce a production build before serving")
-			require.Contains(t, string(buildScript), "sh .143/preview-install-frontend.sh", "dogfood preview build phase should run the shared install script as a fallback")
-			require.Contains(t, string(buildScript), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood preview build phase should stage generated CSS and other static chunks next to the standalone server")
-			require.Contains(t, string(buildScript), "cp -R public .next/standalone/frontend/public", "dogfood preview build phase should stage public assets next to the standalone server")
+			require.Contains(t, string(buildScript), "npm run build", "dogfood Next preview build phase should run a production build before serving")
+			require.Contains(t, string(buildScript), "sh .143/preview-install-frontend.sh", "dogfood Next preview build phase should run the shared install script as a fallback when the platform install phase did not run")
+			require.Contains(t, string(buildScript), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview build phase should stage generated CSS and other static chunks next to the standalone server")
+			require.Contains(t, string(buildScript), "cp -R public .next/standalone/frontend/public", "dogfood Next preview build phase should stage public assets next to the standalone server")
 
 			installScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-install-frontend.sh"))
 			require.NoError(t, err, "test should read committed dogfood frontend install script")

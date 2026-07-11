@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -332,10 +333,14 @@ type SessionAutomationSettings struct {
 // AutomaticFollowThroughOrgSettings controls automatic PR/readiness next steps
 // when sessions or review loops reach a stable point. All flags default off.
 type AutomaticFollowThroughOrgSettings struct {
-	ReadinessAfterReviewLoop       bool               `json:"readiness_after_review_loop,omitempty"`
-	ReadinessAfterReviewLoopStates []ReviewLoopStatus `json:"readiness_after_review_loop_states,omitempty"`
-	ResolveConflictsWhenIdle       bool               `json:"resolve_conflicts_when_idle,omitempty"`
-	FixTestsWhenIdle               bool               `json:"fix_tests_when_idle,omitempty"`
+	ReadinessAfterReviewLoop       bool                `json:"readiness_after_review_loop,omitempty"`
+	ReadinessAfterReviewLoopStates []ReviewLoopStatus  `json:"readiness_after_review_loop_states,omitempty"`
+	ResolveConflictsWhenIdle       bool                `json:"resolve_conflicts_when_idle,omitempty"`
+	FixTestsWhenIdle               bool                `json:"fix_tests_when_idle,omitempty"`
+	PRFeedbackMode                 PRFeedbackHumanMode `json:"pr_feedback_mode,omitempty"`
+	PRFeedbackBotMode              PRFeedbackBotMode   `json:"pr_feedback_bot_mode,omitempty"`
+	PRFeedbackBotCycleLimit        NullableCycleLimit  `json:"pr_feedback_bot_cycle_limit,omitzero"`
+	PRFeedbackBotAllowlist         []string            `json:"pr_feedback_bot_allowlist,omitempty"`
 }
 
 // EffectiveReadinessAfterReviewLoopStates applies the v1 default terminal
@@ -354,6 +359,23 @@ func (s SessionAutomationSettings) Validate() error {
 
 // Validate returns an error when automatic follow-through settings are invalid.
 func (s AutomaticFollowThroughOrgSettings) Validate() error {
+	if err := s.PRFeedbackMode.Validate(); err != nil {
+		return err
+	}
+	if err := s.PRFeedbackBotMode.Validate(); err != nil {
+		return err
+	}
+	if err := s.PRFeedbackBotCycleLimit.Validate(); err != nil {
+		return err
+	}
+	if s.PRFeedbackBotMode == PRFeedbackBotModeAllowlist && len(s.PRFeedbackBotAllowlist) == 0 {
+		return fmt.Errorf("pr_feedback_bot_allowlist must not be empty when bot mode is allowlist")
+	}
+	for _, login := range s.PRFeedbackBotAllowlist {
+		if strings.TrimSpace(login) == "" {
+			return fmt.Errorf("pr_feedback_bot_allowlist entries must not be blank")
+		}
+	}
 	for _, status := range s.ReadinessAfterReviewLoopStates {
 		if err := status.Validate(); err != nil {
 			return fmt.Errorf("readiness_after_review_loop_states: %w", err)
