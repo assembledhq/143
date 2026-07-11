@@ -17,7 +17,8 @@ var prColumns = []string{
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+	"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch",
+	"merged_at", "created_at", "updated_at",
 }
 
 func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
@@ -26,6 +27,7 @@ func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 		"Fix bug", (*string)(nil), "open", "pending", "app", "", (*string)(nil), (*string)(nil), (*string)(nil),
 		models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0),
 		models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil),
+		models.PRFeedbackMonitoringInherit, int64(0), 0,
 		(*time.Time)(nil), now, now,
 	}
 }
