@@ -165,6 +165,15 @@ describe("AutopilotPageContent", () => {
     expect(screen.queryByRole("dialog", { name: "Autopilot documents" })).not.toBeInTheDocument();
   });
 
+  it("renders editable config pills as buttons for keyboard access", async () => {
+    renderWithProviders(<AutopilotPageContent />);
+
+    expect(await screen.findByRole("button", { name: "No direction set" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "No focus" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "No documents" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Default weights" })).toBeInTheDocument();
+  });
+
   it("lets admins start a blocked queue issue and attach session notes", async () => {
     queueRows = [
       {
