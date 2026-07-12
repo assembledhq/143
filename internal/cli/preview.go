@@ -23,6 +23,7 @@ func runPreview(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Fprintln(stdout, `Usage:
   143-tools preview create [--session-id ID] [--repo NAME] [--branch NAME] [--wait]
+  143-tools preview ensure [--session-id ID] [--wait]
   143-tools preview status [--session-id ID|--preview-id ID]
   143-tools preview list
   143-tools preview stop [--session-id ID|--preview-id ID]
@@ -31,6 +32,10 @@ func runPreview(args []string, stdout, stderr io.Writer) int {
   143-tools preview console --session-id ID [--level error]
   143-tools preview inspect --session-id ID [--selector CSS|--x N --y N]
   143-tools preview interact --session-id ID --steps JSON
+  143-tools preview observe [--session-id ID] [--path /]
+  143-tools preview act [--session-id ID] --steps JSON
+  143-tools preview control [--session-id ID]
+  143-tools preview request_handoff [--session-id ID] --reason TEXT
   143-tools preview multi_viewport --session-id ID [--viewports JSON]
   143-tools preview visual_diff --session-id ID --before-snapshot-id ID --after-snapshot-id ID
   143-tools preview assert --session-id ID --assertions JSON
@@ -70,7 +75,7 @@ create infers --repo from the cwd's git remote and --branch from HEAD when omitt
 			return printToolResult(executor.stop(ctx, mustJSON(map[string]string{"preview_id": args[1]})), stdout, stderr)
 		}
 		return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
-	case "restart", "update", "screenshot", "console", "inspect", "interact", "multi_viewport", "visual_diff", "assert":
+	case "ensure", "restart", "update", "screenshot", "console", "inspect", "interact", "observe", "act", "control", "request_handoff", "multi_viewport", "visual_diff", "assert":
 		return runPreviewViaTools(ctx, cfg, args, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "error: unknown preview subcommand %q\n", args[0])

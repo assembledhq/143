@@ -19,7 +19,6 @@ import {
   CheckCircle2,
   Circle,
   Clock,
-  Palette,
   RefreshCw,
   ChevronDown,
   MoreHorizontal,
@@ -57,10 +56,10 @@ import {
   type PreviewRestartReason,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
-import { DesignModeOverlay } from "./design-mode-overlay";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { TTLWarning } from "./ttl-warning";
 import { OpenPreviewButton } from "./open-preview-button";
+import { SharedBrowserSurface } from "./shared-browser-surface";
 import {
   buildPreviewBootstrapSrc,
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
@@ -480,10 +479,7 @@ export function PreviewPanel({
   previewOriginTemplate,
 }: PreviewPanelProps) {
   const queryClient = useQueryClient();
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const startupPhaseRailRef = useRef<HTMLDivElement | null>(null);
-  const [designMode, setDesignMode] = useState(false);
-  const [bootstrapComplete, setBootstrapComplete] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
   const [showPreviewRuntimeLogs, setShowPreviewRuntimeLogs] = useState(false);
@@ -736,7 +732,6 @@ export function PreviewPanel({
 
   const resetPreviewState = useCallback(() => {
     setMutationError(null);
-    setBootstrapComplete(false);
     queryClient.invalidateQueries({
       queryKey: ["preview-status", sessionId],
     });
@@ -776,125 +771,10 @@ export function PreviewPanel({
     },
   });
 
-  // Bootstrap token exchange
-  const bootstrapMutation = useMutation({
-    mutationFn: () => api.sessions.preview.bootstrap(sessionId),
-    onError: (err) => {
-      setMutationError(`Failed to bootstrap preview: ${err.message}`);
-    },
-  });
-
-  const bootstrapMutateRef = useRef(bootstrapMutation.mutate);
-  useEffect(() => {
-    bootstrapMutateRef.current = bootstrapMutation.mutate;
-  }, [bootstrapMutation.mutate]);
-
   const previewOrigin =
     runtimePreviewOrigin ||
     (instance ? previewOriginTemplate.replace("{id}", instance.id) : "");
 
-  // Cache the parsed origin to avoid re-parsing on every postMessage event
-  const parsedOrigin = useMemo(() => {
-    if (!previewOrigin) return "";
-    try {
-      return new URL(previewOrigin).origin;
-    } catch {
-      return "";
-    }
-  }, [previewOrigin]);
-
-  // Warn if the preview origin matches the app origin — this would break the
-  // cross-origin isolation that the iframe sandbox relies on for security.
-  useEffect(() => {
-    if (parsedOrigin && parsedOrigin === window.location.origin) {
-      console.warn(
-        "[143 Preview] Preview origin matches app origin (%s). " +
-          "This breaks iframe sandbox isolation. " +
-          "Ensure PREVIEW_ORIGIN_TEMPLATE uses a different domain/port.",
-        parsedOrigin,
-      );
-    }
-  }, [parsedOrigin]);
-
-  // Reset bootstrapComplete when preview transitions away from ready
-  // (e.g., backend restart) so the loading overlay shows for the new iframe.
-  // Uses the React "store previous value in state" pattern to avoid both
-  // setState-in-effect and ref-access-during-render lint errors.
-  const [prevIsReady, setPrevIsReady] = useState(isReady);
-  if (prevIsReady !== isReady) {
-    setPrevIsReady(isReady);
-    if (prevIsReady && !isReady) {
-      setBootstrapComplete(false);
-    }
-  }
-
-  // Track pending load listener for cleanup
-  const pendingLoadCleanupRef = useRef<(() => void) | null>(null);
-
-  // Post bootstrap token to iframe, retrying on iframe load if needed
-  const sendBootstrapToken = useCallback((token: string, origin: string) => {
-    // Clean up any previous pending listener
-    pendingLoadCleanupRef.current?.();
-    pendingLoadCleanupRef.current = null;
-
-    const contentWindow = iframeRef.current?.contentWindow;
-    if (contentWindow) {
-      contentWindow.postMessage(
-        { type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token },
-        origin,
-      );
-      setBootstrapComplete(true);
-      return;
-    }
-    // Iframe not loaded yet - wait for load event and retry
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const onLoad = () => {
-      pendingLoadCleanupRef.current = null;
-      iframe.removeEventListener("load", onLoad);
-      const cw = iframe.contentWindow;
-      if (cw) {
-        cw.postMessage({ type: PREVIEW_BOOTSTRAP_TOKEN_EVENT, token }, origin);
-        setBootstrapComplete(true);
-      }
-    };
-    iframe.addEventListener("load", onLoad);
-    pendingLoadCleanupRef.current = () =>
-      iframe.removeEventListener("load", onLoad);
-  }, []);
-
-  // Clean up pending load listener on unmount
-  useEffect(() => {
-    return () => {
-      pendingLoadCleanupRef.current?.();
-    };
-  }, []);
-
-  // Handle postMessage exchange for bootstrap
-  const handleMessage = useCallback(
-    (event: MessageEvent) => {
-      if (!parsedOrigin || event.origin !== parsedOrigin) return;
-
-      if (event.data?.type === PREVIEW_BOOTSTRAP_READY_EVENT) {
-        bootstrapMutateRef.current(undefined, {
-          onSuccess: (data) => {
-            setMutationError(null);
-            sendBootstrapToken(data.token, parsedOrigin);
-          },
-        });
-      }
-    },
-    [parsedOrigin, sendBootstrapToken],
-  );
-
-  useEffect(() => {
-    window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
-  }, [handleMessage]);
-
-  // Set iframe src when preview is ready
-  const iframeSrc =
-    isReady && previewOrigin ? buildPreviewIframeSrc(previewOrigin) : undefined;
 
   const isMutating =
     startMutation.isPending ||
@@ -1022,25 +902,6 @@ export function PreviewPanel({
             </div>
 
             <div className="flex max-w-full shrink-0 flex-wrap items-center justify-start gap-2 sm:justify-end">
-              {isReady && (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size="icon-sm"
-                        variant={designMode ? "default" : "outline"}
-                        onClick={() => setDesignMode(!designMode)}
-                      >
-                        <Palette className="size-3.5" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {designMode ? "Exit Design Mode" : "Design Mode"}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
-
               {isManageable && (
                 <PreviewActionsMenu
                   expiresAt={isReady ? instance?.expires_at : undefined}
@@ -1444,45 +1305,9 @@ export function PreviewPanel({
         </Card>
       )}
 
-      {/* Preview iframe */}
-      {isReady && iframeSrc && (
-        <div className="relative rounded-lg border bg-muted/30 overflow-hidden">
-          <div className="mx-auto w-full">
-            <div className="relative" style={{ paddingBottom: "62.5%" }}>
-              {/* Sandbox threat model: allow-same-origin is required so the
-                  iframe can set cookies and use localStorage on its own
-                  subdomain ({id}.preview.*). The parent app is on a different
-                  origin (app.*), so the cross-origin boundary prevents the
-                  framed content from accessing the parent's DOM or storage.
-                  The CSP frame-ancestors header restricts which origins can
-                  embed the preview, and the bootstrap token exchange ensures
-                  only authenticated users can access preview content. */}
-              <iframe
-                ref={iframeRef}
-                src={iframeSrc}
-                className="absolute inset-0 w-full h-full bg-white"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-downloads allow-popups"
-                title="Preview"
-              />
-              {/* Loading overlay before bootstrap */}
-              {!bootstrapComplete && (
-                <div className="absolute inset-0 flex items-center justify-center bg-background/80">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Loader2 className="size-4 animate-spin" />
-                    Connecting to preview...
-                  </div>
-                </div>
-              )}
-              {/* Design mode overlay */}
-              {designMode && bootstrapComplete && (
-                <ErrorBoundary fallback={null}>
-                  <DesignModeOverlay sessionId={sessionId} />
-                </ErrorBoundary>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      {/* The panel renders the worker-owned session browser. Human and agent
+          input therefore share URL, cookies, local storage, and page state. */}
+      {isReady && <SharedBrowserSurface sessionId={sessionId} />}
 
       {/* Idle state */}
       {(!status ||

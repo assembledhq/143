@@ -1,6 +1,21 @@
 # Design: Agent-Native Preview Verification
 
-> **Status:** Future | **Last reviewed:** 2026-07-10
+> **Status:** In progress — Phase 1 complete | **Last reviewed:** 2026-07-11
+
+## Implementation Status
+
+Phase 1 now provides the durable session-owned browser
+foundation and native `ensure`/`observe`/`act` path: persisted browser identity and storage state,
+compatible-origin restoration, bounded accessibility/DOM and console-cursor
+observations, serialized structured actions, configured path enforcement,
+worker routing, explicit session-token preview capabilities, artifact-backed
+screenshots, implicit session targeting, an audited human/agent control lease,
+and a preview panel that watches and controls the same worker-owned browser
+context used by the agent. Active-action fencing prevents human takeover and
+agent input from racing.
+
+Native model image attachments, verification evidence, and automatic
+diff-aware verification remain future phases.
 
 ## Summary
 

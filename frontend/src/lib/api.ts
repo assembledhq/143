@@ -749,6 +749,21 @@ export const api = {
       inspect: (sessionId: string, x: number, y: number) =>
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
           .then(r => r.data),
+      observeBrowser: (sessionId: string) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserObservation>>(`/api/v1/sessions/${sessionId}/preview/watch`, {})
+          .then(r => r.data),
+      browserControl: (sessionId: string) =>
+        get<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control`)
+          .then(r => r.data),
+      acquireBrowserControl: (sessionId: string) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control/acquire`, { duration_seconds: 300 })
+          .then(r => r.data),
+      returnBrowserControl: (sessionId: string) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control/return`)
+          .then(r => r.data),
+      actAsHuman: (sessionId: string, steps: Array<Record<string, unknown>>) =>
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserActResult>>(`/api/v1/sessions/${sessionId}/preview/control/act`, { steps, inline_base64: true, ephemeral: true })
+          .then(r => r.data),
       designFeedback: (sessionId: string, feedback: import('./preview-types').DesignModeFeedback) => post(`/api/v1/sessions/${sessionId}/preview/design-feedback`, feedback),
     },
   },
