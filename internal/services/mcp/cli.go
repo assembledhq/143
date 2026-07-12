@@ -149,7 +149,9 @@ func RunCLI(ctx context.Context, tr ToolSource, args []string, stdout, stderr io
 
 	// Print output.
 	for _, c := range result.Content {
-		fmt.Fprintln(stdout, c.Text)
+		if c.Type == "text" {
+			fmt.Fprintln(stdout, c.Text)
+		}
 	}
 
 	return 0

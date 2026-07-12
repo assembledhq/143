@@ -10,7 +10,8 @@ import (
 )
 
 type staticToolSource struct {
-	tools []Tool
+	tools  []Tool
+	result *ToolCallResult
 }
 
 func (s staticToolSource) ListTools() []Tool {
@@ -18,6 +19,9 @@ func (s staticToolSource) ListTools() []Tool {
 }
 
 func (s staticToolSource) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
+	if s.result != nil {
+		return s.result
+	}
 	return TextResult("called " + name)
 }
 
