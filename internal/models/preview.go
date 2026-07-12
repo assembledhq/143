@@ -79,6 +79,61 @@ type PreviewResourceSample struct {
 	CreatedAt         time.Time       `db:"created_at" json:"created_at"`
 }
 
+// PreviewBrowserSession is the durable identity and restorable state of the
+// browser owned by one coding session. Live CDP targets remain worker-local;
+// this record survives preview instance replacement and worker restarts.
+type PreviewBrowserSession struct {
+	ID                    uuid.UUID                  `db:"id" json:"id"`
+	OrgID                 uuid.UUID                  `db:"org_id" json:"org_id"`
+	SessionID             uuid.UUID                  `db:"session_id" json:"session_id"`
+	PreviewInstanceID     *uuid.UUID                 `db:"preview_instance_id" json:"preview_instance_id,omitempty"`
+	ContextKey            string                     `db:"context_key" json:"context_key"`
+	ControlState          PreviewBrowserControlState `db:"control_state" json:"control_state"`
+	ControlLeaseOwnerID   *uuid.UUID                 `db:"control_lease_owner_id" json:"control_lease_owner_id,omitempty"`
+	ControlLeaseExpiresAt *time.Time                 `db:"control_lease_expires_at" json:"control_lease_expires_at,omitempty"`
+	AgentActionToken      *uuid.UUID                 `db:"agent_action_token" json:"-"`
+	AgentActionExpiresAt  *time.Time                 `db:"agent_action_expires_at" json:"-"`
+	HandoffReason         string                     `db:"handoff_reason" json:"handoff_reason,omitempty"`
+	CurrentURL            string                     `db:"current_url" json:"current_url,omitempty"`
+	Viewport              json.RawMessage            `db:"viewport" json:"viewport"`
+	StorageState          json.RawMessage            `db:"storage_state" json:"-"`
+	ConsoleCursor         int64                      `db:"console_cursor" json:"console_cursor"`
+	LastObservedAt        *time.Time                 `db:"last_observed_at" json:"last_observed_at,omitempty"`
+	CreatedAt             time.Time                  `db:"created_at" json:"created_at"`
+	UpdatedAt             time.Time                  `db:"updated_at" json:"updated_at"`
+}
+
+type PreviewBrowserControlRequest struct {
+	Reason          string `json:"reason,omitempty"`
+	DurationSeconds int    `json:"duration_seconds,omitempty"`
+}
+
+type PreviewBrowserControlStatus struct {
+	State          PreviewBrowserControlState `json:"state"`
+	LeaseOwnerID   *uuid.UUID                 `json:"lease_owner_id,omitempty"`
+	LeaseExpiresAt *time.Time                 `json:"lease_expires_at,omitempty"`
+	HandoffReason  string                     `json:"handoff_reason,omitempty"`
+	IsLeaseOwner   bool                       `json:"is_lease_owner"`
+}
+
+type PreviewBrowserRestorationStatus string
+
+const (
+	PreviewBrowserRestorationPreserved   PreviewBrowserRestorationStatus = "preserved"
+	PreviewBrowserRestorationRestored    PreviewBrowserRestorationStatus = "restored"
+	PreviewBrowserRestorationReset       PreviewBrowserRestorationStatus = "reset"
+	PreviewBrowserRestorationUnavailable PreviewBrowserRestorationStatus = "unavailable"
+)
+
+func (s PreviewBrowserRestorationStatus) Validate() error {
+	switch s {
+	case PreviewBrowserRestorationPreserved, PreviewBrowserRestorationRestored, PreviewBrowserRestorationReset, PreviewBrowserRestorationUnavailable:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewBrowserRestorationStatus: %q", s)
+	}
+}
+
 // PreviewRuntime is the live worker attachment for a preview instance. Preview
 // instances are durable user-facing records; runtimes are leased worker-owned
 // serving attachments and are authoritative for preview proxy routing.
@@ -507,9 +562,30 @@ type PreviewConfig struct {
 	Credentials    CredentialConfig                `json:"credentials"`
 	Network        NetworkConfig                   `json:"network"`
 	Progressive    bool                            `json:"progressive,omitempty"`
+	Browser        PreviewBrowserConfig            `json:"browser,omitempty"`
+	Verification   PreviewVerificationConfig       `json:"verification,omitempty"`
 
 	RuntimeSecretEnv   map[string]map[string]string `json:"-"`
 	RuntimeSecretFiles []PreviewRuntimeSecretFile   `json:"-"`
+}
+
+// PreviewBrowserConfig controls the durable browser attached to a session
+// preview. Defaults are applied while parsing repository config.
+type PreviewBrowserConfig struct {
+	PersistSession  bool         `json:"persist_session"`
+	DefaultViewport ViewportSpec `json:"default_viewport"`
+	AllowedPaths    []string     `json:"allowed_paths"`
+}
+
+// PreviewVerificationConfig controls bounded, agent-native verification.
+// It deliberately describes policy rather than a repository-specific test DSL.
+type PreviewVerificationConfig struct {
+	Auto               bool           `json:"auto"`
+	MaxAttempts        int            `json:"max_attempts"`
+	TimeoutSeconds     int            `json:"timeout_seconds"`
+	Viewports          []ViewportSpec `json:"viewports"`
+	SmokePaths         []string       `json:"smoke_paths"`
+	FailOnConsoleError bool           `json:"fail_on_console_error"`
 }
 
 // PrimaryServiceSupportsHMR reports whether the config's primary service
@@ -755,11 +831,12 @@ type ResourceLimits struct {
 
 // ScreenshotOpts configures a screenshot capture.
 type ScreenshotOpts struct {
-	Path      string        `json:"path"`
-	ViewportW int           `json:"viewport_w"`
-	ViewportH int           `json:"viewport_h"`
-	FullPage  bool          `json:"full_page"`
-	Delay     time.Duration `json:"delay"`
+	Path        string        `json:"path"`
+	ViewportW   int           `json:"viewport_w"`
+	ViewportH   int           `json:"viewport_h"`
+	FullPage    bool          `json:"full_page"`
+	Delay       time.Duration `json:"delay"`
+	CurrentPage bool          `json:"-"`
 }
 
 // PreviewArtifact is a user-readable artifact produced by preview tooling.
@@ -788,7 +865,7 @@ func DefaultScreenshotOpts() ScreenshotOpts {
 
 // ScreenshotResult is the output of a screenshot capture.
 type ScreenshotResult struct {
-	PNG           []byte           `json:"-"`
+	PNG           []byte           `json:"png_base64,omitempty"`
 	PageTitle     string           `json:"page_title"`
 	ConsoleErrors []ConsoleMessage `json:"console_errors,omitempty"`
 	URL           string           `json:"url"`
@@ -797,8 +874,53 @@ type ScreenshotResult struct {
 	CapturedAt    time.Time        `json:"captured_at"`
 }
 
+type BrowserTarget struct {
+	PreviewID  string `json:"preview_id"`
+	SessionID  string `json:"session_id,omitempty"`
+	ContextKey string `json:"context_key"`
+}
+
+type PreviewObservationOpts struct {
+	ScreenshotOpts
+	Selector              string `json:"selector,omitempty"`
+	IncludeDOM            bool   `json:"include_dom,omitempty"`
+	MaxSemanticBytes      int    `json:"max_semantic_bytes,omitempty"`
+	ConsoleCursor         int64  `json:"console_cursor,omitempty"`
+	PreserveConsoleCursor bool   `json:"preserve_console_cursor,omitempty"`
+	ReadOnly              bool   `json:"read_only,omitempty"`
+	SkipSemantic          bool   `json:"skip_semantic,omitempty"`
+}
+
+type PreviewBrowserContextStatus struct {
+	ContextKey   string                          `json:"context_key"`
+	Reused       bool                            `json:"reused"`
+	Restoration  PreviewBrowserRestorationStatus `json:"restoration"`
+	Persisted    bool                            `json:"persisted"`
+	StatusDetail string                          `json:"status_detail,omitempty"`
+}
+
+type PreviewObservation struct {
+	Screenshot    *ScreenshotResult           `json:"screenshot,omitempty"`
+	URL           string                      `json:"url"`
+	Title         string                      `json:"title"`
+	Viewport      ViewportSpec                `json:"viewport"`
+	CapturedAt    time.Time                   `json:"captured_at"`
+	SemanticState string                      `json:"semantic_state,omitempty"`
+	DOMExcerpt    string                      `json:"dom_excerpt,omitempty"`
+	Console       []ConsoleMessage            `json:"console,omitempty"`
+	ConsoleCursor int64                       `json:"console_cursor"`
+	Ready         bool                        `json:"ready"`
+	Context       PreviewBrowserContextStatus `json:"browser_context"`
+}
+
+type PreviewActResult struct {
+	Interaction *InteractionResult  `json:"interaction"`
+	Observation *PreviewObservation `json:"observation,omitempty"`
+}
+
 // ConsoleMessage is a browser console message captured during inspection.
 type ConsoleMessage struct {
+	Cursor int64     `json:"cursor,omitempty"`
 	Level  string    `json:"level"` // "error", "warning", "log", "info"
 	Text   string    `json:"text"`
 	Source string    `json:"source,omitempty"`
@@ -817,8 +939,14 @@ type ScreencastResult struct {
 
 // InteractionStep defines a single browser interaction action.
 type InteractionStep struct {
-	Action     string        `json:"action"`     // "click", "type", "navigate", "wait", "scroll", "select"
-	Selector   string        `json:"selector"`   // CSS selector for click/type/select targets
+	Action     string        `json:"action"`   // click, fill/type, navigate, wait, scroll, select, check, press, hover, viewport
+	Selector   string        `json:"selector"` // CSS selector for click/type/select targets
+	Role       string        `json:"role,omitempty"`
+	Name       string        `json:"name,omitempty"`
+	X          *int          `json:"x,omitempty"`
+	Y          *int          `json:"y,omitempty"`
+	URL        string        `json:"url,omitempty"`
+	Text       string        `json:"text,omitempty"`
 	Value      string        `json:"value"`      // text to type, URL to navigate to, option to select
 	WaitFor    string        `json:"wait_for"`   // CSS selector or "networkidle" or "load"
 	Timeout    time.Duration `json:"timeout"`    // max wait for this step, default 10s
@@ -840,9 +968,11 @@ type StepResult struct {
 	Action     string            `json:"action"`
 	Success    bool              `json:"success"`
 	Error      string            `json:"error,omitempty"`
+	ErrorCode  string            `json:"error_code,omitempty"`
 	Screenshot *ScreenshotResult `json:"screenshot,omitempty"`
 	Duration   time.Duration     `json:"duration"`
 	URL        string            `json:"url"`
+	MatchCount int               `json:"selector_match_count,omitempty"`
 }
 
 // MultiViewportOpts configures a multi-viewport screenshot capture.

@@ -2,10 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -17,15 +19,17 @@ import (
 // /sessions/{id}/preview..., while branch preview lifecycle keeps using
 // /previews*. The executor never constructs worker URLs or preview RPC tokens.
 type previewToolExecutor struct {
-	client *Client
+	client   *Client
+	internal bool
 }
 
 func (e *previewToolExecutor) handles(name string) bool {
 	switch name {
-	case "preview_create", "preview_status", "preview_list", "preview_stop",
+	case "preview_create", "preview_ensure", "preview_status", "preview_list", "preview_stop",
 		"preview_restart", "preview_update", "preview_screenshot", "preview_console",
 		"preview_inspect", "preview_interact", "preview_multi_viewport",
-		"preview_visual_diff", "preview_assert":
+		"preview_visual_diff", "preview_assert", "preview_observe", "preview_act",
+		"preview_control", "preview_request_handoff":
 		return true
 	}
 	return false
@@ -33,6 +37,14 @@ func (e *previewToolExecutor) handles(name string) bool {
 
 func (e *previewToolExecutor) tools() []mcp.Tool {
 	return []mcp.Tool{
+		{
+			Name:        "preview_ensure",
+			Description: "Idempotently create or resume the current session preview. Defaults to 143_SESSION_ID.",
+			InputSchema: mcp.ToolSchema{Type: "object", Properties: map[string]mcp.SchemaProperty{
+				"session_id": {Type: "string", Description: "Session ID; defaults to 143_SESSION_ID"},
+				"wait":       {Type: "boolean", Description: "Wait until the preview is ready or fails"},
+			}},
+		},
 		{
 			Name:        "preview_create",
 			Description: "Create or reuse a preview. Prefer --session-id for agent visual iteration against the live session workspace; use --repository and --branch for pushed branch previews.",
@@ -119,6 +131,33 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 		{Name: "preview_assert", Description: "Run browser/visual assertions against a preview. Pass --assertions as JSON array.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
 			"assertions": {Type: "string", Description: "JSON array of assertion objects"},
 		})},
+		{Name: "preview_observe", Description: "Capture a high-signal observation of the current session browser, including screenshot metadata and console errors.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
+			"path":               {Type: "string", Description: "Optional preview-origin path to observe"},
+			"selector":           {Type: "string", Description: "Optional selector for a bounded DOM excerpt"},
+			"include_dom":        {Type: "boolean", Description: "Include a bounded DOM excerpt"},
+			"viewport_w":         {Type: "number", Description: "Viewport width"},
+			"viewport_h":         {Type: "number", Description: "Viewport height"},
+			"full_page":          {Type: "boolean", Description: "Capture the full page"},
+			"max_semantic_bytes": {Type: "number", Description: "Bound semantic and DOM output size"},
+			"inline_base64":      {Type: "boolean", Description: "Include screenshot bytes; defaults false"},
+			"output":             {Type: "string", Description: "Write screenshot PNG to this workspace path"},
+			"console_cursor":     {Type: "number", Description: "Return console messages after this cursor"},
+		})},
+		{Name: "preview_act", Description: "Execute structured actions in the shared session browser and return the resulting observation.", InputSchema: previewTargetSchema(map[string]mcp.SchemaProperty{
+			"steps":              {Type: "string", Description: "JSON array of structured browser actions"},
+			"selector":           {Type: "string", Description: "Optional selector for a bounded final DOM excerpt"},
+			"include_dom":        {Type: "boolean", Description: "Include a bounded final DOM excerpt"},
+			"viewport_w":         {Type: "number", Description: "Final observation viewport width"},
+			"viewport_h":         {Type: "number", Description: "Final observation viewport height"},
+			"max_semantic_bytes": {Type: "number", Description: "Bound semantic and DOM output size"},
+			"inline_base64":      {Type: "boolean", Description: "Include screenshot bytes; defaults false"},
+			"output":             {Type: "string", Description: "Write the final screenshot PNG to this workspace path"},
+			"console_cursor":     {Type: "number", Description: "Return console messages after this cursor"},
+		})},
+		{Name: "preview_control", Description: "Read the shared session browser control state.", InputSchema: previewSessionSchema(nil)},
+		{Name: "preview_request_handoff", Description: "Pause browser actions and request human control of the shared session browser.", InputSchema: previewSessionSchema(map[string]mcp.SchemaProperty{
+			"reason": {Type: "string", Description: "Why human interaction is required"},
+		})},
 	}
 }
 
@@ -129,7 +168,7 @@ func previewSessionSchema(extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
 	for k, v := range extra {
 		props[k] = v
 	}
-	return mcp.ToolSchema{Type: "object", Properties: props, Required: []string{"session_id"}}
+	return mcp.ToolSchema{Type: "object", Properties: props}
 }
 
 func previewTargetSchema(extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
@@ -144,9 +183,17 @@ func previewTargetSchema(extra map[string]mcp.SchemaProperty) mcp.ToolSchema {
 }
 
 func (e *previewToolExecutor) call(ctx context.Context, name string, args json.RawMessage) *mcp.ToolCallResult {
+	if name != "preview_create" && name != "preview_list" && name != "preview_ensure" {
+		args = previewArgsWithSessionDefault(args)
+	}
+	if e.internal {
+		args = previewArgsWithInternalTarget(args)
+	}
 	switch name {
 	case "preview_create":
 		return e.create(ctx, args)
+	case "preview_ensure":
+		return e.ensure(ctx, args)
 	case "preview_status":
 		return e.status(ctx, args)
 	case "preview_list":
@@ -171,8 +218,76 @@ func (e *previewToolExecutor) call(ctx context.Context, name string, args json.R
 		return e.visualDiff(ctx, args)
 	case "preview_assert":
 		return e.assertions(ctx, args)
+	case "preview_observe":
+		return e.observe(ctx, args)
+	case "preview_act":
+		return e.act(ctx, args)
+	case "preview_control":
+		return e.control(ctx, args)
+	case "preview_request_handoff":
+		return e.requestHandoff(ctx, args)
 	}
 	return mcp.ErrorResult(fmt.Sprintf("unknown preview tool %q", name))
+}
+
+func (e *previewToolExecutor) control(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
+	var params map[string]any
+	if err := json.Unmarshal(args, &params); err != nil {
+		return mcp.ErrorResult("invalid preview control arguments")
+	}
+	target := previewTargetFromMap(params)
+	basePath, err := target.basePath()
+	if err != nil {
+		return mcp.ErrorResult(err.Error())
+	}
+	var resp struct {
+		Data any `json:"data"`
+	}
+	if err := e.client.Do(ctx, http.MethodGet, basePath+"/control", nil, &resp); err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("preview control failed: %s", err))
+	}
+	return jsonResult(resp.Data)
+}
+
+func (e *previewToolExecutor) requestHandoff(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
+	var params map[string]any
+	if err := json.Unmarshal(args, &params); err != nil {
+		return mcp.ErrorResult("invalid preview handoff arguments")
+	}
+	target := previewTargetFromMap(params)
+	reason, _ := params["reason"].(string)
+	if strings.TrimSpace(reason) == "" {
+		return mcp.ErrorResult("reason is required")
+	}
+	return e.postPreviewTarget(ctx, target, "control/request-handoff", map[string]string{"reason": reason}, "preview handoff failed")
+}
+
+func previewArgsWithInternalTarget(args json.RawMessage) json.RawMessage {
+	var params map[string]any
+	if len(args) == 0 {
+		params = make(map[string]any)
+	} else if json.Unmarshal(args, &params) != nil {
+		return args
+	}
+	params["__internal"] = true
+	return mustJSON(params)
+}
+
+func previewArgsWithSessionDefault(args json.RawMessage) json.RawMessage {
+	var params map[string]any
+	if len(args) == 0 {
+		params = make(map[string]any)
+	} else if json.Unmarshal(args, &params) != nil {
+		return args
+	}
+	sessionID, _ := params["session_id"].(string)
+	previewID, _ := params["preview_id"].(string)
+	if strings.TrimSpace(sessionID) == "" && strings.TrimSpace(previewID) == "" {
+		if sessionID := strings.TrimSpace(os.Getenv("143_SESSION_ID")); sessionID != "" {
+			params["session_id"] = sessionID
+		}
+	}
+	return mustJSON(params)
 }
 
 // previewView is the slice of the server's branch-preview response surfaced
@@ -222,6 +337,13 @@ type sessionPreviewStatusWire struct {
 	Prewarm               any                     `json:"prewarm,omitempty"`
 }
 
+func (e *previewToolExecutor) sessionPreviewPath(sessionID string) string {
+	if e.internal {
+		return "/api/v1/internal/sessions/" + sessionID + "/preview"
+	}
+	return "/api/v1/sessions/" + sessionID + "/preview"
+}
+
 func (w ensurePreviewWire) view() previewView {
 	if w.Instance == nil {
 		return previewView{Status: w.Action}
@@ -259,7 +381,7 @@ func (e *previewToolExecutor) sessionStatus(ctx context.Context, sessionID strin
 	var resp struct {
 		Data sessionPreviewStatusWire `json:"data"`
 	}
-	if err := e.client.Do(ctx, http.MethodGet, "/api/v1/sessions/"+sessionID+"/preview", nil, &resp); err != nil {
+	if err := e.client.Do(ctx, http.MethodGet, e.sessionPreviewPath(sessionID), nil, &resp); err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("preview status failed: %s", err))
 	}
 	return jsonResult(resp.Data.view(sessionID))
@@ -328,7 +450,15 @@ func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
 		SessionID string `json:"session_id"`
 		Wait      bool   `json:"wait"`
 	}
-	if err := json.Unmarshal(args, &params); err != nil || params.SessionID == "" {
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &params); err != nil {
+			return "", false, fmt.Errorf("invalid arguments")
+		}
+	}
+	if params.SessionID == "" {
+		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+	}
+	if params.SessionID == "" {
 		return "", false, fmt.Errorf("session_id is required")
 	}
 	return params.SessionID, params.Wait, nil
@@ -337,6 +467,7 @@ func previewSessionAndWait(args json.RawMessage) (string, bool, error) {
 type previewTarget struct {
 	SessionID string
 	PreviewID string
+	Internal  bool
 }
 
 // validate enforces that exactly one target identifier is supplied. Silently
@@ -350,6 +481,9 @@ func (t previewTarget) validate() error {
 	if t.SessionID == "" && t.PreviewID == "" {
 		return fmt.Errorf("session_id or preview_id is required")
 	}
+	if t.Internal && t.PreviewID != "" {
+		return fmt.Errorf("sandbox preview tools may only target their current session")
+	}
 	return nil
 }
 
@@ -358,6 +492,9 @@ func (t previewTarget) basePath() (string, error) {
 		return "", err
 	}
 	if t.SessionID != "" {
+		if t.Internal {
+			return "/api/v1/internal/sessions/" + t.SessionID + "/preview", nil
+		}
 		return "/api/v1/sessions/" + t.SessionID + "/preview", nil
 	}
 	return "/api/v1/previews/" + t.PreviewID, nil
@@ -366,7 +503,12 @@ func (t previewTarget) basePath() (string, error) {
 func previewTargetFromMap(params map[string]any) previewTarget {
 	sessionID, _ := params["session_id"].(string)
 	previewID, _ := params["preview_id"].(string)
-	return previewTarget{SessionID: strings.TrimSpace(sessionID), PreviewID: strings.TrimSpace(previewID)}
+	internal, _ := params["__internal"].(bool)
+	target := previewTarget{SessionID: strings.TrimSpace(sessionID), PreviewID: strings.TrimSpace(previewID), Internal: internal}
+	if target.SessionID == "" && target.PreviewID == "" {
+		target.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+	}
+	return target
 }
 
 func previewJSONPayload(args json.RawMessage, field string) (previewTarget, any, error) {
@@ -400,6 +542,16 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		return mcp.ErrorResult("invalid preview create arguments")
 	}
 	hasBranchTarget := strings.TrimSpace(params.Repository) != "" || strings.TrimSpace(params.Branch) != ""
+	// Sandbox preview tools operate on the current session only. Reject a branch
+	// target up front with an actionable message; otherwise the implicit-session
+	// fallback below would fill SessionID from the environment and then trip the
+	// "not both" guard with an error that misdescribes what the caller did.
+	if e.internal && hasBranchTarget {
+		return mcp.ErrorResult("sandbox preview tools operate on the current session; omit repository/branch to create the session preview")
+	}
+	if e.internal && params.SessionID == "" {
+		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+	}
 	if params.SessionID != "" {
 		if hasBranchTarget {
 			return mcp.ErrorResult("specify session_id or repository and branch, not both")
@@ -407,13 +559,16 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		var resp struct {
 			Data ensurePreviewWire `json:"data"`
 		}
-		if err := e.client.Do(ctx, http.MethodPost, "/api/v1/sessions/"+params.SessionID+"/preview/ensure", nil, &resp); err != nil {
+		if err := e.client.Do(ctx, http.MethodPost, e.sessionPreviewPath(params.SessionID)+"/ensure", nil, &resp); err != nil {
 			return mcp.ErrorResult(fmt.Sprintf("preview create failed: %s", err))
 		}
 		if params.Wait {
 			return e.waitSessionReady(ctx, params.SessionID)
 		}
 		return jsonResult(resp.Data.view())
+	}
+	if e.internal {
+		return mcp.ErrorResult("sandbox preview tools require 143_SESSION_ID")
 	}
 	if params.Repository == "" || params.Branch == "" {
 		return mcp.ErrorResult("session_id or repository and branch are required")
@@ -445,6 +600,14 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		return e.waitBranchReady(ctx, resp.Data.view().PreviewID)
 	}
 	return jsonResult(resp.Data.view())
+}
+
+func (e *previewToolExecutor) ensure(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
+	sessionID, wait, err := previewSessionAndWait(args)
+	if err != nil {
+		return mcp.ErrorResult(err.Error())
+	}
+	return e.create(ctx, mustJSON(map[string]any{"session_id": sessionID, "wait": wait}))
 }
 
 func (e *previewToolExecutor) waitBranchReady(ctx context.Context, previewID string) *mcp.ToolCallResult {
@@ -491,7 +654,7 @@ func (e *previewToolExecutor) status(ctx context.Context, args json.RawMessage) 
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview status arguments")
 	}
-	if err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}).validate(); err != nil {
+	if err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}).validate(); err != nil {
 		return mcp.ErrorResult(err.Error())
 	}
 	if params.SessionID != "" {
@@ -515,6 +678,9 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 			return mcp.ErrorResult("invalid preview list arguments")
 		}
 	}
+	if e.internal && strings.TrimSpace(params.SessionID) == "" {
+		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
+	}
 	if strings.TrimSpace(params.SessionID) != "" {
 		result := e.sessionStatus(ctx, params.SessionID)
 		if result.IsError {
@@ -525,6 +691,9 @@ func (e *previewToolExecutor) list(ctx context.Context, args json.RawMessage) *m
 			return result
 		}
 		return jsonResult([]map[string]any{status})
+	}
+	if e.internal {
+		return mcp.ErrorResult("sandbox preview tools require 143_SESSION_ID")
 	}
 	var resp struct {
 		Data []branchPreviewWire `json:"data"`
@@ -547,11 +716,11 @@ func (e *previewToolExecutor) stop(ctx context.Context, args json.RawMessage) *m
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview stop arguments")
 	}
-	if err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}).validate(); err != nil {
+	if err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}).validate(); err != nil {
 		return mcp.ErrorResult(err.Error())
 	}
 	if params.SessionID != "" {
-		if err := e.client.Do(ctx, http.MethodDelete, "/api/v1/sessions/"+params.SessionID+"/preview", nil, nil); err != nil {
+		if err := e.client.Do(ctx, http.MethodDelete, e.sessionPreviewPath(params.SessionID), nil, nil); err != nil {
 			return mcp.ErrorResult(fmt.Sprintf("preview stop failed: %s", err))
 		}
 		return jsonResult(map[string]string{"session_id": params.SessionID, "status": "stopped"})
@@ -570,7 +739,7 @@ func (e *previewToolExecutor) restart(ctx context.Context, args json.RawMessage)
 	var resp struct {
 		Data any `json:"data"`
 	}
-	if err := e.client.Do(ctx, http.MethodPost, "/api/v1/sessions/"+sessionID+"/preview/restart", nil, &resp); err != nil {
+	if err := e.client.Do(ctx, http.MethodPost, e.sessionPreviewPath(sessionID)+"/restart", nil, &resp); err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("preview restart failed: %s", err))
 	}
 	if wait {
@@ -605,7 +774,7 @@ func (e *previewToolExecutor) update(ctx context.Context, args json.RawMessage) 
 	var resp struct {
 		Data any `json:"data"`
 	}
-	if err := e.client.Do(ctx, http.MethodPost, "/api/v1/sessions/"+params.SessionID+"/preview/update", body, &resp); err != nil {
+	if err := e.client.Do(ctx, http.MethodPost, e.sessionPreviewPath(params.SessionID)+"/update", body, &resp); err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("preview update failed: %s", err))
 	}
 	return jsonResult(resp.Data)
@@ -625,7 +794,7 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview screenshot arguments")
 	}
-	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}
+	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}
 	basePath, err := target.basePath()
 	if err != nil {
 		return mcp.ErrorResult(err.Error())
@@ -633,6 +802,33 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 	body := map[string]any{"path": params.Path, "viewport_w": params.ViewportW, "viewport_h": params.ViewportH, "full_page": params.FullPage, "delay_ms": params.DelayMS}
 	if params.InlineBase64 != nil {
 		body["inline_base64"] = *params.InlineBase64
+	} else if target.SessionID != "" {
+		// The session path is served by /observe, whose inline_base64 defaults to
+		// false. Preserve the documented "inline until artifact storage exists"
+		// behavior: request the bytes, then drop them below when an artifact
+		// reference is available so the transcript stays lean.
+		body["inline_base64"] = true
+	}
+	if target.SessionID != "" {
+		var resp struct {
+			Data map[string]any `json:"data"`
+		}
+		if err := e.client.Do(ctx, http.MethodPost, basePath+"/observe", body, &resp); err != nil {
+			return mcp.ErrorResult(fmt.Sprintf("preview screenshot failed: %s", err))
+		}
+		screenshot, _ := resp.Data["screenshot"].(map[string]any)
+		if screenshot == nil {
+			return mcp.ErrorResult("preview screenshot returned no image")
+		}
+		if params.InlineBase64 != nil {
+			if !*params.InlineBase64 {
+				delete(screenshot, "png_base64")
+			}
+		} else if _, hasArtifact := screenshot["artifact"]; hasArtifact {
+			// Smart default: an artifact reference is enough; drop the inline bytes.
+			delete(screenshot, "png_base64")
+		}
+		return jsonResult(screenshot)
 	}
 	var resp struct {
 		Data map[string]any `json:"data"`
@@ -655,7 +851,7 @@ func (e *previewToolExecutor) console(ctx context.Context, args json.RawMessage)
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview console arguments")
 	}
-	basePath, err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}).basePath()
+	basePath, err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}).basePath()
 	if err != nil {
 		return mcp.ErrorResult(err.Error())
 	}
@@ -685,7 +881,7 @@ func (e *previewToolExecutor) inspect(ctx context.Context, args json.RawMessage)
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview inspect arguments")
 	}
-	basePath, err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}).basePath()
+	basePath, err := (previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}).basePath()
 	if err != nil {
 		return mcp.ErrorResult(err.Error())
 	}
@@ -719,6 +915,78 @@ func (e *previewToolExecutor) interact(ctx context.Context, args json.RawMessage
 	return e.postPreviewTarget(ctx, target, "interact", map[string]any{"steps": steps}, "preview interact failed")
 }
 
+func (e *previewToolExecutor) observe(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
+	var params map[string]any
+	if err := json.Unmarshal(args, &params); err != nil {
+		return mcp.ErrorResult("invalid preview observe arguments")
+	}
+	target := previewTargetFromMap(params)
+	output, _ := params["output"].(string)
+	delete(params, "session_id")
+	delete(params, "preview_id")
+	delete(params, "output")
+	if strings.TrimSpace(output) != "" {
+		params["inline_base64"] = true
+	}
+	result := e.postPreviewTarget(ctx, target, "observe", params, "preview observe failed")
+	return writePreviewObservationImage(result, output, false)
+}
+
+func (e *previewToolExecutor) act(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
+	var params map[string]any
+	if err := json.Unmarshal(args, &params); err != nil {
+		return mcp.ErrorResult("invalid preview act arguments")
+	}
+	target := previewTargetFromMap(params)
+	output, _ := params["output"].(string)
+	rawSteps, _ := params["steps"].(string)
+	if strings.TrimSpace(rawSteps) == "" {
+		return mcp.ErrorResult("steps is required")
+	}
+	var steps any
+	if err := json.Unmarshal([]byte(rawSteps), &steps); err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("steps must be JSON: %s", err))
+	}
+	params["steps"] = steps
+	delete(params, "session_id")
+	delete(params, "preview_id")
+	delete(params, "output")
+	if strings.TrimSpace(output) != "" {
+		params["inline_base64"] = true
+	}
+	result := e.postPreviewTarget(ctx, target, "act", params, "preview act failed")
+	return writePreviewObservationImage(result, output, true)
+}
+
+func writePreviewObservationImage(result *mcp.ToolCallResult, output string, act bool) *mcp.ToolCallResult {
+	if result == nil || result.IsError || strings.TrimSpace(output) == "" {
+		return result
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(firstText(result)), &payload); err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("decode preview image response: %s", err))
+	}
+	observation := payload
+	if act {
+		observation, _ = payload["observation"].(map[string]any)
+	}
+	screenshot, _ := observation["screenshot"].(map[string]any)
+	encoded, _ := screenshot["png_base64"].(string)
+	if encoded == "" {
+		return mcp.ErrorResult("preview response did not include screenshot bytes")
+	}
+	png, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("decode preview screenshot: %s", err))
+	}
+	if err := os.WriteFile(output, png, 0o600); err != nil {
+		return mcp.ErrorResult(fmt.Sprintf("write preview screenshot: %s", err))
+	}
+	delete(screenshot, "png_base64")
+	observation["workspace_path"] = output
+	return jsonResult(payload)
+}
+
 func (e *previewToolExecutor) multiViewport(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {
 	var params struct {
 		SessionID string `json:"session_id"`
@@ -730,7 +998,7 @@ func (e *previewToolExecutor) multiViewport(ctx context.Context, args json.RawMe
 	if err := json.Unmarshal(args, &params); err != nil {
 		return mcp.ErrorResult("invalid preview multi_viewport arguments")
 	}
-	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}
+	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}
 	if _, err := target.basePath(); err != nil {
 		return mcp.ErrorResult(err.Error())
 	}
@@ -755,7 +1023,7 @@ func (e *previewToolExecutor) visualDiff(ctx context.Context, args json.RawMessa
 	if err := json.Unmarshal(args, &params); err != nil || params.BeforeSnapshotID == "" || params.AfterSnapshotID == "" {
 		return mcp.ErrorResult("session_id or preview_id, before_snapshot_id, and after_snapshot_id are required")
 	}
-	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID}
+	target := previewTarget{SessionID: params.SessionID, PreviewID: params.PreviewID, Internal: e.internal}
 	if _, err := target.basePath(); err != nil {
 		return mcp.ErrorResult(err.Error())
 	}

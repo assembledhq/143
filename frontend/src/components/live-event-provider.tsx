@@ -99,6 +99,10 @@ export function LiveEventProvider({ children }: { children: React.ReactNode }) {
 
       const startLeader = () => {
         if (disposed || client) return;
+        if (typeof EventSource === "undefined") {
+          publishHealth("degraded");
+          return;
+        }
         window.dispatchEvent(new CustomEvent("143:live-telemetry", { detail: { name: "leader_state", state: "leader" } }));
         const leaderClient = new LiveEventClient({
           apiBase: process.env.NEXT_PUBLIC_API_URL ?? "", orgId, queryClient,

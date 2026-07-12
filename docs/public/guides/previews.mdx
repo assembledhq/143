@@ -105,14 +105,28 @@ When an agent changes code, a running dev server usually applies the update thro
 Agents can run the same workflow from the sandbox:
 
 ```bash
-143-tools preview create --session-id "$143_SESSION_ID" --wait
-143-tools preview screenshot --session-id "$143_SESSION_ID" --path / --inline-base64 false
-143-tools preview update --session-id "$143_SESSION_ID" --wait
+143-tools preview ensure --wait
+143-tools preview observe --path /
+143-tools preview update --wait
 143-tools preview multi_viewport --session-id "$143_SESSION_ID" --path /
 143-tools preview console --session-id "$143_SESSION_ID" --level error
 ```
 
-Screenshot and multi-viewport responses include an `artifact.url` served through the normal upload pipeline. Use `--inline-base64 false` when agents do not need PNG bytes in stdout.
+The session ID defaults to `143_SESSION_ID` inside coding-agent sandboxes. The
+session owns a durable browser identity. Cookies, local storage, current path,
+and viewport survive reloads and safe updates; compatible runtime replacements
+restore stored state. Observation responses explicitly report `preserved`,
+`restored`, `reset`, or `unavailable` when restoration cannot be guaranteed.
+
+The session preview panel displays that same platform-owned browser rather than
+opening a second browser context. It is watch-only while the agent has control.
+Select **Take control** to acquire an audited five-minute lease for clicking,
+typing, scrolling, or completing login and MFA in the shared browser, then
+select **Return control** so the agent continues from the exact URL and storage
+state you left behind. Agent input is paused during human control, and abandoned
+leases expire automatically.
+
+Screenshot and multi-viewport responses include an `artifact.url` served through the normal upload pipeline. Use `--inline-base64 false` when agents do not need PNG bytes in stdout, or `preview observe --output path.png` to write an observation directly into the workspace.
 
 ## Add dependencies
 

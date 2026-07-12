@@ -2,6 +2,7 @@ package preview
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -53,6 +54,21 @@ type PreviewInspector interface {
 	Close() error
 }
 
+// SessionBrowserBinder lets callers bind replacement preview instances to one
+// durable session-owned browser identity. Inspectors that do not support
+// persistence remain valid PreviewInspector implementations.
+type SessionBrowserBinder interface {
+	BindSessionBrowser(previewID, sessionID string)
+}
+
+type SessionBrowserInspector interface {
+	HasContext(target models.BrowserTarget) bool
+	Observe(ctx context.Context, target models.BrowserTarget, opts models.PreviewObservationOpts) (*models.PreviewObservation, error)
+	Act(ctx context.Context, target models.BrowserTarget, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error)
+	ExportStorage(ctx context.Context, target models.BrowserTarget) (json.RawMessage, error)
+	RestoreStorage(ctx context.Context, target models.BrowserTarget, state json.RawMessage) error
+}
+
 // =============================================================================
 // Supporting types
 // =============================================================================
@@ -82,6 +98,7 @@ type ComponentNode struct {
 
 // ConsoleMessage represents a browser console entry.
 type ConsoleMessage struct {
+	Cursor    int64     `json:"cursor,omitempty"`
 	Level     string    `json:"level"` // "log", "warn", "error", "info"
 	Text      string    `json:"text"`
 	Source    string    `json:"source,omitempty"`

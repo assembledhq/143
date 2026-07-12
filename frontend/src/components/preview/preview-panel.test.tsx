@@ -56,6 +56,12 @@ vi.mock("./design-mode-overlay", () => ({
   ),
 }));
 
+vi.mock("./shared-browser-surface", () => ({
+  SharedBrowserSurface: ({ sessionId }: { sessionId: string }) => (
+    <div title="Preview" data-testid="shared-browser-surface">SharedBrowser:{sessionId}</div>
+  ),
+}));
+
 vi.mock("./ttl-warning", () => ({
   TTLWarning: ({
     expiresAt,
@@ -622,7 +628,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Ready phase ---------- */
 
-  it('shows quiet running metadata and iframe with title "Preview" when phase is ready', async () => {
+  it("shows quiet running metadata and the shared session browser when ready", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "ready", id: "prev-1" }),
     );
@@ -634,16 +640,10 @@ describe("PreviewPanel component", () => {
     });
     expect(screen.queryByText("Ready")).not.toBeInTheDocument();
 
-    // Iframe should be rendered
-    const iframe = screen.getByTitle("Preview");
-    expect(iframe).toBeInTheDocument();
-    expect(iframe).toHaveAttribute(
-      "src",
-      "http://prev-1.preview.test/bootstrap",
-    );
+    expect(screen.getByTestId("shared-browser-surface")).toHaveTextContent("SharedBrowser:sess-1");
   });
 
-  it("uses the runtime preview origin from the status response when present", async () => {
+  it("keeps the panel on the session browser when a runtime origin is present", async () => {
     mockGet.mockResolvedValue({
       ...makePreviewStatus({ status: "ready", id: "prev-1" }),
       preview_origin: "https://prev-1.preview.143.dev",
@@ -660,10 +660,7 @@ describe("PreviewPanel component", () => {
       expect(screen.getByText("Running")).toBeInTheDocument();
     });
 
-    expect(screen.getByTitle("Preview")).toHaveAttribute(
-      "src",
-      "https://prev-1.preview.143.dev/bootstrap",
-    );
+    expect(screen.getByTestId("shared-browser-surface")).toBeInTheDocument();
   });
 
   it("bootstraps preview access before opening from the ready state", async () => {
@@ -1963,7 +1960,7 @@ describe("PreviewPanel component", () => {
 
   /* ---------- Connecting to preview text ---------- */
 
-  it("shows 'Connecting to preview...' overlay when iframe is ready but bootstrap is not complete", async () => {
+  it("mounts the shared browser surface without an iframe bootstrap overlay", async () => {
     mockGet.mockResolvedValue(makePreviewStatus({ status: "ready", id: "prev-1" }));
 
     renderWithProviders(<PreviewPanel {...DEFAULT_PROPS} />);
@@ -1972,8 +1969,8 @@ describe("PreviewPanel component", () => {
       expect(screen.getByTitle("Preview")).toBeInTheDocument();
     });
 
-    // Before bootstrap completes, the connecting overlay should be visible
-    expect(screen.getByText("Connecting to preview...")).toBeInTheDocument();
+    expect(screen.getByTestId("shared-browser-surface")).toBeInTheDocument();
+    expect(screen.queryByText("Connecting to preview...")).not.toBeInTheDocument();
   });
 
   /* ---------- Try Again button in failed state ---------- */
@@ -2032,7 +2029,7 @@ describe("PreviewPanel component", () => {
     expect(mockBootstrap).not.toHaveBeenCalled();
   });
 
-  it("mints a token when bootstrap_ready arrives from the matching origin", async () => {
+  it("does not mint iframe credentials for matching-origin messages in the shared-browser panel", async () => {
     mockGet.mockResolvedValue(
       makePreviewStatus({ status: "ready", id: "prev-1" }),
     );
@@ -2051,8 +2048,7 @@ describe("PreviewPanel component", () => {
       }),
     );
 
-    await waitFor(() => {
-      expect(mockBootstrap).toHaveBeenCalledWith("sess-1");
-    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(mockBootstrap).not.toHaveBeenCalled();
   });
 });

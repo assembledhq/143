@@ -35,6 +35,7 @@ const (
 	NamespaceAutomationGoalImprovement CLINamespace = "automation-goal-improvement"
 	NamespaceCapability                CLINamespace = "capability"
 	NamespaceSessionHistory            CLINamespace = "session-history"
+	NamespacePreview                   CLINamespace = "preview"
 )
 
 // Fixed actions for the hardcoded 143-owned namespace mappings.

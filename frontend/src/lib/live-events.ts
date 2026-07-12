@@ -383,6 +383,10 @@ export class LiveEventClient {
 
   private connect(): void {
     if (this.stopped || !navigator.onLine) return;
+    if (typeof EventSource === "undefined") {
+      this.setHealth("degraded");
+      return;
+    }
     if (this.heartbeatTimer) { clearTimeout(this.heartbeatTimer); this.heartbeatTimer = null; }
     this.source?.close(); this.setHealth("connecting");
     const source = new EventSource(this.url(), { withCredentials: true }); this.source = source;

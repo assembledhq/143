@@ -259,6 +259,40 @@ export interface EnsurePreviewResponse {
   instance: PreviewInstance;
 }
 
+export type PreviewBrowserControlState =
+  | "agent_control"
+  | "human_control"
+  | "waiting_for_handoff";
+
+export interface PreviewBrowserControlStatus {
+  state: PreviewBrowserControlState;
+  lease_owner_id?: string;
+  lease_expires_at?: string;
+  handoff_reason?: string;
+  is_lease_owner: boolean;
+}
+
+export interface PreviewBrowserObservation {
+  screenshot?: {
+    png_base64?: string;
+    url: string;
+    page_title: string;
+    viewport: { width: number; height: number; name?: string };
+    captured_at: string;
+  };
+  url: string;
+  title: string;
+  viewport: { width: number; height: number; name?: string };
+  captured_at: string;
+  console?: ConsoleMessage[];
+  console_cursor: number;
+  ready: boolean;
+}
+
+export interface PreviewBrowserActResult {
+  observation?: PreviewBrowserObservation;
+}
+
 // Console messages
 
 export interface ConsoleMessage {

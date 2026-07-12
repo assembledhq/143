@@ -273,7 +273,10 @@ function SidebarBody({
       </nav>
 
       {/* Repo context switcher */}
-      <div className="relative px-2 pb-1 border-t border-sidebar-border/70 pt-2">
+      <div
+        data-testid="repo-context-switcher-slot"
+        className="relative px-2 pb-1 border-t border-sidebar-border/70 pt-2 empty:hidden"
+      >
         <RepoContextSwitcher />
       </div>
 

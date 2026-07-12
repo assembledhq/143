@@ -61,6 +61,12 @@ func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *
 	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
 }
 
+func TestCapabilityFilteredToolSourceAllowsSessionPreviewTools(t *testing.T) {
+	t.Parallel()
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}}, ToolCapabilityPolicy{})
+	require.Equal(t, []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}, source.ListTools(), "session preview tools should remain available under capability filtering")
+}
+
 func TestCapabilityFilteredToolSourceSeparatesPagerDutyReadsAndWrites(t *testing.T) {
 	t.Parallel()
 
