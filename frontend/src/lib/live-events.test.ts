@@ -154,6 +154,27 @@ describe("LiveEventClient cursors and reconnect", () => {
     expect(MockEventSource.instances.at(-1)?.url).toContain("last_event_id=123-0"); client.stop();
   });
 
+  it("preserves the acknowledged resume cursor across repeated transport failures", async () => {
+    localStorage.setItem(`143:live-cursor:${orgId}`, "123-0");
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const client = new LiveEventClient({ apiBase: "", orgId, queryClient: new QueryClient() });
+      client.start();
+      expect(MockEventSource.instances[0].url).toContain("last_event_id=123-0");
+
+      MockEventSource.instances[0].onerror?.();
+      await vi.runOnlyPendingTimersAsync();
+      MockEventSource.instances.at(-1)?.onerror?.();
+      await vi.runOnlyPendingTimersAsync();
+
+      expect(localStorage.getItem(`143:live-cursor:${orgId}`)).toBe("123-0");
+      expect(MockEventSource.instances.at(-1)?.url).toContain("last_event_id=123-0");
+      client.stop();
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
   it("does not advance a resync checkpoint until canonical synchronization succeeds", async () => {
     const queryClient = new QueryClient();
     const queryFn = vi.fn().mockResolvedValueOnce({ data: [] }).mockRejectedValueOnce(new Error("sync failed")).mockResolvedValue({ data: [] });

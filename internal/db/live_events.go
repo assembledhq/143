@@ -63,6 +63,7 @@ func (s *LiveEventStore) Insert(ctx context.Context, orgID uuid.UUID, event mode
 	return nil
 }
 
+// ClaimPending leases retryable outbox rows across organizations for the system publisher.
 // lint:allow-no-orgid reason="system outbox worker claims pending events across organizations"
 func (s *LiveEventStore) ClaimPending(ctx context.Context, owner string, limit int, lease time.Duration) ([]LiveEventOutboxRow, error) {
 	if limit <= 0 {
@@ -204,6 +205,7 @@ func (s *LiveEventStore) MaterializeAggregate(ctx context.Context, orgID uuid.UU
 	return &row, nil
 }
 
+// Cleanup removes already delivered or folded outbox rows older than the retention window.
 // lint:allow-no-orgid reason="system cleanup removes only already delivered short-lived outbox rows"
 func (s *LiveEventStore) Cleanup(ctx context.Context, olderThan time.Duration, limit int) (int64, error) {
 	tag, err := s.db.Exec(ctx, `DELETE FROM live_event_outbox WHERE id IN (
@@ -216,6 +218,7 @@ func (s *LiveEventStore) Cleanup(ctx context.Context, olderThan time.Duration, l
 	return tag.RowsAffected(), nil
 }
 
+// OldestPendingAge returns the age of the oldest publishable outbox event across organizations.
 // lint:allow-no-orgid reason="node-wide health monitor samples one indexed aggregate across the outbox"
 func (s *LiveEventStore) OldestPendingAge(ctx context.Context) (time.Duration, error) {
 	var seconds *float64

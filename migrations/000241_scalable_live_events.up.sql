@@ -103,6 +103,9 @@ DECLARE
     parent_id uuid;
     payload jsonb;
     key text;
+    session_pr_creation_state text;
+    session_pr_push_state text;
+    session_branch_creation_state text;
     mutation_id uuid := NULLIF(NULLIF(current_setting('app.client_mutation_id', true), ''), '00000000-0000-0000-0000-000000000000')::uuid;
 BEGIN
     IF TG_OP = 'UPDATE' AND NEW.live_version = OLD.live_version THEN
@@ -116,12 +119,16 @@ BEGIN
             payload := jsonb_build_object('list_affected', true, 'counts_affected', true);
         ELSE
             event_type := 'session.updated';
+            SELECT pr_creation_state, pr_push_state, branch_creation_state
+            INTO session_pr_creation_state, session_pr_push_state, session_branch_creation_state
+            FROM session_publish_state
+            WHERE session_id = NEW.id AND org_id = NEW.org_id;
             payload := jsonb_build_object(
                 'status_projection', jsonb_build_object(
                     'status', NEW.status,
-                    'pr_creation_state', NEW.pr_creation_state,
-                    'pr_push_state', NEW.pr_push_state,
-                    'branch_creation_state', NEW.branch_creation_state
+                    'pr_creation_state', COALESCE(session_pr_creation_state, 'idle'),
+                    'pr_push_state', COALESCE(session_pr_push_state, 'idle'),
+                    'branch_creation_state', COALESCE(session_branch_creation_state, 'idle')
                 ),
                 'list_affected', true,
                 'counts_affected', OLD.status IS DISTINCT FROM NEW.status OR OLD.archived_at IS DISTINCT FROM NEW.archived_at
@@ -194,6 +201,19 @@ CREATE TRIGGER automations_enqueue_live_projection AFTER INSERT OR UPDATE ON aut
 FOR EACH ROW EXECUTE FUNCTION enqueue_live_projection('automation');
 CREATE TRIGGER automation_runs_enqueue_live_projection AFTER INSERT OR UPDATE ON automation_runs
 FOR EACH ROW EXECUTE FUNCTION enqueue_live_projection('automation_run');
+
+CREATE FUNCTION touch_session_live_projection_from_publish_state() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE sessions
+    SET live_version = live_version + 1
+    WHERE id = NEW.session_id AND org_id = NEW.org_id;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER session_publish_state_touch_live_projection
+AFTER INSERT OR UPDATE OF pr_creation_state, pr_push_state, branch_creation_state ON session_publish_state
+FOR EACH ROW EXECUTE FUNCTION touch_session_live_projection_from_publish_state();
 
 CREATE FUNCTION enqueue_live_authorization_change() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE

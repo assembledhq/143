@@ -321,6 +321,7 @@ export class LiveEventClient {
   private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
   private stopped = false;
+  private receivedCursor = "";
   private resumeCursor = "";
   private scheduler: LiveInvalidationScheduler;
   private seen = new Set<string>();
@@ -399,10 +400,6 @@ export class LiveEventClient {
     source.onerror = () => {
       source.close();
       this.setHealth("degraded");
-      if (this.resumeCursor && this.attempt >= 1) {
-        this.resumeCursor = "";
-        localStorage.removeItem(this.cursorKey());
-      }
       this.reconnect();
     };
   }
@@ -422,6 +419,9 @@ export class LiveEventClient {
 
   private async onEvent(message: MessageEvent): Promise<void> {
     const cursor = message.lastEventId;
+    if (cursor && (!this.receivedCursor || compareStreamIDs(cursor, this.receivedCursor) > 0)) {
+      this.receivedCursor = cursor;
+    }
     this.armHeartbeat();
     const startedAt = performance.now();
     const event = decodeLiveEvent(message.data);

@@ -2,9 +2,10 @@ package handlers
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"errors"
-	"math/rand/v2"
+	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
@@ -44,7 +45,18 @@ var allowedLiveTelemetryNames = map[string]struct{}{
 }
 
 func nextLiveHeartbeatInterval() time.Duration {
-	return liveHeartbeatBaseInterval - 5*time.Second + time.Duration(rand.Int64N(int64(10*time.Second)))
+	return liveHeartbeatBaseInterval - 5*time.Second + time.Duration(secureJitter(int64(10*time.Second)))
+}
+
+func secureJitter(limit int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	value, err := cryptorand.Int(cryptorand.Reader, big.NewInt(limit))
+	if err != nil {
+		return 0
+	}
+	return value.Int64()
 }
 
 type liveEventMembershipStore interface {
@@ -332,7 +344,7 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 
 	heartbeat := time.NewTimer(nextLiveHeartbeatInterval())
 	defer heartbeat.Stop()
-	maxAge := time.NewTimer(15*time.Minute + time.Duration(rand.Int64N(int64(15*time.Minute))))
+	maxAge := time.NewTimer(15*time.Minute + time.Duration(secureJitter(int64(15*time.Minute))))
 	defer maxAge.Stop()
 	authorizationCheck := time.NewTicker(60 * time.Second)
 	defer authorizationCheck.Stop()
@@ -352,7 +364,7 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-maxAge.C:
-			writeTerminal("server.draining", map[string]any{"retry_after_ms": 1000 + rand.IntN(4000)})
+			writeTerminal("server.draining", map[string]any{"retry_after_ms": 1000 + secureJitter(4000)})
 			return
 		case <-authExpiry:
 			return
@@ -379,7 +391,7 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if subscriber.CloseReason() == "draining" {
-					writeTerminal("server.draining", map[string]any{"retry_after_ms": 1000 + rand.IntN(4000)})
+					writeTerminal("server.draining", map[string]any{"retry_after_ms": 1000 + secureJitter(4000)})
 				} else {
 					writeTerminal("live.degraded", map[string]any{"cause": "redis_bus_disconnected", "bus_shard": h.manager.ShardForOrg(orgID)})
 				}

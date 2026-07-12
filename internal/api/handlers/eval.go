@@ -1472,7 +1472,7 @@ func (h *EvalHandler) StreamBatchUpdates(w http.ResponseWriter, r *http.Request)
 				logger.Warn().Err(err).Msg("failed to write eval batch stream heartbeat")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case event, ok := <-sub.C:
 			if !ok {
 				logger.Warn().Str("reason", sub.CloseReason()).Msg("eval batch update subscription closed")
@@ -1482,7 +1482,7 @@ func (h *EvalHandler) StreamBatchUpdates(w http.ResponseWriter, r *http.Request)
 				logger.Warn().Err(err).Str("batch_id", event.BatchID.String()).Msg("failed to write eval batch update event")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		}
 	}
 }
@@ -1742,7 +1742,7 @@ func (h *EvalHandler) StreamBootstrapUpdates(w http.ResponseWriter, r *http.Requ
 				logger.Warn().Err(err).Msg("failed to write eval bootstrap stream heartbeat")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case event, ok := <-sub.C:
 			if !ok {
 				logger.Warn().Str("reason", sub.CloseReason()).Msg("eval bootstrap update subscription closed")
@@ -1752,7 +1752,7 @@ func (h *EvalHandler) StreamBootstrapUpdates(w http.ResponseWriter, r *http.Requ
 				logger.Warn().Err(err).Str("bootstrap_run_id", event.BootstrapRunID.String()).Msg("failed to write eval bootstrap update event")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		}
 	}
 }

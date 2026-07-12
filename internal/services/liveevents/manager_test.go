@@ -135,6 +135,10 @@ func TestManagerPublishFailuresDegradeAndRequireSuccessfulProbe(t *testing.T) {
 	require.Error(t, err, "handshakes should remain blocked before a successful publish probe")
 	manager.RecordPublishResult(true)
 	require.True(t, manager.publishProbeHealthy.Load(), "successful publication should satisfy the recovery probe prerequisite")
+	cancel()
+	require.True(t, manager.needsHealthSample(), "a degraded node should keep sampling after its last subscriber disconnects")
+	manager.setPublisherHealthy(true)
+	require.False(t, manager.needsHealthSample(), "a healthy idle node should stop polling the outbox")
 }
 
 func TestManagerDrainRejectsHandshakesAndSignalsExistingConnections(t *testing.T) {
@@ -152,6 +156,7 @@ func TestManagerDrainRejectsHandshakesAndSignalsExistingConnections(t *testing.T
 	require.Error(t, err, "draining manager should reject new handshakes")
 }
 
+//nolint:paralleltest // process-wide heap and file-descriptor measurements require isolation
 func TestManagerAdmitsTenThousandDistinctOrganizationsWithFixedShards(t *testing.T) {
 	// Process-wide heap and file-descriptor measurements require isolation from
 	// the other capacity tests, so this test intentionally does not use t.Parallel.

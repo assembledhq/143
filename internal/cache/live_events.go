@@ -52,7 +52,8 @@ func LiveBusShard(orgID uuid.UUID, shards int) int {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write(orgID[:])
-	return int(h.Sum32() % uint32(shards))
+	// #nosec G115 -- the modulo result is bounded by the positive configured shard count.
+	return int(uint64(h.Sum32()) % uint64(shards))
 }
 
 func liveReplayKey(orgID uuid.UUID) string {
@@ -73,7 +74,7 @@ func (c *Client) ValidateLiveReplayMemory(ctx context.Context) error {
 	raw := values["maxmemory"]
 	maximum, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil || maximum <= 0 {
-		return fmt.Errorf("Redis maxmemory must be a finite positive byte limit for live replay")
+		return fmt.Errorf("redis maxmemory must be a finite positive byte limit for live replay")
 	}
 	c.liveReplayBudgetBytes.Store(maximum / 4)
 	return nil
@@ -107,15 +108,28 @@ func (c *Client) enforceLiveReplayBudget(ctx context.Context, key string) {
 		liveReplayTrims.Add(ctx, 1)
 		liveReplayShedding.Add(ctx, 1)
 		if trimmedUsage, err := c.rdb.MemoryUsage(ctx, key).Result(); err == nil {
-			if _, updateErr := updateLiveReplayUsage.Run(ctx, c.rdb,
-				[]string{"143:{live_replay}:sizes", "143:{live_replay}:estimated_bytes"}, key, trimmedUsage).Result(); updateErr != nil {
+			updatedTotal, updateErr := updateLiveReplayUsage.Run(ctx, c.rdb,
+				[]string{"143:{live_replay}:sizes", "143:{live_replay}:estimated_bytes"}, key, trimmedUsage).Int64()
+			if updateErr != nil {
 				c.logger.Warn().Err(updateErr).Msg("failed to update live replay usage after shedding")
+			} else {
+				total = updatedTotal
 			}
 		}
 		c.logger.Warn().Int64("estimated_bytes", total).Int64("budget_bytes", budget).Msg("live replay budget reached; retention shed to minimal tail")
 	} else if total >= budget*4/5 {
 		if _, err := c.rdb.XTrimMaxLen(ctx, key, LiveReplayMaxLen/2).Result(); err != nil {
 			c.logger.Warn().Err(err).Msg("failed to tighten live replay retention")
+			return
+		}
+		if trimmedUsage, err := c.rdb.MemoryUsage(ctx, key).Result(); err == nil {
+			updatedTotal, updateErr := updateLiveReplayUsage.Run(ctx, c.rdb,
+				[]string{"143:{live_replay}:sizes", "143:{live_replay}:estimated_bytes"}, key, trimmedUsage).Int64()
+			if updateErr != nil {
+				c.logger.Warn().Err(updateErr).Msg("failed to update live replay usage after tightening retention")
+			} else {
+				total = updatedTotal
+			}
 		}
 		liveReplayTrims.Add(ctx, 1)
 		c.logger.Warn().Int64("estimated_bytes", total).Int64("budget_bytes", budget).Msg("live replay budget above warning threshold; retention tightened")

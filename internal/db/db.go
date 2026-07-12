@@ -44,22 +44,25 @@ func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error
 	if opts.MaxConnIdleTime > 0 {
 		config.MaxConnIdleTime = opts.MaxConnIdleTime
 	}
-	previousBeforeAcquire := config.BeforeAcquire
+	previousPrepareConn := config.PrepareConn
 	previousAfterRelease := config.AfterRelease
 	var mutationConnections sync.Map
-	config.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
-		if previousBeforeAcquire != nil && !previousBeforeAcquire(ctx, conn) {
-			return false
+	config.PrepareConn = func(ctx context.Context, conn *pgx.Conn) (bool, error) {
+		if previousPrepareConn != nil {
+			valid, prepareErr := previousPrepareConn(ctx, conn)
+			if !valid || prepareErr != nil {
+				return valid, prepareErr
+			}
 		}
 		mutationID := requestctx.MutationID(ctx)
 		if mutationID == uuid.Nil {
-			return true
+			return true, nil
 		}
 		_, err := conn.Exec(ctx, `SELECT set_config('app.client_mutation_id', $1, false)`, mutationID.String())
 		if err == nil {
 			mutationConnections.Store(conn.PgConn().PID(), struct{}{})
 		}
-		return err == nil
+		return err == nil, err
 	}
 	config.AfterRelease = func(conn *pgx.Conn) bool {
 		if _, dirty := mutationConnections.LoadAndDelete(conn.PgConn().PID()); dirty {

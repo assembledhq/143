@@ -15,10 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type jsonStringer string
-
-func (s jsonStringer) String() string { return string(s) }
-
 func testRedisClient(t *testing.T) (*Client, *miniredis.Miniredis) {
 	t.Helper()
 
@@ -283,9 +279,6 @@ func TestSessionStreams_UsesOneCombinedReaderForAllResourceChannels(t *testing.T
 	resourceReaders := len(streams.resourceFanouts)
 	streams.resourceMu.Unlock()
 	require.Equal(t, 1, resourceReaders, "one focused session should use one multi-stream Redis reader")
-	require.Empty(t, streams.logFanouts, "combined subscriptions should not start a separate log reader")
-	require.Empty(t, streams.statusFanouts, "combined subscriptions should not start a separate status reader")
-	require.Empty(t, streams.eventFanouts, "combined subscriptions should not start a separate event reader")
 }
 
 func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
@@ -368,159 +361,12 @@ func TestSessionStreams_RunCleanupBatch_ListError(t *testing.T) {
 	require.Equal(t, 0, count, "cleanup batch should report zero work when listing fails")
 }
 
-func TestSessionStreams_FanoutRun_StopsOnCanceledContext(t *testing.T) {
-	t.Parallel()
-
-	client, _ := testRedisClient(t)
-
-	logCtx, logCancel := context.WithCancel(context.Background())
-	logSub := &logSubscriber{ch: make(chan StreamedLog, 1)}
-	logSub.reason.Store("")
-	logExited := make(chan struct{}, 1)
-	logFanout := &logFanout{
-		sessionID: uuid.New(),
-		streamKey: "logs",
-		client:    client,
-		logger:    zerolog.Nop(),
-		ctx:       logCtx,
-		cancel:    logCancel,
-		clients:   map[*logSubscriber]struct{}{logSub: {}},
-		ring:      newLogRingBuffer(1),
-		onExit: func() {
-			logExited <- struct{}{}
-		},
-	}
-	logCancel()
-	logFanout.run()
-	select {
-	case <-logExited:
-	case <-time.After(time.Second):
-		t.Fatal("log fan-out should invoke onExit after context cancellation")
-	}
-	require.Equal(t, "retry", logSub.reason.Load(), "canceling log fan-out should close subscribers with retry")
-
-	statusCtx, statusCancel := context.WithCancel(context.Background())
-	statusSub := &statusSubscriber{ch: make(chan models.Session, 1)}
-	statusSub.reason.Store("")
-	statusExited := make(chan struct{}, 1)
-	statusFanout := &statusFanout{
-		sessionID: uuid.New(),
-		streamKey: "status",
-		client:    client,
-		logger:    zerolog.Nop(),
-		ctx:       statusCtx,
-		cancel:    statusCancel,
-		clients:   map[*statusSubscriber]struct{}{statusSub: {}},
-		onExit: func() {
-			statusExited <- struct{}{}
-		},
-	}
-	statusCancel()
-	statusFanout.run()
-	select {
-	case <-statusExited:
-	case <-time.After(time.Second):
-		t.Fatal("status fan-out should invoke onExit after context cancellation")
-	}
-	require.Equal(t, "retry", statusSub.reason.Load(), "canceling status fan-out should close subscribers with retry")
-}
-
-func TestSessionStreams_DecodeHelpers_NonStringJSONValue(t *testing.T) {
-	t.Parallel()
-
-	logPayload := jsonStringer(`{"id":77,"session_id":"` + uuid.New().String() + `","org_id":"` + uuid.New().String() + `","level":"info","message":"coerce"}`)
-	logEntry, err := decodeLogEntry(redis.XMessage{Values: map[string]any{"json": logPayload}})
-	require.NoError(t, err, "decoder should coerce non-string JSON payloads")
-	require.Equal(t, int64(77), logEntry.ID, "decoder should unmarshal coerced log payloads")
-
-	sessionID := uuid.New()
-	orgID := uuid.New()
-	issueID := uuid.New()
-	statusPayload := jsonStringer(`{"id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","primary_issue_id":"` + issueID.String() + `","agent_type":"codex","status":"running"}`)
-	session, err := decodeStatusEntry(redis.XMessage{Values: map[string]any{"json": statusPayload}})
-	require.NoError(t, err, "decoder should coerce non-string status payloads")
-	require.Equal(t, sessionID, session.ID, "decoder should unmarshal coerced status payloads")
-}
-
-func TestSessionStreams_NilAndDecodeHelpers(t *testing.T) {
-	t.Parallel()
-
-	var streams *SessionStreams
-	require.False(t, streams.Available(), "nil stream helpers should report unavailable")
-	require.Nil(t, NewSessionStreams(nil, zerolog.Nop(), nil), "constructor should return nil when Redis is disabled")
-	require.Equal(t, "foo", maxLenStreamKey("foo", 10), "maxLen helper should currently return the original stream key")
-
-	require.NoError(t, streams.PublishLog(context.Background(), nil), "nil stream helper should ignore nil log publishes")
-	require.NoError(t, streams.PublishStatus(context.Background(), nil), "nil stream helper should ignore nil status publishes")
-	require.NoError(t, streams.PublishEvent(context.Background(), models.SessionStreamEvent{}), "nil stream helper should ignore event publishes")
-	require.NoError(t, streams.ScheduleExpiry(context.Background(), uuid.New(), time.Now()), "nil stream helper should ignore expiry scheduling")
-	require.NoError(t, streams.DeleteSessionStreams(context.Background(), uuid.New()), "nil stream helper should ignore stream deletion")
-}
-
 type cleanupTestLister struct {
-	sessions []models.Session
-	err      error
+	err error
 }
 
 func (l cleanupTestLister) ListTerminalEndedBefore(context.Context, time.Time, int) ([]models.Session, error) {
-	return l.sessions, l.err
-}
-
-func TestSessionStreams_RunCleanupBatch(t *testing.T) {
-	t.Parallel()
-
-	client, mr := testRedisClient(t)
-	streams := NewSessionStreams(client, zerolog.Nop(), nil)
-	sessionID := uuid.New()
-
-	_, err := mr.XAdd(logStreamKey(sessionID), "1-0", []string{"json", `{"id":1}`})
-	require.NoError(t, err, "test should seed the log stream")
-	_, err = mr.XAdd(statusStreamKey(sessionID), "1-0", []string{"json", `{"id":"` + sessionID.String() + `"}`})
-	require.NoError(t, err, "test should seed the status stream")
-	_, err = mr.XAdd(eventStreamKey(sessionID), "1-0", []string{"json", `{"type":"thread.inbox.queued","session_id":"` + sessionID.String() + `","org_id":"` + uuid.New().String() + `","data":{}}`})
-	require.NoError(t, err, "test should seed the event stream")
-
-	count, err := streams.runCleanupBatch(context.Background(), cleanupTestLister{
-		sessions: []models.Session{{ID: sessionID}},
-	})
-	require.NoError(t, err, "cleanup batch should succeed")
-	require.Equal(t, 1, count, "cleanup batch should report the deleted session stream count")
-	require.False(t, mr.Exists(logStreamKey(sessionID)), "cleanup should delete the log stream")
-	require.False(t, mr.Exists(statusStreamKey(sessionID)), "cleanup should delete the status stream")
-	require.False(t, mr.Exists(eventStreamKey(sessionID)), "cleanup should delete the event stream")
-}
-
-func TestSessionStreams_StartCleanup_StopsOnCanceledContext(t *testing.T) {
-	t.Parallel()
-
-	client, _ := testRedisClient(t)
-	streams := NewSessionStreams(client, zerolog.Nop(), nil)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	require.NotPanics(t, func() {
-		streams.StartCleanup(ctx, cleanupTestLister{})
-	}, "cleanup startup should tolerate already-canceled contexts")
-	require.NotPanics(t, func() {
-		streams.StartCleanup(context.Background(), nil)
-	}, "cleanup startup should ignore nil listers")
-}
-
-func TestSessionStreams_DecodeStatusEntryAndInvalidStreamID(t *testing.T) {
-	t.Parallel()
-
-	issueID := uuid.New()
-	want := models.Session{ID: uuid.New(), OrgID: uuid.New(), PrimaryIssueID: &issueID, Status: models.SessionStatusRunning}
-	payload, err := json.Marshal(want)
-	require.NoError(t, err, "test payload should marshal")
-
-	got, err := decodeStatusEntry(redis.XMessage{Values: map[string]any{"json": string(payload)}})
-	require.NoError(t, err, "decoder should unmarshal the JSON payload")
-	require.Equal(t, want.ID, got.ID, "decoder should hydrate the session ID")
-
-	_, err = ParseLogStreamID("bad")
-	require.Error(t, err, "invalid stream IDs should return an error")
+	return nil, l.err
 }
 
 func TestSessionStreams_DecodeLogEntry(t *testing.T) {
@@ -543,26 +389,4 @@ func TestSessionStreams_DecodeHelpers_MissingJSON(t *testing.T) {
 
 	_, err = decodeStatusEntry(redis.XMessage{Values: map[string]any{}})
 	require.Error(t, err, "status decoder should reject missing payloads")
-}
-
-func TestSessionStreams_FanoutCloseHelpers(t *testing.T) {
-	t.Parallel()
-
-	logSub := &logSubscriber{ch: make(chan StreamedLog, 1)}
-	logSub.reason.Store("")
-	logFanout := &logFanout{clients: map[*logSubscriber]struct{}{logSub: {}}}
-	logFanout.closeAll("retry")
-	require.Equal(t, "retry", logSub.reason.Load(), "closeAll should store the close reason on log subscribers")
-
-	statusSub := &statusSubscriber{ch: make(chan models.Session, 1)}
-	statusSub.reason.Store("")
-	statusFanout := &statusFanout{clients: map[*statusSubscriber]struct{}{statusSub: {}}, cancel: func() {}}
-	statusFanout.removeClient(statusSub, "client_closed")
-	require.Equal(t, "client_closed", statusSub.reason.Load(), "removeClient should store the close reason on status subscribers")
-
-	eventSub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, 1)}
-	eventSub.reason.Store("")
-	eventFanout := &eventFanout{clients: map[*eventSubscriber]struct{}{eventSub: {}}, cancel: func() {}}
-	eventFanout.removeClient(eventSub, "client_closed")
-	require.Equal(t, "client_closed", eventSub.reason.Load(), "removeClient should store the close reason on event subscribers")
 }

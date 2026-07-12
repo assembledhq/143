@@ -11,6 +11,8 @@ DROP TRIGGER IF EXISTS pull_requests_enqueue_live_invalidation ON pull_requests;
 DROP FUNCTION IF EXISTS enqueue_live_invalidation();
 DROP TRIGGER IF EXISTS organization_memberships_enqueue_live_authorization_change ON organization_memberships;
 DROP FUNCTION IF EXISTS enqueue_live_authorization_change();
+DROP TRIGGER IF EXISTS session_publish_state_touch_live_projection ON session_publish_state;
+DROP FUNCTION IF EXISTS touch_session_live_projection_from_publish_state();
 DROP TRIGGER IF EXISTS automation_runs_enqueue_live_projection ON automation_runs;
 DROP TRIGGER IF EXISTS automations_enqueue_live_projection ON automations;
 DROP TRIGGER IF EXISTS preview_instances_enqueue_live_projection ON preview_instances;

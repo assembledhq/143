@@ -137,7 +137,7 @@ func (m *Manager) StartHealthMonitor(ctx context.Context, store *db.LiveEventSto
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if m.ActiveSubscribers() == 0 {
+				if !m.needsHealthSample() {
 					high, low = 0, 0
 					continue
 				}
@@ -166,6 +166,13 @@ func (m *Manager) StartHealthMonitor(ctx context.Context, store *db.LiveEventSto
 			}
 		}
 	}()
+}
+
+// Healthy idle nodes do not poll Postgres. A degraded node must keep sampling
+// even after it has closed its subscribers; otherwise it can never satisfy the
+// recovery hysteresis needed to admit the next reconnecting client.
+func (m *Manager) needsHealthSample() bool {
+	return m.ActiveSubscribers() > 0 || !m.publisherHealthy.Load()
 }
 
 func (m *Manager) RecordPublishResult(success bool) {
@@ -325,6 +332,13 @@ func (m *Manager) SubscribeForUser(orgID, userID uuid.UUID, allow func(models.Li
 	subscriber := newSubscriber(orgID, allow)
 	subscriber.UserID = userID
 	m.mu.Lock()
+	// Recheck while holding the fan-out lock. Shard and publisher degradation
+	// store their unhealthy state before taking this lock to close subscribers,
+	// so either this admission is visible to that sweep or it is rejected here.
+	if m.draining.Load() || !m.health[shard].Load() || !m.publisherHealthy.Load() {
+		m.mu.Unlock()
+		return nil, nil, fmt.Errorf("live bus shard unavailable")
+	}
 	if m.total >= MaxConnectionsPerNode || len(m.subs[orgID]) >= MaxConnectionsPerOrg || (userID != uuid.Nil && m.users[userID] >= MaxConnectionsPerUser) {
 		m.mu.Unlock()
 		return nil, nil, fmt.Errorf("live connection capacity exceeded")
