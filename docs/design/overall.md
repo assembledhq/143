@@ -71,6 +71,7 @@ Vector -> VictoriaLogs / Grafana for centralized logs, dashboards, and alerts
 - Database-backed foreign keys remain the default for tenant-scoped product/control-plane tables. Hot append-only/event/log/cache/runtime tables need an explicit exception review before omitting parent FKs, because parent-row lock fan-in can become a Postgres operational risk; exceptions must keep `org_id NOT NULL`, keep query scoping, and validate parent ownership in the write path.
 - The job queue is Postgres-backed. Workers claim work with `SELECT ... FOR UPDATE SKIP LOCKED`, and durable state transitions are committed before Redis wakeups or SSE notifications.
 - Redis is an optional acceleration layer for cache, pub/sub, SSE fan-out, and coordination. Losing Redis should degrade live updates, not lose durable work. See [implemented/52-redis.md](implemented/52-redis.md).
+- Dashboard freshness uses a transactional Postgres outbox, bounded fixed-shard Redis fan-out, short per-org replay Streams, and one shared visibility-aware browser transport. Redis failures retain committed events for retry while clients fall back to sparse jittered polling. See [implemented/116-scalable-live-updates-sse.md](implemented/116-scalable-live-updates-sse.md).
 - Session snapshots and multi-node recovery use shared object storage so workers and API nodes do not depend on one machine's local disk. See [implemented/54-s3-session-snapshots.md](implemented/54-s3-session-snapshots.md).
 
 ### Runtime Plane

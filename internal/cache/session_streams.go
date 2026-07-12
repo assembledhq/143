@@ -164,6 +164,20 @@ type eventFanout struct {
 	clients map[*eventSubscriber]struct{}
 }
 
+type sessionResourceFanout struct {
+	sessionID uuid.UUID
+	client    *Client
+	logger    zerolog.Logger
+	ctx       context.Context
+	cancel    context.CancelFunc
+	onExit    func()
+	mu        sync.Mutex
+	logs      map[*logSubscriber]struct{}
+	statuses  map[*statusSubscriber]struct{}
+	events    map[*eventSubscriber]struct{}
+	ring      *logRingBuffer
+}
+
 type LogSubscription struct {
 	C       <-chan StreamedLog
 	client  *logSubscriber
@@ -244,8 +258,10 @@ type SessionStreams struct {
 	statusMu      sync.Mutex
 	statusFanouts map[uuid.UUID]*statusFanout
 
-	eventMu      sync.Mutex
-	eventFanouts map[uuid.UUID]*eventFanout
+	eventMu         sync.Mutex
+	eventFanouts    map[uuid.UUID]*eventFanout
+	resourceMu      sync.Mutex
+	resourceFanouts map[uuid.UUID]*sessionResourceFanout
 }
 
 func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) *SessionStreams {
@@ -253,12 +269,13 @@ func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) 
 		return nil
 	}
 	return &SessionStreams{
-		client:        client,
-		logger:        logger,
-		metrics:       metrics,
-		logFanouts:    make(map[uuid.UUID]*logFanout),
-		statusFanouts: make(map[uuid.UUID]*statusFanout),
-		eventFanouts:  make(map[uuid.UUID]*eventFanout),
+		client:          client,
+		logger:          logger,
+		metrics:         metrics,
+		logFanouts:      make(map[uuid.UUID]*logFanout),
+		statusFanouts:   make(map[uuid.UUID]*statusFanout),
+		eventFanouts:    make(map[uuid.UUID]*eventFanout),
+		resourceFanouts: make(map[uuid.UUID]*sessionResourceFanout),
 	}
 }
 
@@ -397,9 +414,9 @@ func (s *SessionStreams) ReplayBufferedLogs(sessionID uuid.UUID, lastStreamID st
 	if s == nil {
 		return nil, false
 	}
-	s.logMu.Lock()
-	f := s.logFanouts[sessionID]
-	s.logMu.Unlock()
+	s.resourceMu.Lock()
+	f := s.resourceFanouts[sessionID]
+	s.resourceMu.Unlock()
 	if f == nil {
 		return nil, false
 	}
@@ -442,19 +459,19 @@ func (s *SessionStreams) SubscribeLogs(sessionID uuid.UUID) (*LogSubscription, e
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureLogFanout(sessionID)
+	f := s.ensureResourceFanout(sessionID)
 	sub := &logSubscriber{ch: make(chan StreamedLog, perClientBufferSize)}
 	sub.reason.Store("")
 
 	f.mu.Lock()
-	f.clients[sub] = struct{}{}
+	f.logs[sub] = struct{}{}
 	f.mu.Unlock()
 
 	return &LogSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeLogClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -463,19 +480,19 @@ func (s *SessionStreams) SubscribeStatus(sessionID uuid.UUID) (*StatusSubscripti
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureStatusFanout(sessionID)
+	f := s.ensureResourceFanout(sessionID)
 	sub := &statusSubscriber{ch: make(chan models.Session, perClientBufferSize)}
 	sub.reason.Store("")
 
 	f.mu.Lock()
-	f.clients[sub] = struct{}{}
+	f.statuses[sub] = struct{}{}
 	f.mu.Unlock()
 
 	return &StatusSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeStatusClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -484,19 +501,19 @@ func (s *SessionStreams) SubscribeEvents(sessionID uuid.UUID) (*EventSubscriptio
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureEventFanout(sessionID)
+	f := s.ensureResourceFanout(sessionID)
 	sub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, perClientBufferSize)}
 	sub.reason.Store("")
 
 	f.mu.Lock()
-	f.clients[sub] = struct{}{}
+	f.events[sub] = struct{}{}
 	f.mu.Unlock()
 
 	return &EventSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeEventClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -545,6 +562,195 @@ func (s *SessionStreams) runCleanupBatch(ctx context.Context, lister SessionTerm
 	return len(sessions), nil
 }
 
+func (s *SessionStreams) ensureResourceFanout(sessionID uuid.UUID) *sessionResourceFanout {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+	if fanout := s.resourceFanouts[sessionID]; fanout != nil {
+		return fanout
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	fanout := &sessionResourceFanout{
+		sessionID: sessionID, client: s.client, logger: s.logger, ctx: ctx, cancel: cancel,
+		logs: make(map[*logSubscriber]struct{}), statuses: make(map[*statusSubscriber]struct{}),
+		events: make(map[*eventSubscriber]struct{}), ring: newLogRingBuffer(logRingBufferSize),
+		onExit: func() {
+			s.metrics.RecordSessionReader(context.Background(), "combined", -1)
+			s.resourceMu.Lock()
+			delete(s.resourceFanouts, sessionID)
+			s.resourceMu.Unlock()
+		},
+	}
+	s.resourceFanouts[sessionID] = fanout
+	s.metrics.RecordSessionReader(context.Background(), "combined", 1)
+	go fanout.run()
+	return fanout
+}
+
+func (f *sessionResourceFanout) emptyLocked() bool {
+	return len(f.logs) == 0 && len(f.statuses) == 0 && len(f.events) == 0
+}
+
+func (f *sessionResourceFanout) run() {
+	defer f.onExit()
+	keys := []string{logStreamKey(f.sessionID), statusStreamKey(f.sessionID), eventStreamKey(f.sessionID)}
+	ids := []string{"$", "$", "$"}
+	for {
+		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{Streams: append(append([]string{}, keys...), ids...), Block: 30 * time.Second, Count: 100}).Result()
+		if err != nil {
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			if !errors.Is(err, context.Canceled) {
+				f.client.breaker.ForceOpen()
+				f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("combined session resource reader failed")
+			}
+			f.closeAll("retry")
+			return
+		}
+		for _, stream := range streams {
+			streamIndex := 0
+			for index, key := range keys {
+				if stream.Stream == key {
+					streamIndex = index
+					break
+				}
+			}
+			for _, message := range stream.Messages {
+				ids[streamIndex] = message.ID
+				switch streamIndex {
+				case 0:
+					f.deliverLog(message)
+				case 1:
+					f.deliverStatus(message)
+				case 2:
+					f.deliverEvent(message)
+				}
+			}
+		}
+		f.mu.Lock()
+		empty := f.emptyLocked()
+		f.mu.Unlock()
+		if empty {
+			return
+		}
+	}
+}
+
+func (f *sessionResourceFanout) deliverLog(message redis.XMessage) {
+	log, err := decodeLogEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session log")
+		return
+	}
+	entry := StreamedLog{StreamID: message.ID, Log: log}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ring.add(entry)
+	for subscriber := range f.logs {
+		select {
+		case subscriber.ch <- entry:
+		default:
+			f.closeLogLocked(subscriber, "slow_consumer")
+		}
+	}
+}
+
+func (f *sessionResourceFanout) deliverStatus(message redis.XMessage) {
+	session, err := decodeStatusEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session status")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.statuses {
+		select {
+		case subscriber.ch <- session:
+		default:
+			f.closeStatusLocked(subscriber, "slow_consumer")
+		}
+	}
+}
+
+func (f *sessionResourceFanout) deliverEvent(message redis.XMessage) {
+	event, err := decodeEventEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session event")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.events {
+		select {
+		case subscriber.ch <- event:
+		default:
+			f.closeEventLocked(subscriber, "slow_consumer")
+		}
+	}
+}
+
+func (f *sessionResourceFanout) closeLogLocked(subscriber *logSubscriber, reason string) {
+	delete(f.logs, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeStatusLocked(subscriber *statusSubscriber, reason string) {
+	delete(f.statuses, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeEventLocked(subscriber *eventSubscriber, reason string) {
+	delete(f.events, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeAll(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.logs {
+		f.closeLogLocked(subscriber, reason)
+	}
+	for subscriber := range f.statuses {
+		f.closeStatusLocked(subscriber, reason)
+	}
+	for subscriber := range f.events {
+		f.closeEventLocked(subscriber, reason)
+	}
+}
+func (f *sessionResourceFanout) removeLogClient(subscriber *logSubscriber, reason string) {
+	f.mu.Lock()
+	if _, ok := f.logs[subscriber]; ok {
+		f.closeLogLocked(subscriber, reason)
+	}
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
+		f.cancel()
+	}
+}
+func (f *sessionResourceFanout) removeStatusClient(subscriber *statusSubscriber, reason string) {
+	f.mu.Lock()
+	if _, ok := f.statuses[subscriber]; ok {
+		f.closeStatusLocked(subscriber, reason)
+	}
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
+		f.cancel()
+	}
+}
+func (f *sessionResourceFanout) removeEventClient(subscriber *eventSubscriber, reason string) {
+	f.mu.Lock()
+	if _, ok := f.events[subscriber]; ok {
+		f.closeEventLocked(subscriber, reason)
+	}
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
+		f.cancel()
+	}
+}
+
 func (s *SessionStreams) ensureLogFanout(sessionID uuid.UUID) *logFanout {
 	s.logMu.Lock()
 	defer s.logMu.Unlock()
@@ -562,12 +768,14 @@ func (s *SessionStreams) ensureLogFanout(sessionID uuid.UUID) *logFanout {
 		clients:   make(map[*logSubscriber]struct{}),
 		ring:      newLogRingBuffer(logRingBufferSize),
 		onExit: func() {
+			s.metrics.RecordSessionReader(context.Background(), "log", -1)
 			s.logMu.Lock()
 			delete(s.logFanouts, sessionID)
 			s.logMu.Unlock()
 		},
 	}
 	s.logFanouts[sessionID] = f
+	s.metrics.RecordSessionReader(context.Background(), "log", 1)
 	go f.run()
 	return f
 }
@@ -588,12 +796,14 @@ func (s *SessionStreams) ensureStatusFanout(sessionID uuid.UUID) *statusFanout {
 		cancel:    cancel,
 		clients:   make(map[*statusSubscriber]struct{}),
 		onExit: func() {
+			s.metrics.RecordSessionReader(context.Background(), "status", -1)
 			s.statusMu.Lock()
 			delete(s.statusFanouts, sessionID)
 			s.statusMu.Unlock()
 		},
 	}
 	s.statusFanouts[sessionID] = f
+	s.metrics.RecordSessionReader(context.Background(), "status", 1)
 	go f.run()
 	return f
 }
@@ -614,12 +824,14 @@ func (s *SessionStreams) ensureEventFanout(sessionID uuid.UUID) *eventFanout {
 		cancel:    cancel,
 		clients:   make(map[*eventSubscriber]struct{}),
 		onExit: func() {
+			s.metrics.RecordSessionReader(context.Background(), "event", -1)
 			s.eventMu.Lock()
 			delete(s.eventFanouts, sessionID)
 			s.eventMu.Unlock()
 		},
 	}
 	s.eventFanouts[sessionID] = f
+	s.metrics.RecordSessionReader(context.Background(), "event", 1)
 	go f.run()
 	return f
 }

@@ -113,7 +113,6 @@ import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
 import {
   SSE_EVENT,
   addSSEListener,
-  buildPullRequestStreamURL,
   buildSessionLogsStreamURL,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTranscriptWindows, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
@@ -141,7 +140,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -161,6 +160,7 @@ import { ErrorBoundary } from "@/components/error-boundary";
 import { useAuth } from "@/hooks/use-auth";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
 import { usePageTitle } from "@/hooks/use-page-title";
 import {
   useSessionKeyboardShortcuts,
@@ -173,6 +173,8 @@ import { cn, sessionTitle, formatTimeAgo } from "@/lib/utils";
 import { isProvisionalSessionDetail } from "@/lib/session-detail-cache";
 import { useReconcileOptimisticAction } from "./use-optimistic-pr-action";
 import { pollMs } from "@/lib/poll-intervals";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { activeSet, workingStatusesSet } from "@/lib/session-status-groups";
 import { MobileSessionTopBar } from "./mobile-session-top-bar";
 import { RecoverableInboxNotice } from "./recoverable-inbox-notice";
@@ -187,7 +189,7 @@ import {
   getDisplayStatus,
   getInitialComposerSelectedModel,
   getPendingEditableThreadUpdate,
-  getPullRequestHealthRefetchInterval,
+  isPullRequestHealthConverging,
   hasMeaningfulDuration,
   invalidateSessionHumanInputRequests,
   liveLogsForTimeline,
@@ -258,7 +260,6 @@ const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
-const SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS = pollMs(3000);
 
 const EDITABLE_THREAD_AGENTS: ReadonlyArray<{ key: string; label: string }> =
   AGENTS.map((agent) => ({ key: agent.key, label: agent.label }));
@@ -2238,6 +2239,9 @@ function ChatPanel({
   onRegisterKeyboardControls,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
+  const liveHealth = useLiveHealth();
+  const isDocumentVisible = useDocumentVisible();
+  const liveDetailPollMs = liveRefreshInterval(["session-detail", sessionId], "active-detail", liveHealth, isDocumentVisible);
   const [dismissedHumanInputIds, setDismissedHumanInputIds] = useState<Set<string>>(() => new Set());
   const [newerThreadMessagePages, setNewerThreadMessagePages] = useState<SessionTranscriptWindowResponse[]>([]);
   const [isFetchingNewerThreadMessages, setIsFetchingNewerThreadMessages] = useState(false);
@@ -2251,7 +2255,6 @@ function ChatPanel({
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
-  const isDocumentVisible = useDocumentVisible();
 
   const activeThreadId = activeThread?.id;
   const isRunning = activeThread ? activeThread.status === "running" : session.status === "running";
@@ -2274,7 +2277,7 @@ function ChatPanel({
     queryFn: () => api.settings.getRuntimeStatus(),
     enabled: isPending,
     staleTime: 15_000,
-    refetchInterval: 15_000,
+    refetchInterval: isPending ? liveDetailPollMs : false,
   });
   const capacity = runtimeStatusQuery.data?.data.capacity;
   const isCapacityLimited = capacity != null && capacity.active_agent_runs >= capacity.max_concurrent_agent_runs;
@@ -2296,7 +2299,7 @@ function ChatPanel({
     queryKey: ["session", sessionId, "timeline"],
     queryFn: () => api.sessions.getTimeline(sessionId),
     enabled: !activeThreadId,
-    refetchInterval: isActive && !activeThreadId ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
+    refetchInterval: isActive && !activeThreadId ? liveDetailPollMs : false,
   });
 
   // Single transcript-window query feeding the legacy ChatTimeline. It replaces
@@ -2321,7 +2324,7 @@ function ChatPanel({
         ? { before: lastPage.meta.next_older_cursor }
         : undefined,
     enabled: !!activeThreadId && !!viewerScope,
-    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
+    refetchInterval: activeThread && workingStatusesSet.has(activeThread.status) ? liveDetailPollMs : false,
   });
 
   const threadTranscriptTurns = useMemo(
@@ -2365,7 +2368,7 @@ function ChatPanel({
   const humanInputQuery = useQuery({
     queryKey: queryKeys.sessions.humanInputRequests(sessionId, humanInputStatusFilter ?? null, activeThreadId ?? null),
     queryFn: () => api.sessions.getHumanInputRequests(sessionId, { status: humanInputStatusFilter, threadId: activeThreadId ?? null }),
-    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false,
+    refetchInterval: isActive && (session.status === "awaiting_input" || activeThread?.status === "awaiting_input") ? liveDetailPollMs : false,
   });
   const pendingHumanInputs = useMemo(() => {
     const requests = humanInputQuery.data?.data ?? [];
@@ -3336,6 +3339,9 @@ function getDefaultReviewAgentType(sessionAgentType?: string): string {
 
 export function SessionDetailContent({ id }: { id: string }) {
   const router = useRouter();
+  const liveHealth = useLiveHealth();
+  const isDocumentVisible = useDocumentVisible();
+  const liveDetailPollMs = liveRefreshInterval(["session-detail", id], "active-detail", liveHealth, isDocumentVisible);
   const { user, isLoading: isAuthLoading } = useAuth();
   const canListTeamMembers = user?.role === "admin" || user?.role === "member";
   const canShipPR = user?.role === "admin" || user?.role === "member" || user?.role === "builder";
@@ -3530,9 +3536,6 @@ export function SessionDetailContent({ id }: { id: string }) {
     const inFlight = localPRState !== "idle" || localPushState !== "idle" || localBranchState !== "idle";
     setAnyActionInFlight((prev) => (prev === inFlight ? prev : inFlight));
   }, [localPRState, localPushState, localBranchState]);
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-  const isDocumentVisible = useDocumentVisible();
-
   const resetSessionChromeAndActionState = useCallback(() => {
     setMobileDetailOpen(false);
     setMobileReviewComposerOpen(false);
@@ -3560,9 +3563,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     { name: "session chrome and action state", reset: resetSessionChromeAndActionState },
   ]);
 
+  const sessionDetailKey = queryKeys.sessions.detail(id);
+  useLiveQueryRegistration({
+    queryKey: sessionDetailKey,
+    families: ["session.detail"],
+    resourceId: id,
+    priority: "critical",
+    visible: isDocumentVisible,
+    resourceStreamOwnsDetail: true,
+  });
   const { data, isLoading, error } = useQuery({
-    queryKey: queryKeys.sessions.detail(id),
-    queryFn: () => api.sessions.get(id),
+    queryKey: sessionDetailKey,
+    queryFn: ({ signal }) => api.sessions.get(id, { signal }),
     // Sidebar navigation may seed this key with list-row data so the detail
     // shell can open immediately. Always treat that cache entry as stale so
     // the authoritative detail payload replaces it on mount.
@@ -3591,9 +3603,9 @@ export function SessionDetailContent({ id }: { id: string }) {
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
       if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
-        return pollMs(2000);
+        return liveRefreshInterval(sessionDetailKey, "converging", liveHealth, isDocumentVisible);
       }
-      return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
+      return sessionVolatile || threadVolatile ? liveDetailPollMs : false;
     },
     // While a PR-level action is in flight, keep converging even if the tab is
     // backgrounded or refocused. For a terminal (completed) session there is no
@@ -3817,7 +3829,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     // tab is hidden — refetchIntervalInBackground=false (the default) stops
     // the interval; refetchOnWindowFocus=true picks up any changes when the
     // user returns.
-    refetchInterval: recoverableInboxThreadId ? 30_000 : false,
+    refetchInterval: recoverableInboxThreadId ? liveDetailPollMs : false,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
@@ -4103,16 +4115,21 @@ export function SessionDetailContent({ id }: { id: string }) {
     staleTime: 30_000,
   });
   const pullRequestId = prData?.data?.id;
+  const pullRequestHealthKey = ["pull-request", pullRequestId, "health"] as const;
+  useLiveQueryRegistration({ queryKey: pullRequestHealthKey, families: ["pull-request.detail"], resourceId: pullRequestId, priority: "critical", visible: isDocumentVisible && !!pullRequestId });
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
-    queryKey: ["pull-request", pullRequestId, "health"],
-    queryFn: () => api.pullRequests.getHealth(pullRequestId!),
+    queryKey: pullRequestHealthKey,
+    queryFn: ({ signal }) => api.pullRequests.getHealth(pullRequestId!, { signal }),
     enabled: !!pullRequestId && prData?.data?.status === "open",
     // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
     // below also reconciles once because Redis pub/sub does not replay PR row
     // or health events missed while the tab was hidden or the EventSource was
     // reconnecting.
     staleTime: 30_000,
-    refetchInterval: (query) => getPullRequestHealthRefetchInterval(query.state.data?.data),
+    refetchInterval: (query) => {
+      const converging = isPullRequestHealthConverging(query.state.data?.data);
+      return converging ? liveRefreshInterval(pullRequestHealthKey, "converging", liveHealth, isDocumentVisible) : false;
+    },
   });
   const prHealth = prHealthData?.data;
   const prHealthActionsBlocked = prHealthBlocksPRActions(prHealth);
@@ -4364,67 +4381,6 @@ export function SessionDetailContent({ id }: { id: string }) {
       toast.error(message);
     },
   });
-  useEffect(() => {
-    // Pause the PR health SSE stream while the tab is hidden — same reasoning
-    // as the session log stream above. The onerror branch already invalidates
-    // the health query on disconnect, so reconnecting on visibility refreshes
-    // the cached health to whatever happened while we were away.
-    if (!pullRequestId || prData?.data?.status !== "open" || !isDocumentVisible) {
-      return;
-    }
-
-    let eventSource: EventSource | null = null;
-    let cancelled = false;
-    let reconnectAttempts = 0;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-    function connect() {
-      if (cancelled) {
-        return;
-      }
-
-      eventSource = new EventSource(buildPullRequestStreamURL(apiBase, getActiveOrgId()), { withCredentials: true });
-      eventSource.onopen = () => {
-        reconnectAttempts = 0;
-        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
-        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
-      };
-      addSSEListener(eventSource, SSE_EVENT.PULL_REQUEST_UPDATED, (event) => {
-        if (event.pull_request_id !== pullRequestId) {
-          return;
-        }
-
-        const cached = queryClient.getQueryData<SingleResponse<PullRequestHealthResponse>>(["pull-request", pullRequestId, "health"]);
-        const cachedVersion = cached?.data?.health_version ?? 0;
-        if (event.version < cachedVersion) {
-          return;
-        }
-
-        void queryClient.invalidateQueries({ queryKey: ["session", id, "pr"] });
-        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
-      });
-      eventSource.onerror = () => {
-        eventSource?.close();
-        void queryClient.invalidateQueries({ queryKey: ["pull-request", pullRequestId, "health"] });
-
-        if (!cancelled && reconnectAttempts < MAX_SSE_RECONNECT_ATTEMPTS) {
-          const delay = BASE_SSE_RECONNECT_DELAY_MS * Math.pow(2, reconnectAttempts);
-          reconnectAttempts += 1;
-          reconnectTimer = setTimeout(connect, delay);
-        }
-      };
-    }
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      eventSource?.close();
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-      }
-    };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   const resetSessionNotificationRefs = useCallback(() => {
     previousSessionStatusRef.current = undefined;
@@ -4491,7 +4447,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!session,
     refetchInterval: (query) => {
       const status = query.state.data?.data.latest?.status;
-      return status === "queued" || status === "running" ? pollMs(3000) : false;
+      return status === "queued" || status === "running" ? liveDetailPollMs : false;
     },
   });
   const runReadinessMutation = useMutation({
@@ -5622,7 +5578,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     queryKey: queryKeys.sessions.threadFileEvents(id),
     queryFn: () => api.sessions.listThreadFileEvents(id, fileEventsSinceRef.current),
     enabled: threads.length > 0,
-    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? pollMs(5000) : false,
+    refetchInterval: threads.some((t) => t.status === "running" || t.status === "pending") ? liveDetailPollMs : false,
     staleTime: 2_000,
   });
   useEffect(() => {

@@ -98,6 +98,7 @@ export type PreviewErrorCode =
 
 export interface PreviewInstance {
   id: string;
+  live_version: number;
   session_id: string;
   org_id: string;
   user_id: string;

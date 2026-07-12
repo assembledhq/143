@@ -14,13 +14,6 @@ vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "batch-1" }),
 }));
 
-vi.mock("@/lib/use-resource-sse", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/use-resource-sse")>("@/lib/use-resource-sse");
-  return {
-    ...actual,
-    useResourceSSE: () => ({ healthy: true }),
-  };
-});
 
 describe("BatchDetailPage", () => {
   it("updates the browser tab title with the eval batch name", async () => {

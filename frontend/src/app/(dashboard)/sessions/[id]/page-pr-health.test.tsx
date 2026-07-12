@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
-import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
+import { createTestQueryClient, renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockPR, mockPRHealth } from '@/test/mocks/handlers';
@@ -162,28 +162,22 @@ describe('SessionDetailPage PR health and merge', () => {
     });
   });
 
-  it('includes the active org in the PR health stream URL', async () => {
+  it('does not open a per-page PR health stream now that the layout owns org events', async () => {
     const activeOrgId = '22222222-2222-2222-2222-222222222222';
     window.sessionStorage.setItem('active_org_id', activeOrgId);
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const queryClient = createTestQueryClient();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
 
     expect(await screen.findByText('PR health')).toBeInTheDocument();
-    expect(MockEventSource.instances).toHaveLength(1);
-    expect(MockEventSource.instances[0].url).toContain(`/api/v1/pull-requests/stream?org_id=${activeOrgId}`);
+    expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(false);
   });
 
-  it('reconnects the PR health stream after an SSE error', async () => {
+  it('leaves PR reconnect ownership outside the detail page', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     expect(await screen.findByText('PR health')).toBeInTheDocument();
-    expect(MockEventSource.instances).toHaveLength(1);
-
-    MockEventSource.instances[0].onerror?.(new Event('error'));
-
-    await waitFor(() => {
-      expect(MockEventSource.instances).toHaveLength(2);
-    }, { timeout: 2500 });
+    expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(false);
   });
 
   it('preserves plan-mode styling for streamed output logs', async () => {
@@ -472,6 +466,7 @@ describe('SessionDetailPage PR health and merge', () => {
   });
 
   it('reconciles open PR health when the PR stream opens after a missed update', async () => {
+    const queryClient = createTestQueryClient();
     let healthRequestCount = 0;
     let prRequestCount = 0;
     server.use(
@@ -514,19 +509,12 @@ describe('SessionDetailPage PR health and merge', () => {
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
 
     expect(await screen.findByText('PR #42 is waiting for required checks to report passing.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Merge$/ })).toBeDisabled();
 
-    await waitFor(() => {
-      expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
-    });
-    const prStream = MockEventSource.instances.find((source) => source.url.includes('/api/v1/pull-requests/stream'));
-
-    act(() => {
-      prStream?.onopen?.(new Event('open'));
-    });
+    await act(async () => { await queryClient.refetchQueries({ type: 'active' }); });
 
     expect(await screen.findByRole('button', { name: /^Merge$/ })).toBeInTheDocument();
     expect(healthRequestCount).toBeGreaterThanOrEqual(2);
@@ -560,7 +548,8 @@ describe('SessionDetailPage PR health and merge', () => {
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const queryClient = createTestQueryClient();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
 
     const user = userEvent.setup();
     await user.hover(await screen.findByText('2/2 failed'));
@@ -667,6 +656,7 @@ describe('SessionDetailPage PR health and merge', () => {
   });
 
   it('updates the header status when the PR stream reports a merge', async () => {
+    const queryClient = createTestQueryClient();
     const prCreatedSession: Session = {
       ...mockSessions[0],
       status: 'pr_created',
@@ -691,13 +681,9 @@ describe('SessionDetailPage PR health and merge', () => {
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
 
     expect(await screen.findAllByText('PR created')).toHaveLength(2);
-    await waitFor(() => {
-      expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
-    });
-
     currentPR = {
       ...currentPR,
       status: 'merged',
@@ -705,18 +691,7 @@ describe('SessionDetailPage PR health and merge', () => {
       updated_at: '2026-02-17T07:10:00Z',
     };
 
-    const prStream = MockEventSource.instances.find((source) => source.url.includes('/api/v1/pull-requests/stream'));
-    expect(prStream).toBeDefined();
-
-    act(() => {
-      prStream?.emit('pull_request.updated', {
-        pull_request_id: 'pr-1',
-        version: 2,
-        head_sha: 'head-sha',
-        base_sha: 'base-sha',
-        synced_at: '2026-02-17T07:10:00Z',
-      });
-    });
+    await act(async () => { await queryClient.refetchQueries({ type: 'active' }); });
 
     await waitFor(() => {
       const mergedBadges = screen.getAllByText('PR merged');
@@ -744,7 +719,8 @@ describe('SessionDetailPage PR health and merge', () => {
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    const queryClient = createTestQueryClient();
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
     await screen.findByText('PR health');
     const mergeButton = screen.getByRole('button', { name: /^Merge$/ });
     expect(mergeButton).toBeDisabled();
@@ -1309,6 +1285,7 @@ describe('SessionDetailPage PR health and merge', () => {
   });
 
   it('clears the running repair state after a pull request SSE health refresh', async () => {
+    const queryClient = createTestQueryClient();
     let healthRequestCount = 0;
     server.use(
       http.get('/api/v1/pull-requests/:id/health', () => {
@@ -1343,23 +1320,10 @@ describe('SessionDetailPage PR health and merge', () => {
       }),
     );
 
-    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />, { queryClient });
 
     expect(await screen.findByText('Fix tests running')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(MockEventSource.instances.some((source) => source.url.includes('/api/v1/pull-requests/stream'))).toBe(true);
-    });
-
-    const prStream = MockEventSource.instances.find((source) => source.url.includes('/api/v1/pull-requests/stream'));
-    act(() => {
-      prStream?.emit('pull_request.updated', {
-        pull_request_id: 'pr-1',
-        version: 2,
-        head_sha: 'head-sha',
-        base_sha: 'base-sha',
-        synced_at: '2026-02-17T07:10:00Z',
-      });
-    });
+    await act(async () => { await queryClient.refetchQueries({ type: 'active' }); });
 
     await waitFor(() => {
       expect(screen.queryByText('Fix tests running')).not.toBeInTheDocument();

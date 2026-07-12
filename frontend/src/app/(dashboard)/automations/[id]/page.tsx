@@ -58,6 +58,10 @@ import {
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { agentTypeForModel } from "@/lib/agents";
 import {
   automationProductTriggerOptions,
@@ -821,6 +825,8 @@ function SettingsTab({
 }
 
 export default function AutomationDetailPage() {
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const params = useParams();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -829,11 +835,13 @@ export default function AutomationDetailPage() {
   const canManage = user?.role === "admin" || user?.role === "member";
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const automationKey = queryKeys.automations.detail(automationId);
+  useLiveQueryRegistration({ queryKey: automationKey, families: ["automation.detail"], resourceId: automationId, priority: "critical", visible: documentVisible });
 
   const { data, isLoading } = useQuery({
-    queryKey: queryKeys.automations.detail(automationId),
-    queryFn: () => api.automations.get(automationId),
-    refetchInterval: 10000,
+    queryKey: automationKey,
+    queryFn: ({ signal }) => api.automations.get(automationId, { signal }),
+    refetchInterval: liveRefreshInterval(automationKey, "active-detail", liveHealth, documentVisible),
   });
 
   const automation = data?.data;
@@ -1291,10 +1299,14 @@ function priorityLabel(priority?: number): string {
 }
 
 function LatestRunSummary({ automationId }: { automationId: string }) {
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
+  const recentRunsKey = ["automation-runs", automationId, "recent"] as const;
+  useLiveQueryRegistration({ queryKey: recentRunsKey, families: ["automation.runs"], resourceId: automationId, priority: "secondary", visible: documentVisible });
   const { data, isLoading } = useQuery({
-    queryKey: ["automation-runs", automationId, "recent"],
-    queryFn: () => api.automations.listRuns(automationId, { limit: 5 }),
-    refetchInterval: 10_000,
+    queryKey: recentRunsKey,
+    queryFn: ({ signal }) => api.automations.listRuns(automationId, { limit: 5 }, { signal }),
+    refetchInterval: liveRefreshInterval(recentRunsKey, "active-detail", liveHealth, documentVisible),
   });
   const latest = data?.data?.[0];
 

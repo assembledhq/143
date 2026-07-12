@@ -428,6 +428,7 @@ type Session struct {
 	GitIdentitySource *GitIdentitySource `db:"git_identity_source" json:"git_identity_source,omitempty"`
 	GitIdentityUserID *uuid.UUID         `db:"git_identity_user_id" json:"git_identity_user_id,omitempty"`
 	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
+	LiveVersion       int64              `db:"live_version" json:"live_version"`
 }
 
 // SessionDetail is the API response for a single session, enriched with threads.

@@ -166,7 +166,7 @@ var previewInstanceTestCols = []string{
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
 	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 }
 
 var previewServiceTestCols = []string{
@@ -221,7 +221,7 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, status models
 		"reserved", stringPtr("req-1"), "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
-		false,
+		false, int64(1),
 	}
 }
 

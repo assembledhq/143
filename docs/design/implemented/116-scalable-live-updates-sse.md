@@ -1,6 +1,6 @@
 # Design: Scalable Low-Latency Live Updates Over SSE
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-11
+> **Status:** Implemented | **Last reviewed:** 2026-07-12
 
 ## Summary
 
@@ -22,7 +22,7 @@ The first migration targets the highest-polling dashboard surfaces:
 - `/automations`
 - automation detail and runs
 
-The same transport and frontend dispatcher should become the shared replacement for the existing one-off SSE implementations across code reviews, PR health, eval batches, eval bootstrap, and session streams. Existing routes remain during migration.
+The same transport and frontend dispatcher replaces the one-off SSE implementations across code reviews, PR health, eval batches, and eval bootstrap. Their obsolete compatibility routes have been removed; focused high-volume session append traffic remains on its resource stream and shares one typed backend reader per session.
 
 The following decisions are load-bearing and fixed in this design:
 

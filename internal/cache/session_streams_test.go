@@ -265,6 +265,29 @@ func TestSessionStreams_SubscribeStatusCloseRemovesClient(t *testing.T) {
 	require.Equal(t, "client_closed", sub.CloseReason(), "closing a status subscription should record the close reason")
 }
 
+func TestSessionStreams_UsesOneCombinedReaderForAllResourceChannels(t *testing.T) {
+	t.Parallel()
+	client, _ := testRedisClient(t)
+	streams := NewSessionStreams(client, zerolog.Nop(), nil)
+	sessionID := uuid.New()
+	logSubscription, err := streams.SubscribeLogs(sessionID)
+	require.NoError(t, err, "log subscription should join the resource reader")
+	defer logSubscription.Close()
+	statusSubscription, err := streams.SubscribeStatus(sessionID)
+	require.NoError(t, err, "status subscription should join the resource reader")
+	defer statusSubscription.Close()
+	eventSubscription, err := streams.SubscribeEvents(sessionID)
+	require.NoError(t, err, "event subscription should join the resource reader")
+	defer eventSubscription.Close()
+	streams.resourceMu.Lock()
+	resourceReaders := len(streams.resourceFanouts)
+	streams.resourceMu.Unlock()
+	require.Equal(t, 1, resourceReaders, "one focused session should use one multi-stream Redis reader")
+	require.Empty(t, streams.logFanouts, "combined subscriptions should not start a separate log reader")
+	require.Empty(t, streams.statusFanouts, "combined subscriptions should not start a separate status reader")
+	require.Empty(t, streams.eventFanouts, "combined subscriptions should not start a separate event reader")
+}
+
 func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 	t.Parallel()
 
@@ -272,7 +295,7 @@ func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 	streams := NewSessionStreams(client, zerolog.Nop(), nil)
 	sessionID := uuid.New()
 
-	fanout := streams.ensureLogFanout(sessionID)
+	fanout := streams.ensureResourceFanout(sessionID)
 	entry1 := StreamedLog{StreamID: SessionLogStreamID(10), Log: models.SessionLog{ID: 10}}
 	entry2 := StreamedLog{StreamID: SessionLogStreamID(11), Log: models.SessionLog{ID: 11}}
 	fanout.mu.Lock()

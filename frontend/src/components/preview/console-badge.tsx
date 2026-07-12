@@ -9,6 +9,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
 import type { ConsoleMessage } from "@/lib/preview-types";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 interface ConsoleBadgeProps {
   sessionId: string;
@@ -41,6 +44,8 @@ const LEVEL_CONFIG: Record<
 };
 
 export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
+  const documentVisible = useDocumentVisible();
+  const liveHealth = useLiveHealth();
   const [expanded, setExpanded] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -59,7 +64,7 @@ export function ConsoleBadge({ sessionId }: ConsoleBadgeProps) {
     queryKey: ["preview-console", sessionId],
     queryFn: ({ signal }) =>
       api.sessions.preview.console(sessionId, { signal, timeoutMs: 5000 }),
-    refetchInterval: 10000,
+    refetchInterval: liveRefreshInterval(["preview-console", sessionId], "active-detail", liveHealth, documentVisible),
     retry: false,
   });
   const messages = useMemo(

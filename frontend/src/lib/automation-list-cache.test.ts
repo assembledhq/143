@@ -10,6 +10,7 @@ import type { Automation, ListResponse } from "./types";
 function makeAutomation(overrides: Partial<Automation> = {}): Automation {
   return {
     id: "automation-1",
+    live_version: 1,
     org_id: "org-1",
     repository_id: "repo-1",
     name: "Automation",

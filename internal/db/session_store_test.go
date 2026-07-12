@@ -38,7 +38,7 @@ var sessionTestColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at", "live_version",
 }
 
 func anyDBArgs(count int) []interface{} {
@@ -171,7 +171,7 @@ func newAgentSessionRow(sessionID, issueID, orgID uuid.UUID, now time.Time) []in
 		nil,            // capability_snapshot
 		nil,            // git_identity_source
 		nil,            // git_identity_user_id
-		createdAt,
+		createdAt, int64(1),
 	}
 }
 
@@ -1519,7 +1519,7 @@ func TestSessionStore_UpdateStatus_CollectError(t *testing.T) {
 
 	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(123))
 
 	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted)
 	require.Error(t, err, "UpdateStatus should surface row collection failures")
@@ -1577,7 +1577,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 
 		mock.ExpectQuery("UPDATE sessions").
 			WithArgs(anyDBArgs(11)...).
-			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
+			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(123))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{})
 		require.Error(t, err, "UpdateResult should surface row collection failures")

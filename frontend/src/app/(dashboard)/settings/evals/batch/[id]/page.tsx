@@ -1,22 +1,22 @@
 "use client";
 
-import { useCallback, useMemo } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
-import { getActiveOrgId } from "@/lib/active-org";
-import { buildEvalBatchStreamURL, SSE_EVENT } from "@/lib/sse";
-import { shouldSubscribeToEvalBatchStream } from "@/lib/eval-streams";
-import { useResourceSSE } from "@/lib/use-resource-sse";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { ArrowLeft, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { usePageTitle } from "@/hooks/use-page-title";
-import type { EvalBatchDetail, EvalReleaseGate, EvalRun, EvalTask, ListResponse, SingleResponse } from "@/lib/types";
+import type { EvalBatchDetail, EvalReleaseGate, EvalRun, EvalTask, ListResponse } from "@/lib/types";
 import { evalRunStatusConfig } from "@/lib/types";
 
 // Slow polling backstop while SSE is the primary update channel. Keeps the
@@ -25,43 +25,20 @@ import { evalRunStatusConfig } from "@/lib/types";
 // after the missed event) without doing anything close to the prior 5s
 // load on Postgres. When SSE itself is unavailable (Redis down) we drop
 // back to the original 5s cadence — see streamHealthy from useResourceSSE.
-const SSE_BACKSTOP_POLL_MS = 30_000;
-const SSE_DOWN_POLL_MS = 5_000;
-
 export default function BatchDetailPage() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const params = useParams();
   const batchId = params.id as string;
-  const queryClient = useQueryClient();
-  const cachedBatch = queryClient.getQueryData<SingleResponse<EvalBatchDetail>>(
-    queryKeys.evals.batch(batchId),
-  )?.data;
-
-  // Per-batch SSE subscription. Invalidates the detail query on each event
-  // so React Query refetches the full EvalBatchDetail (batch + runs). The
-  // event itself carries only batch_id + status, but we don't try to merge
-  // partial state into the cache because the matrix needs the full runs
-  // array — a single GET keeps the rendering path simple.
-  const sseURL = useMemo(() => {
-    if (!batchId || !shouldSubscribeToEvalBatchStream(cachedBatch?.status)) return null;
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-    return buildEvalBatchStreamURL(apiBase, batchId, getActiveOrgId());
-  }, [batchId, cachedBatch?.status]);
-  const onBatchEvent = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: queryKeys.evals.batch(batchId) });
-  }, [queryClient, batchId]);
-  const { healthy: streamHealthy } = useResourceSSE({
-    url: sseURL,
-    event: SSE_EVENT.EVAL_BATCH_UPDATED,
-    onEvent: onBatchEvent,
-  });
-
+  const batchKey = queryKeys.evals.batch(batchId);
+  useLiveQueryRegistration({ queryKey: batchKey, families: ["eval.detail"], resourceId: batchId, priority: "critical", visible: documentVisible });
   const { data: batchResponse, isLoading } = useQuery({
-    queryKey: queryKeys.evals.batch(batchId),
-    queryFn: () => api.evals.getBatch(batchId),
+    queryKey: batchKey,
+    queryFn: ({ signal }) => api.evals.getBatch(batchId, { signal }),
     refetchInterval: (query) => {
       const batch = query.state.data?.data;
       if (!batch || batch.status === "completed") return false;
-      return streamHealthy ? SSE_BACKSTOP_POLL_MS : SSE_DOWN_POLL_MS;
+      return liveRefreshInterval(batchKey, "active-detail", liveHealth, documentVisible);
     },
   });
 

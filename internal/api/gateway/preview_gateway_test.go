@@ -43,7 +43,7 @@ var previewGatewayInstanceColumns = []string{
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
 	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 }
 
 var previewGatewayLinkColumns = []string{
@@ -59,7 +59,7 @@ func previewGatewayInstanceRow(id, sessionID uuid.UUID, targetID *uuid.UUID, org
 		int64(0), (*time.Time)(nil), "",
 		string(status), nil, "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-		false,
+		false, int64(1),
 	}
 }
 
@@ -760,7 +760,7 @@ func TestGateway_ServeHTTP_BootstrapExchange_AllowsTargetHost(t *testing.T) {
 				"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 				"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
 				"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-				"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+				"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 			}).AddRow(
 				previewID, sessionID, &targetID, orgID, userID, "default", "preview", string(models.PreviewStatusReady),
 				"docker", "worker-1", "handle-1", "web", 3000,
@@ -769,7 +769,7 @@ func TestGateway_ServeHTTP_BootstrapExchange_AllowsTargetHost(t *testing.T) {
 				int64(0), (*time.Time)(nil), "",
 				"ready", gatewayStringPtr("req-1"), "", now, now, now, nil,
 				(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-				false,
+				false, int64(1),
 			),
 		)
 

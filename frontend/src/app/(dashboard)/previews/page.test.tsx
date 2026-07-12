@@ -440,7 +440,7 @@ describe("PreviewsPage", () => {
     expect(await screen.findAllByText("feature/recovered")).toHaveLength(2);
   });
 
-  it("keeps previously loaded rows visible when interval refetches start failing", async () => {
+  it("keeps previously loaded rows visible while the healthy fallback remains sparse", async () => {
     let failing = false;
     const failedRequests: string[] = [];
     server.use(
@@ -476,9 +476,9 @@ describe("PreviewsPage", () => {
     expect(await screen.findAllByText("feature/sticky-rows")).toHaveLength(2);
 
     failing = true;
-    // Two failed polls guarantee the first error has settled into the query
-    // cache; stale rows must survive it rather than yield to an error card.
-    await waitFor(() => expect(failedRequests.length).toBeGreaterThanOrEqual(2));
+    // Live events are primary, so a healthy page must not immediately poll
+    // again just because the backend later becomes unavailable.
+    expect(failedRequests).toHaveLength(0);
     expect(screen.getAllByText("feature/sticky-rows")).toHaveLength(2);
     expect(
       screen.queryByText("Failed to load previews."),

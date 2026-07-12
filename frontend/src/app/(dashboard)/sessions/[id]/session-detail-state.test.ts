@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { pollMs } from "@/lib/poll-intervals";
 import {
   formatDuration,
   getDisplayStatus,
@@ -20,7 +19,7 @@ import {
   statusConfig,
   trackInFlightAgentUpdate,
   buildChromeThreads,
-  getPullRequestHealthRefetchInterval,
+  isPullRequestHealthConverging,
 } from "./session-detail-state";
 import type { PullRequestHealthResponse, SessionDetail, SessionLog, SessionMessage, SessionReviewLoop, SessionThread } from "@/lib/types";
 
@@ -96,9 +95,9 @@ describe("formatDuration", () => {
   });
 });
 
-describe("getPullRequestHealthRefetchInterval", () => {
+describe("isPullRequestHealthConverging", () => {
   it("does not poll blocked PR health for disconnected repositories", () => {
-    expect(getPullRequestHealthRefetchInterval({
+    expect(isPullRequestHealthConverging({
       ...baseHealth,
       sync_status: "blocked",
       sync_blocker: "repository_disconnected",
@@ -107,11 +106,11 @@ describe("getPullRequestHealthRefetchInterval", () => {
   });
 
   it("keeps polling real pending mergeability", () => {
-    expect(getPullRequestHealthRefetchInterval({
+    expect(isPullRequestHealthConverging({
       ...baseHealth,
       sync_status: "pending",
       merge_state: "mergeability_pending",
-    })).toBe(pollMs(5_000));
+    })).toBe(true);
   });
 });
 

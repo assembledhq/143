@@ -393,7 +393,7 @@ describe("SessionDetailContent performance", () => {
     expect(diffRequestCount).toBe(1);
   });
 
-  it("does not refetch the diff when active detail polling only changes collection time", async () => {
+  it("does not run a fast detail poll or refetch the diff while live transport owns freshness", async () => {
     const { SessionDetailContent } = await import("./session-detail-content");
     let sessionRequestCount = 0;
     let diffRequestCount = 0;
@@ -438,10 +438,7 @@ describe("SessionDetailContent performance", () => {
     );
 
     await screen.findByTestId("review-diff-view-mock");
-    await waitFor(() => {
-      expect(sessionRequestCount).toBeGreaterThanOrEqual(2);
-    });
-
+    expect(sessionRequestCount).toBe(1);
     expect(diffRequestCount).toBe(1);
   });
 

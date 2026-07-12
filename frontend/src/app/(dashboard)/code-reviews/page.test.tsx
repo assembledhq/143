@@ -13,16 +13,6 @@ vi.mock("@/lib/notify", () => ({ notify: toast }));
 
 import CodeReviewsPage from "./page";
 
-// jsdom has no EventSource; stub the SSE hook so the live-refresh subscription
-// is a no-op in tests (the list refreshes via React Query as usual). Mirrors
-// the eval batch page test.
-vi.mock("@/lib/use-resource-sse", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/use-resource-sse")>("@/lib/use-resource-sse");
-  return {
-    ...actual,
-    useResourceSSE: () => ({ healthy: true }),
-  };
-});
 import type {
   CodingCredentialSummary,
   CodeReviewEvidence,

@@ -35,6 +35,10 @@ import {
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
 import { useSessionsRouteState } from "./sessions-route-state";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 // ---------------------------------------------------------------------------
 // Status config
@@ -339,6 +343,8 @@ type SidebarSessionRow =
 // ---------------------------------------------------------------------------
 
 export function SessionSidebar() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const router = useRouter();
   const routeState = useSessionsRouteState();
   const queryClient = useQueryClient();
@@ -453,24 +459,29 @@ export function SessionSidebar() {
     [repo, scopedUserIDs, trimmedSearch, isArchivedView, statusParam],
   );
 
+  const sidebarListKey = [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam, trimmedSearch] as const;
+  const sidebarCountsKey = queryKeys.sessions.counts(repo, serializedPeopleParam);
+  const livePollMs = liveRefreshInterval(sidebarListKey, "list", liveHealth, documentVisible);
+  useLiveQueryRegistration({ queryKey: sidebarListKey, families: ["session.list"], priority: "critical", visible: documentVisible });
+  useLiveQueryRegistration({ queryKey: sidebarCountsKey, families: ["session.counts"], priority: "secondary", visible: documentVisible });
   const { data: listData, isLoading } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam, trimmedSearch],
-    queryFn: () => api.sessions.list(listParams),
+    queryKey: sidebarListKey,
+    queryFn: ({ signal }) => api.sessions.list(listParams, { signal }),
     enabled: isResolved,
-    refetchInterval: isPaginated || isListHovered ? false : 10000,
+    refetchInterval: isPaginated || isListHovered ? false : livePollMs,
   });
 
   // Tab badge counts. Search-independent so tabs reflect the scope totals, not
   // the current search result size.
   const { data: countsData } = useQuery({
-    queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam),
-    queryFn: () =>
+    queryKey: sidebarCountsKey,
+    queryFn: ({ signal }) =>
       api.sessions.counts({
         repository_id: repo ?? undefined,
         triggered_by_user_ids: scopedUserIDs,
-      }),
+      }, { signal }),
     enabled: isResolved,
-    refetchInterval: 10000,
+    refetchInterval: livePollMs,
   });
 
   const firstPage = useMemo(() => listData?.data ?? [], [listData?.data]);

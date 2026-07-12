@@ -1,0 +1,44 @@
+{
+  "id": null,
+  "uid": "143-live-events",
+  "title": "143 - Live Events",
+  "tags": ["143", "sse", "live-events"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Publication failures and retries",
+      "description": "Live-event publication failures indicate clients are entering degraded polling while the transactional outbox retains work.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "victorialogs"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"refId": "A", "queryType": "statsRange", "expr": "_msg:\"live event publication failed\" | stats by (_time:1m) count() as failures", "step": "$__interval"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Replay retention pressure",
+      "description": "Warning and hard replay-budget actions. Hard actions preserve live delivery and force canonical resync on reconnect.",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "victorialogs"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"refId": "A", "queryType": "statsRange", "expr": "(_msg:\"live replay budget above warning threshold; retention tightened\" OR _msg:\"live replay budget reached; retention shed to minimal tail\") | stats by (_time:5m) count() as trims", "step": "$__interval"}],
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}}
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "Live delivery errors",
+      "datasource": {"type": "victoriametrics-logs-datasource", "uid": "victorialogs"},
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 8},
+      "targets": [{"refId": "A", "queryType": "logs", "expr": "service:api AND (_msg:\"live event publication failed\" OR _msg:\"failed to claim live event outbox rows\" OR _msg:\"live outbox listener disconnected\" OR _msg:\"failed to write terminal live event\")"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "enableLogDetails": true}
+    }
+  ]
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { addSSEListener, buildCodeReviewStreamURL, SSE_EVENT } from "./sse";
+import { addSSEListener, SSE_EVENT } from "./sse";
 
 /** Minimal mock that captures handlers like a real EventSource. */
 function createMockEventSource() {
@@ -143,25 +143,9 @@ describe("SSE_EVENT constants", () => {
     expect(SSE_EVENT.DONE).toBe("done");
     expect(SSE_EVENT.HUMAN_INPUT_CREATED).toBe("session_human_input.created");
     expect(SSE_EVENT.HUMAN_INPUT_UPDATED).toBe("session_human_input.updated");
-    expect(SSE_EVENT.PULL_REQUEST_UPDATED).toBe("pull_request.updated");
-    expect(SSE_EVENT.CODE_REVIEW_UPDATED).toBe("code_review.updated");
     expect(SSE_EVENT.THREAD_INBOX_QUEUED).toBe("thread.inbox.queued");
     expect(SSE_EVENT.THREAD_INBOX_CLEARED).toBe("thread.inbox.cleared");
     expect(SSE_EVENT.THREAD_RUNTIME_UPDATED).toBe("thread.runtime.updated");
     expect(SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED).toBe("session.workspace.generation_changed");
-  });
-});
-
-describe("buildCodeReviewStreamURL", () => {
-  it("builds the stream URL with an org_id query param", () => {
-    expect(buildCodeReviewStreamURL("https://api.example.com", "org-123")).toBe(
-      "https://api.example.com/api/v1/code-reviews/stream?org_id=org-123",
-    );
-  });
-
-  it("omits the query string when there is no active org", () => {
-    expect(buildCodeReviewStreamURL("https://api.example.com", null)).toBe(
-      "https://api.example.com/api/v1/code-reviews/stream",
-    );
   });
 });

@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/assembledhq/143/internal/requestctx"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,6 +43,31 @@ func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error
 	}
 	if opts.MaxConnIdleTime > 0 {
 		config.MaxConnIdleTime = opts.MaxConnIdleTime
+	}
+	previousBeforeAcquire := config.BeforeAcquire
+	previousAfterRelease := config.AfterRelease
+	var mutationConnections sync.Map
+	config.BeforeAcquire = func(ctx context.Context, conn *pgx.Conn) bool {
+		if previousBeforeAcquire != nil && !previousBeforeAcquire(ctx, conn) {
+			return false
+		}
+		mutationID := requestctx.MutationID(ctx)
+		if mutationID == uuid.Nil {
+			return true
+		}
+		_, err := conn.Exec(ctx, `SELECT set_config('app.client_mutation_id', $1, false)`, mutationID.String())
+		if err == nil {
+			mutationConnections.Store(conn.PgConn().PID(), struct{}{})
+		}
+		return err == nil
+	}
+	config.AfterRelease = func(conn *pgx.Conn) bool {
+		if _, dirty := mutationConnections.LoadAndDelete(conn.PgConn().PID()); dirty {
+			if _, err := conn.Exec(context.Background(), `SELECT set_config('app.client_mutation_id', '', false)`); err != nil {
+				return false
+			}
+		}
+		return previousAfterRelease == nil || previousAfterRelease(conn)
 	}
 	return config, nil
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -53,10 +53,10 @@ import { ModelOptionGroups } from "@/components/model-option-groups";
 import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
-import { getActiveOrgId } from "@/lib/active-org";
-import { buildCodeReviewStreamURL, SSE_EVENT } from "@/lib/sse";
-import { useResourceSSE } from "@/lib/use-resource-sse";
-import { pollMs } from "@/lib/poll-intervals";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
@@ -86,7 +86,6 @@ const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
-const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const MAX_REVIEWER_MODELS = 3;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
@@ -191,6 +190,8 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 }
 
 export default function CodeReviewsPage() {
+  const documentVisible = useDocumentVisible();
+  const liveHealth = useLiveHealth();
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
   const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
@@ -227,36 +228,12 @@ export default function CodeReviewsPage() {
   // only org→org switch path (org-switcher) navigates away to /sessions and
   // replaces the QueryClient (see providers.tsx), so this page never stays
   // mounted across an org change — there's nothing to react to here.
-  const codeReviewStreamURL = useMemo(() => {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-    return buildCodeReviewStreamURL(apiBase, getActiveOrgId());
-  }, []);
-  // A single review lifecycle emits several events (queued → running →
-  // completed), and a batch-stale transition can fan out across the org — so
-  // coalesce bursts into one refetch per window rather than one per event.
-  const invalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onCodeReviewEvent = useCallback(() => {
-    if (invalidateTimerRef.current) return;
-    invalidateTimerRef.current = setTimeout(() => {
-      invalidateTimerRef.current = null;
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
-    }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
-  }, [queryClient]);
-  useEffect(
-    () => () => {
-      if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
-    },
-    [],
-  );
-  const { healthy: codeReviewStreamHealthy } = useResourceSSE({
-    url: codeReviewStreamURL,
-    event: SSE_EVENT.CODE_REVIEW_UPDATED,
-    onEvent: onCodeReviewEvent,
-  });
+  const liveReviewsKey = queryKeys.codeReviews.list(reviewFilters);
+  useLiveQueryRegistration({ queryKey: liveReviewsKey, families: ["code-review.list"], priority: "critical", visible: documentVisible });
   const reviewsQuery = useQuery({
-    queryKey: queryKeys.codeReviews.list(reviewFilters),
-    queryFn: () => api.codeReviews.list(reviewFilters),
-    refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
+    queryKey: liveReviewsKey,
+    queryFn: ({ signal }) => api.codeReviews.list(reviewFilters, { signal }),
+    refetchInterval: liveRefreshInterval(liveReviewsKey, "list", liveHealth, documentVisible),
   });
   const policyQuery = useQuery({
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),

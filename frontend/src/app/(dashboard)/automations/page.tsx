@@ -33,6 +33,10 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { EmptyState } from "@/components/empty-state";
 import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { useAuth } from "@/hooks/use-auth";
@@ -546,12 +550,16 @@ function AutomationMobileRow({ automation, canManage }: { automation: Automation
 }
 
 export default function AutomationsPage() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
+  const liveAutomationKey = queryKeys.automations.all;
+  useLiveQueryRegistration({ queryKey: liveAutomationKey, families: ["automation.list"], priority: "critical", visible: documentVisible });
   const { data, isLoading } = useQuery({
-    queryKey: queryKeys.automations.all,
-    queryFn: () => api.automations.list(),
-    refetchInterval: 10000,
+    queryKey: liveAutomationKey,
+    queryFn: ({ signal }) => api.automations.list(undefined, { signal }),
+    refetchInterval: liveRefreshInterval(liveAutomationKey, "list", liveHealth, documentVisible),
   });
 
   const automations = useMemo(() => data?.data ?? [], [data?.data]);

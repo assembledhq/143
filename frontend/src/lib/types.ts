@@ -3443,6 +3443,7 @@ export interface AutomationGitHubEventFilters {
 
 export interface Automation {
   id: string;
+  live_version: number;
   org_id: string;
   repository_id?: string;
   name: string;
@@ -3518,6 +3519,7 @@ export interface AutomationGoalImprovement {
 
 export interface AutomationRun {
   id: string;
+  live_version: number;
   automation_id: string;
   triggered_at: string;
   triggered_by: "schedule" | "manual" | "github";

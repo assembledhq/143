@@ -63,6 +63,42 @@ groups:
           summary: 'SSE/log streaming degradation'
           description: 'The API logged {{ $value }} SSE stream write failures in the last 15 minutes.'
           runbook: 'Inspect session log streaming paths and correlate with deploys or client disconnect spikes.'
+      - alert: LiveEventPublisherFailures
+        expr: '_time:10m service:api AND _msg:"live event publication failed" | stats count() as failures | filter failures:>4'
+        for: 2m
+        labels:
+          service: api
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Live-event publisher is repeatedly failing'
+          description: '{{ $value }} live-event publications failed in the last 10 minutes; clients may be using degraded polling.'
+          runbook: 'Inspect Redis health, live_event_outbox pending age, and live bus shard reconnects.'
+      - alert: LiveReplayMemoryPressure
+        expr: '_time:15m service:api AND (_msg:"live replay budget above warning threshold; retention tightened" OR _msg:"live replay budget reached; retention shed to minimal tail") | stats count() as trims | filter trims:>0'
+        for: 1m
+        labels:
+          service: api
+          severity: warning
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Live replay retention is being shed'
+          description: 'Replay memory crossed its configured warning or hard budget in the last 15 minutes.'
+          runbook: 'Inspect Redis maxmemory/headroom, active replay stream count, encoded event rate, and replay misses.'
+      - alert: LiveOutboxClaimFailures
+        expr: '_time:10m service:api AND _msg:"failed to claim live event outbox rows" | stats count() as failures | filter failures:>2'
+        for: 2m
+        labels:
+          service: api
+          severity: critical
+          team: platform
+          signal: logs
+        annotations:
+          summary: 'Live-event outbox cannot be claimed'
+          description: 'The live publisher failed to claim pending rows {{ $value }} times in 10 minutes.'
+          runbook: 'Inspect Postgres availability, lock pressure, and the live_event_outbox pending indexes.'
 
   - name: worker-failures
     type: vlogs

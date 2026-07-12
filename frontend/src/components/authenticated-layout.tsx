@@ -61,6 +61,7 @@ import { CreateSessionDialog } from "@/components/create-session-dialog";
 import { ResizeHandle } from "@/components/resize-handle";
 import { usePersistedPanelWidth } from "@/hooks/use-persisted-panel-width";
 import { Kbd } from "@/components/ui/kbd";
+import { LiveEventProvider } from "@/components/live-event-provider";
 
 type SidebarUser = NonNullable<ReturnType<typeof useAuth>["user"]>;
 
@@ -776,7 +777,7 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
   const canCreateSession = user.role !== "viewer";
 
   return (
-    <div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
+    <LiveEventProvider><div className="fixed inset-0 flex h-dvh overflow-hidden overscroll-none bg-background">
       {/* Desktop sidebar (md and up) */}
       <CompactSidebarRail
         user={user}
@@ -855,6 +856,6 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         />
       )}
       {canCreateSession && <CreateSessionDialog open={createOpen} onOpenChange={setCreateOpen} />}
-    </div>
+    </div></LiveEventProvider>
   );
 }

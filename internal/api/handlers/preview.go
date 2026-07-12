@@ -2272,7 +2272,15 @@ func (h *PreviewHandler) GetLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var logs []models.PreviewLog
-	if r.URL.Query().Get("tail") == "true" {
+	afterIDValue := r.URL.Query().Get("after_id")
+	if afterIDValue != "" {
+		afterID, parseErr := uuid.Parse(afterIDValue)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_AFTER_ID", "after_id must be a UUID")
+			return
+		}
+		logs, err = h.store.ListLogsByPreview(r.Context(), orgID, instance.ID, &afterID)
+	} else if r.URL.Query().Get("tail") == "true" {
 		logs, err = h.store.ListLatestLogsByPreview(r.Context(), orgID, instance.ID)
 	} else {
 		logs, err = h.store.ListLogsByPreview(r.Context(), orgID, instance.ID, nil)

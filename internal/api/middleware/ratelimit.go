@@ -140,10 +140,18 @@ func (rl *rateLimiter) cleanup() {
 
 // RateLimit returns middleware that enforces per-org and per-IP rate limits.
 func RateLimit(config RateLimitConfig) func(http.Handler) http.Handler {
+	return RateLimitExcept(config, nil)
+}
+
+func RateLimitExcept(config RateLimitConfig, excludedPaths map[string]struct{}) func(http.Handler) http.Handler {
 	limiter := newRateLimiter(config)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, excluded := excludedPaths[r.URL.Path]; excluded {
+				next.ServeHTTP(w, r)
+				return
+			}
 			// Check IP rate limit
 			ip := extractIP(r)
 			if !limiter.getIPBucket(ip).allow() {

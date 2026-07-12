@@ -174,7 +174,7 @@ var sessionColumns = []string{
 	"target_branch", "working_branch", "base_commit_sha", "repository_id", "diff_stats", "diff_history", "input_manifest", "archived_at", "archived_by_user_id", "automation_run_id", "pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at", "live_version",
 }
 
 var reviewLoopColumns = []string{
@@ -297,11 +297,12 @@ func TestPreLinearSessionColumnsLenStaysInSync(t *testing.T) {
 	const prPushFieldsAdded = 3
 	const branchCreationFieldsAdded = 3
 	const workspaceGenerationFieldAdded = 1
+	const liveVersionFieldAdded = 1
 	const workspaceRevisionFieldsAdded = 2
 	require.Equal(t, preLinearSessionColumnsLen+pendingSnapshotFieldsAdded+unpushedChangesFieldAdded+workspaceRevisionFieldsAdded+linearFieldsAdded+capabilitySnapshotFieldsAdded+identityFieldsAdded+prPushFieldsAdded+branchCreationFieldsAdded, sessionColumnsWithLegacyResultConfidenceLen,
 		"sessionColumns shifted; bump preLinearSessionColumnsLen, pendingSnapshotFieldsAdded, "+
 			"unpushedChangesFieldAdded, workspaceRevisionFieldsAdded, linearFieldsAdded, capabilitySnapshotFieldsAdded, identityFieldsAdded, prPushFieldsAdded, or branchCreationFieldsAdded if a new migration added more session columns")
-	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
+	require.Equal(t, len(sessionColumns)+3, sessionColumnsWithLegacyResultConfidenceLen+workspaceGenerationFieldAdded+liveVersionFieldAdded, "legacy confidence columns should stay isolated to test fixtures")
 }
 
 // linearSessionDefaults returns the placeholder values for the derived
@@ -537,6 +538,9 @@ func sessionTestRow(values ...interface{}) []interface{} {
 		row = stripLegacySessionResultConfidence(row)
 	}
 	row = padSessionWorkspaceGeneration(row)
+	if len(row) == len(sessionColumns)-1 {
+		row = append(row, int64(1))
+	}
 	return row
 }
 

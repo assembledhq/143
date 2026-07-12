@@ -7,6 +7,7 @@ import { groupRuns, isQuietStatus } from "./run-grouping";
 function makeRun(id: string, status: AutomationRunStatus): AutomationRun {
   return {
     id,
+    live_version: 1,
     automation_id: "auto-1",
     triggered_at: "2026-04-30T00:00:00Z",
     triggered_by: "schedule",

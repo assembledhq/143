@@ -28,6 +28,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import {
   Select,
   SelectContent,
@@ -44,7 +48,6 @@ import {
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api } from "@/lib/api";
-import { pollMs } from "@/lib/poll-intervals";
 import { formatPreviewStatus } from "@/lib/preview-types";
 import { queryKeys } from "@/lib/query-keys";
 import type {
@@ -547,6 +550,8 @@ function RestartLatestButton({
 }
 
 export default function PreviewsPage() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   usePageTitle("Previews");
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -562,61 +567,70 @@ export default function PreviewsPage() {
     queryFn: () => api.repositories.list(),
   });
   const repositoryFilter = repositoryId === "all" ? undefined : repositoryId;
+  const runningKey = ["previews", "running", repositoryFilter ?? "", query] as const;
+  const resumableKey = ["previews", "resumable", repositoryFilter ?? "", query] as const;
+  const attentionKey = ["previews", "attention", repositoryFilter ?? "", query] as const;
+  const recentKey = ["previews", "recent", repositoryFilter ?? "", query] as const;
+  const livePollMs = liveRefreshInterval(runningKey, "list", liveHealth, documentVisible);
+  useLiveQueryRegistration({ queryKey: runningKey, families: ["preview.list"], priority: "critical", visible: documentVisible });
+  useLiveQueryRegistration({ queryKey: attentionKey, families: ["preview.list"], priority: "critical", visible: documentVisible });
+  useLiveQueryRegistration({ queryKey: resumableKey, families: ["preview.list"], priority: "secondary", visible: documentVisible });
+  useLiveQueryRegistration({ queryKey: recentKey, families: ["preview.list"], priority: "secondary", visible: documentVisible });
 
   const runningQuery = useQuery<
     ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
-    queryKey: ["previews", "running", repositoryFilter ?? "", query],
-    queryFn: () =>
+    queryKey: runningKey,
+    queryFn: ({ signal }) =>
       api.previews.current.list({
         scope: "running",
         repository_id: repositoryFilter,
         q: query.trim(),
         limit: 50,
-      }),
-    refetchInterval: pollMs(5000),
+      }, { signal }),
+    refetchInterval: livePollMs,
     placeholderData: (previous) => previous,
   });
   const resumableQuery = useQuery<
     ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
-    queryKey: ["previews", "resumable", repositoryFilter ?? "", query],
-    queryFn: () =>
+    queryKey: resumableKey,
+    queryFn: ({ signal }) =>
       api.previews.current.list({
         scope: "resumable",
         repository_id: repositoryFilter,
         q: query.trim(),
         limit: 50,
-      }),
-    refetchInterval: pollMs(30000),
+      }, { signal }),
+    refetchInterval: livePollMs,
     placeholderData: (previous) => previous,
   });
   const attentionQuery = useQuery<
     ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
-    queryKey: ["previews", "attention", repositoryFilter ?? "", query],
-    queryFn: () =>
+    queryKey: attentionKey,
+    queryFn: ({ signal }) =>
       api.previews.current.list({
         scope: "attention",
         repository_id: repositoryFilter,
         q: query.trim(),
         limit: 50,
-      }),
-    refetchInterval: pollMs(30000),
+      }, { signal }),
+    refetchInterval: livePollMs,
     placeholderData: (previous) => previous,
   });
   const recentQuery = useQuery<
     ListResponse<PreviewCurrentResponse> & { meta: PreviewListMeta }
   >({
-    queryKey: ["previews", "recent", repositoryFilter ?? "", query],
-    queryFn: () =>
+    queryKey: recentKey,
+    queryFn: ({ signal }) =>
       api.previews.current.list({
         scope: "recent",
         repository_id: repositoryFilter,
         q: query.trim(),
         limit: 50,
-      }),
-    refetchInterval: pollMs(30000),
+      }, { signal }),
+    refetchInterval: livePollMs,
     placeholderData: (previous) => previous,
   });
   const allSectionQueries = [runningQuery, attentionQuery, resumableQuery, recentQuery];

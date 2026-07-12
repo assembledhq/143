@@ -28,7 +28,7 @@ const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	github_event_triggers, github_event_filters,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
-	priority, external_metadata, created_at, updated_at, deleted_at`
+	priority, external_metadata, created_at, updated_at, deleted_at, live_version`
 
 // maxDueAutomationsPerTick caps how many due automations the scheduler claims
 // in one tick. Combined with the 10-minute tick cadence, this gives a global
@@ -48,7 +48,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&githubEventTriggers, &a.GitHubEventFilters,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
-		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
+		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt, &a.LiveVersion,
 	)
 	if err == nil {
 		a.GitHubEventTriggers = automationGitHubEventsFromStrings(githubEventTriggers)
@@ -647,7 +647,7 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 const automationRunColumns = `id, automation_id, org_id, triggered_at, triggered_by,
 	triggered_by_user_id, scheduled_time, trigger_id, provider, provider_event_id, trigger_context,
 	goal_snapshot, config_snapshot,
-	status, capability_snapshot, completed_at, result_summary, created_at, updated_at`
+	status, capability_snapshot, completed_at, result_summary, created_at, updated_at, live_version`
 
 func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 	var r models.AutomationRun
@@ -656,7 +656,7 @@ func scanAutomationRun(row pgx.Row) (models.AutomationRun, error) {
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext,
 		&r.GoalSnapshot, &r.ConfigSnapshot,
-		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
+		&r.Status, &r.CapabilitySnapshot, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt, &r.LiveVersion,
 	)
 	if provider != nil {
 		p := models.AutomationEventProvider(*provider)
