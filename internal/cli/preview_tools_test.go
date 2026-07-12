@@ -290,6 +290,42 @@ func TestPreviewToolExecutor_ObserveRejectsOversizedImageBeforeDecode(t *testing
 	require.Contains(t, firstText(result), "exceeds", "oversized image error should identify the size limit")
 }
 
+func TestWritePrivatePreviewImageRejectsWorkspaceEscape(t *testing.T) {
+	t.Parallel()
+
+	workspace, err := os.Getwd()
+	require.NoError(t, err, "test should resolve the current workspace")
+	outsideDir, err := os.MkdirTemp(filepath.Dir(workspace), "preview-output-outside-")
+	require.NoError(t, err, "outside output directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(outsideDir), "outside output directory should be removed") }()
+
+	insideDir, err := os.MkdirTemp(".", "preview-output-links-")
+	require.NoError(t, err, "workspace symlink directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(insideDir), "workspace symlink directory should be removed") }()
+	symlinkPath := filepath.Join(insideDir, "outside")
+	require.NoError(t, os.Symlink(outsideDir, symlinkPath), "workspace symlink should target the outside directory")
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "parent traversal", path: filepath.Join("..", filepath.Base(outsideDir), "image.png")},
+		{name: "absolute outside path", path: filepath.Join(outsideDir, "image.png")},
+		{name: "symlink escape", path: filepath.Join(symlinkPath, "image.png")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := writePrivatePreviewImage(tt.path, pngSignature)
+			require.Error(t, err, "workspace image writer should reject paths that escape the workspace")
+			_, statErr := os.Stat(filepath.Join(outsideDir, "image.png"))
+			require.ErrorIs(t, statErr, os.ErrNotExist, "rejected output should not create a file outside the workspace")
+		})
+	}
+}
+
 func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 	t.Parallel()
 

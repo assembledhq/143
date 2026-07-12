@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -1024,10 +1025,38 @@ func writePreviewObservationImage(result *mcp.ToolCallResult, output string, act
 	return textResult
 }
 
-func writePrivatePreviewImage(path string, png []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+func writePrivatePreviewImage(path string, png []byte) (returnErr error) {
+	workspace, err := os.Getwd()
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve workspace: %w", err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve output path: %w", err)
+	}
+	relPath, err := filepath.Rel(workspace, absPath)
+	if err != nil {
+		return fmt.Errorf("resolve workspace-relative output path: %w", err)
+	}
+	if !filepath.IsLocal(relPath) {
+		return fmt.Errorf("output path must stay within the current workspace")
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return fmt.Errorf("open workspace root: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			if returnErr == nil {
+				returnErr = fmt.Errorf("close workspace root: %w", err)
+			} else {
+				returnErr = fmt.Errorf("%w (close workspace root: %v)", returnErr, err)
+			}
+		}
+	}()
+	file, err := root.OpenFile(relPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open workspace output: %w", err)
 	}
 	if err := file.Chmod(0o600); err != nil {
 		closeErr := file.Close()
