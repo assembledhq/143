@@ -1,10 +1,10 @@
 # Design: Agent-Native Preview Verification
 
-> **Status:** In progress — Phase 1 complete | **Last reviewed:** 2026-07-11
+> **Status:** In progress — Phase 1 complete; Phase 2 core implemented | **Last reviewed:** 2026-07-12
 
 ## Implementation Status
 
-Phase 1 now provides the durable session-owned browser
+Phase 1 and the Phase 2 core now provide the durable session-owned browser
 foundation and native `ensure`/`observe`/`act` path: persisted browser identity and storage state,
 compatible-origin restoration, bounded accessibility/DOM and console-cursor
 observations, serialized structured actions, configured path enforcement,
@@ -12,10 +12,15 @@ worker routing, explicit session-token preview capabilities, artifact-backed
 screenshots, implicit session targeting, an audited human/agent control lease,
 and a preview panel that watches and controls the same worker-owned browser
 context used by the agent. Active-action fencing prevents human takeover and
-agent input from racing.
+agent input from racing. MCP observations carry compact semantic context plus
+native PNG image content; CLI-only runtimes retain a private workspace-file
+fallback, and durable artifact references remain authoritative evidence.
 
-Native model image attachments, verification evidence, and automatic
-diff-aware verification remain future phases.
+Adapter-by-adapter native-image compatibility still needs rollout validation;
+CLI-only runtimes can use the implemented workspace fallback. Verification
+evidence and automatic diff-aware verification remain future phases. Repository
+`browser` and `verification` policy parsing, defaults, and validation are already
+implemented as groundwork for Phase 3.
 
 ## Summary
 
@@ -78,7 +83,7 @@ available for diagnostics and privileged workflows.
 
 ## P0 Feature Set
 
-### 1. Session-Owned Preview And Browser Context
+### 1. Session-Owned Preview And Browser Context — Implemented
 
 Add `preview ensure` as the idempotent agent entry point. It resolves the
 current session, starts configured services when necessary, waits for the
@@ -103,7 +108,7 @@ Playwright/CDP bridge may be added for complex scripted flows, but it must bind
 to the same authorized browser context and remain unreachable outside the
 session tool path.
 
-### 2. Unified Observe And Act
+### 2. Unified Observe And Act — Core Implemented
 
 Add a high-signal `preview observe` operation. One response includes:
 
@@ -134,6 +139,13 @@ selector match count, browser error, screenshot, and relevant console messages.
 Existing `screenshot`, `inspect`, `interact`, and `console` commands remain
 available as lower-level and compatibility operations.
 
+The MCP transport now returns the bounded observation as text followed by a
+validated native `image/png` content block. It removes inline base64 from the
+text block, retains durable artifact metadata, rejects missing, malformed,
+unsupported, or oversized image payloads, and preserves `--output` as a private
+workspace-file fallback. Confirming native image consumption in each supported
+coding-agent adapter remains rollout work.
+
 ### 3. Automatic Verification Loop
 
 The orchestrator should trigger preview verification after an agent changes
@@ -155,7 +167,7 @@ This loop belongs in orchestration policy rather than prompt text alone. Agent
 guidance still explains the tools, but the runtime is responsible for deciding
 that verification is due and making image observations available to the model.
 
-### 4. Shared Human/Agent Browser
+### 4. Shared Human/Agent Browser — Implemented
 
 The existing preview UI should render the session browser's live page rather
 than opening an unrelated browser context. It exposes three explicit states:
@@ -281,8 +293,9 @@ New responsibilities should remain separated:
 - The preview manager owns app runtime lifecycle and config application.
 - A browser-session service owns persistent browser context and control leases.
 - `PreviewInspector` owns bounded observation and actions.
-- The agent runtime adapter turns screenshot artifacts into native model image
-  content.
+- The preview tool transport turns screenshot bytes into native MCP image
+  content while preserving artifact references and the CLI workspace fallback;
+  coding-agent adapters consume the richest form they support.
 - A verification coordinator owns trigger policy, bounded retries, plans, and
   evidence records.
 
@@ -309,30 +322,36 @@ New responsibilities should remain separated:
 
 ### Phase 0: Repair The Existing Agent Path
 
-- Separate public and internal API base URLs and normalize legacy environment
+- **Complete:** Separate public and internal API base URLs and normalize legacy environment
   values.
-- Default preview tools to `143_SESSION_ID` and inject it in every coding-agent
+- **Complete:** Default preview tools to `143_SESSION_ID` and inject it in every coding-agent
   launch path.
-- Add explicit preview capability mappings and same-session authorization tests.
-- Verify sandbox-token access to preview endpoints and artifact downloads.
+- **Complete:** Add explicit preview capability mappings and same-session authorization tests.
+- **Complete:** Verify sandbox-token access to preview endpoints and artifact downloads.
 
 ### Phase 1: Persistent Session Browser
 
-- Add `preview ensure` and session-default targeting.
-- Introduce browser-context identity and persistence across update modes.
-- Route the preview UI and agent inspector to the same context.
-- Add control-lease APIs and cross-session isolation tests.
+- **Complete:** Add `preview ensure` and session-default targeting.
+- **Complete:** Introduce browser-context identity and persistence across update modes.
+- **Complete:** Route the preview UI and agent inspector to the same context.
+- **Complete:** Add control-lease APIs and cross-session isolation tests.
 
 ### Phase 2: Native Observe/Act
 
-- Add combined observation responses and actionable step failures.
-- Store screenshots and provide workspace paths plus signed URLs.
-- Update coding-agent adapters to attach images natively to model turns.
-- Add semantic actions and optional platform-owned Playwright/CDP attachment.
+- **Complete:** Add combined observation responses and actionable step failures.
+- **Complete:** Store screenshots and provide workspace paths plus signed URLs.
+- **Complete:** Return screenshots as native MCP image content while preserving
+  the workspace-file fallback for CLI-only runtimes.
+- **Complete:** Add semantic actions against the platform-owned shared browser
+  context. A general-purpose Playwright/CDP attachment remains optional and is
+  deferred until a workflow requires it.
+- **Pending rollout validation:** Confirm which supported coding-agent adapters
+  consume MCP image blocks directly and document/use the workspace fallback for
+  adapters that do not.
 
 ### Phase 3: Automatic Verification And Evidence
 
-- Parse and validate `.143/config.json` browser/verification policy.
+- **Complete:** Parse and validate `.143/config.json` browser/verification policy.
 - Add diff-aware verification triggers, bounded retries, and smoke plans.
 - Persist verification summaries and artifact references.
 - Render evidence and handoff state in session/preview UI.
@@ -359,6 +378,13 @@ The P0 product is complete when a fresh coding-agent session can:
 7. Fail closed when the sandbox token targets another session or navigation
    leaves the preview origin.
 
+Criteria 1, 2, 3, 5, and 7 are implemented at the platform/tool-contract
+level. Criterion 4 has the required observe/act/update and diagnostic
+primitives, but automatic failure-driven re-verification remains Phase 3.
+Criterion 6 remains pending durable verification-run evidence. Criterion 2
+also retains adapter rollout validation before native image consumption can be
+claimed uniformly across every supported coding-agent runtime.
+
 ## Deferred Features
 
 - General computer/desktop use outside web previews.
@@ -370,8 +396,9 @@ The P0 product is complete when a fresh coding-agent session can:
 
 ## Open Questions
 
-- Which coding-agent adapters can consume tool-returned image content directly,
-  and which require workspace-file fallback?
+- Which coding-agent adapters consume MCP image content directly in production,
+  and which should be configured or guided to use the implemented workspace-file
+  fallback?
 - Should a full preview recycle restore cookies only, or cookies plus local and
   session storage?
 - How should the verifier identify user-facing diffs in repositories with
