@@ -141,7 +141,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -3330,6 +3330,59 @@ const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 const REVIEW_AGENT_KEYS = ["codex", "claude_code", "amp", "pi"] as const;
 
+export function PullRequestList({
+  changesets,
+  selectedID,
+  onSelect,
+}: {
+  changesets: ChangesetSummary[];
+  selectedID: string;
+  onSelect: (id: string) => void;
+}) {
+  if (changesets.length <= 1) return null;
+
+  return (
+    <Card className="border-border/60" data-testid="pull-request-list">
+      <CardHeader className="p-3 pb-2">
+        <CardTitle className="text-sm">Pull requests</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1 p-2 pt-0">
+        {changesets.map((changeset, index) => {
+          const selected = changeset.id === selectedID;
+          const pr = changeset.pull_request;
+          return (
+            <Button
+              key={changeset.id}
+              type="button"
+              variant={selected ? "secondary" : "ghost"}
+              className="h-auto w-full justify-start gap-2 px-2 py-2 text-left"
+              aria-pressed={selected}
+              onClick={() => onSelect(changeset.id)}
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">
+                {index + 1}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">{changeset.title}</span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {pr ? `#${pr.github_pr_number} · ${pr.status}` : changeset.status.replaceAll("_", " ")}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1">
+                {pr?.ci_status && <Badge variant="outline" className="h-5 px-1 text-xs">CI {pr.ci_status}</Badge>}
+                {changeset.stacked_on_changeset_id && <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />}
+              </span>
+            </Button>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
 function getDefaultReviewAgentType(sessionAgentType?: string): string {
   return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
 }
@@ -3346,6 +3399,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
   const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
+  const [changesetParam, setChangesetParam] = useQueryState("changeset");
   const [centerMode, setCenterMode] = useState<"chat" | "review">(
     reviewParam === "active" ? "review" : "chat"
   );
@@ -3467,9 +3521,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
+  const selectedIsPrimaryRef = useRef(true);
 
   // --- Enter review mode ---
   const openReview = useCallback((fileIndex?: number) => {
+    if (!selectedIsPrimaryRef.current) {
+      setDetailTab("changes");
+      setShowDetailPanel(true);
+      if (isMobileReviewViewport) {
+        setMobileDetailOpen(true);
+      }
+      return;
+    }
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
     setCenterMode("review");
     suppressNextReviewParamClearRef.current = true;
@@ -3619,6 +3682,39 @@ export function SessionDetailContent({ id }: { id: string }) {
   const rawSession = data?.data;
   const isProvisionalSession = isProvisionalSessionDetail(rawSession);
   const session = isProvisionalSession ? undefined : rawSession;
+  const changesets = session?.changesets ?? [];
+  const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
+  const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
+  const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const hasMultipleChangesets = changesets.length > 1;
+  const selectedIsPrimary = selectedChangeset?.is_primary !== false;
+  selectedIsPrimaryRef.current = selectedIsPrimary;
+  // The primary changeset keeps the legacy null-tolerant PR lookup: sending a
+  // changeset_id would route the backend to GetByChangesetID, which cannot
+  // match legacy PR rows whose changeset_id is still NULL. Only non-primary
+  // slots, whose PRs always carry a changeset_id, are looked up by changeset.
+  const selectedChangesetPRParam = selectedIsPrimary ? undefined : selectedChangeset?.id;
+  const changesetSessionIDRef = useRef(id);
+  useEffect(() => {
+    const syncSelectionFromURL = () => setSelectedChangesetID(new URL(window.location.href).searchParams.get("changeset"));
+    window.addEventListener("popstate", syncSelectionFromURL);
+    return () => window.removeEventListener("popstate", syncSelectionFromURL);
+  }, []);
+  useEffect(() => {
+    if (changesetSessionIDRef.current === id) return;
+    changesetSessionIDRef.current = id;
+    setSelectedChangesetID(null);
+    void setChangesetParam(null);
+  }, [id, setChangesetParam]);
+  useEffect(() => {
+    if (selectedIsPrimary || centerMode !== "review") return;
+    exitReview();
+    setDetailTab("changes");
+    setShowDetailPanel(true);
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(true);
+    }
+  }, [centerMode, exitReview, isMobileReviewViewport, selectedIsPrimary]);
   // Tab title from whatever payload is available — the provisional row's
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
@@ -4094,19 +4190,20 @@ export function SessionDetailContent({ id }: { id: string }) {
   // transition within milliseconds, and the SSE polling fallback re-reads the
   // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
-    queryKey: ["session", id, "pr"],
-    queryFn: () => api.sessions.getPR(id),
+    queryKey: queryKeys.sessions.pr(id, selectedChangesetPRParam),
+    queryFn: () => api.sessions.getPR(id, selectedChangesetPRParam),
     enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
     staleTime: 30_000,
   });
-  const pullRequestId = prData?.data?.id;
+  const selectedPR = prData?.data ?? selectedChangeset?.pull_request;
+  const pullRequestId = selectedPR?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
-    enabled: !!pullRequestId && prData?.data?.status === "open",
+    enabled: !!pullRequestId && selectedPR?.status === "open",
     // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
     // below also reconciles once because Redis pub/sub does not replay PR row
     // or health events missed while the tab was hidden or the EventSource was
@@ -4116,9 +4213,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const prHealth = prHealthData?.data;
   const prHealthActionsBlocked = prHealthBlocksPRActions(prHealth);
-  const rawPRStatus = prData?.data?.status;
+  const rawPRStatus = selectedPR?.status;
   const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
-  const prNumber = prData?.data?.github_pr_number;
+  const prNumber = selectedPR?.github_pr_number;
   const closedPRNumber = prNumber;
   const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
   const closedPRSummary = closedPRNumber
@@ -4174,7 +4271,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   useReconcileOptimisticAction({ phase: localPushState, serverState: session?.pr_push_state, onResolved: resolvePushAction });
   useReconcileOptimisticAction({ phase: localBranchState, serverState: session?.branch_creation_state, onResolved: resolveBranchAction });
 
-  const prUrl = prData?.data?.github_pr_url;
+  const prUrl = selectedPR?.github_pr_url;
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
     localPRState === "queued" &&
@@ -4369,7 +4466,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     // as the session log stream above. The onerror branch already invalidates
     // the health query on disconnect, so reconnecting on visibility refreshes
     // the cached health to whatever happened while we were away.
-    if (!pullRequestId || prData?.data?.status !== "open" || !isDocumentVisible) {
+    if (!pullRequestId || selectedPR?.status !== "open" || !isDocumentVisible) {
       return;
     }
 
@@ -4424,7 +4521,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
+  }, [apiBase, selectedPR?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   const resetSessionNotificationRefs = useCallback(() => {
     previousSessionStatusRef.current = undefined;
@@ -4459,7 +4556,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [id, queryClient, session?.id]);
 
-  const hasPR = !!prData?.data;
+  const hasPR = !!selectedPR;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const isTerminalSession = session ? terminalSessionStatuses.has(session.status) : false;
@@ -4488,7 +4585,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const { data: readinessData } = useQuery({
     queryKey: queryKeys.sessions.readiness(id),
     queryFn: () => api.sessions.getReadiness(id),
-    enabled: !!session,
+    enabled: !!session && selectedIsPrimary,
     refetchInterval: (query) => {
       const status = query.state.data?.data.latest?.status;
       return status === "queued" || status === "running" ? pollMs(3000) : false;
@@ -4542,10 +4639,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       latestReadiness.status === "queued" ||
       latestReadiness.status === "running");
   const createPRAllowsSubmission = builderReviewAllowsPR || readinessAutoRunCanQueue;
-  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
+  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning && selectedIsPrimary;
   const canCreatePR = canAttemptCreatePR && createPRAllowsSubmission;
   const canCreateBranch = canAttemptCreatePR && builderReviewAllowsPR;
-  const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
+  const needsGitHubStatus = canCreatePR || (hasPR && selectedPR?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
   const reviewUnavailableReason = reviewLoopRunning
@@ -4573,7 +4670,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const createPRMutation = useMutation({
     mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) =>
-      api.sessions.createPR(id, options),
+      api.sessions.createPR(id, selectedChangeset ? { ...options, changesetId: selectedChangeset.id } : options),
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
@@ -4708,7 +4805,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness?.status === "running" ||
     runReadinessMutation.isPending;
   const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessCheckDisabled = readinessRunning || isRunning;
+  const readinessCheckDisabled = readinessRunning || isRunning || !selectedIsPrimary;
 
   // Readiness findings, grouped with role-aware enforcement so the merged
   // Review card can surface blockers, bypasses, and the review packet inline.
@@ -4916,7 +5013,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const continueFromPRBranchMutation = useMutation({
     mutationFn: async () => {
-      const headRef = prData?.data?.head_ref ?? prData?.data?.branch_name;
+      const headRef = selectedPR?.head_ref ?? selectedPR?.branch_name;
       const message = continueFromPRBranchMessage(headRef);
       if (activeThread?.id) {
         const clientMessageID =
@@ -5942,11 +6039,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [continueFromPRBranchMutation, ghBlocked, localPushState, pushBranchDiverged, pushChangesMutation]);
 
   const viewPRFromKeyboard = useCallback(() => {
-    if (!prData?.data?.github_pr_url) {
+    if (!selectedPR?.github_pr_url) {
       return;
     }
-    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
-  }, [prData?.data?.github_pr_url]);
+    window.open(selectedPR.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [selectedPR?.github_pr_url]);
 
   useSessionKeyboardShortcuts({
     enabled: !isLoading && !!session,
@@ -5987,8 +6084,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
-      canView: !!prData?.data?.github_pr_url,
-      canPush: !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
+      canView: !!selectedPR?.github_pr_url,
+      canPush: selectedIsPrimary && !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
       canFixTests: !prHealthActionsBlocked && canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: !prHealthActionsBlocked && canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: !prHealthActionsBlocked && canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
@@ -6114,7 +6211,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const pushAction = derivePushChangesActionState({
     canShipPR,
     hasOpenPR: hasPR && prStatus === "open",
-    hasUnpushedChanges: !!session.has_unpushed_changes,
+    hasUnpushedChanges: selectedIsPrimary && !!session.has_unpushed_changes,
     hasSnapshot,
     isRunning,
     builderReviewAllowsPR,
@@ -6231,7 +6328,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
-            {hasPR && prData?.data?.github_pr_url ? (
+            {hasPR && selectedPR?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
@@ -6239,7 +6336,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Badge>
                 )}
                 <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
-                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                  <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
                   </a>
@@ -6342,7 +6439,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={visibleFilteredFiles}
+          filteredFiles={selectedIsPrimary ? visibleFilteredFiles : []}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -6352,7 +6449,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           passRange={passRange}
           onPassRangeChange={setPassRange}
           emptyStatusText={
-            isDiffDisplayLoading
+            !selectedIsPrimary
+              ? "Changes for this pull request will be available after its branch is materialized."
+              : isDiffDisplayLoading
               ? "Loading changes..."
               : session.status === "running" || session.status === "pending"
               ? "Changes will appear here as the agent modifies files."
@@ -6366,6 +6465,43 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          <PullRequestList
+            changesets={changesets}
+            selectedID={selectedChangeset?.id ?? ""}
+            onSelect={(changesetID) => {
+              setSelectedChangesetID(changesetID);
+              void setChangesetParam(changesetID);
+            }}
+          />
+          {hasMultipleChangesets && selectedChangeset && (
+            <Card className="border-border/60" data-testid="selected-pull-request-panel">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-sm font-medium">{selectedChangeset.title}</div>
+                {selectedChangeset.summary && <p className="text-xs text-muted-foreground">{selectedChangeset.summary}</p>}
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
+                  <dt className="text-muted-foreground">Base</dt><dd className="truncate">{selectedChangeset.base_branch}</dd>
+                  <dt className="text-muted-foreground">Head</dt><dd className="truncate">{selectedChangeset.working_branch ?? "Not materialized"}</dd>
+                  <dt className="text-muted-foreground">Target</dt><dd className="truncate">{selectedChangeset.target_branch}</dd>
+                  <dt className="text-muted-foreground">State</dt><dd>{selectedChangeset.pull_request?.status ?? selectedChangeset.status.replaceAll("_", " ")}</dd>
+                  {selectedChangeset.pull_request?.ci_status && <><dt className="text-muted-foreground">CI</dt><dd>{selectedChangeset.pull_request.ci_status}</dd></>}
+                  {selectedChangeset.pull_request?.review_status && <><dt className="text-muted-foreground">Review</dt><dd>{selectedChangeset.pull_request.review_status.replaceAll("_", " ")}</dd></>}
+                </dl>
+                {!selectedChangeset.pull_request && !selectedChangeset.is_primary && (
+                  <DisabledTooltip disabled content="Create PR becomes available after branch materialization">
+                    <Button type="button" size="sm" disabled className="mt-2">
+                      <GitPullRequest className="h-3.5 w-3.5" />
+                      Create PR
+                    </Button>
+                  </DisabledTooltip>
+                )}
+                {!selectedChangeset.is_primary && (
+                  <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
+                    Changes, preview, readiness, review, and push become available after branch materialization.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -6392,7 +6528,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 }}
                 onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
                 stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
                   title: reviewActionDisabledReason,
@@ -6422,7 +6558,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </Card>
             ) : null
           )}
-          {canManageSession && !hasPR && hasSessionChanges ? (
+          {selectedIsPrimary && canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
                 <div className="flex flex-col gap-3">
@@ -6617,12 +6753,20 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-        <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
-          <PreviewPanel
-            sessionId={id}
-            previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
-          />
-        </ErrorBoundary>
+        {selectedIsPrimary ? (
+          <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
+            <PreviewPanel
+              sessionId={id}
+              previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
+            />
+          </ErrorBoundary>
+        ) : (
+          <Card className="border-border/60">
+            <CardContent className="p-4 text-sm text-muted-foreground">
+              Preview for this pull request will be available after its branch is materialized.
+            </CardContent>
+          </Card>
+        )}
       </TabsContent>
     </Tabs>
   );

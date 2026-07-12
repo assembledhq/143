@@ -378,6 +378,47 @@ func (s *PullRequestStore) BatchGetBySessionIDs(ctx context.Context, orgID uuid.
 	return s.BatchGetPrimaryBySessionIDs(ctx, orgID, sessionIDs)
 }
 
+// ListBySessionChangesets returns at most one current PR for each changeset.
+// Legacy PRs without a changeset remain represented by the primary changeset
+// through the migration backfill, so callers never need a second join path.
+func (s *PullRequestStore) ListBySessionChangesets(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.PullRequest, error) {
+	batched, err := s.BatchListBySessionChangesets(ctx, orgID, []uuid.UUID{sessionID})
+	if err != nil {
+		return nil, err
+	}
+	return batched[sessionID], nil
+}
+
+// BatchListBySessionChangesets preserves every changeset PR while hydrating
+// multiple sessions. The outer key is session ID and the inner key is
+// changeset ID; unlike the scalar compatibility helper, no PR is collapsed.
+func (s *PullRequestStore) BatchListBySessionChangesets(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]models.PullRequest, error) {
+	if len(sessionIDs) == 0 {
+		return map[uuid.UUID]map[uuid.UUID]models.PullRequest{}, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT ON (changeset_id) `+prSelectColumns+`
+		FROM pull_requests
+		WHERE org_id = @org_id AND session_id = ANY(@session_ids) AND changeset_id IS NOT NULL
+		ORDER BY changeset_id, created_at DESC, id DESC`, pgx.NamedArgs{"org_id": orgID, "session_ids": sessionIDs})
+	if err != nil {
+		return nil, fmt.Errorf("list pull requests by changeset: %w", err)
+	}
+	prs, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
+	if err != nil {
+		return nil, fmt.Errorf("collect pull requests by changeset: %w", err)
+	}
+	result := make(map[uuid.UUID]map[uuid.UUID]models.PullRequest)
+	for _, pr := range prs {
+		if pr.SessionID != nil && pr.ChangesetID != nil {
+			if result[*pr.SessionID] == nil {
+				result[*pr.SessionID] = make(map[uuid.UUID]models.PullRequest)
+			}
+			result[*pr.SessionID][*pr.ChangesetID] = pr
+		}
+	}
+	return result, nil
+}
+
 // BatchGetPrimaryBySessionIDs returns only the PR attached to each session's
 // primary changeset. It is the scalar compatibility read for session list and
 // sidebar surfaces; Phase 2 multi-PR hydration must use a changeset-keyed read.

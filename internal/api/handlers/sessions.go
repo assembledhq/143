@@ -573,6 +573,24 @@ func (h *SessionHandler) primaryChangesetID(ctx context.Context, orgID, sessionI
 	return changeset.ID, nil
 }
 
+// errInvalidChangesetID marks a malformed changeset_id query parameter so
+// callers can distinguish a client error (400) from a store/DB failure (500).
+var errInvalidChangesetID = errors.New("invalid changeset ID")
+
+func (h *SessionHandler) requestedChangeset(ctx context.Context, orgID, sessionID uuid.UUID, raw string) (models.SessionChangeset, error) {
+	if h.changesetStore == nil {
+		return models.SessionChangeset{ID: sessionID, OrgID: orgID, SessionID: sessionID, IsPrimary: true}, nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return h.changesetStore.GetPrimary(ctx, orgID, sessionID)
+	}
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return models.SessionChangeset{}, fmt.Errorf("%w: %v", errInvalidChangesetID, err)
+	}
+	return h.changesetStore.GetByID(ctx, orgID, sessionID, id)
+}
+
 type publishActionTxError struct {
 	phase string
 	err   error
@@ -870,6 +888,12 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	h.enrichSessionLinks(r.Context(), orgID, &run)
 
 	detail := models.SessionDetail{Session: run}
+	changesets, err := h.listChangesetSummaries(r.Context(), orgID, runID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CHANGESETS_FAILED", "failed to load pull requests", err)
+		return
+	}
+	detail.Changesets = changesets
 	if h.repoStore != nil && run.RepositoryID != nil {
 		repo, err := h.repoStore.GetByID(r.Context(), orgID, *run.RepositoryID)
 		if err != nil {
@@ -895,6 +919,140 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDetail]{Data: detail})
+}
+
+func (h *SessionHandler) listChangesetSummaries(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ChangesetSummary, error) {
+	if h.changesetStore == nil {
+		return []models.ChangesetSummary{}, nil
+	}
+	changesets, err := h.changesetStore.ListBySession(ctx, orgID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if changesets == nil {
+		changesets = []models.ChangesetSummary{}
+	}
+	if h.pullRequestStore == nil || len(changesets) == 0 {
+		return changesets, nil
+	}
+	prs, err := h.pullRequestStore.ListBySessionChangesets(ctx, orgID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range changesets {
+		if pr, ok := prs[changesets[i].ID]; ok {
+			changesets[i].PullRequest = &pr
+		}
+	}
+	return changesets, nil
+}
+
+func (h *SessionHandler) ListChangesets(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	if _, err := h.runStore.GetAPIDetailByID(r.Context(), orgID, sessionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to load session", err)
+		return
+	}
+	changesets, err := h.listChangesetSummaries(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CHANGESETS_FAILED", "failed to load pull requests", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ChangesetSummary]{Data: changesets})
+}
+
+type createChangesetRequest struct {
+	Title     string     `json:"title"`
+	Summary   string     `json:"summary"`
+	StackedOn *uuid.UUID `json:"stacked_on_changeset_id"`
+}
+
+func (h *SessionHandler) CreateChangeset(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	var req createChangesetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Title == "" {
+		writeError(w, r, http.StatusBadRequest, "TITLE_REQUIRED", "title is required")
+		return
+	}
+	changeset, err := h.changesetStore.Create(r.Context(), orgID, sessionID, req.Title, strings.TrimSpace(req.Summary), req.StackedOn)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session or parent pull request not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CHANGESET_CREATE_FAILED", "failed to create pull request", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ChangesetSummary]{Data: changeset.SummaryView()})
+}
+
+type updateChangesetRequest struct {
+	Title   *string `json:"title"`
+	Summary *string `json:"summary"`
+}
+
+func (h *SessionHandler) UpdateChangeset(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	var req updateChangesetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.Title == nil && req.Summary == nil {
+		writeError(w, r, http.StatusBadRequest, "NO_CHANGES", "provide a title or summary")
+		return
+	}
+	if req.Title != nil {
+		trimmed := strings.TrimSpace(*req.Title)
+		if trimmed == "" {
+			writeError(w, r, http.StatusBadRequest, "TITLE_REQUIRED", "title cannot be empty")
+			return
+		}
+		req.Title = &trimmed
+	}
+	if req.Summary != nil {
+		trimmed := strings.TrimSpace(*req.Summary)
+		req.Summary = &trimmed
+	}
+	changeset, err := h.changesetStore.UpdateMetadata(r.Context(), orgID, sessionID, changesetID, req.Title, req.Summary)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CHANGESET_UPDATE_FAILED", "failed to update pull request", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ChangesetSummary]{Data: changeset.SummaryView()})
 }
 
 func (h *SessionHandler) attachThreadInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
@@ -988,7 +1146,6 @@ func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
-
 	if session.Title != nil && *session.Title == title {
 		writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 		return
@@ -1984,7 +2141,18 @@ func (h *SessionHandler) GetPullRequest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	pr, err := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, runID)
+	var pr models.PullRequest
+	changesetIDParam := strings.TrimSpace(r.URL.Query().Get("changeset_id"))
+	if changesetIDParam == "" {
+		pr, err = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, runID)
+	} else {
+		changesetID, parseErr := uuid.Parse(changesetIDParam)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+			return
+		}
+		pr, err = h.pullRequestStore.GetByChangesetID(r.Context(), orgID, runID, changesetID)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusOK, models.SingleResponse[*models.PullRequest]{Data: nil})
@@ -2523,6 +2691,22 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
+	targetChangeset, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
+	if err != nil {
+		switch {
+		case errors.Is(err, errInvalidChangesetID):
+			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target", err)
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "CHANGESET_LOOKUP_FAILED", "failed to resolve the pull request target", err)
+		}
+		return
+	}
+	if !targetChangeset.IsPrimary {
+		writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request branch must be materialized before it can be created")
+		return
+	}
 
 	if session.SandboxState == models.SandboxStateDestroyed {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
@@ -2536,6 +2720,9 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Non-primary changesets are rejected above with CHANGESET_NOT_MATERIALIZED,
+	// so from here the target is always the primary changeset and only the
+	// legacy session-scoped creation guards apply.
 	switch session.PRCreationState {
 	case models.PRCreationStateQueued, models.PRCreationStatePushing:
 		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
@@ -2555,7 +2742,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check for existing PR", prErr)
 		return
 	}
-	if session.PRCreationState == models.PRCreationStateSucceeded {
+	if targetChangeset.PRCreationState == models.PRCreationStateSucceeded || session.PRCreationState == models.PRCreationStateSucceeded {
 		writeError(w, r, http.StatusConflict, "PR_ALREADY_CREATED", "PR creation already completed for this session")
 		return
 	}
@@ -2617,11 +2804,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	changesetID, err := h.primaryChangesetID(r.Context(), orgID, sessionID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", err)
-		return
-	}
+	changesetID := targetChangeset.ID
 	payload := map[string]any{
 		"session_id":     sessionID.String(),
 		"changeset_id":   changesetID.String(),

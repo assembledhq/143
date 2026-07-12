@@ -433,8 +433,9 @@ type Session struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	RepositoryFullName *string         `json:"repository_full_name,omitempty"`
-	Threads            []SessionThread `json:"threads"`
+	RepositoryFullName *string            `json:"repository_full_name,omitempty"`
+	Threads            []SessionThread    `json:"threads"`
+	Changesets         []ChangesetSummary `json:"changesets"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is

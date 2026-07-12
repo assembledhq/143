@@ -2,8 +2,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders, screen, userEvent, waitFor, within } from '@/test/test-utils';
 import { QueryClient } from '@tanstack/react-query';
+import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
-import { mockSessions, mockMembers } from '@/test/mocks/handlers';
+import { mockSessions, mockMembers, mockPR, mockPRHealth } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import { queryKeys } from '@/lib/query-keys';
 import { markProvisionalSessionDetail } from '@/lib/session-detail-cache';
@@ -94,6 +95,7 @@ describe('SessionDetailPage overview and review loop', () => {
         ...mockSessions[0],
         result_summary: 'Provisional list title',
         threads: [],
+        changesets: [],
       }),
     } satisfies SingleResponse<Session>);
     let detailRequests = 0;
@@ -840,4 +842,161 @@ describe('SessionDetailPage overview and review loop', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
   });
+
+  it('keeps the legacy full-page layout when the session has one pull request slot', async () => {
+    const primaryChangesetID = '11111111-1111-4111-8111-111111111111';
+    server.use(http.get('/api/v1/sessions/:id', () => HttpResponse.json({
+      data: {
+        ...mockSessions[0],
+        changesets: [{
+          id: primaryChangesetID, is_primary: true, order_index: 0, title: 'Foundation', summary: '',
+          status: 'planned', target_branch: 'main', base_branch: 'main',
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        }],
+      },
+    })));
+
+    renderWithProviders(<SessionDetailContent id={mockSessions[0].id} />);
+    await screen.findAllByText('Fixed TypeError by adding null check');
+    expect(screen.queryByTestId('pull-request-list')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('selected-pull-request-panel')).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Overview' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Changes' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Preview' })).toBeInTheDocument();
+  });
+
+  it('scopes the full PR details surface when a different pull request is selected', async () => {
+    const primaryChangesetID = '11111111-1111-4111-8111-111111111111';
+    const childChangesetID = '22222222-2222-4222-8222-222222222222';
+    const primaryPR = { ...mockPR, id: 'pr-primary', changeset_id: primaryChangesetID, github_pr_number: 101, title: 'Foundation' };
+    const childPR = {
+      ...mockPR,
+      id: 'pr-child',
+      changeset_id: childChangesetID,
+      github_pr_number: 102,
+      github_pr_url: 'https://github.com/org/repo/pull/102',
+      title: 'API integration',
+      branch_name: '143/api',
+      head_ref: '143/api',
+      ci_status: 'failure' as const,
+      review_status: 'changes_requested' as const,
+    };
+    const multiPRSession = {
+      ...mockSessions[0],
+      changesets: [
+        {
+          id: primaryChangesetID, is_primary: true, order_index: 0, title: 'Foundation', summary: 'Shared types',
+          status: 'pr_open', target_branch: 'main', base_branch: 'main', working_branch: '143/foundation',
+          pull_request: primaryPR, created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+        {
+          id: childChangesetID, is_primary: false, order_index: 1, title: 'API integration', summary: 'Connect the API',
+          status: 'pr_open', target_branch: 'main', base_branch: '143/foundation', working_branch: '143/api',
+          stacked_on_changeset_id: primaryChangesetID, pull_request: childPR,
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+      ],
+    };
+    const requestedChangesets: string[] = [];
+    const requestedHealthPRs: string[] = [];
+    const requestedRepairPRs: string[] = [];
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: multiPRSession })),
+      http.get('/api/v1/sessions/:id/pr', ({ request }) => {
+        const selected = new URL(request.url).searchParams.get('changeset_id') ?? primaryChangesetID;
+        requestedChangesets.push(selected);
+        return HttpResponse.json({ data: selected === childChangesetID ? childPR : primaryPR });
+      }),
+      http.get('/api/v1/pull-requests/:id/health', ({ params }) => {
+        requestedHealthPRs.push(String(params.id));
+        return HttpResponse.json({
+          data: params.id === childPR.id
+            ? { ...mockPRHealth, pull_request_id: childPR.id, failing_test_count: 1, can_fix_tests: true, needs_agent_action: true }
+            : { ...mockPRHealth, pull_request_id: primaryPR.id },
+        });
+      }),
+      http.post('/api/v1/pull-requests/:id/repair/fix-tests', ({ params }) => {
+        requestedRepairPRs.push(String(params.id));
+        return HttpResponse.json({
+          data: {
+            session_id: multiPRSession.id,
+            mode: 'resumed',
+            reused_in_flight: false,
+            head_sha: 'head-sha',
+            base_sha: 'base-sha',
+            health_version: 1,
+            repair_action_type: 'fix_tests',
+          },
+        });
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={multiPRSession.id} />);
+    expect(await screen.findByTestId('pull-request-list')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /API integration/ }));
+
+    await waitFor(() => {
+      expect(within(screen.getByTestId('selected-pull-request-panel')).getByText('Connect the API')).toBeInTheDocument();
+    });
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).getByText('143/foundation')).toBeInTheDocument();
+    expect(within(selectedPanel).getByText('changes requested')).toBeInTheDocument();
+    expect(screen.getByTestId('branch-actions-unavailable')).toBeInTheDocument();
+    await waitFor(() => expect(requestedChangesets).toContain(childChangesetID));
+    await waitFor(() => expect(requestedHealthPRs).toContain(childPR.id));
+    expect(screen.getByRole('link', { name: 'View PR' })).toHaveAttribute('href', childPR.github_pr_url);
+    await user.click(await screen.findByRole('button', { name: 'Fix tests' }));
+    await waitFor(() => expect(requestedRepairPRs).toEqual([childPR.id]));
+
+    act(() => {
+      window.history.replaceState({}, '', window.location.pathname);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await waitFor(() => {
+      expect(within(screen.getByTestId('selected-pull-request-panel')).getByText('Shared types')).toBeInTheDocument();
+    });
+  }, 10_000);
+
+  it('keeps every branch-backed action on the materialization boundary for a planned pull request slot', async () => {
+    const primaryChangesetID = '33333333-3333-4333-8333-333333333333';
+    const plannedChangesetID = '44444444-4444-4444-8444-444444444444';
+    const session = {
+      ...mockSessions[0],
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      changesets: [
+        {
+          id: primaryChangesetID, is_primary: true, order_index: 0, title: 'Foundation', summary: '',
+          status: 'planned', target_branch: 'main', base_branch: 'main',
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+        {
+          id: plannedChangesetID, is_primary: false, order_index: 1, title: 'API integration', summary: 'Not materialized yet',
+          status: 'planned', target_branch: 'main', base_branch: 'main',
+          created_at: '2026-07-11T00:00:00Z', updated_at: '2026-07-11T00:00:00Z',
+        },
+      ],
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: session })),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({ data: null })),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={session.id} />);
+    await user.click(await screen.findByRole('button', { name: /API integration/ }));
+
+    const selectedPanel = screen.getByTestId('selected-pull-request-panel');
+    expect(within(selectedPanel).getByRole('button', { name: 'Create PR' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Check readiness' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Push changes' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByTitle('View changes'));
+    expect(await screen.findByText('Changes for this pull request will be available after its branch is materialized.')).toBeInTheDocument();
+    expect(new URL(window.location.href).searchParams.get('review')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: 'Preview' }));
+    expect(await screen.findByText('Preview for this pull request will be available after its branch is materialized.')).toBeInTheDocument();
+  }, 10_000);
 });

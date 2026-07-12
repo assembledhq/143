@@ -127,6 +127,35 @@ func TestPullRequestStoreGetByChangesetIDScopesByOrgAndSession(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestPullRequestStoreBatchListBySessionChangesetsPreservesEveryPR(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+	orgID, sessionOne, sessionTwo := uuid.New(), uuid.New(), uuid.New()
+	changesetOne, changesetTwo := uuid.New(), uuid.New()
+	now := time.Now()
+	columns := append([]string{}, prColumns[:2]...)
+	columns = append(columns, "changeset_id")
+	columns = append(columns, prColumns[2:]...)
+	row := func(prID, sessionID, changesetID uuid.UUID) []any {
+		values := newPRRow(prID, sessionID, orgID, now)
+		return append(values[:2], append([]any{&changesetID}, values[2:]...)...)
+	}
+	prOne, prTwo := uuid.New(), uuid.New()
+	mock.ExpectQuery(`(?s)SELECT DISTINCT ON \(changeset_id\).+FROM pull_requests.+session_id = ANY`).
+		WithArgs(orgID, []uuid.UUID{sessionOne, sessionTwo}).
+		WillReturnRows(pgxmock.NewRows(columns).
+			AddRow(row(prOne, sessionOne, changesetOne)...).
+			AddRow(row(prTwo, sessionTwo, changesetTwo)...))
+
+	actual, err := NewPullRequestStore(mock).BatchListBySessionChangesets(context.Background(), orgID, []uuid.UUID{sessionOne, sessionTwo})
+	require.NoError(t, err, "batch changeset hydration should succeed")
+	require.Equal(t, prOne, actual[sessionOne][changesetOne].ID, "first session should retain its changeset PR")
+	require.Equal(t, prTwo, actual[sessionTwo][changesetTwo].ID, "second session should retain its changeset PR")
+	require.NoError(t, mock.ExpectationsWereMet(), "batch lookup should use one tenant-scoped query")
+}
+
 func TestPullRequestStore_GetByID_Success(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

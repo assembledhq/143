@@ -56,3 +56,30 @@ type SessionChangeset struct {
 	CreatedAt             time.Time       `db:"created_at" json:"created_at"`
 	UpdatedAt             time.Time       `db:"updated_at" json:"updated_at"`
 }
+
+// ChangesetSummary is the stable session-detail and list representation. It
+// deliberately omits internal push coordination and PR creation error fields.
+type ChangesetSummary struct {
+	ID                   uuid.UUID       `db:"id" json:"id"`
+	IsPrimary            bool            `db:"is_primary" json:"is_primary"`
+	OrderIndex           int             `db:"order_index" json:"order_index"`
+	Title                string          `db:"title" json:"title"`
+	Summary              string          `db:"summary" json:"summary"`
+	Status               ChangesetStatus `db:"status" json:"status"`
+	TargetBranch         string          `db:"target_branch" json:"target_branch"`
+	BaseBranch           string          `db:"base_branch" json:"base_branch"`
+	WorkingBranch        *string         `db:"working_branch" json:"working_branch,omitempty"`
+	StackedOnChangesetID *uuid.UUID      `db:"stacked_on_changeset_id" json:"stacked_on_changeset_id,omitempty"`
+	HeadSHA              *string         `db:"head_sha" json:"head_sha,omitempty"`
+	PullRequest          *PullRequest    `json:"pull_request,omitempty"`
+	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time       `db:"updated_at" json:"updated_at"`
+}
+
+func (c SessionChangeset) SummaryView() ChangesetSummary {
+	return ChangesetSummary{
+		ID: c.ID, IsPrimary: c.IsPrimary, OrderIndex: c.OrderIndex, Title: c.Title, Summary: c.Summary,
+		Status: c.Status, TargetBranch: c.TargetBranch, BaseBranch: c.BaseBranch, WorkingBranch: c.WorkingBranch,
+		StackedOnChangesetID: c.StackedOnChangesetID, HeadSHA: c.HeadSHA, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+	}
+}
