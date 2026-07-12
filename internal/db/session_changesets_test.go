@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 
@@ -103,4 +105,73 @@ func TestSessionChangesetStoreRecordPushedHeadUpdatesBothSHAFields(t *testing.T)
 	err = NewSessionChangesetStore(mock).RecordPushedHead(context.Background(), uuid.New(), uuid.New(), uuid.New(), "head-sha")
 	require.NoError(t, err, "successful platform push should update local and expected remote heads")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionChangesetStoreListBySessionScopesAndOrders(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID := uuid.New(), uuid.New()
+	changesetID := uuid.New()
+	now := time.Now().UTC()
+	mock.ExpectQuery(`SELECT .+ FROM session_changesets.+WHERE org_id = .+ AND session_id = .+ORDER BY order_index`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "is_primary", "order_index", "title", "summary", "status", "target_branch",
+			"base_branch", "working_branch", "stacked_on_changeset_id", "head_sha", "created_at", "updated_at",
+		}).AddRow(changesetID, true, 0, "Foundation", "Base work", "planned", "main", "main", nil, nil, nil, now, now))
+
+	actual, err := NewSessionChangesetStore(mock).ListBySession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "listing changesets should succeed")
+	require.Equal(t, []models.ChangesetSummary{{
+		ID: changesetID, IsPrimary: true, OrderIndex: 0, Title: "Foundation", Summary: "Base work",
+		Status: models.ChangesetStatusPlanned, TargetBranch: "main", BaseBranch: "main", CreatedAt: now, UpdatedAt: now,
+	}}, actual, "changesets should retain their stable order and complete summary")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionChangesetStoreUpdateMetadataScopesByTenantAndParent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	title := "API integration"
+	mock.ExpectQuery(`UPDATE session_changesets SET.+WHERE org_id = .+ AND session_id = .+ AND id = .+RETURNING`).
+		WithArgs(&title, (*string)(nil), orgID, sessionID, changesetID).
+		WillReturnError(pgx.ErrNoRows)
+
+	_, err = NewSessionChangesetStore(mock).UpdateMetadata(context.Background(), orgID, sessionID, changesetID, &title, nil)
+	require.ErrorIs(t, err, pgx.ErrNoRows, "missing tenant-scoped changeset should remain distinguishable")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionChangesetStoreCreateRetriesConcurrentOrderConflict(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	query := `INSERT INTO session_changesets .+ RETURNING`
+	args := []any{orgID, sessionID, "API", "Endpoints", (*uuid.UUID)(nil)}
+	mock.ExpectQuery(query).WithArgs(args...).WillReturnError(&pgconn.PgError{
+		Code: "23505", ConstraintName: "session_changesets_org_id_session_id_order_index_key",
+	})
+	mock.ExpectQuery(query).WithArgs(args...).WillReturnRows(pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
+		"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
+		"head_sha", "expected_remote_head_sha", "base_head_sha", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+	}).AddRow(
+		changesetID, orgID, sessionID, false, 1, "API", "Endpoints", models.ChangesetStatusPlanned,
+		"main", "main", nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+	))
+
+	actual, err := NewSessionChangesetStore(mock).Create(context.Background(), orgID, sessionID, "API", "Endpoints", nil)
+	require.NoError(t, err, "concurrent order allocation should retry")
+	require.Equal(t, changesetID, actual.ID, "retry should return the created changeset")
+	require.NoError(t, mock.ExpectationsWereMet(), "create should retry only the order uniqueness conflict")
 }

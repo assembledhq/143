@@ -1611,6 +1611,37 @@ export interface ForkResult {
 
 export interface SessionDetail extends Session {
   threads: SessionThread[];
+  changesets: ChangesetSummary[];
+}
+
+export type ChangesetStatus =
+  | "planned"
+  | "materializing"
+  | "published_branch"
+  | "pr_open"
+  | "needs_restack"
+  | "restacking"
+  | "restack_conflict"
+  | "external_update_detected"
+  | "ready"
+  | "merged"
+  | "abandoned";
+
+export interface ChangesetSummary {
+  id: string;
+  is_primary: boolean;
+  order_index: number;
+  title: string;
+  summary: string;
+  status: ChangesetStatus;
+  target_branch: string;
+  base_branch: string;
+  working_branch?: string;
+  stacked_on_changeset_id?: string;
+  head_sha?: string;
+  pull_request?: PullRequest;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SessionDiff {
@@ -1862,6 +1893,7 @@ export interface SessionTranscriptWindowResponse {
 export interface PullRequest {
   id: string;
   session_id: string;
+  changeset_id?: string;
   org_id: string;
   github_pr_number: number;
   github_pr_url: string;
