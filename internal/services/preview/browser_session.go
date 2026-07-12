@@ -197,20 +197,39 @@ func (s *BrowserSessionService) Observe(ctx context.Context, orgID, sessionID, p
 	if opts.Path == "" {
 		return s.observe(ctx, orgID, sessionID, previewID, policy, opts)
 	}
+	var result *models.PreviewObservation
+	err := s.RunAgentOperation(ctx, orgID, sessionID, 5*time.Minute, func() error {
+		var observeErr error
+		result, observeErr = s.observe(ctx, orgID, sessionID, previewID, policy, opts)
+		return observeErr
+	})
+	return result, err
+}
+
+// RunAgentOperation fences any browser operation against human control and
+// other agent actions, including compatibility tools that do not use Act.
+func (s *BrowserSessionService) RunAgentOperation(ctx context.Context, orgID, sessionID uuid.UUID, duration time.Duration, operation func() error) error {
+	if s == nil || s.store == nil {
+		return ErrBrowserUnavailable
+	}
 	token := uuid.New()
-	started, err := s.store.BeginAgentAction(ctx, orgID, sessionID, token, 5*time.Minute)
+	started, err := s.store.BeginAgentAction(ctx, orgID, sessionID, token, duration)
 	if err != nil {
-		return nil, fmt.Errorf("acquire agent browser navigation: %w", err)
+		return fmt.Errorf("acquire agent browser operation: %w", err)
 	}
 	if !started {
-		return nil, ErrBrowserControlHeld
+		control, controlErr := s.GetControl(ctx, orgID, sessionID)
+		if controlErr == nil && control.State == models.PreviewBrowserControlAgent {
+			return ErrBrowserControlBusy
+		}
+		return ErrBrowserControlHeld
 	}
-	result, observeErr := s.observe(ctx, orgID, sessionID, previewID, policy, opts)
+	operationErr := operation()
 	endErr := s.store.EndAgentAction(context.WithoutCancel(ctx), orgID, sessionID, token)
 	if endErr != nil {
-		endErr = fmt.Errorf("release agent browser navigation: %w", endErr)
+		endErr = fmt.Errorf("release agent browser operation: %w", endErr)
 	}
-	return result, errors.Join(observeErr, endErr)
+	return errors.Join(operationErr, endErr)
 }
 
 func (s *BrowserSessionService) observe(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
@@ -259,24 +278,13 @@ func (s *BrowserSessionService) observe(ctx context.Context, orgID, sessionID, p
 }
 
 func (s *BrowserSessionService) Act(ctx context.Context, orgID, sessionID, previewID uuid.UUID, policy BrowserSessionPolicy, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
-	token := uuid.New()
-	started, err := s.store.BeginAgentAction(ctx, orgID, sessionID, token, 5*time.Minute)
-	if err != nil {
-		return nil, fmt.Errorf("acquire agent browser action: %w", err)
-	}
-	if !started {
-		control, controlErr := s.GetControl(ctx, orgID, sessionID)
-		if controlErr == nil && control.State != models.PreviewBrowserControlAgent {
-			return nil, ErrBrowserControlHeld
-		}
-		return nil, ErrBrowserControlBusy
-	}
-	result, actErr := s.act(ctx, orgID, sessionID, previewID, policy, steps, opts)
-	endErr := s.store.EndAgentAction(context.WithoutCancel(ctx), orgID, sessionID, token)
-	if endErr != nil {
-		endErr = fmt.Errorf("release agent browser action: %w", endErr)
-	}
-	return result, errors.Join(actErr, endErr)
+	var result *models.PreviewActResult
+	err := s.RunAgentOperation(ctx, orgID, sessionID, 5*time.Minute, func() error {
+		var actErr error
+		result, actErr = s.act(ctx, orgID, sessionID, previewID, policy, steps, opts)
+		return actErr
+	})
+	return result, err
 }
 
 func (s *BrowserSessionService) ActAsHuman(ctx context.Context, orgID, sessionID, previewID, userID uuid.UUID, policy BrowserSessionPolicy, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {

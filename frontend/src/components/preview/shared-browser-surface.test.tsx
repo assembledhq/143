@@ -61,6 +61,27 @@ describe("SharedBrowserSurface", () => {
     await user.pointer({ target: surface, coords: { clientX: 250, clientY: 125 }, keys: "[MouseLeft]" });
     await waitFor(() => expect(mocks.act).toHaveBeenCalledWith("session-1", [{ action: "click", x: 500, y: 250 }]));
   });
+
+  it("queues rapid keyboard input in order without dropping keys", async () => {
+    mocks.control.mockResolvedValue({ state: "human_control", lease_owner_id: "user-1", is_lease_owner: true });
+    let resolveFirst!: (value: object) => void;
+    mocks.act
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValue({});
+    const user = userEvent.setup();
+    renderWithProviders(<SharedBrowserSurface sessionId="session-1" />);
+    const surface = await screen.findByRole("button", { name: "Interact with session browser" });
+
+    surface.focus();
+    await user.keyboard("abc");
+    await waitFor(() => expect(mocks.act).toHaveBeenCalledTimes(1));
+    expect(mocks.act).toHaveBeenNthCalledWith(1, "session-1", [{ action: "press", value: "a" }]);
+
+    resolveFirst({});
+    await waitFor(() => expect(mocks.act).toHaveBeenCalledTimes(3));
+    expect(mocks.act).toHaveBeenNthCalledWith(2, "session-1", [{ action: "press", value: "b" }]);
+    expect(mocks.act).toHaveBeenNthCalledWith(3, "session-1", [{ action: "press", value: "c" }]);
+  });
 });
 
 describe("mapSharedBrowserPoint", () => {

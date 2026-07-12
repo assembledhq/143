@@ -44,6 +44,59 @@ func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 	require.NotContains(t, firstText(result), "png_base64", "inline_base64=false should remove large screenshot payloads from CLI output")
 }
 
+func TestPreviewToolExecutor_InternalCreateRejectsBranchTarget(t *testing.T) {
+	// Not parallel: mutates process env via t.Setenv.
+	t.Setenv("143_SESSION_ID", "session-1")
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: "http://unused.test", Token: "sandbox-token"}), internal: true}
+	result := executor.create(context.Background(), mustJSON(map[string]any{
+		"repository": "acme/web",
+		"branch":     "main",
+	}))
+
+	require.True(t, result.IsError, "sandbox branch preview should be rejected")
+	require.Contains(t, firstText(result), "current session", "error should explain sandbox tools are session-scoped")
+	require.NotContains(t, firstText(result), "not both", "should not surface the misleading not-both error")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.Equal(t, true, gotBody["inline_base64"], "session screenshot should request bytes by default so the image is not silently dropped")
+	require.Contains(t, firstText(result), "png_base64", "without artifact storage the image must still be inlined by default")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","artifact":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.NotContains(t, firstText(result), "png_base64", "an artifact reference should replace inline bytes in the transcript")
+	require.Contains(t, firstText(result), "art-1", "artifact reference should be retained")
+}
+
 func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
 	t.Parallel()
 

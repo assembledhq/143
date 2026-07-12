@@ -542,6 +542,13 @@ func (e *previewToolExecutor) create(ctx context.Context, args json.RawMessage) 
 		return mcp.ErrorResult("invalid preview create arguments")
 	}
 	hasBranchTarget := strings.TrimSpace(params.Repository) != "" || strings.TrimSpace(params.Branch) != ""
+	// Sandbox preview tools operate on the current session only. Reject a branch
+	// target up front with an actionable message; otherwise the implicit-session
+	// fallback below would fill SessionID from the environment and then trip the
+	// "not both" guard with an error that misdescribes what the caller did.
+	if e.internal && hasBranchTarget {
+		return mcp.ErrorResult("sandbox preview tools operate on the current session; omit repository/branch to create the session preview")
+	}
 	if e.internal && params.SessionID == "" {
 		params.SessionID = strings.TrimSpace(os.Getenv("143_SESSION_ID"))
 	}
@@ -795,6 +802,12 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 	body := map[string]any{"path": params.Path, "viewport_w": params.ViewportW, "viewport_h": params.ViewportH, "full_page": params.FullPage, "delay_ms": params.DelayMS}
 	if params.InlineBase64 != nil {
 		body["inline_base64"] = *params.InlineBase64
+	} else if target.SessionID != "" {
+		// The session path is served by /observe, whose inline_base64 defaults to
+		// false. Preserve the documented "inline until artifact storage exists"
+		// behavior: request the bytes, then drop them below when an artifact
+		// reference is available so the transcript stays lean.
+		body["inline_base64"] = true
 	}
 	if target.SessionID != "" {
 		var resp struct {
@@ -807,7 +820,12 @@ func (e *previewToolExecutor) screenshot(ctx context.Context, args json.RawMessa
 		if screenshot == nil {
 			return mcp.ErrorResult("preview screenshot returned no image")
 		}
-		if params.InlineBase64 != nil && !*params.InlineBase64 {
+		if params.InlineBase64 != nil {
+			if !*params.InlineBase64 {
+				delete(screenshot, "png_base64")
+			}
+		} else if _, hasArtifact := screenshot["artifact"]; hasArtifact {
+			// Smart default: an artifact reference is enough; drop the inline bytes.
 			delete(screenshot, "png_base64")
 		}
 		return jsonResult(screenshot)

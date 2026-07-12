@@ -155,9 +155,31 @@ func (c *ChromeDPInspector) BindSessionBrowser(previewID, sessionID string) {
 	if strings.TrimSpace(previewID) == "" || strings.TrimSpace(sessionID) == "" {
 		return
 	}
+	sessionKey := "session:" + sessionID
 	c.mu.Lock()
-	c.contextKeys[previewID] = "session:" + sessionID
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	if c.contextKeys[previewID] == sessionKey {
+		return
+	}
+	c.contextKeys[previewID] = sessionKey
+	// A context may already have been created under the raw previewID key by a
+	// path that touched this preview before it was session-bound (HMR watcher,
+	// console/inspect). Once bound, getOrCreatePreviewCtx resolves to sessionKey,
+	// so that raw-keyed context (with its own Chrome tab and console listener)
+	// would otherwise be orphaned and leak. Reconcile it here.
+	raw, hasRaw := c.previews[previewID]
+	if !hasRaw {
+		return
+	}
+	if _, bound := c.previews[sessionKey]; bound {
+		// A session-keyed context already exists; the raw one is a stale
+		// leftover — release it instead of leaking it.
+		raw.cancel()
+		delete(c.previews, previewID)
+		return
+	}
+	c.previews[sessionKey] = raw
+	delete(c.previews, previewID)
 }
 
 // =============================================================================
@@ -196,6 +218,13 @@ func sameOrigin(rawURL, expectedURL string) bool {
 		return false
 	}
 	return target.Scheme == expected.Scheme && target.Host == expected.Host
+}
+
+func validateObservationOrigin(rawURL, expectedURL string) error {
+	if !sameOrigin(rawURL, expectedURL) {
+		return fmt.Errorf("%w: browser left the authorized preview origin: %q", ErrNavigationNotAllowed, rawURL)
+	}
+	return nil
 }
 
 // =============================================================================
@@ -591,6 +620,21 @@ func (c *ChromeDPInspector) Observe(ctx context.Context, target models.BrowserTa
 	}
 	screenshot, err := c.CaptureScreenshot(ctx, target.PreviewID, opts.ScreenshotOpts)
 	if err != nil {
+		return nil, err
+	}
+	expectedOrigin, err := c.previewURL(target.PreviewID, "/")
+	if err != nil {
+		return nil, fmt.Errorf("resolve authorized preview origin: %w", err)
+	}
+	if err := validateObservationOrigin(screenshot.URL, expectedOrigin); err != nil {
+		if pc, contextErr := c.getOrCreatePreviewCtx(target.PreviewID); contextErr == nil {
+			merged, cancel := mergeContexts(pc.ctx, ctx)
+			blankErr := chromedp.Run(merged, chromedp.Navigate("about:blank"))
+			cancel()
+			if blankErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("reset browser after unauthorized navigation: %w", blankErr))
+			}
+		}
 		return nil, err
 	}
 	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)

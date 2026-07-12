@@ -750,7 +750,7 @@ export const api = {
         post<import('./types').SingleResponse<import('./preview-types').ElementInfo>>(`/api/v1/sessions/${sessionId}/preview/inspect`, { x, y })
           .then(r => r.data),
       observeBrowser: (sessionId: string) =>
-        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserObservation>>(`/api/v1/sessions/${sessionId}/preview/observe`, { inline_base64: true, preserve_console_cursor: true, read_only: true, ephemeral: true, skip_semantic: true })
+        post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserObservation>>(`/api/v1/sessions/${sessionId}/preview/watch`, {})
           .then(r => r.data),
       browserControl: (sessionId: string) =>
         get<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control`)

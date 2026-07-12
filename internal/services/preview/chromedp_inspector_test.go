@@ -20,6 +20,34 @@ func TestChromeDPInspector_BindsSessionContextIdentity(t *testing.T) {
 	require.False(t, inspector.HasContext(models.BrowserTarget{PreviewID: "preview-new", SessionID: "session-1", ContextKey: "session:session-1"}), "binding should not eagerly launch a browser")
 }
 
+func TestChromeDPInspector_BindAdoptsRawContext(t *testing.T) {
+	t.Parallel()
+	inspector := NewChromeDPInspector(ChromeDPInspectorConfig{}, zerolog.Nop())
+	// A context created under the raw previewID key before the session bind
+	// (e.g. by the HMR watcher or a console read) must be adopted under the
+	// session key. Otherwise the next lookup resolves to the session key and
+	// creates a second Chrome tab, orphaning (and leaking) this one.
+	cancelled := false
+	inspector.previews["preview-1"] = &previewContext{cancel: func() { cancelled = true }}
+	inspector.BindSessionBrowser("preview-1", "session-1")
+	require.NotContains(t, inspector.previews, "preview-1", "raw-keyed context should be reconciled away")
+	require.Contains(t, inspector.previews, "session:session-1", "context should be adopted under the session key")
+	require.False(t, cancelled, "adopted context must not be torn down")
+}
+
+func TestChromeDPInspector_BindReleasesStaleRawContext(t *testing.T) {
+	t.Parallel()
+	inspector := NewChromeDPInspector(ChromeDPInspectorConfig{}, zerolog.Nop())
+	sessionCancelled, rawCancelled := false, false
+	inspector.previews["session:session-1"] = &previewContext{cancel: func() { sessionCancelled = true }}
+	inspector.previews["preview-1"] = &previewContext{cancel: func() { rawCancelled = true }}
+	inspector.BindSessionBrowser("preview-1", "session-1")
+	require.NotContains(t, inspector.previews, "preview-1", "stale raw context should be removed")
+	require.Contains(t, inspector.previews, "session:session-1", "existing session context should be preserved")
+	require.True(t, rawCancelled, "stale raw context should be torn down to avoid a leak")
+	require.False(t, sessionCancelled, "existing session context must be preserved")
+}
+
 func TestCompatiblePreviewRestoreURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -151,6 +179,30 @@ func TestSameOrigin(t *testing.T) {
 			if got := sameOrigin(tc.rawURL, tc.expected); got != tc.wantMatch {
 				t.Errorf("sameOrigin(%q, %q) = %v, want %v", tc.rawURL, tc.expected, got, tc.wantMatch)
 			}
+		})
+	}
+}
+
+func TestValidateObservationOriginRejectsRedirectedPage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		observedURL string
+		expectError bool
+	}{
+		{name: "same preview origin", observedURL: "https://preview-1.preview.test/dashboard", expectError: false},
+		{name: "external redirect", observedURL: "https://evil.example/dashboard", expectError: true},
+		{name: "prefix confusion", observedURL: "https://preview-1.preview.test.evil.example/", expectError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateObservationOrigin(tt.observedURL, "https://preview-1.preview.test/")
+			if tt.expectError {
+				require.ErrorIs(t, err, ErrNavigationNotAllowed, "redirected observations should fail with the navigation policy error")
+				return
+			}
+			require.NoError(t, err, "same-origin observations should remain allowed")
 		})
 	}
 }

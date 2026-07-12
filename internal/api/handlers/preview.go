@@ -37,6 +37,8 @@ const (
 	sandboxBusyAcquireRetryDelay = 2 * time.Second
 )
 
+var errPreviewResponseWritten = errors.New("preview response already written")
+
 // PreviewHandler handles all preview-related HTTP endpoints.
 type PreviewHandler struct {
 	manager           *preview.Manager
@@ -2548,7 +2550,35 @@ func browserPolicyForInstance(instance *models.PreviewInstance) preview.BrowserS
 	return policy
 }
 
+func (h *PreviewHandler) runAgentBrowserOperation(ctx context.Context, orgID uuid.UUID, instance *models.PreviewInstance, operation func() error) error {
+	if instance.SessionID == uuid.Nil || h.browserSessions == nil {
+		return operation()
+	}
+	if _, err := h.browserSessions.EnsureIdentity(ctx, orgID, instance.SessionID, instance.ID, browserPolicyForInstance(instance)); err != nil {
+		return err
+	}
+	return h.browserSessions.RunAgentOperation(ctx, orgID, instance.SessionID, 5*time.Minute, operation)
+}
+
 func (h *PreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
+	middleware.OrgIDFromContext(r.Context())
+	var body observePreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
+		return
+	}
+	h.observePreview(w, r, body)
+}
+
+// WatchBrowser returns a fixed, side-effect-free observation for the preview
+// panel. Viewers cannot supply navigation, viewport, persistence, cursor, or
+// artifact options through this endpoint.
+func (h *PreviewHandler) WatchBrowser(w http.ResponseWriter, r *http.Request) {
+	middleware.OrgIDFromContext(r.Context())
+	h.observePreview(w, r, observePreviewRequest{InlineBase64: true, PreserveConsoleCursor: true, ReadOnly: true, Ephemeral: true, SkipSemantic: true})
+}
+
+func (h *PreviewHandler) observePreview(w http.ResponseWriter, r *http.Request, body observePreviewRequest) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	instance, ok := h.getPreviewTarget(w, r)
 	if !ok {
@@ -2556,11 +2586,6 @@ func (h *PreviewHandler) Observe(w http.ResponseWriter, r *http.Request) {
 	}
 	if instance.SessionID == uuid.Nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "SESSION_BROWSER_REQUIRED", "observe requires a session preview")
-		return
-	}
-	var body observePreviewRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body", err)
 		return
 	}
 	opts := models.PreviewObservationOpts{ScreenshotOpts: models.ScreenshotOpts{Path: body.Path, ViewportW: body.ViewportW, ViewportH: body.ViewportH, FullPage: body.FullPage, Delay: time.Duration(body.DelayMS) * time.Millisecond}, Selector: body.Selector, IncludeDOM: body.IncludeDOM, MaxSemanticBytes: body.MaxSemanticBytes, ConsoleCursor: body.ConsoleCursor, PreserveConsoleCursor: body.PreserveConsoleCursor, ReadOnly: body.ReadOnly, SkipSemantic: body.SkipSemantic}
@@ -2729,6 +2754,14 @@ func (h *PreviewHandler) changeBrowserControl(w http.ResponseWriter, r *http.Req
 	}
 	if h.browserSessions == nil || instance.SessionID == uuid.Nil {
 		writeError(w, r, http.StatusServiceUnavailable, "BROWSER_UNAVAILABLE", "preview browser is unavailable")
+		return
+	}
+	// Ensure the durable browser identity row exists first. Without it, an
+	// acquire/return/handoff on a session that has never been observed hits
+	// pgx.ErrNoRows and surfaces as a misleading "control held by another actor"
+	// conflict instead of operating on a fresh agent-controlled browser.
+	if _, err := h.browserSessions.EnsureIdentity(r.Context(), orgID, instance.SessionID, instance.ID, browserPolicyForInstance(instance)); err != nil {
+		writeBrowserSessionError(w, r, err)
 		return
 	}
 	var body models.PreviewBrowserControlRequest
@@ -2921,32 +2954,39 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 	}
 
 	var result *models.ScreenshotResult
-	var err error
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
+		var operationErr error
+		if h.workerRoutingEnabled() {
+			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+			if resolveErr != nil {
+				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+				return errPreviewResponseWritten
+			}
+			if h.isLocalWorker(worker) {
+				inspector, inspectorOK := h.requireInspector(w, r)
+				if !inspectorOK {
+					return errPreviewResponseWritten
+				}
+				bindSessionBrowser(inspector, instance)
+				result, operationErr = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
+			} else {
+				result, operationErr = h.workerClient.CaptureScreenshot(r.Context(), worker, orgID, instance.ID, opts)
+			}
+		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {
-				return
+				return errPreviewResponseWritten
 			}
 			bindSessionBrowser(inspector, instance)
-			result, err = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
-		} else {
-			result, err = h.workerClient.CaptureScreenshot(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, opts)
+			result, operationErr = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
 		}
-	} else {
-		inspector, inspectorOK := h.requireInspector(w, r)
-		if !inspectorOK {
+		return operationErr
+	})
+	if err != nil {
+		if errors.Is(err, errPreviewResponseWritten) {
 			return
 		}
-		bindSessionBrowser(inspector, instance)
-		result, err = inspector.CaptureScreenshot(r.Context(), instance.ID.String(), opts)
-	}
-	if err != nil {
 		if h.workerRoutingEnabled() {
 			if _, ok := preview.AsWorkerRequestError(err); ok {
 				h.writeWorkerClientError(w, r, err)
@@ -2959,7 +2999,7 @@ func (h *PreviewHandler) CaptureScreenshot(w http.ResponseWriter, r *http.Reques
 	if result.Viewport.Width == 0 && result.Viewport.Height == 0 {
 		result.Viewport = models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH}
 	}
-	attachPreviewArtifacts(r.Context(), h, middleware.OrgIDFromContext(r.Context()), instance, result, "screenshot")
+	attachPreviewArtifacts(r.Context(), h, orgID, instance, result, "screenshot")
 
 	// When an artifact was persisted, callers get a stable reference and don't
 	// need the full PNG inlined; defaulting it off keeps large base64 blobs out
@@ -3270,6 +3310,10 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 		for i := range actResult.Interaction.Steps {
 			if actResult.Interaction.Steps[i].Screenshot != nil {
 				attachPreviewArtifacts(r.Context(), h, orgID, instance, actResult.Interaction.Steps[i].Screenshot, "interaction_screenshot")
+				// Keep large base64 PNGs out of the tool response; callers use the
+				// persisted artifact reference. Screenshot bytes are still carried
+				// over the worker transport above so the artifact upload works.
+				actResult.Interaction.Steps[i].Screenshot.PNG = nil
 			}
 		}
 		h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{"tool": "preview_interact", "step_count": len(body.Steps)})
@@ -3316,6 +3360,9 @@ func (h *PreviewHandler) ExecuteInteraction(w http.ResponseWriter, r *http.Reque
 	for i := range result.Steps {
 		if result.Steps[i].Screenshot != nil {
 			attachPreviewArtifacts(r.Context(), h, orgID, instance, result.Steps[i].Screenshot, "interaction_screenshot")
+			// Keep large base64 PNGs out of the tool response; callers use the
+			// persisted artifact reference.
+			result.Steps[i].Screenshot.PNG = nil
 		}
 	}
 	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
@@ -3386,31 +3433,40 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 
 	var (
 		result *models.MultiViewportResult
-		err    error
 	)
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
+		var operationErr error
+		if h.workerRoutingEnabled() {
+			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+			if resolveErr != nil {
+				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+				return errPreviewResponseWritten
+			}
+			if h.isLocalWorker(worker) {
+				inspector, inspectorOK := h.requireInspector(w, r)
+				if !inspectorOK {
+					return errPreviewResponseWritten
+				}
+				bindSessionBrowser(inspector, instance)
+				result, operationErr = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
+			} else {
+				result, operationErr = h.workerClient.CaptureMultiViewport(r.Context(), worker, orgID, instance.ID, opts)
+			}
+		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {
-				return
+				return errPreviewResponseWritten
 			}
-			result, err = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
-		} else {
-			result, err = h.workerClient.CaptureMultiViewport(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, opts)
+			bindSessionBrowser(inspector, instance)
+			result, operationErr = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
 		}
-	} else {
-		inspector, inspectorOK := h.requireInspector(w, r)
-		if !inspectorOK {
+		return operationErr
+	})
+	if err != nil {
+		if errors.Is(err, errPreviewResponseWritten) {
 			return
 		}
-		result, err = inspector.CaptureMultiViewport(r.Context(), instance.ID.String(), opts)
-	}
-	if err != nil {
 		if _, ok := preview.AsWorkerRequestError(err); ok {
 			h.writeWorkerClientError(w, r, err)
 			return
@@ -3418,10 +3474,12 @@ func (h *PreviewHandler) CaptureMultiViewport(w http.ResponseWriter, r *http.Req
 		writeError(w, r, http.StatusInternalServerError, "MULTI_VIEWPORT_FAILED", "failed to capture multi-viewport screenshots", err)
 		return
 	}
-	orgID := middleware.OrgIDFromContext(r.Context())
 	for i := range result.Captures {
 		result.Captures[i].Screenshot.Viewport = result.Captures[i].Viewport
 		attachPreviewArtifacts(r.Context(), h, orgID, instance, &result.Captures[i].Screenshot, "multi_viewport_screenshot")
+		// Keep large base64 PNGs out of the tool response; callers use the
+		// persisted artifact reference.
+		result.Captures[i].Screenshot.PNG = nil
 	}
 	h.emitPreviewToolAudit(r, models.AuditActionPreviewToolInvoked, instance, map[string]any{
 		"tool":          "preview_multi_viewport",
@@ -3541,31 +3599,40 @@ func (h *PreviewHandler) RunAssertions(w http.ResponseWriter, r *http.Request) {
 
 	var (
 		result *preview.AssertionResult
-		err    error
 	)
-	if h.workerRoutingEnabled() {
-		worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
-		if resolveErr != nil {
-			writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
-			return
-		}
-		if h.isLocalWorker(worker) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	err := h.runAgentBrowserOperation(r.Context(), orgID, instance, func() error {
+		var operationErr error
+		if h.workerRoutingEnabled() {
+			worker, resolveErr := h.resolvePreviewWorker(r.Context(), instance.WorkerNodeID)
+			if resolveErr != nil {
+				writeError(w, r, http.StatusBadGateway, "PREVIEW_WORKER_RESOLUTION_FAILED", "failed to resolve preview worker", resolveErr)
+				return errPreviewResponseWritten
+			}
+			if h.isLocalWorker(worker) {
+				inspector, inspectorOK := h.requireInspector(w, r)
+				if !inspectorOK {
+					return errPreviewResponseWritten
+				}
+				bindSessionBrowser(inspector, instance)
+				result, operationErr = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
+			} else {
+				result, operationErr = h.workerClient.RunAssertions(r.Context(), worker, orgID, instance.ID, body.Assertions)
+			}
+		} else {
 			inspector, inspectorOK := h.requireInspector(w, r)
 			if !inspectorOK {
-				return
+				return errPreviewResponseWritten
 			}
-			result, err = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
-		} else {
-			result, err = h.workerClient.RunAssertions(r.Context(), worker, middleware.OrgIDFromContext(r.Context()), instance.ID, body.Assertions)
+			bindSessionBrowser(inspector, instance)
+			result, operationErr = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
 		}
-	} else {
-		inspector, inspectorOK := h.requireInspector(w, r)
-		if !inspectorOK {
+		return operationErr
+	})
+	if err != nil {
+		if errors.Is(err, errPreviewResponseWritten) {
 			return
 		}
-		result, err = inspector.RunAssertions(r.Context(), instance.ID.String(), body.Assertions)
-	}
-	if err != nil {
 		if _, ok := preview.AsWorkerRequestError(err); ok {
 			h.writeWorkerClientError(w, r, err)
 			return

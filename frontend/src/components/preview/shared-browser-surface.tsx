@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Hand, Keyboard, Loader2, MousePointer2 } from "lucide-react";
 import Image from "next/image";
@@ -23,6 +23,9 @@ export function mapSharedBrowserPoint(rect: Pick<DOMRect, "left" | "top" | "widt
 export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
   const [path, setPath] = useState("");
+  const [pendingInputCount, setPendingInputCount] = useState(0);
+  const [inputError, setInputError] = useState<unknown>();
+  const inputQueue = useRef<Promise<void>>(Promise.resolve());
   const control = useQuery({
     queryKey: ["preview-browser-control", sessionId],
     queryFn: () => api.sessions.preview.browserControl(sessionId),
@@ -33,13 +36,24 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
     queryFn: () => api.sessions.preview.observeBrowser(sessionId),
     refetchInterval: 1500,
   });
-  const refresh = () => {
+  const refresh = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["preview-browser-observation", sessionId] });
     void queryClient.invalidateQueries({ queryKey: ["preview-browser-control", sessionId] });
-  };
+  }, [queryClient, sessionId]);
   const acquire = useMutation({ mutationFn: () => api.sessions.preview.acquireBrowserControl(sessionId), onSuccess: refresh });
   const release = useMutation({ mutationFn: () => api.sessions.preview.returnBrowserControl(sessionId), onSuccess: refresh });
-  const act = useMutation({ mutationFn: (steps: Array<Record<string, unknown>>) => api.sessions.preview.actAsHuman(sessionId, steps), onSuccess: refresh });
+  const enqueueInput = useCallback((steps: Array<Record<string, unknown>>) => {
+    setPendingInputCount((count) => count + 1);
+    setInputError(undefined);
+    inputQueue.current = inputQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        await api.sessions.preview.actAsHuman(sessionId, steps);
+        refresh();
+      })
+      .catch((error: unknown) => setInputError(error))
+      .finally(() => setPendingInputCount((count) => count - 1));
+  }, [refresh, sessionId]);
   const image = observation.data?.screenshot?.png_base64;
   const viewport = observation.data?.viewport;
   const isHuman = control.data?.state === "human_control";
@@ -49,7 +63,7 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
 
   const navigate = () => {
     const value = path.trim();
-    if (value) act.mutate([{ action: "navigate", value: value.startsWith("/") ? value : `/${value}` }]);
+    if (value) enqueueInput([{ action: "navigate", value: value.startsWith("/") ? value : `/${value}` }]);
   };
 
   return (
@@ -70,11 +84,11 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
       {isLeaseOwner && (
         <div className="flex gap-2 border-b bg-card p-2">
           <Input aria-label="Preview path" value={path} onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") navigate(); }} placeholder="/path" />
-          <Button variant="outline" onClick={navigate} disabled={act.isPending}>Go</Button>
+          <Button variant="outline" onClick={navigate} disabled={pendingInputCount > 0}>Go</Button>
         </div>
       )}
-      {(control.error || observation.error || acquire.error || release.error || act.error) && (
-        <ErrorNotice title="Shared browser unavailable" description={String(control.error || observation.error || acquire.error || release.error || act.error)} />
+      {Boolean(control.error || observation.error || acquire.error || release.error || inputError) && (
+        <ErrorNotice title="Shared browser unavailable" description={String(control.error || observation.error || acquire.error || release.error || inputError)} />
       )}
       <div className="relative mx-auto aspect-[16/10] max-h-[70vh] bg-background">
         {imageSrc ? (
@@ -88,16 +102,16 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
                 onClick={(event) => {
                   const rect = event.currentTarget.getBoundingClientRect();
                   const point = mapSharedBrowserPoint(rect, viewport, event.clientX, event.clientY);
-                  if (point) act.mutate([{ action: "click", ...point }]);
+                  if (point) enqueueInput([{ action: "click", ...point }]);
                 }}
                 onKeyDown={(event) => {
                   if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
                   event.preventDefault();
-                  act.mutate([{ action: "press", value: event.key }]);
+                  enqueueInput([{ action: "press", value: event.key }]);
                 }}
                 onWheel={(event) => {
                   event.preventDefault();
-                  if (!act.isPending) act.mutate([{ action: "scroll", value: String(Math.round(event.deltaY)) }]);
+                  enqueueInput([{ action: "scroll", value: String(Math.round(event.deltaY)) }]);
                 }}
               ><span className="sr-only">Shared browser input surface</span></Button>
             )}
@@ -105,7 +119,7 @@ export function SharedBrowserSurface({ sessionId }: { sessionId: string }) {
         ) : (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Connecting to the session browser…</div>
         )}
-        {act.isPending && <div className="absolute bottom-3 right-3 flex items-center gap-2 rounded-md bg-background/90 px-3 py-2 text-sm shadow"><Loader2 className="size-4 animate-spin" />Applying input…</div>}
+        {pendingInputCount > 0 && <div className="absolute bottom-3 right-3 flex items-center gap-2 rounded-md bg-background/90 px-3 py-2 text-sm shadow"><Loader2 className="size-4 animate-spin" />Applying input…</div>}
       </div>
       <div className="flex items-center gap-4 border-t bg-card px-3 py-2 text-xs text-muted-foreground">
         <span className="flex items-center gap-1"><MousePointer2 className="size-3" />Shared pointer</span>
