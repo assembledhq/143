@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,20 +107,37 @@ func TestSessionHandlerUpdateChangeset(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "update should scope by org, session, and changeset")
 }
 
-func TestSessionHandlerListChangesetsRejectsMissingSession(t *testing.T) {
+func TestSessionHandlerListChangesetsHandlesSessionLookupErrors(t *testing.T) {
 	t.Parallel()
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "test should create database mock")
-	t.Cleanup(mock.Close)
-	orgID, sessionID := uuid.New(), uuid.New()
-	mock.ExpectQuery(`(?s)SELECT .+ FROM sessions`).
-		WithArgs(sessionID, orgID).
-		WillReturnError(pgx.ErrNoRows)
-	h := newSessionHandler(t, mock)
-	h.SetChangesetStore(db.NewSessionChangesetStore(mock))
-	w := httptest.NewRecorder()
-	h.ListChangesets(w, changesetRequest(http.MethodGet, "/changesets", sessionID.String(), nil, orgID, ""))
-	require.Equal(t, http.StatusNotFound, w.Code, "unknown tenant-scoped session should return not found")
-	require.Contains(t, w.Body.String(), "NOT_FOUND", "handler should return the API error envelope")
-	require.NoError(t, mock.ExpectationsWereMet(), "session existence lookup should be tenant scoped")
+
+	tests := []struct {
+		name       string
+		lookupErr  error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "missing session", lookupErr: pgx.ErrNoRows, wantStatus: http.StatusNotFound, wantCode: "NOT_FOUND"},
+		{name: "database failure", lookupErr: fmt.Errorf("connection reset by peer"), wantStatus: http.StatusInternalServerError, wantCode: "SESSION_LOOKUP_FAILED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID := uuid.New(), uuid.New()
+			mock.ExpectQuery(`(?s)SELECT .+ FROM sessions`).
+				WithArgs(sessionID, orgID).
+				WillReturnError(tt.lookupErr)
+			h := newSessionHandler(t, mock)
+			h.SetChangesetStore(db.NewSessionChangesetStore(mock))
+			w := httptest.NewRecorder()
+			h.ListChangesets(w, changesetRequest(http.MethodGet, "/changesets", sessionID.String(), nil, orgID, ""))
+			require.Equal(t, tt.wantStatus, w.Code, "handler should classify the session lookup error")
+			require.Contains(t, w.Body.String(), tt.wantCode, "handler should return the expected API error code")
+			require.NoError(t, mock.ExpectationsWereMet(), "session existence lookup should be tenant scoped")
+		})
+	}
 }

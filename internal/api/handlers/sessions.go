@@ -955,7 +955,11 @@ func (h *SessionHandler) ListChangesets(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if _, err := h.runStore.GetAPIDetailByID(r.Context(), orgID, sessionID); err != nil {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to load session", err)
 		return
 	}
 	changesets, err := h.listChangesetSummaries(r.Context(), orgID, sessionID)
