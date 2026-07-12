@@ -3521,9 +3521,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
+  const selectedIsPrimaryRef = useRef(true);
 
   // --- Enter review mode ---
   const openReview = useCallback((fileIndex?: number) => {
+    if (!selectedIsPrimaryRef.current) {
+      setDetailTab("changes");
+      setShowDetailPanel(true);
+      if (isMobileReviewViewport) {
+        setMobileDetailOpen(true);
+      }
+      return;
+    }
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
     setCenterMode("review");
     suppressNextReviewParamClearRef.current = true;
@@ -3679,6 +3688,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
   const hasMultipleChangesets = changesets.length > 1;
   const selectedIsPrimary = selectedChangeset?.is_primary !== false;
+  selectedIsPrimaryRef.current = selectedIsPrimary;
   // The primary changeset keeps the legacy null-tolerant PR lookup: sending a
   // changeset_id would route the backend to GetByChangesetID, which cannot
   // match legacy PR rows whose changeset_id is still NULL. Only non-primary
@@ -3696,6 +3706,15 @@ export function SessionDetailContent({ id }: { id: string }) {
     setSelectedChangesetID(null);
     void setChangesetParam(null);
   }, [id, setChangesetParam]);
+  useEffect(() => {
+    if (selectedIsPrimary || centerMode !== "review") return;
+    exitReview();
+    setDetailTab("changes");
+    setShowDetailPanel(true);
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(true);
+    }
+  }, [centerMode, exitReview, isMobileReviewViewport, selectedIsPrimary]);
   // Tab title from whatever payload is available — the provisional row's
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
