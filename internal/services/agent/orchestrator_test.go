@@ -319,6 +319,8 @@ type mockSessionStore struct {
 	workerOwnerships       []workerOwnershipUpdate
 	revisionContextUpdates [][]byte
 	updateWorkingBranchErr error
+	primaryWorktreePath    *string
+	primaryWorktreeErr     error
 	countRunningErr        error
 	beginRuntimeErr        error
 	publishCheckpointErr   error
@@ -1187,6 +1189,10 @@ func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Org
 
 func (m *mockSessionStore) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
 	return sessionID, nil
+}
+
+func (m *mockSessionStore) GetPrimaryChangesetWorktreePath(_ context.Context, _, _ uuid.UUID) (*string, error) {
+	return m.primaryWorktreePath, m.primaryWorktreeErr
 }
 
 func (m *mockSessionStore) UpdatePRCreationState(_ context.Context, _, _ uuid.UUID, _ models.PRCreationState, _ string) error {
@@ -8196,6 +8202,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 	const (
 		sandboxCreateFailure failureMode = iota
 		workdirResolveFailure
+		primaryChangesetWorktreeFailure
 	)
 
 	cases := []struct {
@@ -8251,6 +8258,15 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			wantMessageAfter:  true,
 			wantErrMatch:      "resolve workdir",
 		},
+		{
+			name:              "primary-changeset-worktree: dead-letter posts exactly one message",
+			failure:           primaryChangesetWorktreeFailure,
+			withRegistry:      true,
+			runHooks:          true,
+			wantMessageInline: false,
+			wantMessageAfter:  true,
+			wantErrMatch:      "resolve primary changeset worktree",
+		},
 	}
 
 	for _, c := range cases {
@@ -8286,6 +8302,8 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			case workdirResolveFailure:
 				// Force sessionRepoSlug to fail at the repo lookup.
 				d.repos.err = errors.New("db flaky")
+			case primaryChangesetWorktreeFailure:
+				d.sessions.primaryWorktreeErr = errors.New(`column "worktree_path" does not exist`)
 			}
 
 			ctx := context.Background()
@@ -8295,8 +8313,12 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 
 			orch := buildOrchestrator(d)
 			err := orch.ContinueSession(ctx, session, nil)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), c.wantErrMatch)
+			require.Error(t, err, "ContinueSession should return the startup failure")
+			require.Contains(t, err.Error(), c.wantErrMatch, "ContinueSession should identify the failed startup stage")
+			if c.failure == primaryChangesetWorktreeFailure {
+				require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "worktree lookup failure should immediately restore the session to idle")
+				require.Contains(t, d.sessions.getSandboxStateUpdateContexts(), sandboxStateUpdateContext{state: models.SandboxStateSnapshotted}, "worktree lookup failure should restore the durable sandbox state")
+			}
 
 			countAssistantMessages := func() int {
 				var n int

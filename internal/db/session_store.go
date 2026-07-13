@@ -1283,32 +1283,42 @@ func (s *SessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sess
 }
 
 // ListRuntimeControlStalledSessions returns running sessions whose runtime
-// controller should already have stopped or requested stop handling. This is a
-// narrower watchdog than ListStaleRunningSessions: it only targets rows whose
-// own runtime budget has already expired or whose persisted stop-after deadline
-// has passed.
+// controller should already have stopped or requested stop handling while an
+// execution job still holds a live lease. This is a narrower watchdog than
+// ListStaleRunningSessions: it only targets rows whose own runtime budget has
+// expired and whose worker is still actively claiming capacity.
 // lint:allow-no-orgid reason="cross-org reaper scan for stalled runtime control"
 func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopAfterBefore time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE status = 'running'
-		  AND deleted_at IS NULL
+		WHERE sessions.status = 'running'
+		  AND sessions.deleted_at IS NULL
+		  AND EXISTS (
+		    SELECT 1
+		    FROM jobs j
+		    WHERE j.org_id = sessions.org_id
+		      AND j.status = 'running'
+		      AND j.job_type IN ('run_agent', 'continue_session')
+		      AND j.payload->>'session_id' = sessions.id::text
+		      AND j.lock_token IS NOT NULL
+		      AND j.lease_expires_at > @stop_after_before
+		  )
 		  AND (
 		    (
-		      runtime_stop_reason <> ''
-		      AND runtime_graceful_stop_at IS NOT NULL
-		      AND (started_at IS NULL OR runtime_graceful_stop_at >= started_at)
-		      AND runtime_graceful_stop_at < @stop_after_before
+		      sessions.runtime_stop_reason <> ''
+		      AND sessions.runtime_graceful_stop_at IS NOT NULL
+		      AND (sessions.started_at IS NULL OR sessions.runtime_graceful_stop_at >= sessions.started_at)
+		      AND sessions.runtime_graceful_stop_at < @stop_after_before
 		    )
 		    OR (
-		      runtime_stop_reason = ''
-		      AND runtime_soft_deadline_at IS NOT NULL
-		      AND (started_at IS NULL OR runtime_soft_deadline_at >= started_at)
-		      AND runtime_soft_deadline_at < @deadline_before
+		      sessions.runtime_stop_reason = ''
+		      AND sessions.runtime_soft_deadline_at IS NOT NULL
+		      AND (sessions.started_at IS NULL OR sessions.runtime_soft_deadline_at >= sessions.started_at)
+		      AND sessions.runtime_soft_deadline_at < @deadline_before
 		    )
 		  )
-		ORDER BY COALESCE(runtime_graceful_stop_at, runtime_soft_deadline_at) ASC
+		ORDER BY COALESCE(sessions.runtime_graceful_stop_at, sessions.runtime_soft_deadline_at) ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{

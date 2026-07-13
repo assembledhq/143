@@ -3788,6 +3788,18 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
 	if err := o.applyPrimaryChangesetWorkDir(ctx, session, &sandboxCfg); err != nil {
+		log.Error().Err(err).Msg("primary changeset worktree resolution failed during continue_session")
+		o.cleanupContinueSessionStartupFailure(
+			ctx,
+			session,
+			log,
+			models.SessionStatusIdle,
+			&snapshottedState,
+			"failed to revert session to idle after primary changeset worktree resolution failure",
+			"failed to revert sandbox state after primary changeset worktree resolution failure",
+			fmt.Sprintf("Failed to resolve the pull request workspace: %s\n\nPlease try again in a moment.", err),
+			"primary changeset worktree resolution",
+		)
 		return fmt.Errorf("resolve primary changeset worktree: %w", err)
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
