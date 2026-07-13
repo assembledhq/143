@@ -1083,6 +1083,8 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypeMaterializeChangeset          = "materialize_changeset"
+	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 )
 
 // Job represents an async work queue item.

@@ -130,6 +130,13 @@ function patch<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
+function put<T>(path: string, body: unknown): Promise<T> {
+  return request<T>(path, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  });
+}
+
 function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
@@ -536,8 +543,8 @@ export const api = {
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
     get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
-    getDiff: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
-      `/api/v1/sessions/${id}/diff`,
+    getDiff: (id: string, changesetId?: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
+      `/api/v1/sessions/${id}/diff${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`,
       { cache: 'no-store' },
     ),
     update: (id: string, body: { title: string }) =>
@@ -555,10 +562,28 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
     updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
       patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
-    getReadiness: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest`),
-    runReadiness: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs`, {}),
+    getChangesetSplitStatus: (sessionId: string) =>
+      get<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-status`),
+    replaceChangesetSplitPaths: (sessionId: string, changesetId: string, paths: string[]) =>
+      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/split-paths`, { paths }),
+    initializeChangesetSplit: (sessionId: string) =>
+      post<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split`),
+    replaceChangesetSplitOmissions: (sessionId: string, omissions: Array<{ path: string; reason: string }>) =>
+      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-omissions`, { omissions }),
+    materializeChangeset: (sessionId: string, changesetId: string) =>
+      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/materialize`),
+    verifyChangesetSplit: (sessionId: string) =>
+      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/verify`),
+    acceptChangesetSplit: (sessionId: string) =>
+      post<void>(`/api/v1/sessions/${sessionId}/changesets/accept-split`),
+    reorderChangesets: (sessionId: string, changesetIds: string[]) =>
+      put<void>(`/api/v1/sessions/${sessionId}/changesets/order`, { changeset_ids: changesetIds }),
+    foldChangeset: (sessionId: string, sourceId: string, targetId: string) =>
+      post<void>(`/api/v1/sessions/${sessionId}/changesets/${sourceId}/fold`, { target_changeset_id: targetId }),
+    getReadiness: (sessionId: string, changesetId?: string) =>
+      get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`),
+    runReadiness: (sessionId: string, changesetId?: string) =>
+      post<import('./types').SingleResponse<import('./types').PRReadinessRun>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`, {}),
     createReadinessBypass: (sessionId: string, reason: string) =>
       post<import('./types').SingleResponse<import('./types').PRReadinessBypass>>(`/api/v1/sessions/${sessionId}/pr-readiness-bypasses`, { reason }),
     getReadinessContext: (sessionId: string) =>

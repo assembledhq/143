@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -636,6 +637,150 @@ type Orchestrator struct {
 	isDraining                 func() bool
 }
 
+type ChangesetMaterializationResult struct {
+	WorkingBranch string
+	WorktreePath  string
+	BaseHeadSHA   string
+	HeadSHA       string
+	Diff          string
+}
+
+type ChangesetDiffResult struct {
+	HeadSHA string
+	Diff    string
+}
+
+func (o *Orchestrator) applyPrimaryChangesetWorkDir(ctx context.Context, session *models.Session, cfg *SandboxConfig) error {
+	lookup, ok := o.sessions.(interface {
+		GetPrimaryChangesetWorktreePath(context.Context, uuid.UUID, uuid.UUID) (*string, error)
+	})
+	if !ok || session == nil || cfg == nil {
+		return nil
+	}
+	worktreePath, err := lookup.GetPrimaryChangesetWorktreePath(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return err
+	}
+	if worktreePath != nil && strings.TrimSpace(*worktreePath) != "" {
+		cfg.WorkDir = *worktreePath
+	}
+	return nil
+}
+
+func (o *Orchestrator) CaptureChangesetDiff(ctx context.Context, session *models.Session, changeset models.SessionChangeset) (ChangesetDiffResult, error) {
+	if session == nil || session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		return ChangesetDiffResult{}, ErrChangesetSandboxUnavailable
+	}
+	if changeset.WorktreePath == nil || changeset.BaseHeadSHA == nil {
+		return ChangesetDiffResult{}, errors.New("changeset is not materialized")
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: *changeset.WorktreePath, HomeDir: DefaultSandboxConfig().HomeDir}
+	cmd := fmt.Sprintf("git -C '%s' rev-parse HEAD && git -C '%s' diff --binary '%s' -- .", shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.BaseHeadSHA))
+	var stdout, stderr bytes.Buffer
+	code, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil || code != 0 {
+		return ChangesetDiffResult{}, fmt.Errorf("capture changeset diff: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	output := stdout.String()
+	newline := strings.IndexByte(output, '\n')
+	if newline < 0 {
+		return ChangesetDiffResult{}, errors.New("capture changeset diff: git returned no head line")
+	}
+	return ChangesetDiffResult{HeadSHA: strings.TrimSpace(output[:newline]), Diff: output[newline+1:]}, nil
+}
+
+var ErrChangesetSandboxUnavailable = errors.New("changeset materialization requires a live session sandbox")
+var ErrChangesetDiskBudget = errors.New("insufficient sandbox disk for another changeset worktree")
+
+// MaterializeChangeset creates an independent worktree from the changeset's
+// target branch in the session's live sandbox. Dependency installation remains
+// lazy: the worktree shares Git objects immediately and bootstrap/install work
+// runs only when the branch is first used by an agent, preview, or readiness.
+func (o *Orchestrator) MaterializeChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, patch string) (ChangesetMaterializationResult, error) {
+	if session == nil || session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		return ChangesetMaterializationResult{}, ErrChangesetSandboxUnavailable
+	}
+	if changeset.StackedOnChangesetID != nil {
+		return ChangesetMaterializationResult{}, errors.New("stacked changeset materialization is deferred until Phase 5")
+	}
+	workDir := DefaultSandboxConfig().WorkDir
+	if session.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
+		if err != nil {
+			return ChangesetMaterializationResult{}, fmt.Errorf("resolve changeset repository: %w", err)
+		}
+		if slug := SlugForRepo(repo.FullName); slug != "" {
+			workDir = DefaultSandboxConfig().HomeDir + "/" + slug
+		}
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: workDir, HomeDir: DefaultSandboxConfig().HomeDir}
+	var diskOut, diskErr bytes.Buffer
+	code, err := o.provider.Exec(ctx, sandbox, "df -Pk '"+shellEscapeSingleQuote(workDir)+"' | awk 'NR==2 {print $4}'", &diskOut, &diskErr)
+	if err != nil || code != 0 {
+		return ChangesetMaterializationResult{}, fmt.Errorf("inspect sandbox disk budget: %w: %s", err, strings.TrimSpace(diskErr.String()))
+	}
+	availableKB, err := strconv.ParseInt(strings.TrimSpace(diskOut.String()), 10, 64)
+	if err != nil {
+		return ChangesetMaterializationResult{}, fmt.Errorf("parse sandbox disk budget: %w", err)
+	}
+	const minimumWorktreeAvailableKB = 512 * 1024
+	if availableKB < minimumWorktreeAvailableKB {
+		return ChangesetMaterializationResult{}, fmt.Errorf("%w: %d KiB available, %d KiB required", ErrChangesetDiskBudget, availableKB, minimumWorktreeAvailableKB)
+	}
+	branchSlug := strings.Trim(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return '-'
+	}, changeset.Title), "-")
+	if branchSlug == "" {
+		branchSlug = "pull-request"
+	}
+	if len(branchSlug) > 36 {
+		branchSlug = strings.TrimRight(branchSlug[:36], "-")
+	}
+	workingBranch := fmt.Sprintf("143/%s/%d-%s", session.ID.String()[:8], changeset.OrderIndex+1, branchSlug)
+	worktreePath := fmt.Sprintf("%s/.143/changesets/%s", DefaultSandboxConfig().HomeDir, changeset.ID.String())
+	cmd := fmt.Sprintf("git -C '%s' fetch --quiet origin '%s' && mkdir -p '%s/.143/changesets' && git -C '%s' worktree add -b '%s' '%s' FETCH_HEAD && git -C '%s' rev-parse HEAD",
+		shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(changeset.TargetBranch), shellEscapeSingleQuote(DefaultSandboxConfig().HomeDir),
+		shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(workingBranch), shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(worktreePath))
+	var stdout, stderr bytes.Buffer
+	code, err = o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil || code != 0 {
+		return ChangesetMaterializationResult{}, fmt.Errorf("create changeset worktree: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	headSHA := strings.TrimSpace(stdout.String())
+	if headSHA == "" {
+		return ChangesetMaterializationResult{}, errors.New("create changeset worktree: git returned an empty head SHA")
+	}
+	cleanup := func() {
+		cleanupCmd := fmt.Sprintf("git -C '%s' worktree remove --force '%s' && git -C '%s' branch -D '%s'", shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(workingBranch))
+		var cleanupErr bytes.Buffer
+		if code, err := o.provider.Exec(context.WithoutCancel(ctx), sandbox, cleanupCmd, io.Discard, &cleanupErr); err != nil || code != 0 {
+			o.logger.Warn().Err(err).Str("changeset_id", changeset.ID.String()).Str("stderr", strings.TrimSpace(cleanupErr.String())).Msg("failed to clean up partial changeset worktree")
+		}
+	}
+	if strings.TrimSpace(patch) != "" {
+		patchPath := worktreePath + "/.143-split.patch"
+		if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(patch)); err != nil {
+			cleanup()
+			return ChangesetMaterializationResult{}, fmt.Errorf("write changeset split patch: %w", err)
+		}
+		applyCmd := fmt.Sprintf("git -C '%s' apply --whitespace=nowarn '%s' && rm -f '%s'", shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(patchPath), shellEscapeSingleQuote(patchPath))
+		var applyErr bytes.Buffer
+		if code, err := o.provider.Exec(ctx, sandbox, applyCmd, io.Discard, &applyErr); err != nil || code != 0 {
+			cleanup()
+			return ChangesetMaterializationResult{}, fmt.Errorf("apply changeset split patch: %w: %s", err, strings.TrimSpace(applyErr.String()))
+		}
+	}
+	captured, err := o.CaptureChangesetDiff(ctx, session, models.SessionChangeset{WorktreePath: &worktreePath, BaseHeadSHA: &headSHA})
+	if err != nil {
+		cleanup()
+		return ChangesetMaterializationResult{}, err
+	}
+	return ChangesetMaterializationResult{WorkingBranch: workingBranch, WorktreePath: worktreePath, BaseHeadSHA: headSHA, HeadSHA: captured.HeadSHA, Diff: captured.Diff}, nil
+}
+
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
 // in-flight agent for the given thread. Returns false when no live entry
 // exists (the run already finished). Safe to call without a registry; just
@@ -720,6 +865,9 @@ func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session
 		return fmt.Errorf("revert thread: resolve workdir: %w", err)
 	} else if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+	if err := o.applyPrimaryChangesetWorkDir(ctx, session, &sandboxCfg); err != nil {
+		return fmt.Errorf("revert thread: resolve primary changeset worktree: %w", err)
 	}
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		return fmt.Errorf("revert thread: resolve sandbox network: %w", err)
@@ -2612,6 +2760,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
+	if err := o.applyPrimaryChangesetWorkDir(ctx, run, &sandboxCfg); err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("resolve primary changeset worktree: %s", err))
+		return err
+	}
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, run.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -3634,6 +3786,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+	if err := o.applyPrimaryChangesetWorkDir(ctx, session, &sandboxCfg); err != nil {
+		return fmt.Errorf("resolve primary changeset worktree: %w", err)
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir

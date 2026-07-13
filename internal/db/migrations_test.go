@@ -36,6 +36,20 @@ func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T
 	require.NotContains(t, sql, "changeset_worktree_leases", "Phase 1 should not introduce premature worktree lease state")
 }
 
+func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("../../migrations/000241_session_changeset_split_plans.up.sql")
+	require.NoError(t, err, "test should read the changeset split migration")
+	sql := string(body)
+	require.Contains(t, sql, "source_diff_snapshot_id uuid NOT NULL", "split plans should freeze an immutable diff snapshot")
+	require.Contains(t, sql, "FOREIGN KEY (changeset_id, org_id, session_id)", "split ownership and readiness should enforce tenant and session ownership")
+	require.Contains(t, sql, "session_changeset_split_omissions", "confirmed omissions should remain auditable")
+	require.Contains(t, sql, "session_changesets_one_materializing_per_session", "worktree materialization should serialize per session")
+	require.Contains(t, sql, "pr_readiness_runs_changeset_scope_fkey", "readiness runs should be changeset scoped")
+	require.Contains(t, sql, "pr_readiness_checks_changeset_scope_fkey", "readiness checks should be changeset scoped")
+	require.Contains(t, sql, "pr_readiness_bypasses_changeset_scope_fkey", "readiness bypasses should be changeset scoped")
+}
+
 func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

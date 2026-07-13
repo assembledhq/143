@@ -1056,6 +1056,290 @@ func (h *SessionHandler) UpdateChangeset(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ChangesetSummary]{Data: changeset.SummaryView()})
 }
 
+type replaceChangesetSplitPathsRequest struct {
+	Paths []string `json:"paths"`
+}
+
+func (h *SessionHandler) ReplaceChangesetSplitPaths(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	var req replaceChangesetSplitPathsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+		return
+	}
+	if req.Paths == nil {
+		writeError(w, r, http.StatusBadRequest, "PATHS_REQUIRED", "paths are required")
+		return
+	}
+	if err := h.changesetStore.ReplaceSplitPaths(r.Context(), orgID, sessionID, changesetID, req.Paths); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+			return
+		}
+		if errors.Is(err, db.ErrInvalidSplitPath) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SPLIT_PATH", "paths must be safe repository paths present in the split source")
+			return
+		}
+		if errors.Is(err, db.ErrSplitSourceUnavailable) {
+			writeError(w, r, http.StatusConflict, "SPLIT_SOURCE_UNAVAILABLE", "a complete session diff is required before assigning files")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_PATHS_UPDATE_FAILED", "failed to update split paths", err)
+		return
+	}
+	status, err := h.changesetStore.GetSplitStatus(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_STATUS_FAILED", "failed to load split status", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"changeset_id": changesetID, "paths": req.Paths})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ChangesetSplitStatus]{Data: status})
+}
+
+func (h *SessionHandler) GetChangesetSplitStatus(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	status, err := h.changesetStore.GetSplitStatus(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "SPLIT_NOT_STARTED", "split planning has not started")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_STATUS_FAILED", "failed to load split status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ChangesetSplitStatus]{Data: status})
+}
+
+func (h *SessionHandler) InitializeChangesetSplit(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	if err := h.changesetStore.InitializeSplit(r.Context(), orgID, sessionID); err != nil {
+		if errors.Is(err, db.ErrSplitSourceUnavailable) {
+			writeError(w, r, http.StatusConflict, "SPLIT_SOURCE_UNAVAILABLE", "a complete session diff is required before starting a split")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_INITIALIZE_FAILED", "failed to start split planning", err)
+		return
+	}
+	status, err := h.changesetStore.GetSplitStatus(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_STATUS_FAILED", "failed to load split status", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitStarted, sessionID, map[string]any{"source_diff_snapshot_id": status.SourceDiffSnapshotID})
+	writeJSON(w, http.StatusCreated, models.SingleResponse[models.ChangesetSplitStatus]{Data: status})
+}
+
+func (h *SessionHandler) MaterializeChangeset(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SESSION_LOOKUP_FAILED", "failed to load session", err)
+		return
+	}
+	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		writeError(w, r, http.StatusConflict, "SANDBOX_NOT_RUNNING", "start or resume the session before materializing a pull request worktree")
+		return
+	}
+	changeset, err := h.changesetStore.GetByID(r.Context(), orgID, sessionID, changesetID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CHANGESET_LOOKUP_FAILED", "failed to load pull request", err)
+		return
+	}
+	if changeset.WorktreePath != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "materialized", "changeset_id": changeset.ID})
+		return
+	}
+	dedupeKey := "materialize_changeset:" + changesetID.String()
+	jobID, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", models.JobTypeMaterializeChangeset, map[string]string{
+		"org_id": orgID.String(), "session_id": sessionID.String(), "changeset_id": changesetID.String(),
+	}, 5, &dedupeKey, models.SessionWorkerTarget(&session))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "MATERIALIZATION_QUEUE_FAILED", "failed to queue pull request materialization", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitMaterialized, sessionID, map[string]any{"changeset_id": changesetID, "job_id": jobID})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+}
+
+func (h *SessionHandler) VerifyChangesetSplit(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		writeError(w, r, http.StatusConflict, "SANDBOX_NOT_RUNNING", "start or resume the session before verifying the split")
+		return
+	}
+	dedupeKey := "verify_changeset_split:" + sessionID.String()
+	jobID, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", models.JobTypeVerifyChangesetSplit, map[string]string{
+		"org_id": orgID.String(), "session_id": sessionID.String(),
+	}, 5, &dedupeKey, models.SessionWorkerTarget(&session))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_VERIFY_QUEUE_FAILED", "failed to queue split verification", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"operation": "verify_requested", "job_id": jobID})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+}
+
+func (h *SessionHandler) ReplaceChangesetSplitOmissions(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	var req struct {
+		Omissions []models.ChangesetSplitOmission `json:"omissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Omissions == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "omissions are required")
+		return
+	}
+	if err := h.changesetStore.ReplaceSplitOmissions(r.Context(), orgID, sessionID, user.ID, req.Omissions); err != nil {
+		if errors.Is(err, db.ErrInvalidSplitPath) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_SPLIT_PATH", "every omission must reference a source path and include a reason")
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_OMISSIONS_UPDATE_FAILED", "failed to update split omissions", err)
+		return
+	}
+	status, err := h.changesetStore.GetSplitStatus(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "SPLIT_STATUS_FAILED", "failed to load split status", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"operation": "omissions_updated", "omission_count": len(req.Omissions)})
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.ChangesetSplitStatus]{Data: status})
+}
+
+func (h *SessionHandler) AcceptChangesetSplit(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
+		return
+	}
+	if err := h.changesetStore.AcceptSplit(r.Context(), orgID, sessionID, user.ID); err != nil {
+		writeError(w, r, http.StatusConflict, "SPLIT_NOT_READY", "verify and complete the split before accepting it", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitAccepted, sessionID, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func emitChangesetAudit(h *SessionHandler, r *http.Request, action models.AuditAction, sessionID uuid.UUID, details map[string]any) {
+	if h == nil || h.audit == nil {
+		return
+	}
+	resourceID := sessionID.String()
+	emitUserAuditWithSession(h.audit, r, action, models.AuditResourceSession, &resourceID, &sessionID, nil, marshalAuditDetails(h.logger, details))
+}
+
+func (h *SessionHandler) ReorderChangesets(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	var req struct {
+		ChangesetIDs []uuid.UUID `json:"changeset_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ChangesetIDs == nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "changeset_ids are required")
+		return
+	}
+	if err := h.changesetStore.Reorder(r.Context(), orgID, sessionID, req.ChangesetIDs); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ORDER", "order must contain every planned pull request exactly once", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"operation": "reordered", "changeset_ids": req.ChangesetIDs})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *SessionHandler) FoldChangeset(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	sourceID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	var req struct {
+		TargetChangesetID uuid.UUID `json:"target_changeset_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.TargetChangesetID == uuid.Nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "target_changeset_id is required")
+		return
+	}
+	if err := h.changesetStore.FoldInto(r.Context(), orgID, sessionID, sourceID, req.TargetChangesetID); err != nil {
+		writeError(w, r, http.StatusConflict, "CHANGESET_FOLD_FAILED", "only unmaterialized planned pull requests can be folded", err)
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"operation": "folded", "source_changeset_id": sourceID, "target_changeset_id": req.TargetChangesetID})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *SessionHandler) attachThreadInboxDeliverySummaries(ctx context.Context, orgID, sessionID uuid.UUID, threads []models.SessionThread) error {
 	if h.threadInboxStore == nil || len(threads) == 0 {
 		return nil
@@ -1107,6 +1391,24 @@ func (h *SessionHandler) GetDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	changesetParam := strings.TrimSpace(r.URL.Query().Get("changeset_id"))
+	if changesetParam != "" {
+		changesetID, parseErr := uuid.Parse(changesetParam)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+			return
+		}
+		changeset, loadErr := h.changesetStore.GetByID(r.Context(), orgID, sessionID, changesetID)
+		if loadErr != nil {
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request diff not found")
+			return
+		}
+		if !changeset.IsPrimary {
+			payload := models.SessionDiff{SessionID: sessionID, Diff: changeset.MaterializedDiff}
+			writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionDiff]{Data: payload})
+			return
+		}
+	}
 	payload, err := h.runStore.GetDiffByID(r.Context(), orgID, sessionID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session diff not found")
@@ -2266,7 +2568,12 @@ func (h *SessionHandler) GetReadiness(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
-	run, err := h.readinessStore.GetLatestBySession(r.Context(), orgID, sessionID)
+	target, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+		return
+	}
+	run, err := h.readinessStore.GetLatestByChangeset(r.Context(), orgID, sessionID, target.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusOK, models.SingleResponse[models.PRReadinessResponse]{Data: models.PRReadinessResponse{}})
@@ -2370,7 +2677,17 @@ func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
-	if !h.requireSnapshotQuiescent(w, r, orgID, session, "running readiness checks") {
+	target, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "pull request not found")
+		return
+	}
+	if target.IsPrimary {
+		if !h.requireSnapshotQuiescent(w, r, orgID, session, "running readiness checks") {
+			return
+		}
+	} else if target.WorktreePath == nil || target.HeadSHA == nil {
+		writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "materialize this pull request before running readiness checks")
 		return
 	}
 	var triggeredByUserID *uuid.UUID
@@ -2381,6 +2698,8 @@ func (h *SessionHandler) RunReadiness(w http.ResponseWriter, r *http.Request) {
 		OrgID:             orgID,
 		Session:           session,
 		TriggeredByUserID: triggeredByUserID,
+		ChangesetID:       &target.ID,
+		ChangesetHeadSHA:  target.HeadSHA,
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)

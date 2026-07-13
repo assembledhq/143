@@ -22,7 +22,7 @@ import (
 var sessionChangesetColumns = []string{
 	"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
 	"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
-	"head_sha", "expected_remote_head_sha", "base_head_sha", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+	"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
 }
 
 func changesetRequest(method, target, sessionID string, changesetID *uuid.UUID, orgID uuid.UUID, body string) *http.Request {
@@ -56,7 +56,7 @@ func TestSessionHandlerCreateChangeset(t *testing.T) {
 					WithArgs(orgID, sessionID, "API", "Endpoints", (*uuid.UUID)(nil)).
 					WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).AddRow(
 						changesetID, orgID, sessionID, false, 1, "API", "Endpoints", models.ChangesetStatusPlanned,
-						"main", "main", nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+						"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
 					))
 			},
 			wantStatus: http.StatusCreated, wantBody: `"title":"API"`,
@@ -96,7 +96,7 @@ func TestSessionHandlerUpdateChangeset(t *testing.T) {
 		WithArgs(&title, (*string)(nil), orgID, sessionID, changesetID).
 		WillReturnRows(pgxmock.NewRows(sessionChangesetColumns).AddRow(
 			changesetID, orgID, sessionID, false, 1, title, "Endpoints", models.ChangesetStatusPlanned,
-			"main", "main", nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+			"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
 		))
 	h := newSessionHandler(t, mock)
 	h.SetChangesetStore(db.NewSessionChangesetStore(mock))

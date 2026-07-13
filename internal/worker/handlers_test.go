@@ -3340,6 +3340,14 @@ type orchestratorServiceStub struct {
 	runtimeCeiling       time.Duration
 }
 
+func (s *orchestratorServiceStub) MaterializeChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetMaterializationResult, error) {
+	return agent.ChangesetMaterializationResult{}, nil
+}
+
+func (s *orchestratorServiceStub) CaptureChangesetDiff(context.Context, *models.Session, models.SessionChangeset) (agent.ChangesetDiffResult, error) {
+	return agent.ChangesetDiffResult{}, nil
+}
+
 type fakeSessionExecutorDispatcher struct {
 	calls    int
 	jobType  string

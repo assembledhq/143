@@ -3646,6 +3646,17 @@ func (s *SessionStore) GetPrimaryChangesetID(ctx context.Context, orgID, session
 	return changesetID, nil
 }
 
+func (s *SessionStore) GetPrimaryChangesetWorktreePath(ctx context.Context, orgID, sessionID uuid.UUID) (*string, error) {
+	var path *string
+	if err := s.db.QueryRow(ctx, `SELECT worktree_path FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&path); err != nil {
+		return nil, fmt.Errorf("get primary changeset worktree path: %w", err)
+	}
+	return path, nil
+}
+
 // ListStalePendingSessions returns pending sessions whose latest pending-state
 // activity is before the given cutoff. These sessions have been stuck in
 // pending for too long and should be failed with an explanatory error.
