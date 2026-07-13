@@ -21,6 +21,7 @@ func TestService_EnqueueRun(t *testing.T) {
 	sessionID := uuid.New()
 	repositoryID := uuid.New()
 	userID := uuid.New()
+	primaryChangesetID := uuid.New()
 	snapshotKey := "snapshot.tar.zst"
 
 	tests := []struct {
@@ -85,7 +86,7 @@ func TestService_EnqueueRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			store := &fakeStore{latest: tt.latest, latestErr: tt.latestErr, nextID: uuid.New()}
+			store := &fakeStore{latest: tt.latest, latestErr: tt.latestErr, nextID: uuid.New(), primaryChangesetID: primaryChangesetID}
 			jobs := &fakeJobStore{err: tt.enqueueErr}
 			svc := NewService(store, jobs)
 			session := models.Session{
@@ -138,13 +139,18 @@ func TestService_EnqueueRun(t *testing.T) {
 				require.Equal(t, runJobQueue, enqueued.queue, "job should use the readiness queue")
 				require.Equal(t, runJobType, enqueued.jobType, "job should use the readiness job type")
 				require.Equal(t, runJobPriority, enqueued.priority, "job should use the readiness priority")
+				require.Equal(t, primaryChangesetID, created.ChangesetID, "created run should adopt the trigger-assigned primary changeset")
 				require.NotNil(t, enqueued.dedupeKey, "job should include a dedupe key")
-				require.Equal(t, DedupeKey(sessionID), *enqueued.dedupeKey, "job should dedupe by session")
+				// A session-scoped enqueue must land on the same dedupe key as a manual
+				// run against the primary changeset, otherwise the two paths race and
+				// enqueue duplicate readiness runs for the same primary changeset.
+				require.Equal(t, DedupeKey(primaryChangesetID), *enqueued.dedupeKey, "job should dedupe by the primary changeset")
 				require.Equal(t, map[string]string{
 					"org_id":       orgID.String(),
 					"session_id":   sessionID.String(),
 					"readiness_id": created.ID.String(),
-				}, enqueued.payload, "job payload should identify the readiness run")
+					"changeset_id": primaryChangesetID.String(),
+				}, enqueued.payload, "job payload should identify the readiness run and its changeset")
 			}
 		})
 	}
@@ -161,19 +167,45 @@ func TestService_EnqueueRunRejectsMissingDependencies(t *testing.T) {
 	require.Error(t, err, "service without stores should reject enqueue requests")
 }
 
+func TestServiceEnqueueRunScopesToChangesetHead(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	headSHA := "head-123"
+	store := &fakeStore{latestErr: pgx.ErrNoRows, nextID: uuid.New()}
+	jobs := &fakeJobStore{}
+	run, err := NewService(store, jobs).EnqueueRun(context.Background(), EnqueueRunRequest{
+		OrgID: orgID, Session: models.Session{ID: sessionID}, ChangesetID: &changesetID, ChangesetHeadSHA: &headSHA,
+	})
+	require.NoError(t, err, "changeset readiness should enqueue against a materialized branch head")
+	require.Equal(t, changesetID, run.ChangesetID, "readiness run should retain its changeset scope")
+	require.Equal(t, &headSHA, run.EvaluatedHeadSHA, "readiness run should pin the evaluated branch head")
+	require.Equal(t, "pr_readiness:"+changesetID.String(), *jobs.enqueued[0].dedupeKey, "readiness jobs should deduplicate per changeset")
+	require.Equal(t, changesetID.String(), jobs.enqueued[0].payload.(map[string]string)["changeset_id"], "worker payload should carry the selected changeset")
+}
+
 type fakeStore struct {
-	latest    *models.PRReadinessRun
-	latestErr error
-	nextID    uuid.UUID
-	created   []*models.PRReadinessRun
+	latest             *models.PRReadinessRun
+	latestErr          error
+	nextID             uuid.UUID
+	primaryChangesetID uuid.UUID
+	created            []*models.PRReadinessRun
 }
 
 func (s *fakeStore) GetLatestBySession(context.Context, uuid.UUID, uuid.UUID) (*models.PRReadinessRun, error) {
 	return s.latest, s.latestErr
 }
 
+func (s *fakeStore) GetLatestByChangeset(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PRReadinessRun, error) {
+	return s.latest, s.latestErr
+}
+
 func (s *fakeStore) CreateRun(_ context.Context, run *models.PRReadinessRun) error {
 	run.ID = s.nextID
+	// Mirror the pr_readiness_runs BEFORE INSERT trigger, which defaults an
+	// unset changeset_id to the session's primary changeset.
+	if run.ChangesetID == uuid.Nil {
+		run.ChangesetID = s.primaryChangesetID
+	}
 	now := time.Now()
 	run.StartedAt = now
 	run.CreatedAt = now

@@ -45,6 +45,8 @@ func HandleSubcommand(args []string, stdout, stderr io.Writer) (handled bool, ex
 			return false, 0
 		}
 		return true, runPreview(args[1:], stdout, stderr)
+	case "changesets":
+		return true, runChangesets(args[1:], stdout, stderr)
 	case "mcp":
 		if len(args) >= 2 && args[1] == "serve" {
 			return true, runMCPServe(stderr)

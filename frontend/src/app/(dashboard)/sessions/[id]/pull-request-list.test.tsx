@@ -1,8 +1,9 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ChangesetSummary } from '@/lib/types';
-import { PullRequestList } from './session-detail-content';
+import { ChangesetSplitPlanner, PullRequestList } from './session-detail-content';
 
 function changeset(overrides: Partial<ChangesetSummary> = {}): ChangesetSummary {
   return {
@@ -57,5 +58,29 @@ describe('PullRequestList', () => {
     expect(screen.getByText('#102 · open')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /API integration/ }));
     expect(onSelect).toHaveBeenCalledWith('changeset-2');
+  });
+});
+
+describe('ChangesetSplitPlanner', () => {
+  it('shows verified split progress and enables acceptance only when complete', () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    queryClient.setQueryData(['session', 'session-1', 'changeset-split'], {
+      data: {
+        status: 'draft', source_diff_snapshot_id: 'snapshot-1', source_paths: ['api.go'],
+        assignments: [{ changeset_id: 'changeset-2', paths: ['api.go'] }], unassigned_paths: [],
+        duplicates: [], conflicts: [], omissions: [], unexpected_paths: [], verification: 'verified', complete: true,
+      },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChangesetSplitPlanner sessionID="session-1" changesets={[
+          changeset(),
+          changeset({ id: 'changeset-2', is_primary: false, order_index: 1, title: 'API', worktree_path: '/work/api' }),
+        ]} />
+      </QueryClientProvider>,
+    );
+    expect(screen.getByTestId('changeset-split-planner')).toBeInTheDocument();
+    expect(screen.getByText('1 of 1 files accounted for')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Accept split' })).toBeEnabled();
   });
 });
