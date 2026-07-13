@@ -20,13 +20,13 @@ export default function LegalPageLayout({
   return (
     <div
       className="min-h-screen flex flex-col"
-      style={{ background: isDark ? "#08080f" : "#d4e6f5" }}
+      style={{ background: isDark ? "#151513" : "#f6f5f0" }}
     >
       {/* Nav */}
       <div className="flex items-center justify-between px-6 sm:px-10 pt-6 sm:pt-8">
         <Link
           href="/"
-          className={`text-sm font-medium ${isDark ? "text-white/60 hover:text-white" : "text-slate-600 hover:text-slate-900"} transition-colors`}
+          className={`text-sm font-medium ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
         >
           &larr; 143
         </Link>
@@ -36,18 +36,18 @@ export default function LegalPageLayout({
       <main className="flex-1 px-6 sm:px-10 py-16 sm:py-24">
         <div className="max-w-2xl mx-auto">
           <h1
-            className={`text-2xl sm:text-3xl font-light tracking-tight mb-2 ${isDark ? "text-white" : "text-slate-900"}`}
+            className={`mb-2 font-display text-2xl font-semibold tracking-[-0.035em] sm:text-3xl ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
           >
             {title}
           </h1>
           <p
-            className={`text-xs mb-12 ${isDark ? "text-white/30" : "text-slate-400"}`}
+            className={`mb-12 text-xs ${isDark ? "text-[#77766f]" : "text-[#85847c]"}`}
           >
             Last updated: {lastUpdated}
           </p>
 
           <div
-            className={`space-y-8 text-sm leading-relaxed ${isDark ? "text-white/50" : "text-slate-600"}`}
+            className={`space-y-8 text-sm leading-relaxed ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
           >
             {children}
           </div>

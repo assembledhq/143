@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { IntegrationsCard } from "@/components/integrations-card";
+import { StatusLabel } from "@/components/status-label";
 import { getIntegrationByKey, type IntegrationKey } from "@/lib/integrations";
 import {
   AlertDialog,
@@ -168,7 +169,7 @@ function IntegrationAuthErrorAlert({ info }: { info: IntegrationAuthErrorInfo })
 
 function IntegrationLogo({ name, src }: { name: string; src: string }) {
   return (
-    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted/50 dark:bg-white/5 ring-1 ring-border/50 transition-transform duration-200 group-hover:scale-105">
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-surface-recessed">
       <Image
         src={src}
         alt={`${name} logo`}
@@ -227,9 +228,10 @@ function IntegrationAction({
 
   if (readOnly) {
     return (
-      <Badge variant={authErrored ? "outline" : connected ? "secondary" : "outline"} className="text-xs">
-        {authErrored ? "Reconnect required" : connected ? "Connected" : "Not connected"}
-      </Badge>
+      <StatusLabel
+        label={authErrored ? "Reconnect required" : connected ? "Connected" : "Not connected"}
+        tone={authErrored ? "warning" : connected ? "success" : "neutral"}
+      />
     );
   }
 
@@ -271,7 +273,7 @@ function IntegrationAction({
           {disconnectError && (
             <span className="text-xs text-destructive">{disconnectError}</span>
           )}
-          <span className="text-xs text-muted-foreground">Connected</span>
+          <StatusLabel label="Connected" tone="success" />
           <Button
             size="sm"
             variant="outline"

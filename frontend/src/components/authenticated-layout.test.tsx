@@ -385,7 +385,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  it("shows org name icon with first letter", async () => {
+  it("shows the compact 143 organization mark", async () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -393,7 +393,7 @@ describe("AuthenticatedLayout", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("T")).toBeInTheDocument();
+      expect(screen.getByText("143")).toBeInTheDocument();
     });
   });
 

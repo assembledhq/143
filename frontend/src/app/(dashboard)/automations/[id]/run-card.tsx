@@ -92,14 +92,15 @@ function FullCard({ run, kind, navigateTo }: FullCardProps) {
 
   return (
     <Card
+      variant={navigate ? "interactive" : "default"}
       role={navigate ? "button" : undefined}
       tabIndex={navigate ? 0 : undefined}
       aria-label={ariaLabel}
       onClick={navigate}
       onKeyDown={handleKeyDown}
       className={cn(
-        "group overflow-hidden border transition-all",
-        navigate && "cursor-pointer hover:border-primary/30 hover:bg-accent/35 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "group overflow-hidden",
+        navigate && "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         cardSurfaceClass(kind),
       )}
     >
@@ -444,6 +445,7 @@ export function QuietRunRow({
 
   return (
     <Card
+      variant={navigate ? "interactive" : "recessed"}
       role={navigate ? "button" : undefined}
       tabIndex={navigate ? 0 : undefined}
       onClick={navigate}
@@ -455,8 +457,8 @@ export function QuietRunRow({
         }
       }}
       className={cn(
-        "group border-border/70 bg-muted/10 transition-colors",
-        navigate && "cursor-pointer hover:border-border/90 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+        "group",
+        navigate && "cursor-pointer focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
       )}
     >
       <CardContent className="px-4 py-3">

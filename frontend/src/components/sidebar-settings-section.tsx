@@ -150,10 +150,10 @@ export function SidebarSettingsSection({
           type="button"
           variant="ghost"
           className={cn(
-            "flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-colors duration-150",
-            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] text-xs",
+            "relative flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-colors duration-[175ms]",
+            isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] type-dense",
             onSettingsPage
-              ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+              ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
               : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
           )}
         >
@@ -221,9 +221,9 @@ export function SidebarSettingsSection({
                         }
                         className={cn(
                           "relative flex items-center gap-2 rounded-lg pr-2.5 font-medium transition-colors duration-150",
-                          isMobile ? "py-2.5 pl-8 text-sm" : "py-1.5 pl-7 text-xs",
+                          isMobile ? "py-2.5 pl-8 text-sm" : "py-1.5 pl-7 type-dense",
                           active
-                            ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60 before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-[3px] before:rounded-full before:bg-primary"
+                            ? "bg-accent/65 text-foreground before:absolute before:left-1.5 before:top-1/2 before:h-4 before:-translate-y-1/2 before:w-0.5 before:rounded-full before:bg-primary"
                             : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
                         )}
                       >

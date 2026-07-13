@@ -671,7 +671,7 @@ describe('SessionDetailPage overview and review loop', () => {
     });
   });
 
-  it('renders the session header title at text-sm size', async () => {
+  it('renders the session header title at the context-title size', async () => {
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
 
     const headerTitle = await screen.findByRole('heading', {
@@ -679,7 +679,8 @@ describe('SessionDetailPage overview and review loop', () => {
       name: 'Fixed TypeError by adding null check',
     });
 
-    expect(headerTitle.className).toContain('text-sm');
+    expect(headerTitle.className).toContain('text-base');
+    expect(headerTitle.className).toContain('font-display');
     expect(headerTitle.className).not.toContain('text-xs');
   });
 

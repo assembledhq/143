@@ -91,6 +91,8 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { ContextHeader } from "@/components/context-header";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -202,6 +204,16 @@ import {
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
+
+function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus | null): StatusTone {
+  if (status === "failed") return "destructive";
+  if (status === "awaiting_input") return "warning";
+  if (status === "needs_human_guidance") return "attention";
+  if (status === "pr_created" && prStatus === "closed") return "neutral";
+  if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
+  if (status === "running" || status === "idle") return "primary";
+  return "neutral";
+}
 
 // Defer the diff viewer until the user actually opens review mode. Saves
 // review-specific code from the initial session-detail bundle for the common
@@ -1527,22 +1539,25 @@ function SessionComposer({
       />
 
       <div
-        className="border-t border-border p-3 bg-background shrink-0"
+        className="shrink-0 border-t border-border bg-background/95 p-3"
         ref={composerCardRef}
         data-testid="session-composer-shell"
       >
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
-              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
-              <button
+            <div className="flex items-center gap-1.5 rounded-full border border-warning/20 bg-warning/8 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-warning" />
+              <span className="text-xs font-medium text-warning">Plan mode</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
                 onClick={() => onPlanModeChange(false)}
-                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                className="ml-0.5 h-4 w-4 rounded-full text-warning/65 hover:bg-warning/10 hover:text-warning"
                 title="Exit plan mode"
               >
                 &times;
-              </button>
+              </Button>
             </div>
             <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
           </div>
@@ -1553,8 +1568,8 @@ function SessionComposer({
           data-testid="session-composer-input-surface"
           {...fileDropzone.dropzoneProps}
           className={cn(
-            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
-            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            "rounded-xl border bg-surface-raised shadow-[0_10px_30px_rgb(36_34_28_/_8%)] transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15",
+            planMode ? "border-warning/25" : "border-border-strong",
             fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
           )}
         >
@@ -6653,16 +6668,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
-            <div
+            <ContextHeader
               data-testid="session-main-header"
-              className={cn(
-                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
-                SESSION_HEADER_HEIGHT_CLASSNAME,
-              )}
-            >
+              className={cn("hidden shrink-0 md:block", SESSION_HEADER_HEIGHT_CLASSNAME)}
+              title={
               <div
                 data-testid="session-header-summary"
-                className="min-w-0 flex-1 overflow-hidden flex items-center gap-2"
+                className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden"
               >
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
@@ -6701,7 +6713,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 ) : (
                   <>
-                    <h1 className="text-sm font-medium text-foreground truncate">
+                    <h1 className="truncate font-display text-base font-semibold tracking-[-0.025em] text-foreground">
                       {sessionTitle(session)}
                     </h1>
                     <Button
@@ -6718,9 +6730,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </Button>
                   </>
                 )}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-                  {status.label}
-                </span>
+                <StatusLabel
+                  label={status.label}
+                  tone={sessionStatusTone(session.status, prStatus)}
+                  active={session.status === "running"}
+                  className="shrink-0"
+                />
                 {diffStats && (
                   <DiffStatsBadge
                     added={diffStats.added}
@@ -6731,6 +6746,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
+              }
+              actions={
               <div className="flex shrink-0 items-center gap-2" data-testid="session-header-actions">
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
@@ -6746,7 +6763,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 </DisabledTooltip>
               </div>
-            </div>
+              }
+            />
           </>
         ) : null}
 
