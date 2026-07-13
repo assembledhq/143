@@ -116,8 +116,11 @@ export class MockEventSource {
   });
   close = vi.fn();
   dispatchEvent = vi.fn(() => true);
-  emit(event: string, data: unknown) {
-    const message = { data: JSON.stringify(data) } as MessageEvent;
+  emit(event: string, data: unknown, lastEventId = "") {
+    const message = { data: JSON.stringify(data), lastEventId } as MessageEvent;
+    if (event === 'message') {
+      this.onmessage?.(message);
+    }
     for (const listener of this.listeners.get(event) ?? []) {
       listener(message);
     }

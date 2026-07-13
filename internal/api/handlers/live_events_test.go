@@ -16,13 +16,24 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/liveevents"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
 type liveMembershipStub struct{ allowed bool }
+type liveMembershipErrorStub struct{ err error }
 type liveRepositoryStub struct{ ids []uuid.UUID }
 type countingLiveMembershipStub struct{ calls atomic.Int32 }
+type changingLiveRepositoryStub struct {
+	mu  sync.Mutex
+	ids []uuid.UUID
+}
+
+type countingErrorMembershipStub struct {
+	calls atomic.Int32
+	err   error
+}
 
 func (s *countingLiveMembershipStub) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
 	s.calls.Add(1)
@@ -30,8 +41,25 @@ func (s *countingLiveMembershipStub) Get(_ context.Context, userID, orgID uuid.U
 	return models.OrganizationMembership{UserID: userID, OrgID: orgID}, nil
 }
 
+func (s *countingErrorMembershipStub) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	s.calls.Add(1)
+	return models.OrganizationMembership{}, s.err
+}
+
 func (s liveRepositoryStub) ListIDsForLiveAuthorization(context.Context, uuid.UUID) ([]uuid.UUID, error) {
 	return s.ids, nil
+}
+
+func (s *changingLiveRepositoryStub) ListIDsForLiveAuthorization(context.Context, uuid.UUID) ([]uuid.UUID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]uuid.UUID(nil), s.ids...), nil
+}
+
+func (s *changingLiveRepositoryStub) set(ids ...uuid.UUID) {
+	s.mu.Lock()
+	s.ids = append([]uuid.UUID(nil), ids...)
+	s.mu.Unlock()
 }
 
 func (s liveMembershipStub) Get(_ context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error) {
@@ -39,6 +67,10 @@ func (s liveMembershipStub) Get(_ context.Context, userID, orgID uuid.UUID) (mod
 		return models.OrganizationMembership{}, context.Canceled
 	}
 	return models.OrganizationMembership{UserID: userID, OrgID: orgID}, nil
+}
+
+func (s liveMembershipErrorStub) Get(context.Context, uuid.UUID, uuid.UUID) (models.OrganizationMembership, error) {
+	return models.OrganizationMembership{}, s.err
 }
 
 func TestLiveEventHandlerRejectsInvalidInputs(t *testing.T) {
@@ -64,6 +96,35 @@ func TestLiveEventHandlerRejectsInvalidInputs(t *testing.T) {
 			require.Contains(t, rr.Body.String(), tt.code, "handler should return the typed error code")
 		})
 	}
+}
+
+func TestLiveEventHandlerUsesSharedHandshakeAuthorization(t *testing.T) {
+	t.Parallel()
+
+	memberships := &countingLiveMembershipStub{}
+	handler := NewLiveEventHandler(nil, nil, memberships, liveRepositoryStub{}, zerolog.Nop())
+	userID, orgID := uuid.New(), uuid.New()
+	for range 2 {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream?org_id="+orgID.String(), nil)
+		req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+		rr := httptest.NewRecorder()
+		handler.Stream(rr, req)
+		require.Equal(t, http.StatusServiceUnavailable, rr.Code, "authorized handshake should continue to transport availability")
+	}
+	require.Equal(t, int32(1), memberships.calls.Load(), "reconnect handshakes should share one cached membership query")
+}
+
+func TestLiveEventHandlerReturnsForbiddenForMissingMembership(t *testing.T) {
+	t.Parallel()
+
+	handler := NewLiveEventHandler(nil, nil, liveMembershipErrorStub{err: pgx.ErrNoRows}, nil, zerolog.Nop())
+	orgID, userID := uuid.New(), uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream?org_id="+orgID.String(), nil)
+	req = req.WithContext(middleware.WithUser(req.Context(), &models.User{ID: userID}))
+	rr := httptest.NewRecorder()
+	handler.Stream(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, "missing organization membership should reject the handshake")
+	require.Contains(t, rr.Body.String(), "FORBIDDEN", "membership rejection should preserve the typed API error")
 }
 
 func TestLiveEventHandlerTelemetry(t *testing.T) {
@@ -200,4 +261,52 @@ func TestLiveEventAuthorizationSnapshotIsSharedPerUserAndOrg(t *testing.T) {
 	wg.Wait()
 	require.True(t, allAllowed.Load(), "shared snapshot should authorize every concurrent connection")
 	require.Equal(t, int32(1), memberships.calls.Load(), "concurrent connections should share one membership authorization read")
+}
+
+func TestLiveEventAuthorizationSnapshotRefreshesRepositoryGrants(t *testing.T) {
+	t.Parallel()
+
+	firstRepository, secondRepository := uuid.New(), uuid.New()
+	repositories := &changingLiveRepositoryStub{ids: []uuid.UUID{firstRepository}}
+	handler := NewLiveEventHandler(nil, nil, liveMembershipStub{allowed: true}, repositories, zerolog.Nop())
+	userID, orgID := uuid.New(), uuid.New()
+
+	initial := handler.authorizationSnapshot(context.Background(), userID, orgID)
+	_, initiallyAllowed := initial.repositories[firstRepository]
+	require.True(t, initiallyAllowed, "initial snapshot should include the connect-time repository grant")
+	repositories.set(secondRepository)
+
+	refreshed := handler.refreshAuthorizationSnapshot(context.Background(), userID, orgID)
+	_, staleGrantRetained := refreshed.repositories[firstRepository]
+	_, newGrantAllowed := refreshed.repositories[secondRepository]
+	require.False(t, staleGrantRetained, "refresh should remove repository grants that no longer exist")
+	require.True(t, newGrantAllowed, "refresh should admit repository grants without waiting for reconnect")
+}
+
+func TestLiveEventAuthorizationSnapshotDoesNotCacheTransientErrors(t *testing.T) {
+	t.Parallel()
+
+	memberships := &countingErrorMembershipStub{err: context.DeadlineExceeded}
+	handler := NewLiveEventHandler(nil, nil, memberships, nil, zerolog.Nop())
+	userID, orgID := uuid.New(), uuid.New()
+
+	first := handler.authorizationSnapshot(context.Background(), userID, orgID)
+	require.False(t, first.allowed, "a transient authorization failure should deny the handshake")
+	second := handler.authorizationSnapshot(context.Background(), userID, orgID)
+	require.False(t, second.allowed, "a transient authorization failure should deny the handshake")
+	require.Equal(t, int32(2), memberships.calls.Load(), "transient authorization failures must not be cached across handshakes")
+}
+
+func TestLiveEventAuthorizationSnapshotCachesMissingMembership(t *testing.T) {
+	t.Parallel()
+
+	memberships := &countingErrorMembershipStub{err: pgx.ErrNoRows}
+	handler := NewLiveEventHandler(nil, nil, memberships, nil, zerolog.Nop())
+	userID, orgID := uuid.New(), uuid.New()
+
+	first := handler.authorizationSnapshot(context.Background(), userID, orgID)
+	require.False(t, first.allowed, "a missing membership should deny the handshake")
+	second := handler.authorizationSnapshot(context.Background(), userID, orgID)
+	require.False(t, second.allowed, "a missing membership should deny the handshake")
+	require.Equal(t, int32(1), memberships.calls.Load(), "a definitive membership denial should be cached across handshakes")
 }

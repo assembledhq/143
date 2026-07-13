@@ -326,6 +326,7 @@ export class LiveEventClient {
   private scheduler: LiveInvalidationScheduler;
   private seen = new Set<string>();
   private pendingCheckpoint: { cursor: string; cause: string; jitterApplied: boolean } | null = null;
+  private checkpointSync: Promise<void> | null = null;
   private currentHealth: LiveHealth = "connecting";
   private healthyAt = 0;
 
@@ -451,7 +452,17 @@ export class LiveEventClient {
     if (document.visibilityState === "visible") await this.synchronizeCheckpoint();
   }
 
-  private async synchronizeCheckpoint(): Promise<void> {
+  private synchronizeCheckpoint(): Promise<void> {
+    if (this.checkpointSync) return this.checkpointSync;
+    const sync = this.runCheckpointSync();
+    this.checkpointSync = sync;
+    void sync.finally(() => {
+      if (this.checkpointSync === sync) this.checkpointSync = null;
+    });
+    return sync;
+  }
+
+  private async runCheckpointSync(): Promise<void> {
     const checkpoint = this.pendingCheckpoint;
     if (this.stopped || !checkpoint || document.visibilityState !== "visible" || !navigator.onLine) return;
     try {

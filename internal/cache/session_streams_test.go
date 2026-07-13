@@ -281,6 +281,31 @@ func TestSessionStreams_UsesOneCombinedReaderForAllResourceChannels(t *testing.T
 	require.Equal(t, 1, resourceReaders, "one focused session should use one multi-stream Redis reader")
 }
 
+func TestSessionStreams_ReconnectDoesNotAttachToStoppingResourceReader(t *testing.T) {
+	t.Parallel()
+
+	client, _ := testRedisClient(t)
+	streams := NewSessionStreams(client, zerolog.Nop(), nil)
+	sessionID := uuid.New()
+	dying := streams.ensureResourceFanout(sessionID)
+	dying.mu.Lock()
+	dying.stopping = true
+	dying.mu.Unlock()
+
+	subscription, err := streams.SubscribeLogs(sessionID)
+	require.NoError(t, err, "reconnecting subscriber should replace a stopping reader")
+	defer subscription.Close()
+
+	streams.resourceMu.Lock()
+	replacement := streams.resourceFanouts[sessionID]
+	streams.resourceMu.Unlock()
+	require.NotSame(t, dying, replacement, "reconnect should attach to a fresh resource reader")
+	replacement.mu.Lock()
+	_, attached := replacement.logs[subscription.client]
+	replacement.mu.Unlock()
+	require.True(t, attached, "fresh reader should own the reconnecting subscriber")
+}
+
 func TestSessionStreams_ReplayBufferedLogsAndHelperFunctions(t *testing.T) {
 	t.Parallel()
 

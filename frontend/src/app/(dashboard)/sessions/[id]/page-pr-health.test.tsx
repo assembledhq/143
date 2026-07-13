@@ -149,11 +149,22 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(initialTimelineFetchCount).toBeGreaterThanOrEqual(1);
     expect(MockEventSource.instances).toHaveLength(1);
 
+    MockEventSource.instances[0].emit('message', {
+      id: 100,
+      session_id: runningSession.id,
+      level: 'info',
+      message: 'cursor checkpoint',
+      metadata: null,
+      turn_number: 1,
+      created_at: '2026-02-17T07:02:59Z',
+    }, '100-0');
+
     MockEventSource.instances[0].onerror?.(new Event('error'));
 
     await waitFor(() => {
       expect(MockEventSource.instances).toHaveLength(2);
     }, { timeout: 2500 });
+    expect(MockEventSource.instances[1].url).toContain('last_event_id=100-0');
 
     expect(await screen.findByText('late log after reconnect')).toBeInTheDocument();
 

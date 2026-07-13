@@ -19,13 +19,26 @@ export function buildSessionLogsStreamURL(
   apiBase: string,
   sessionId: string,
   activeOrgId: string | null,
+  lastEventId?: string,
 ): string {
   const searchParams = new URLSearchParams();
   if (activeOrgId) {
     searchParams.set("org_id", activeOrgId);
   }
+  if (lastEventId) {
+    searchParams.set("last_event_id", lastEventId);
+  }
   const qs = searchParams.toString();
   return `${apiBase}/api/v1/sessions/${sessionId}/logs/stream${qs ? `?${qs}` : ""}`;
+}
+
+/** Full-jitter reconnects that never give up on an active resource stream. */
+export function resourceSSEReconnectDelay(attempt: number, random = Math.random): number {
+  if (attempt >= 5) {
+    return 30_000 + Math.floor(random() * 90_001);
+  }
+  const cap = Math.min(15_000, 1_000 * 2 ** Math.max(0, attempt));
+  return Math.floor(random() * (cap + 1));
 }
 
 // Same X-Active-Org-ID workaround as buildSessionLogsStreamURL — see comment
@@ -85,15 +98,23 @@ export interface SSEEventPayloads {
   [SSE_EVENT.SESSION_WORKSPACE_GENERATION_CHANGED]: SessionWorkspaceGenerationChangedEvent;
 }
 
-/** Type-safe event listener adder for session SSE streams. */
+/**
+ * Type-safe event listener adder for session SSE streams.
+ *
+ * `onCursor` is invoked on receipt of the frame, before parsing/handling, so a
+ * corrupt payload still advances the resume cursor past an undeliverable event
+ * rather than reconnecting into an infinite replay of it.
+ */
 export function addSSEListener<K extends keyof SSEEventPayloads>(
   source: EventSource,
   event: K,
   handler: (data: SSEEventPayloads[K]) => void,
+  onCursor?: (lastEventId: string) => void,
 ): void {
   if (event === SSE_EVENT.LOG) {
     source.onmessage = (e: MessageEvent) => {
       try {
+        if (e.lastEventId) onCursor?.(e.lastEventId);
         handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });
@@ -102,6 +123,7 @@ export function addSSEListener<K extends keyof SSEEventPayloads>(
   } else {
     source.addEventListener(event, ((e: MessageEvent) => {
       try {
+        if (e.lastEventId) onCursor?.(e.lastEventId);
         handler(normalizeAPIResponse(JSON.parse(e.data)) as SSEEventPayloads[K]);
       } catch (err) {
         captureError(err, { feature: "sse" });

@@ -114,6 +114,7 @@ import {
   SSE_EVENT,
   addSSEListener,
   buildSessionLogsStreamURL,
+  resourceSSEReconnectDelay,
 } from "@/lib/sse";
 import { applyPlanModePrefix, buildTimeline, flattenTimelineResponse, flattenTranscriptWindows, sortTimelineEntries, type TimelineEntry } from "@/lib/timeline";
 import { formatReviewMessage } from "@/lib/format-review-message";
@@ -1949,8 +1950,6 @@ function SessionComposer({
 // Main chat panel
 // ---------------------------------------------------------------------------
 
-const MAX_SSE_RECONNECT_ATTEMPTS = 3;
-const BASE_SSE_RECONNECT_DELAY_MS = pollMs(1000);
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 const SCROLL_NEAR_BOTTOM_THRESHOLD = 100;
 const SCROLL_POSITION_SAVE_DEBOUNCE_MS = 150;
@@ -2253,6 +2252,10 @@ function ChatPanel({
   const saveScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const lastResourceCursor = useRef({ sessionId, cursor: "" });
+  if (lastResourceCursor.current.sessionId !== sessionId) {
+    lastResourceCursor.current = { sessionId, cursor: "" };
+  }
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
@@ -2904,7 +2907,7 @@ function ChatPanel({
       if (cancelled) return;
 
       eventSource = new EventSource(
-        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId()),
+        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId(), lastResourceCursor.current.cursor),
         { withCredentials: true }
       );
 
@@ -2913,14 +2916,19 @@ function ChatPanel({
         queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       };
 
-      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
-        if (!activeThreadId || log.thread_id === activeThreadId) {
-          mergeLogs([log]);
-        }
-        if (log.level === "human_input") {
-          invalidateSessionHumanInputRequests(queryClient, sessionId);
-        }
-      });
+      addSSEListener(
+        eventSource,
+        SSE_EVENT.LOG,
+        (log) => {
+          if (!activeThreadId || log.thread_id === activeThreadId) {
+            mergeLogs([log]);
+          }
+          if (log.level === "human_input") {
+            invalidateSessionHumanInputRequests(queryClient, sessionId);
+          }
+        },
+        (cursor) => { lastResourceCursor.current = { sessionId, cursor }; },
+      );
 
       addSSEListener(eventSource, SSE_EVENT.HUMAN_INPUT_CREATED, () => {
         invalidateSessionHumanInputRequests(queryClient, sessionId);
@@ -2979,13 +2987,9 @@ function ChatPanel({
           queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threadTranscript(sessionId, activeThreadId) });
         }
 
-        if (!cancelled && reconnectAttempts.current < MAX_SSE_RECONNECT_ATTEMPTS) {
-          const delay =
-            BASE_SSE_RECONNECT_DELAY_MS *
-            Math.pow(2, reconnectAttempts.current);
-          reconnectAttempts.current += 1;
-          reconnectTimer.current = setTimeout(connect, delay);
-        }
+        if (cancelled) return;
+        const delay = resourceSSEReconnectDelay(reconnectAttempts.current++);
+        reconnectTimer.current = setTimeout(connect, delay);
       };
     }
 

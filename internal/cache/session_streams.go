@@ -136,6 +136,7 @@ type sessionResourceFanout struct {
 	statuses  map[*statusSubscriber]struct{}
 	events    map[*eventSubscriber]struct{}
 	ring      *logRingBuffer
+	stopping  bool
 }
 
 type LogSubscription struct {
@@ -408,13 +409,9 @@ func (s *SessionStreams) SubscribeLogs(sessionID uuid.UUID) (*LogSubscription, e
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureResourceFanout(sessionID)
 	sub := &logSubscriber{ch: make(chan StreamedLog, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.logs[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.logs[sub] = struct{}{} })
 
 	return &LogSubscription{
 		C:      sub.ch,
@@ -429,13 +426,9 @@ func (s *SessionStreams) SubscribeStatus(sessionID uuid.UUID) (*StatusSubscripti
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureResourceFanout(sessionID)
 	sub := &statusSubscriber{ch: make(chan models.Session, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.statuses[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.statuses[sub] = struct{}{} })
 
 	return &StatusSubscription{
 		C:      sub.ch,
@@ -450,13 +443,9 @@ func (s *SessionStreams) SubscribeEvents(sessionID uuid.UUID) (*EventSubscriptio
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureResourceFanout(sessionID)
 	sub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.events[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.events[sub] = struct{}{} })
 
 	return &EventSubscription{
 		C:      sub.ch,
@@ -522,17 +511,45 @@ func (s *SessionStreams) ensureResourceFanout(sessionID uuid.UUID) *sessionResou
 		sessionID: sessionID, client: s.client, logger: s.logger, ctx: ctx, cancel: cancel,
 		logs: make(map[*logSubscriber]struct{}), statuses: make(map[*statusSubscriber]struct{}),
 		events: make(map[*eventSubscriber]struct{}), ring: newLogRingBuffer(logRingBufferSize),
-		onExit: func() {
-			s.metrics.RecordSessionReader(context.Background(), "combined", -1)
-			s.resourceMu.Lock()
+	}
+	fanout.onExit = func() {
+		s.metrics.RecordSessionReader(context.Background(), "combined", -1)
+		s.resourceMu.Lock()
+		if s.resourceFanouts[sessionID] == fanout {
 			delete(s.resourceFanouts, sessionID)
-			s.resourceMu.Unlock()
-		},
+		}
+		s.resourceMu.Unlock()
 	}
 	s.resourceFanouts[sessionID] = fanout
 	s.metrics.RecordSessionReader(context.Background(), "combined", 1)
 	go fanout.run()
 	return fanout
+}
+
+func (s *SessionStreams) attachResourceSubscriber(sessionID uuid.UUID, attach func(*sessionResourceFanout)) *sessionResourceFanout {
+	for {
+		fanout := s.ensureResourceFanout(sessionID)
+		fanout.mu.Lock()
+		if !fanout.stopping {
+			attach(fanout)
+			fanout.mu.Unlock()
+			return fanout
+		}
+		fanout.mu.Unlock()
+
+		// Replace only the dying instance we observed. Its onExit callback also
+		// compares pointers, so it cannot delete the replacement.
+		replaced := false
+		s.resourceMu.Lock()
+		if s.resourceFanouts[sessionID] == fanout {
+			delete(s.resourceFanouts, sessionID)
+			replaced = true
+		}
+		s.resourceMu.Unlock()
+		if replaced {
+			fanout.cancel()
+		}
+	}
 }
 
 func (f *sessionResourceFanout) emptyLocked() bool {
@@ -578,6 +595,9 @@ func (f *sessionResourceFanout) run() {
 		}
 		f.mu.Lock()
 		empty := f.emptyLocked()
+		if empty {
+			f.stopping = true
+		}
 		f.mu.Unlock()
 		if empty {
 			return

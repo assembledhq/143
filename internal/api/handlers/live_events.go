@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
@@ -78,9 +79,10 @@ type LiveEventHandler struct {
 }
 
 type liveAuthorizationCacheEntry struct {
-	allowed      bool
-	repositories map[uuid.UUID]struct{}
-	expiresAt    time.Time
+	allowed          bool
+	repositories     map[uuid.UUID]struct{}
+	authorizationErr error
+	expiresAt        time.Time
 }
 
 func NewLiveEventHandler(redisClient *cache.Client, manager *liveevents.Manager, memberships liveEventMembershipStore, repositories liveEventRepositoryStore, logger zerolog.Logger) *LiveEventHandler {
@@ -121,7 +123,7 @@ func (h *LiveEventHandler) Telemetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *LiveEventHandler) authorizationSnapshot(ctx context.Context, userID, orgID uuid.UUID) liveAuthorizationCacheEntry {
-	key := userID.String() + ":" + orgID.String()
+	key := liveAuthorizationCacheKey(userID, orgID)
 	now := time.Now()
 	h.authMu.Lock()
 	cached, ok := h.authCache[key]
@@ -131,24 +133,45 @@ func (h *LiveEventHandler) authorizationSnapshot(ctx context.Context, userID, or
 	}
 	value, _, _ := h.authGroup.Do(key, func() (any, error) {
 		_, err := h.memberships.Get(ctx, userID, orgID)
-		entry := liveAuthorizationCacheEntry{allowed: err == nil, repositories: make(map[uuid.UUID]struct{}), expiresAt: time.Now().Add(60 * time.Second)}
+		entry := liveAuthorizationCacheEntry{allowed: err == nil, repositories: make(map[uuid.UUID]struct{}), authorizationErr: err, expiresAt: time.Now().Add(60 * time.Second)}
 		if err == nil && h.repositories != nil {
 			ids, repositoriesErr := h.repositories.ListIDsForLiveAuthorization(ctx, orgID)
 			if repositoriesErr != nil {
 				entry.allowed = false
+				entry.authorizationErr = repositoriesErr
 			} else {
 				for _, id := range ids {
 					entry.repositories[id] = struct{}{}
 				}
 			}
 		}
-		h.authMu.Lock()
-		h.authCache[key] = entry
-		h.authMu.Unlock()
+		// Only persist definitive outcomes. A transient authorization error
+		// (anything other than a missing membership) must not be cached for the
+		// full TTL, or a momentary datastore blip would lock the stream out for
+		// 60s across every reconnect even after the datastore recovers. The
+		// singleflight above still collapses concurrent failing handshakes.
+		if entry.allowed || errors.Is(entry.authorizationErr, pgx.ErrNoRows) {
+			h.authMu.Lock()
+			h.authCache[key] = entry
+			h.authMu.Unlock()
+		}
 		return entry, nil
 	})
 	entry, _ := value.(liveAuthorizationCacheEntry)
 	return entry
+}
+
+func liveAuthorizationCacheKey(userID, orgID uuid.UUID) string {
+	return userID.String() + ":" + orgID.String()
+}
+
+func (h *LiveEventHandler) refreshAuthorizationSnapshot(ctx context.Context, userID, orgID uuid.UUID) liveAuthorizationCacheEntry {
+	key := liveAuthorizationCacheKey(userID, orgID)
+	h.authMu.Lock()
+	delete(h.authCache, key)
+	h.authMu.Unlock()
+	h.authGroup.Forget(key)
+	return h.authorizationSnapshot(ctx, userID, orgID)
 }
 
 type liveReady struct {
@@ -204,19 +227,17 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusServiceUnavailable, "LIVE_EVENTS_UNAVAILABLE", "live events unavailable")
 		return
 	}
-	if _, membershipErr := h.memberships.Get(r.Context(), user.ID, orgID); membershipErr != nil {
-		if errors.Is(membershipErr, pgx.ErrNoRows) {
+	snapshot := h.authorizationSnapshot(r.Context(), user.ID, orgID)
+	if !snapshot.allowed {
+		if errors.Is(snapshot.authorizationErr, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusForbidden, "FORBIDDEN", "organization access denied")
 		} else {
-			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to authorize live stream", membershipErr)
+			writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to authorize live stream", snapshot.authorizationErr)
 		}
 		return
 	}
-	snapshot := h.authorizationSnapshot(r.Context(), user.ID, orgID)
-	if !snapshot.allowed {
-		writeError(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to build live authorization snapshot")
-		return
-	}
+	var activeAuthorization atomic.Pointer[liveAuthorizationCacheEntry]
+	activeAuthorization.Store(&snapshot)
 	cursor := r.URL.Query().Get("last_event_id")
 	if cursor == "" {
 		cursor = r.Header.Get("Last-Event-ID")
@@ -235,6 +256,10 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	allow := func(event models.LiveEvent) bool {
+		current := activeAuthorization.Load()
+		if current == nil || !current.allowed {
+			return false
+		}
 		if event.Type == models.LiveEventAuthorizationChanged {
 			return false
 		}
@@ -242,7 +267,7 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 			return true
 		}
 		if event.RepositoryID != nil {
-			_, allowed := snapshot.repositories[*event.RepositoryID]
+			_, allowed := current.repositories[*event.RepositoryID]
 			return allowed
 		}
 		// Existing resource REST endpoints are org-member visible unless they
@@ -292,11 +317,14 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seen := make(map[uuid.UUID]struct{})
+	seenOrder := make([]uuid.UUID, 0, 4096)
 	rememberSeen := func(id uuid.UUID) {
 		if len(seen) >= 4096 {
-			clear(seen)
+			delete(seen, seenOrder[0])
+			seenOrder = seenOrder[1:]
 		}
 		seen[id] = struct{}{}
+		seenOrder = append(seenOrder, id)
 	}
 	if cursor != "" && compareRedisStreamID(cursor, bounds.Last) < 0 {
 		replay, replayErr := h.redis.ReplayLiveEvents(r.Context(), orgID, cursor, bounds.Last, cache.LiveReplayLimit)
@@ -369,9 +397,11 @@ func (h *LiveEventHandler) Stream(w http.ResponseWriter, r *http.Request) {
 		case <-authExpiry:
 			return
 		case <-authorizationCheck.C:
-			if !h.authorizationSnapshot(r.Context(), user.ID, orgID).allowed {
+			refreshed := h.refreshAuthorizationSnapshot(r.Context(), user.ID, orgID)
+			if !refreshed.allowed {
 				return
 			}
+			activeAuthorization.Store(&refreshed)
 		case <-heartbeat.C:
 			healthy, currentEpoch := h.manager.Healthy(orgID)
 			if !healthy || currentEpoch != epoch {

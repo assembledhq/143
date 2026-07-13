@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { addSSEListener, SSE_EVENT } from "./sse";
+import { addSSEListener, buildSessionLogsStreamURL, resourceSSEReconnectDelay, SSE_EVENT } from "./sse";
 
 /** Minimal mock that captures handlers like a real EventSource. */
 function createMockEventSource() {
@@ -9,8 +9,8 @@ function createMockEventSource() {
     addEventListener(event: string, handler: EventListener) {
       listeners[event] = handler;
     },
-    _fire(event: string, data: string) {
-      const msg = new MessageEvent(event, { data });
+    _fire(event: string, data: string, lastEventId = "") {
+      const msg = new MessageEvent(event, { data, lastEventId });
       if (event === "message" && this.onmessage) {
         this.onmessage(msg);
       } else if (listeners[event]) {
@@ -133,6 +133,32 @@ describe("addSSEListener", () => {
     source._fire("status", "{bad json");
 
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("reports the received cursor before delivering a valid append", () => {
+    const source = createMockEventSource();
+    const handler = vi.fn();
+    const onCursor = vi.fn();
+    addSSEListener(source as unknown as EventSource, SSE_EVENT.LOG, handler, onCursor);
+
+    source._fire("message", JSON.stringify({ id: 12, session_id: "s1", level: "info", message: "hi", metadata: null, turn_number: 1, created_at: "2026-01-01T00:00:00Z" }), "12-0");
+
+    expect(onCursor).toHaveBeenCalledWith("12-0");
+    expect(onCursor.mock.invocationCallOrder[0]).toBeLessThan(handler.mock.invocationCallOrder[0]);
+  });
+});
+
+describe("resource SSE reconnect", () => {
+  it("reconstructs a resource URL with its application-managed cursor", () => {
+    expect(buildSessionLogsStreamURL("https://api.test", "session-1", "org-1", "42-0"))
+      .toBe("https://api.test/api/v1/sessions/session-1/logs/stream?org_id=org-1&last_event_id=42-0");
+  });
+
+  it("uses bounded full jitter and keeps probing indefinitely", () => {
+    expect(resourceSSEReconnectDelay(0, () => 0.999999)).toBe(1_000);
+    expect(resourceSSEReconnectDelay(4, () => 0.999999)).toBe(15_000);
+    expect(resourceSSEReconnectDelay(5, () => 0)).toBe(30_000);
+    expect(resourceSSEReconnectDelay(500, () => 0.999999)).toBe(120_000);
   });
 });
 

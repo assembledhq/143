@@ -610,7 +610,12 @@ export function PreviewPanel({
       return api.sessions.preview.logs(sessionId, { tail: previewLogsTail && !afterId, afterId, signal });
     },
     enabled: Boolean(instance) && shouldLoadPreviewLogs,
-    refetchInterval: false,
+    // Status events wake this query immediately. While the startup log panel is
+    // actively visible, the central detail policy remains a sparse gap-recovery
+    // backstop so log appends between phase transitions cannot stall forever.
+    refetchInterval: previewLogsTail
+      ? liveRefreshInterval(previewLogsKey, "active-detail", liveHealth, documentVisible)
+      : false,
     retry: 1,
     structuralSharing: (oldData: unknown, newData: unknown): PreviewLog[] => {
       const oldLogs = Array.isArray(oldData) ? oldData as PreviewLog[] : undefined;

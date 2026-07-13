@@ -42,7 +42,7 @@ import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, Che
 import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, EvalBootstrapCandidate, EvalBootstrapCandidateStatus, EvalDataset, EvalReleaseGate, ListResponse, Repository, SessionLog } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
-import { addSSEListener, SSE_EVENT, buildSessionLogsStreamURL } from "@/lib/sse";
+import { addSSEListener, SSE_EVENT, buildSessionLogsStreamURL, resourceSSEReconnectDelay } from "@/lib/sse";
 import { getActiveOrgId } from "@/lib/active-org";
 import { useLiveHealth } from "@/components/live-event-provider";
 import { liveRefreshInterval } from "@/lib/live-refresh-policy";
@@ -554,7 +554,6 @@ function BootstrapDetailSheet({
     });
   }, []);
 
-  const MAX_SSE_RECONNECT_ATTEMPTS = 3;
 
   useEffect(() => {
     const sessionId = bootstrap.session_id;
@@ -569,7 +568,9 @@ function BootstrapDetailSheet({
       if (!cancelled && response?.data) {
         mergeLogs(response.data);
       }
-    }).catch(() => {});
+    }).catch((error) => {
+      console.error("Failed to load eval bootstrap session logs.", error);
+    });
 
     // Only open SSE for active sessions.
     if (!isActive) {
@@ -579,12 +580,13 @@ function BootstrapDetailSheet({
     let eventSource: EventSource | null = null;
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastEventId = "";
 
     const connect = () => {
       if (cancelled) return;
 
       eventSource = new EventSource(
-        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId()),
+        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId(), lastEventId),
         { withCredentials: true }
       );
 
@@ -592,9 +594,12 @@ function BootstrapDetailSheet({
         reconnectAttempts = 0;
       };
 
-      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
-        mergeLogs([log]);
-      });
+      addSSEListener(
+        eventSource,
+        SSE_EVENT.LOG,
+        (log) => { mergeLogs([log]); },
+        (cursor) => { lastEventId = cursor; },
+      );
 
       addSSEListener(eventSource, SSE_EVENT.DONE, () => {
         eventSource?.close();
@@ -603,11 +608,8 @@ function BootstrapDetailSheet({
       eventSource.onerror = () => {
         eventSource?.close();
         if (cancelled) return;
-        reconnectAttempts++;
-        if (reconnectAttempts <= MAX_SSE_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 15000);
-          reconnectTimer = setTimeout(connect, delay);
-        }
+        const delay = resourceSSEReconnectDelay(reconnectAttempts++);
+        reconnectTimer = setTimeout(connect, delay);
       };
     };
 

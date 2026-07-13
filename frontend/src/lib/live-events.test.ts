@@ -192,6 +192,32 @@ describe("LiveEventClient cursors and reconnect", () => {
     unregister(); unsubscribeObserver();
   });
 
+  it("singleflights concurrent resync, visibility, and online synchronization", async () => {
+    let resolveSync!: (value: { data: unknown[] }) => void;
+    const queryClient = new QueryClient();
+    const queryFn = vi.fn()
+      .mockResolvedValueOnce({ data: [] })
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSync = resolve; }));
+    await queryClient.fetchQuery({ queryKey: ["sessions"], queryFn });
+    const observer = new QueryObserver(queryClient, { queryKey: ["sessions"], queryFn, staleTime: Infinity });
+    const unsubscribeObserver = observer.subscribe(() => undefined);
+    const unregister = registerLiveQuery(queryClient, { queryKey: ["sessions"], families: ["session.list"], priority: "critical", visible: true });
+    const client = new LiveEventClient({ apiBase: "", orgId, queryClient });
+    client.start();
+
+    MockEventSource.instances[0].emit("live.resync", { cause: "replay_window_missed", through_stream_id: "900-0" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    resolveSync({ data: [] });
+    await vi.runOnlyPendingTimersAsync();
+    expect(MockEventSource.instances).toHaveLength(2);
+    client.stop();
+    unregister(); unsubscribeObserver();
+  });
+
   it("retains the old checkpoint while hidden and synchronizes once visible", async () => {
     localStorage.setItem(`143:live-cursor:${orgId}`, "100-0");
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
