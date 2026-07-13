@@ -213,6 +213,29 @@ func TestPreviewWildcardProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
 	require.NotContains(t, previewDefaults, "fail_duration 10s", "preview gateway proxying should not fan out one preview failure into a 10s wildcard outage")
 }
 
+func TestPreviewAPIProxyDoesNotUseMainAppPassiveHealth(t *testing.T) {
+	t.Parallel()
+
+	caddyfile, err := os.ReadFile("../deploy/Caddyfile")
+	require.NoError(t, err, "test should read the Caddyfile")
+	caddyText := string(caddyfile)
+
+	// Prefix the bare-domain site with a newline so it cannot match the same
+	// substring inside the preceding www.{$DOMAIN:143.dev} site label.
+	appBlock := extractCaddyBlock(t, caddyText, "\n{$DOMAIN:143.dev}")
+	previewAPIBlock := extractCaddyBlock(t, appBlock, "handle @preview_data_plane")
+	previewDefaults := extractCaddySnippetBlock(t, caddyText, "preview_gateway_upstream_defaults")
+	require.Contains(t, appBlock, "@preview_data_plane path /api/v1/sessions/*/preview /api/v1/sessions/*/preview/* /api/v1/previews /api/v1/previews/*", "main app routing should identify session and branch preview API endpoints")
+	require.Contains(t, previewAPIBlock, "name api", "preview API requests should still route through the API service")
+	require.Contains(t, previewAPIBlock, "port 8080", "preview API requests should use the public API port")
+	require.Contains(t, previewAPIBlock, "lb_retries 5", "safe preview API requests should retain transient retries")
+	require.Contains(t, previewAPIBlock, "lb_retries 0", "mutating preview API requests should not be replayed")
+	require.Equal(t, 2, strings.Count(previewAPIBlock, "import preview_gateway_upstream_defaults"), "both safe and mutating preview API requests should use preview-safe upstream health settings")
+	require.NotContains(t, previewAPIBlock, "import upstream_defaults", "preview API failures must not inherit main app passive health penalties")
+	require.NotContains(t, previewDefaults, "fail_duration", "preview-safe proxying should not quarantine the API after a worker-side preview failure")
+	require.Less(t, strings.Index(appBlock, "handle @preview_data_plane"), strings.Index(appBlock, "handle /api/*"), "preview API routing should run before the general API handler")
+}
+
 func extractCaddySnippetBlock(t *testing.T, caddyText, snippetName string) string {
 	t.Helper()
 
