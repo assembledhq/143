@@ -591,7 +591,7 @@ describe("ManualSessionCreatePageContent", () => {
 
     const textarea = await screen.findByRole("textbox", { name: "Manual session prompt" });
     expect(textarea).toHaveClass("max-sm:text-base");
-    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).toHaveClass("type-dense");
     expect(textarea).not.toHaveClass("text-base");
   });
 

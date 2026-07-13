@@ -151,7 +151,7 @@ export function CLIJoinTokensCard() {
             <div className="space-y-1.5">
               <Label htmlFor="join-token-role">Role granted</Label>
               <Select value={role} onValueChange={setRole}>
-                <SelectTrigger id="join-token-role" className="h-9 w-full sm:w-32">
+                <SelectTrigger id="join-token-role" className="h-11 w-full sm:h-9 sm:w-32">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -162,7 +162,7 @@ export function CLIJoinTokensCard() {
               </Select>
             </div>
             <Button
-              className="h-9"
+              className="h-11 w-full sm:h-9 sm:w-auto"
               disabled={createMutation.isPending}
               onClick={() => createMutation.mutate()}
             >
@@ -197,7 +197,7 @@ export function CLIJoinTokensCard() {
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          className={copiedTokenId === token.id ? "text-primary" : undefined}
+                          className={copiedTokenId === token.id ? "size-11 text-primary sm:size-7" : "size-11 sm:size-7"}
                           disabled={copyingTokenId === token.id}
                           aria-label={`Copy install link for ${token.name || token.token_prefix}`}
                           onClick={() => copyExistingMutation.mutate(token)}
@@ -208,7 +208,7 @@ export function CLIJoinTokensCard() {
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="text-destructive hover:text-destructive"
+                        className="min-h-11 text-destructive hover:text-destructive sm:min-h-0"
                         disabled={revokeMutation.isPending}
                         onClick={() => revokeMutation.mutate(token.id)}
                       >
@@ -242,7 +242,7 @@ export function CLIJoinTokensCard() {
               aria-label="Copy install command"
               variant="outline"
               size="icon"
-              className="size-9 shrink-0"
+              className="size-11 shrink-0 sm:size-9"
               onClick={copyInstallCommand}
             >
               {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}

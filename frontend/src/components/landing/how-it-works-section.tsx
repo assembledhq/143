@@ -20,8 +20,8 @@ function FadeInStep({ children }: { children: React.ReactNode }) {
       ref={ref}
       style={{
         opacity: inView ? 1 : 0,
-        transform: inView ? "translateY(0)" : "translateY(32px)",
-        transition: "opacity 0.7s ease-out, transform 0.7s ease-out",
+        transform: inView ? "translateY(0)" : "translateY(24px)",
+        transition: "opacity 0.65s cubic-bezier(0.16, 1, 0.3, 1), transform 0.65s cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
       {children}
@@ -45,7 +45,7 @@ function AnimatedBulletList({
           <li
             key={item}
             className={`text-xs font-mono transition-all duration-500 ${
-              isDark ? "text-white/35" : "text-slate-500"
+              isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"
             }`}
             style={{
               opacity: inView ? 1 : 0,
@@ -72,12 +72,12 @@ function ProductScreenshotFrame({
     <div className={layout.visualColumn}>
       <div
         className={`${layout.visualFrame} aspect-[16/9] border ${
-          isDark ? "border-white/10 bg-zinc-950" : "border-slate-200 bg-white"
+          isDark ? "border-white/10 bg-[#11110f]" : "border-[#e1ded5] bg-[#fefdfb]"
         }`}
         style={{
           boxShadow: isDark
-            ? "0 25px 50px -12px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05)"
-            : "0 25px 50px -12px rgba(15,23,42,0.15), 0 0 0 1px rgba(15,23,42,0.08)",
+            ? "0 30px 80px -28px rgba(0,0,0,0.72), 0 0 0 1px rgba(255,255,255,0.035)"
+            : "0 30px 80px -28px rgba(36,34,28,0.24), 0 8px 24px -16px rgba(36,34,28,0.16)",
         }}
       >
         <Image
@@ -95,9 +95,9 @@ function ProductScreenshotFrame({
 
 /* ─── Main Section ─── */
 export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
-  const label = isDark ? "text-white/25" : "text-slate-400";
-  const heading = isDark ? "text-white" : "text-slate-900";
-  const body = isDark ? "text-white/45" : "text-slate-600";
+  const label = isDark ? "text-[#7992ff]" : "text-[#315ce8]";
+  const heading = isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]";
+  const body = isDark ? "text-[#aaa89f]" : "text-[#6b6b65]";
   const [contextLayer, executionLayer, controlLayer, previewLayer] =
     platformLayers;
 
@@ -105,22 +105,22 @@ export default function HowItWorksSection({ isDark }: HowItWorksSectionProps) {
     <section
       id="how-it-works"
       className={layout.sectionPadding}
-      style={{ background: isDark ? "#0a0a12" : "#f2f5f9" }}
+      style={{ background: isDark ? "#151513" : "#f6f5f0" }}
     >
       <div className="absolute inset-0 pointer-events-none">
         <div
           className={`absolute inset-x-0 top-0 h-px ${
-            isDark ? "bg-white/10" : "bg-slate-300/80"
+            isDark ? "bg-white/10" : "bg-[#e1ded5]"
           }`}
         />
         <div
           className={`absolute left-1/2 top-0 h-full w-px ${
-            isDark ? "bg-white/[0.04]" : "bg-slate-300/50"
+            isDark ? "bg-white/[0.035]" : "bg-[#e1ded5]/70"
           }`}
         />
       </div>
 
-      <div className={`${layout.pageShell} space-y-32 sm:space-y-44`}>
+      <div className={`${layout.pageShell} space-y-28 sm:space-y-44`}>
         <div className={layout.sectionHeaderGrid}>
           <p className={`${type.eyebrow} ${label}`}>01 Why this matters</p>
           <div className="space-y-5">

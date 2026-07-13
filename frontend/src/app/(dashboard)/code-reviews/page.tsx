@@ -19,6 +19,9 @@ import {
 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Badge } from "@/components/ui/badge";
@@ -133,25 +136,63 @@ function decisionLabel(review: CodeReviewListItem): string {
   return "Pending";
 }
 
-function decisionVariant(review: CodeReviewListItem): "success" | "secondary" | "destructive" | "outline" {
-  if (review.decision === "approved") return "success";
-  if (review.decision === "blocked") return "destructive";
-  if (review.decision === "needs_human_review") return "secondary";
-  return "outline";
-}
-
-function statusVariant(status: string): "success" | "secondary" | "destructive" | "outline" {
-  if (status === "completed") return "success";
-  if (status === "failed" || status === "stale") return "destructive";
-  if (status === "running" || status === "queued") return "secondary";
-  return "outline";
-}
-
 function statusLabel(status: string): string {
   return status
     .split("_")
     .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
     .join(" ");
+}
+
+function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
+  if (review.decision === "approved") return "success";
+  if (review.decision === "blocked") return "destructive";
+  if (review.decision === "needs_human_review") return "warning";
+  return "neutral";
+}
+
+function reviewStatusTone(status: string): StatusTone {
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "stale") return "destructive";
+  if (status === "running" || status === "queued") return "primary";
+  return "neutral";
+}
+
+function ReviewActions({
+  review,
+  selected,
+  onToggleEvidence,
+}: {
+  review: CodeReviewListItem;
+  selected: boolean;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap justify-end gap-2 [&_a]:min-h-11 [&_button]:min-h-11 md:[&_a]:min-h-0 md:[&_button]:min-h-0">
+      <Button
+        variant={selected ? "secondary" : "ghost"}
+        size="sm"
+        onClick={onToggleEvidence}
+      >
+        <FileSearch className="h-4 w-4" />
+        Evidence
+      </Button>
+      <Button variant="ghost" size="sm" asChild>
+        <Link href={`/sessions/${review.session_id}`}>Session</Link>
+      </Button>
+      <Button className="size-11 md:size-7" variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
+        <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
+          <ExternalLink className="h-4 w-4" />
+        </Link>
+      </Button>
+      {review.github_review_url ? (
+        <Button className="size-11 md:size-7" variant="ghost" size="icon-sm" asChild aria-label="Open final review">
+          <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+            <ClipboardCheck className="h-4 w-4" />
+          </Link>
+        </Button>
+      ) : null}
+    </div>
+  );
 }
 
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
@@ -490,6 +531,10 @@ export default function CodeReviewsPage() {
           </TabsList>
 
           <TabsContent value="reviews" className="space-y-3">
+            <SectionGroup
+              title="Review activity"
+              description="Pull requests reviewed by the team policy and their current outcome."
+            >
             {reviews.length === 0 ? (
               <EmptyState
                 icon={ClipboardCheck}
@@ -498,7 +543,7 @@ export default function CodeReviewsPage() {
               />
             ) : (
               <>
-              <Card>
+              <Card className="hidden md:flex">
                 <CardContent className="p-0">
                   <Table>
                     <TableHeader>
@@ -525,55 +570,80 @@ export default function CodeReviewsPage() {
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
                           <TableCell>
-                            <Badge variant={review.acceptable ? "success" : "secondary"}>
-                              {review.acceptable ? "Acceptable" : "Needs review"}
-                            </Badge>
+                            <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
                           </TableCell>
                           <TableCell>
-                            <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                            <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(review.stale ? "stale" : review.status)}>
-                              {statusLabel(review.stale ? "stale" : review.status)}
-                            </Badge>
+                            <StatusLabel
+                              label={statusLabel(review.stale ? "stale" : review.status)}
+                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                              active={!review.stale && (review.status === "running" || review.status === "queued")}
+                            />
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                variant={selectedEvidenceSessionId === review.session_id ? "secondary" : "ghost"}
-                                size="sm"
-                                onClick={() =>
-                                  setSelectedEvidenceSessionId((current) =>
-                                    current === review.session_id ? null : review.session_id,
-                                  )
-                                }
-                              >
-                                <FileSearch className="h-4 w-4" />
-                                Evidence
-                              </Button>
-                              <Button variant="ghost" size="sm" asChild>
-                                <Link href={`/sessions/${review.session_id}`}>Session</Link>
-                              </Button>
-                              <Button variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
-                                <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
-                                  <ExternalLink className="h-4 w-4" />
-                                </Link>
-                              </Button>
-                              {review.github_review_url ? (
-                                <Button variant="ghost" size="icon-sm" asChild aria-label="Open final review">
-                                  <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-                                    <ClipboardCheck className="h-4 w-4" />
-                                  </Link>
-                                </Button>
-                              ) : null}
-                            </div>
+                            <ReviewActions
+                              review={review}
+                              selected={selectedEvidenceSessionId === review.session_id}
+                              onToggleEvidence={() =>
+                                setSelectedEvidenceSessionId((current) =>
+                                  current === review.session_id ? null : review.session_id,
+                                )
+                              }
+                            />
                           </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
                 </CardContent>
+              </Card>
+              <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
+                {reviews.map((review) => {
+                  const effectiveStatus = review.stale ? "stale" : review.status;
+                  return (
+                    <ResourceRow
+                      key={review.id}
+                      title={(
+                        <span className="break-words text-sm">
+                          #{review.github_pr_number} {review.pull_request_title}
+                        </span>
+                      )}
+                      metadata={(
+                        <span>
+                          {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                        </span>
+                      )}
+                      status={(
+                        <StatusLabel
+                          label={statusLabel(effectiveStatus)}
+                          tone={reviewStatusTone(effectiveStatus)}
+                          active={!review.stale && (review.status === "running" || review.status === "queued")}
+                        />
+                      )}
+                      detail={(
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                          <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
+                          <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+                          <span>Completed {formatDate(review.completed_at)}</span>
+                        </div>
+                      )}
+                      actions={(
+                        <ReviewActions
+                          review={review}
+                          selected={selectedEvidenceSessionId === review.session_id}
+                          onToggleEvidence={() =>
+                            setSelectedEvidenceSessionId((current) =>
+                              current === review.session_id ? null : review.session_id,
+                            )
+                          }
+                        />
+                      )}
+                    />
+                  );
+                })}
               </Card>
               <CodeReviewEvidenceSheet
                 review={selectedEvidenceReview}
@@ -587,6 +657,7 @@ export default function CodeReviewsPage() {
               />
               </>
             )}
+            </SectionGroup>
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
@@ -2088,7 +2159,7 @@ function CodeReviewEvidenceSheet({
                 {review?.pull_request_title ?? "Review evidence"}
               </SheetDescription>
             </div>
-            {review ? <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge> : null}
+            {review ? <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} /> : null}
           </div>
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
@@ -2120,7 +2191,7 @@ function CodeReviewEvidenceSheet({
                             {result.agent_model ? ` · ${result.agent_model}` : ""}
                           </div>
                         </div>
-                        <Badge variant={statusVariant(result.status)}>{statusLabel(result.status)}</Badge>
+                        <StatusLabel label={statusLabel(result.status)} tone={reviewStatusTone(result.status)} active={result.status === "running" || result.status === "queued"} />
                       </div>
                       {result.raw_output ? (
                         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">

@@ -68,7 +68,7 @@ function authStatusTone(status: CodingCredentialSummary["status"]) {
     case "invalid":
       return "text-destructive";
     default:
-      return "text-slate-700";
+      return "text-muted-foreground";
   }
 }
 

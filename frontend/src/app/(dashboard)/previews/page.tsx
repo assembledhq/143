@@ -19,6 +19,8 @@ import {
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
 import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
 import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import {
@@ -310,7 +312,7 @@ function PreviewActions({
   const previewHref = safeExternalUrl(preview.preview_url);
 
   return (
-    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
+    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap [&_a]:min-h-11 [&_button]:min-h-11 md:[&_a]:min-h-0 md:[&_button]:min-h-0">
       {previewHref ? (
         <Button
           asChild
@@ -368,34 +370,40 @@ function PreviewActions({
 }
 
 function PreviewMobileRow(props: PreviewActionsProps) {
-  const { preview } = props;
+  const { preview, scope } = props;
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="min-w-0">
+    <ResourceRow
+      title={(
         <Link
           href={previewDetailHref(preview)}
-          className="block truncate font-medium text-foreground"
+          className="block truncate font-medium text-foreground hover:underline"
         >
           {previewDisplayName(preview)}
         </Link>
-        <p className="truncate text-sm text-muted-foreground">
+      )}
+      metadata={(
+        <span>
           {preview.repository_full_name || preview.repository_id} ·{" "}
           {sourceLabel(preview)}
-        </p>
-      </div>
-      <div className="flex items-center justify-between gap-2">
+        </span>
+      )}
+      status={(
         <PreviewStatusBadge
           status={preview.status}
           label={statusLabel(preview)}
           variant={statusBadgeVariant(preview)}
         />
-        <span className="text-xs text-muted-foreground">
+      )}
+      detail={(
+        <span>
+          {statusDetail(preview, scope)}
+          {statusDetail(preview, scope) && relativeTime(preview.created_at) ? " · " : ""}
           {relativeTime(preview.created_at)}
         </span>
-      </div>
-      <PreviewActions {...props} />
-    </div>
+      )}
+      actions={<PreviewActions {...props} />}
+    />
   );
 }
 
@@ -783,13 +791,11 @@ export default function PreviewsPage() {
               const sectionPreviews = previewsByScope[section.scope];
               const count = sectionPreviews.length;
               return (
-                <section
+                <SectionGroup
                   key={section.scope}
-                  className="space-y-3"
-                  aria-labelledby={`previews-${section.scope}`}
-                >
-                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2">
+                  aria-label={`${section.title} previews`}
+                  title={(
+                    <span className="inline-flex items-center gap-2">
                       {section.scope === "running" ? (
                         <MonitorPlay className="h-4 w-4 text-muted-foreground" />
                       ) : section.scope === "attention" ? (
@@ -799,27 +805,18 @@ export default function PreviewsPage() {
                       ) : (
                         <GitBranch className="h-4 w-4 text-muted-foreground" />
                       )}
-                      <h2
-                        id={`previews-${section.scope}`}
-                        className="text-sm font-semibold text-foreground"
-                      >
-                        {section.title} ({count})
-                      </h2>
-                    </div>
-                    {section.scope === "running" && firstMeta?.pool ? (
-                      <p className="text-xs text-muted-foreground">
-                        Pool:{" "}
-                        {firstMeta.pool.user_active +
-                          firstMeta.pool.auto_active}{" "}
-                        of {firstMeta.pool.user_max + firstMeta.pool.auto_max}{" "}
-                        previews
-                      </p>
-                    ) : section.scope === "resumable" ? (
-                      <p className="text-xs text-muted-foreground">
-                        warm - resumes in ~30s
-                      </p>
-                    ) : null}
-                  </div>
+                      {section.title} ({count})
+                    </span>
+                  )}
+                  action={section.scope === "running" && firstMeta?.pool ? (
+                    <p className="text-xs text-muted-foreground">
+                      Pool: {firstMeta.pool.user_active + firstMeta.pool.auto_active} of{" "}
+                      {firstMeta.pool.user_max + firstMeta.pool.auto_max} previews
+                    </p>
+                  ) : section.scope === "resumable" ? (
+                    <p className="text-xs text-muted-foreground">warm - resumes in ~30s</p>
+                  ) : undefined}
+                >
                   <SectionRows
                     scope={section.scope}
                     previews={
@@ -841,7 +838,7 @@ export default function PreviewsPage() {
                       pendingStartLatestIds.has(preview.preview_group_id)
                     }
                   />
-                </section>
+                </SectionGroup>
               );
             })}
           </div>

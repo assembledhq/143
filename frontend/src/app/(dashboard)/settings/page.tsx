@@ -39,6 +39,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { PageHeader } from "@/components/page-header";
 import { PageContainer } from "@/components/page-container";
+import { SectionGroup } from "@/components/section-group";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { DebouncedInput } from "@/components/debounced-fields";
@@ -1089,26 +1090,23 @@ export default function SettingsPage() {
           description="Manage your organization."
         />
 
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xs font-medium text-foreground">Organization</h2>
-            {user?.role === "admin" && <AutosaveIndicator status={autosave.status} />}
+        <SectionGroup
+          title="Organization"
+          description="The workspace name shown throughout 143."
+          action={user?.role === "admin" ? <AutosaveIndicator status={autosave.status} /> : undefined}
+          variant="bordered"
+        >
+          <div className="max-w-[560px] space-y-2">
+            <Label htmlFor="org-name">Organization name</Label>
+            <DebouncedInput
+              id="org-name"
+              serverValue={settings?.data?.name ?? ""}
+              onCommit={(name) => autosave.save({ name })}
+              disabled={user?.role !== "admin"}
+              className={user?.role !== "admin" ? "bg-muted" : undefined}
+            />
           </div>
-          <Card>
-            <CardContent>
-              <div className="max-w-[560px] space-y-2">
-                <Label htmlFor="org-name">Organization name</Label>
-                <DebouncedInput
-                  id="org-name"
-                  serverValue={settings?.data?.name ?? ""}
-                  onCommit={(name) => autosave.save({ name })}
-                  disabled={user?.role !== "admin"}
-                  className={user?.role !== "admin" ? "bg-muted" : undefined}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        </section>
+        </SectionGroup>
 
         {user?.role === "admin" && <PRAuthorshipSettings />}
 

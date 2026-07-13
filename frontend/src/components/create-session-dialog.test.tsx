@@ -275,7 +275,7 @@ describe("CreateSessionDialog", () => {
     expect(dialog).toHaveClass("max-w-none");
     expect(dialog).toHaveClass("overflow-y-auto");
     expect(textarea).toHaveClass("max-sm:text-base");
-    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).toHaveClass("type-dense");
     expect(textarea).not.toHaveClass("text-base");
   });
 

@@ -148,7 +148,7 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByText(/Updated .* ago by Admin User/)).toBeInTheDocument();
   });
 
-  it('renders the members in list format with column headers', async () => {
+  it('keeps desktop column headers while making member rows compact on mobile', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await waitFor(() => {
@@ -159,10 +159,14 @@ describe('TeamSettingsPage', () => {
     expect(membersSection).not.toBeNull();
 
     const membersQueries = within(membersSection!);
-    expect(membersQueries.getAllByText('Name', { selector: 'div' }).length).toBeGreaterThan(0);
-    expect(membersQueries.getAllByText('Email', { selector: 'div' }).length).toBeGreaterThan(0);
-    expect(membersQueries.getAllByText('Role', { selector: 'div' }).length).toBeGreaterThan(0);
-    expect(membersQueries.getAllByText('Actions', { selector: 'div' }).length).toBeGreaterThan(0);
+    expect(membersQueries.getAllByText('Name', { selector: 'div' })).toHaveLength(1);
+    expect(membersQueries.getAllByText('Email', { selector: 'div' })).toHaveLength(1);
+    expect(membersQueries.getAllByText('Role', { selector: 'div' })).toHaveLength(1);
+    expect(membersQueries.getAllByText('Actions', { selector: 'div' })).toHaveLength(1);
+    expect(screen.getAllByTestId('team-member-row')[0]).toHaveClass(
+      'grid-cols-[minmax(0,1fr)_auto]',
+      'md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]',
+    );
   });
 
   it('shows (you) label for the current user', async () => {
@@ -194,17 +198,17 @@ describe('TeamSettingsPage', () => {
     expect(screen.getByRole('button', { name: 'Send invite' })).toBeDisabled();
   });
 
-  it('uses consistent compact sizing for invite email input in modal', async () => {
+  it('uses touch-safe mobile sizing and compact desktop sizing for the invite email input', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
 
     await userEvent.click(screen.getByRole('tab', { name: 'Email' }));
     const emailInput = await screen.findByRole('textbox', { name: 'Email' });
-    expect(emailInput).toHaveClass('h-9');
+    expect(emailInput).toHaveClass('h-11', 'sm:h-9');
   });
 
-  it('uses the shared modal action sizing for the invite footer buttons', async () => {
+  it('uses the shared responsive sizing for the invite footer buttons', async () => {
     renderWithProviders(<TeamSettingsPage />);
 
     await userEvent.click(await screen.findByRole('button', { name: 'Invite' }));
@@ -212,9 +216,8 @@ describe('TeamSettingsPage', () => {
     const cancelButton = await screen.findByRole('button', { name: 'Cancel' });
     const sendInviteButton = screen.getByRole('button', { name: 'Send invite' });
 
-    expect(cancelButton).toHaveClass('h-8');
-    expect(sendInviteButton).toHaveClass('h-8');
-    expect(sendInviteButton).not.toHaveClass('h-9');
+    expect(cancelButton).toHaveClass('h-11', 'sm:h-8');
+    expect(sendInviteButton).toHaveClass('h-11', 'sm:h-8');
   });
 
   it('renders pending invitations', async () => {
@@ -391,7 +394,7 @@ describe('TeamSettingsPage', () => {
     // Remove button should exist for the other member
     const removeButton = screen.getByRole('button', { name: 'Remove' });
     expect(removeButton).toBeInTheDocument();
-    expect(removeButton).toHaveClass('px-0');
+    expect(removeButton).toHaveClass('md:px-0');
   });
 
   it('shows confirmation dialog when Remove is clicked and calls removeMember on confirm', async () => {

@@ -66,12 +66,7 @@ function Milestone({
               : isDark
                 ? "rgba(255,255,255,0.15)"
                 : "rgba(0,0,0,0.12)",
-            boxShadow: active
-              ? isDark
-                ? "0 0 12px rgba(96,165,250,0.4)"
-                : "0 0 12px rgba(59,130,246,0.3)"
-              : "none",
-            transition: "background 0.4s ease-out, box-shadow 0.4s ease-out",
+            transition: "background 0.4s ease-out",
           }}
         />
       </div>
@@ -118,13 +113,13 @@ export default function Why143Page() {
   return (
     <div
       className="min-h-screen flex flex-col"
-      style={{ background: isDark ? "#08080f" : "#d4e6f5" }}
+      style={{ background: isDark ? "#151513" : "#f6f5f0" }}
     >
       {/* Nav */}
       <div className="flex items-center justify-between px-6 sm:px-10 pt-6 sm:pt-8">
         <Link
           href="/"
-          className={`text-sm font-medium ${isDark ? "text-white/60 hover:text-white" : "text-slate-600 hover:text-slate-900"} transition-colors`}
+          className={`text-sm font-medium ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
         >
           &larr; 143
         </Link>
@@ -147,7 +142,7 @@ export default function Why143Page() {
               Why &ldquo;143&rdquo;?
             </p>
             <h1
-              className={`text-2xl sm:text-3xl font-light tracking-tight ${isDark ? "text-white" : "text-slate-900"}`}
+              className={`font-display text-2xl font-semibold tracking-[-0.035em] sm:text-3xl ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
             >
               Why we&rsquo;re called 143
             </h1>
@@ -248,7 +243,7 @@ export default function Why143Page() {
           {/* Narrative */}
           <Reveal inView={inView} delay={0.3}>
             <h2
-              className={`mt-14 text-lg sm:text-2xl font-light leading-snug tracking-tight ${isDark ? "text-white" : "text-slate-900"}`}
+              className={`mt-14 font-display text-lg font-medium leading-snug tracking-[-0.03em] sm:text-2xl ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
             >
               Fast doesn&rsquo;t mean sloppy. It means{" "}
               <span
@@ -305,7 +300,7 @@ export default function Why143Page() {
           {/* Connector to today */}
           <Reveal inView={inView} delay={0.7}>
             <div
-              className={`mt-6 pt-8 border-t ${isDark ? "border-white/10" : "border-slate-900/10"}`}
+              className={`mt-6 border-t pt-8 ${isDark ? "border-white/10" : "border-black/10"}`}
             >
               <p
                 className="text-sm sm:text-base leading-relaxed"
