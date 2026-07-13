@@ -3786,7 +3786,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // changeset_id would route the backend to GetByChangesetID, which cannot
   // match legacy PR rows whose changeset_id is still NULL. Only non-primary
   // slots, whose PRs always carry a changeset_id, are looked up by changeset.
-  const selectedChangesetPRParam = selectedIsPrimary ? undefined : selectedChangeset?.id;
+  const selectedBranchChangesetID = selectedIsPrimary ? undefined : selectedChangeset?.id;
   const changesetSessionIDRef = useRef(id);
   useEffect(() => {
     const syncSelectionFromURL = () => setSelectedChangesetID(new URL(window.location.href).searchParams.get("changeset"));
@@ -3839,12 +3839,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     error: diffError,
     refetch: refetchDiff,
   } = useQuery({
-    queryKey: queryKeys.sessions.diff(id, `${diffRevisionKey ?? ""}:${selectedChangeset?.id ?? "primary"}`),
+    queryKey: queryKeys.sessions.diff(id, selectedBranchChangesetID),
     queryFn: () => {
       if (!diffRevisionKey) {
         fetchedDiffBeforeRevisionRef.current = true;
       }
-      return api.sessions.getDiff(id, selectedChangeset?.id);
+      return api.sessions.getDiff(id, selectedBranchChangesetID);
     },
     enabled: shouldLoadDiff,
     staleTime: Infinity,
@@ -4283,8 +4283,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // transition within milliseconds, and the SSE polling fallback re-reads the
   // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
-    queryKey: queryKeys.sessions.pr(id, selectedChangesetPRParam),
-    queryFn: () => api.sessions.getPR(id, selectedChangesetPRParam),
+    queryKey: queryKeys.sessions.pr(id, selectedBranchChangesetID),
+    queryFn: () => api.sessions.getPR(id, selectedBranchChangesetID),
     enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
