@@ -322,9 +322,11 @@ func (r *SessionReaper) reap(ctx context.Context) {
 
 	// Phase 0.4: Fail sessions whose runtime controller has already missed
 	// an expired deadline or left a stop request past its persisted stop-after
-	// deadline. Unlike the broad maxRunningAge safety net, this is keyed off
-	// the row's own runtime budget fields, so it can act quickly without
-	// cutting off healthy long-running sessions.
+	// deadline while the corresponding execution job still holds a live lease.
+	// Unlike the broad maxRunningAge safety net, this is keyed off the row's own
+	// runtime budget plus positive worker-liveness evidence, so a startup error
+	// that merely left session.status stale cannot be mislabeled as a shutdown
+	// stall.
 	now := time.Now()
 	runtimeDeadlineCutoff := now.Add(-r.runtimeStallAge)
 	runtimeStalled, err := r.sessions.ListRuntimeControlStalledSessions(ctx, runtimeDeadlineCutoff, now)
