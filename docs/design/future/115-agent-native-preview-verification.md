@@ -1,6 +1,6 @@
 # Design: Agent-Native Preview Verification
 
-> **Status:** In progress — Phase 1 complete; Phase 2 core implemented | **Last reviewed:** 2026-07-12
+> **Status:** In progress — Phases 1–2 complete; Phase 3 evidence core implemented | **Last reviewed:** 2026-07-13
 
 ## Implementation Status
 
@@ -18,7 +18,10 @@ fallback, and durable artifact references remain authoritative evidence.
 
 Adapter-by-adapter native-image compatibility still needs rollout validation;
 CLI-only runtimes can use the implemented workspace fallback. Verification
-evidence and automatic diff-aware verification remain future phases. Repository
+evidence now has a durable revision-keyed run model, a bounded coordinator,
+diff-aware smoke planning, and a session preview summary surface. Wiring the
+coordinator into every agent adapter's successful-turn lifecycle remains rollout
+work. Repository
 `browser` and `verification` policy parsing, defaults, and validation are already
 implemented as groundwork for Phase 3.
 
@@ -352,9 +355,13 @@ New responsibilities should remain separated:
 ### Phase 3: Automatic Verification And Evidence
 
 - **Complete:** Parse and validate `.143/config.json` browser/verification policy.
-- Add diff-aware verification triggers, bounded retries, and smoke plans.
-- Persist verification summaries and artifact references.
-- Render evidence and handoff state in session/preview UI.
+- **Complete:** Add deterministic diff-aware trigger policy, bounded coordinator retries,
+  and route/viewport smoke plans.
+- **Complete:** Persist revision-keyed verification summaries, ordered action outcomes,
+  console counts, and artifact references.
+- **Complete:** Render the latest evidence and handoff result in the session preview UI.
+- **Pending rollout wiring:** Invoke the coordinator from successful agent turns for each
+  supported adapter and supply the adapter-specific fix-and-resume callback.
 
 ### Phase 4: Quality Improvements
 
@@ -379,9 +386,9 @@ The P0 product is complete when a fresh coding-agent session can:
    leaves the preview origin.
 
 Criteria 1, 2, 3, 5, and 7 are implemented at the platform/tool-contract
-level. Criterion 4 has the required observe/act/update and diagnostic
-primitives, but automatic failure-driven re-verification remains Phase 3.
-Criterion 6 remains pending durable verification-run evidence. Criterion 2
+level. Criteria 4 and 6 now have the bounded retry coordinator, durable
+verification-run evidence, and UI summary contracts; production completion
+still requires the pending successful-turn adapter wiring described in Phase 3. Criterion 2
 also retains adapter rollout validation before native image consumption can be
 claimed uniformly across every supported coding-agent runtime.
 
