@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,11 +9,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/services/mcp"
 )
+
+const (
+	previewImageMIMEType = "image/png"
+	maxPreviewImageBytes = 10 << 20
+)
+
+var pngSignature = []byte{'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'}
 
 // previewToolExecutor implements the platform preview tools as thin
 // client-side wrappers over /api/v1. Session-preview actions target
@@ -139,7 +148,7 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"viewport_h":         {Type: "number", Description: "Viewport height"},
 			"full_page":          {Type: "boolean", Description: "Capture the full page"},
 			"max_semantic_bytes": {Type: "number", Description: "Bound semantic and DOM output size"},
-			"inline_base64":      {Type: "boolean", Description: "Include screenshot bytes; defaults false"},
+			"inline_base64":      {Type: "boolean", Description: "Ignored; screenshot bytes are always captured, returned as native image content, and stripped from the text block"},
 			"output":             {Type: "string", Description: "Write screenshot PNG to this workspace path"},
 			"console_cursor":     {Type: "number", Description: "Return console messages after this cursor"},
 		})},
@@ -150,7 +159,7 @@ func (e *previewToolExecutor) tools() []mcp.Tool {
 			"viewport_w":         {Type: "number", Description: "Final observation viewport width"},
 			"viewport_h":         {Type: "number", Description: "Final observation viewport height"},
 			"max_semantic_bytes": {Type: "number", Description: "Bound semantic and DOM output size"},
-			"inline_base64":      {Type: "boolean", Description: "Include screenshot bytes; defaults false"},
+			"inline_base64":      {Type: "boolean", Description: "Ignored; screenshot bytes are always captured, returned as native image content, and stripped from the text block"},
 			"output":             {Type: "string", Description: "Write the final screenshot PNG to this workspace path"},
 			"console_cursor":     {Type: "number", Description: "Return console messages after this cursor"},
 		})},
@@ -925,9 +934,10 @@ func (e *previewToolExecutor) observe(ctx context.Context, args json.RawMessage)
 	delete(params, "session_id")
 	delete(params, "preview_id")
 	delete(params, "output")
-	if strings.TrimSpace(output) != "" {
-		params["inline_base64"] = true
-	}
+	// Native MCP image content and the workspace fallback both require the
+	// screenshot bytes for this call. The bytes are removed from the text block
+	// before it is returned, so they do not inflate the model transcript.
+	params["inline_base64"] = true
 	result := e.postPreviewTarget(ctx, target, "observe", params, "preview observe failed")
 	return writePreviewObservationImage(result, output, false)
 }
@@ -951,15 +961,13 @@ func (e *previewToolExecutor) act(ctx context.Context, args json.RawMessage) *mc
 	delete(params, "session_id")
 	delete(params, "preview_id")
 	delete(params, "output")
-	if strings.TrimSpace(output) != "" {
-		params["inline_base64"] = true
-	}
+	params["inline_base64"] = true
 	result := e.postPreviewTarget(ctx, target, "act", params, "preview act failed")
 	return writePreviewObservationImage(result, output, true)
 }
 
 func writePreviewObservationImage(result *mcp.ToolCallResult, output string, act bool) *mcp.ToolCallResult {
-	if result == nil || result.IsError || strings.TrimSpace(output) == "" {
+	if result == nil || result.IsError {
 		return result
 	}
 	var payload map[string]any
@@ -970,21 +978,104 @@ func writePreviewObservationImage(result *mcp.ToolCallResult, output string, act
 	if act {
 		observation, _ = payload["observation"].(map[string]any)
 	}
+	if observation == nil {
+		return mcp.ErrorResult("preview response did not include an observation")
+	}
 	screenshot, _ := observation["screenshot"].(map[string]any)
+	if screenshot == nil {
+		return mcp.ErrorResult("preview response did not include a screenshot")
+	}
 	encoded, _ := screenshot["png_base64"].(string)
 	if encoded == "" {
 		return mcp.ErrorResult("preview response did not include screenshot bytes")
+	}
+	mimeType := previewImageMIMEType
+	if value, _ := screenshot["mime_type"].(string); strings.TrimSpace(value) != "" {
+		mimeType = strings.ToLower(strings.TrimSpace(value))
+	}
+	if mimeType != previewImageMIMEType {
+		return mcp.ErrorResult(fmt.Sprintf("preview screenshot has unsupported MIME type %q", mimeType))
+	}
+	if len(encoded) > base64.StdEncoding.EncodedLen(maxPreviewImageBytes) {
+		return mcp.ErrorResult(fmt.Sprintf("preview screenshot exceeds %d byte limit", maxPreviewImageBytes))
 	}
 	png, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return mcp.ErrorResult(fmt.Sprintf("decode preview screenshot: %s", err))
 	}
-	if err := os.WriteFile(output, png, 0o600); err != nil {
-		return mcp.ErrorResult(fmt.Sprintf("write preview screenshot: %s", err))
+	if len(png) > maxPreviewImageBytes {
+		return mcp.ErrorResult(fmt.Sprintf("preview screenshot exceeds %d byte limit", maxPreviewImageBytes))
+	}
+	if !bytes.HasPrefix(png, pngSignature) {
+		return mcp.ErrorResult("preview screenshot is not a valid PNG")
 	}
 	delete(screenshot, "png_base64")
-	observation["workspace_path"] = output
-	return jsonResult(payload)
+	delete(screenshot, "mime_type")
+
+	if strings.TrimSpace(output) != "" {
+		if err := writePrivatePreviewImage(output, png); err != nil {
+			return mcp.ErrorResult(fmt.Sprintf("write preview screenshot: %s", err))
+		}
+		observation["workspace_path"] = output
+		return jsonResult(payload)
+	}
+
+	textResult := jsonResult(payload)
+	textResult.Content = append(textResult.Content, mcp.ImageContent(encoded, previewImageMIMEType))
+	return textResult
+}
+
+func writePrivatePreviewImage(path string, png []byte) (returnErr error) {
+	workspace, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve workspace: %w", err)
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve output path: %w", err)
+	}
+	relPath, err := filepath.Rel(workspace, absPath)
+	if err != nil {
+		return fmt.Errorf("resolve workspace-relative output path: %w", err)
+	}
+	if !filepath.IsLocal(relPath) {
+		return fmt.Errorf("output path must stay within the current workspace")
+	}
+	root, err := os.OpenRoot(workspace)
+	if err != nil {
+		return fmt.Errorf("open workspace root: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			if returnErr == nil {
+				returnErr = fmt.Errorf("close workspace root: %w", err)
+			} else {
+				returnErr = fmt.Errorf("%w (close workspace root: %v)", returnErr, err)
+			}
+		}
+	}()
+	file, err := root.OpenFile(relPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open workspace output: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		closeErr := file.Close()
+		if closeErr != nil {
+			return fmt.Errorf("set permissions: %w (close: %v)", err, closeErr)
+		}
+		return fmt.Errorf("set permissions: %w", err)
+	}
+	if _, err := file.Write(png); err != nil {
+		closeErr := file.Close()
+		if closeErr != nil {
+			return fmt.Errorf("write image: %w (close: %v)", err, closeErr)
+		}
+		return fmt.Errorf("write image: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close image: %w", err)
+	}
+	return nil
 }
 
 func (e *previewToolExecutor) multiViewport(ctx context.Context, args json.RawMessage) *mcp.ToolCallResult {

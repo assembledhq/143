@@ -604,7 +604,8 @@ describe('SessionSidebar', () => {
     const selectedRow = selectedLink.parentElement;
 
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(selectedRow).toHaveClass('rounded-xl', 'border', 'border-primary/25', 'bg-card', 'shadow-sm');
+    expect(selectedRow).toHaveClass('rounded-xl', 'bg-accent/55');
+    expect(selectedRow).not.toHaveClass('shadow-sm', 'ring-1');
 
     fireEvent.click(selectedRow!);
 
@@ -678,8 +679,8 @@ describe('SessionSidebar', () => {
     const normalOption = (await screen.findByText('Existing session')).closest('[role="option"]');
     expect(normalOption).not.toBeNull();
 
-    expect(draftOption).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
-    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(draftOption).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'p-1');
 
     const draftLink = draftOption.querySelector('a');
     const normalLink = normalOption!.querySelector('a');
@@ -851,8 +852,8 @@ describe('SessionSidebar', () => {
     expect(optimisticOption).not.toBeNull();
     expect(normalOption).not.toBeNull();
 
-    expect(optimisticOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
-    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'border', 'p-1');
+    expect(optimisticOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'p-1');
+    expect(normalOption!).toHaveClass('flex', 'min-w-0', 'rounded-xl', 'p-1');
 
     const optimisticSurface = optimisticOption!.querySelector('[data-session-row-surface="true"]');
     const normalSurface = normalOption!.querySelector('a');
@@ -1198,18 +1199,11 @@ describe('SessionSidebar', () => {
     const selectedLink = screen.getByText('Selected session').closest('a');
     const unselectedLink = screen.getByText('Other session').closest('a');
     const selectedRow = selectedLink?.parentElement;
-    expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('md:bg-primary/5');
-    expect(selectedLink?.className).toContain('border-transparent');
-    expect(selectedLink?.className).toContain('shadow-none');
-    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedLink?.className).toContain('bg-accent/55');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/25');
-    expect(selectedRow?.className).toContain('ring-1');
-    expect(selectedRow?.className).toContain('ring-primary/10');
-    expect(selectedRow?.className).toContain('shadow-sm');
+    expect(selectedRow?.className).toContain('bg-accent/55');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
-    expect(unselectedLink?.className).not.toContain('bg-primary/5');
+    expect(unselectedLink?.className).not.toContain('bg-accent/55');
   });
 
   it('reserves the same selected-shell layout for unselected rows', async () => {
@@ -1225,9 +1219,9 @@ describe('SessionSidebar', () => {
     const selectedRow = screen.getByText('Selected session').closest('a')?.parentElement;
     const unselectedRow = screen.getByText('Other session').closest('a')?.parentElement;
 
-    expect(selectedRow).toHaveClass('border', 'p-1');
-    expect(selectedRow).toHaveClass('border-primary/25');
-    expect(unselectedRow).toHaveClass('border', 'border-transparent', 'p-1');
+    expect(selectedRow).toHaveClass('p-1', 'bg-accent/55');
+    expect(unselectedRow).toHaveClass('p-1');
+    expect(unselectedRow).not.toHaveClass('bg-accent/55');
   });
 
   it('highlights the selected session from the active layout segment', async () => {
@@ -1243,16 +1237,9 @@ describe('SessionSidebar', () => {
 
     const selectedLink = screen.getByText('Selected via pathname').closest('a');
     const selectedRow = selectedLink?.parentElement;
-    expect(selectedLink?.className).toContain('bg-primary/5');
-    expect(selectedLink?.className).toContain('md:bg-primary/5');
-    expect(selectedLink?.className).toContain('border-transparent');
-    expect(selectedLink?.className).toContain('shadow-none');
-    expect(selectedLink?.className).toContain('ring-0');
+    expect(selectedLink?.className).toContain('bg-accent/55');
     expect(selectedRow?.className).toContain('rounded-xl');
-    expect(selectedRow?.className).toContain('border-primary/25');
-    expect(selectedRow?.className).toContain('ring-1');
-    expect(selectedRow?.className).toContain('ring-primary/10');
-    expect(selectedRow?.className).toContain('shadow-sm');
+    expect(selectedRow?.className).toContain('bg-accent/55');
     expect(selectedLink).toHaveAttribute('aria-current', 'page');
   });
 

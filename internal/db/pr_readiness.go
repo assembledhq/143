@@ -33,11 +33,11 @@ func NewPRReadinessStore(db DBTX) *PRReadinessStore {
 	return &PRReadinessStore{db: db}
 }
 
-const prReadinessRunColumns = `id, org_id, session_id, repository_id, status,
-	evaluated_workspace_revision, evaluated_snapshot_key, summary, review_packet,
+const prReadinessRunColumns = `id, org_id, session_id, changeset_id, repository_id, status,
+	evaluated_workspace_revision, evaluated_snapshot_key, evaluated_head_sha, summary, review_packet,
 	triggered_by_user_id, started_at, completed_at, created_at, updated_at`
 
-const prReadinessCheckColumns = `id, org_id, run_id, session_id, check_type, status,
+const prReadinessCheckColumns = `id, org_id, run_id, session_id, changeset_id, check_type, status,
 	enforcement, title, summary, details, action, created_at,
 	check_key, enforcement_builder, enforcement_engineer, enforcement_admin, provenance, source`
 
@@ -45,26 +45,48 @@ func (s *PRReadinessStore) CreateRun(ctx context.Context, run *models.PRReadines
 	if err := run.Status.Validate(); err != nil {
 		return err
 	}
-	query := `
-		INSERT INTO pr_readiness_runs (
+	if run.ChangesetID == uuid.Nil {
+		err := s.db.QueryRow(ctx, `INSERT INTO pr_readiness_runs (
 			org_id, session_id, repository_id, status, evaluated_workspace_revision,
 			evaluated_snapshot_key, summary, review_packet, triggered_by_user_id
 		) VALUES (
 			@org_id, @session_id, @repository_id, @status, @evaluated_workspace_revision,
 			@evaluated_snapshot_key, @summary, @review_packet, @triggered_by_user_id
+		) RETURNING id, changeset_id, started_at, created_at, updated_at`, pgx.NamedArgs{
+			"org_id": run.OrgID, "session_id": run.SessionID, "repository_id": run.RepositoryID,
+			"status": run.Status, "evaluated_workspace_revision": run.EvaluatedWorkspaceRevision,
+			"evaluated_snapshot_key": run.EvaluatedSnapshotKey, "summary": run.Summary,
+			"review_packet": run.ReviewPacket, "triggered_by_user_id": run.TriggeredByUserID,
+		}).Scan(&run.ID, &run.ChangesetID, &run.StartedAt, &run.CreatedAt, &run.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("create PR readiness run: %w", err)
+		}
+		return nil
+	}
+	query := `
+		INSERT INTO pr_readiness_runs (
+			org_id, session_id, changeset_id, repository_id, status, evaluated_workspace_revision,
+			evaluated_snapshot_key, evaluated_head_sha, summary, review_packet, triggered_by_user_id
+		) VALUES (
+			@org_id, @session_id, COALESCE(NULLIF(@changeset_id, '00000000-0000-0000-0000-000000000000'::uuid),
+				(SELECT id FROM session_changesets WHERE org_id = @org_id AND session_id = @session_id AND is_primary)),
+			@repository_id, @status, @evaluated_workspace_revision,
+			@evaluated_snapshot_key, @evaluated_head_sha, @summary, @review_packet, @triggered_by_user_id
 		)
-		RETURNING id, started_at, created_at, updated_at`
+		RETURNING id, changeset_id, started_at, created_at, updated_at`
 	err := s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"org_id":                       run.OrgID,
 		"session_id":                   run.SessionID,
+		"changeset_id":                 run.ChangesetID,
 		"repository_id":                run.RepositoryID,
 		"status":                       run.Status,
 		"evaluated_workspace_revision": run.EvaluatedWorkspaceRevision,
 		"evaluated_snapshot_key":       run.EvaluatedSnapshotKey,
+		"evaluated_head_sha":           run.EvaluatedHeadSHA,
 		"summary":                      run.Summary,
 		"review_packet":                run.ReviewPacket,
 		"triggered_by_user_id":         run.TriggeredByUserID,
-	}).Scan(&run.ID, &run.StartedAt, &run.CreatedAt, &run.UpdatedAt)
+	}).Scan(&run.ID, &run.ChangesetID, &run.StartedAt, &run.CreatedAt, &run.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("create PR readiness run: %w", err)
 	}
@@ -186,17 +208,18 @@ func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid
 		}
 		_, err := tx.Exec(ctx, `
 			INSERT INTO pr_readiness_checks (
-				org_id, run_id, session_id, check_key, check_type, status, enforcement,
+				org_id, run_id, session_id, changeset_id, check_key, check_type, status, enforcement,
 				enforcement_builder, enforcement_engineer, enforcement_admin,
 				provenance, source, title, summary, details, action
 			) VALUES (
-				@org_id, @run_id, @session_id, @check_key, @check_type, @status, @enforcement,
+				@org_id, @run_id, @session_id, @changeset_id, @check_key, @check_type, @status, @enforcement,
 				@enforcement_builder, @enforcement_engineer, @enforcement_admin,
 				@provenance, @source, @title, @summary, @details, @action
 			)`, pgx.NamedArgs{
 			"org_id":               orgID,
 			"run_id":               runID,
 			"session_id":           check.SessionID,
+			"changeset_id":         check.ChangesetID,
 			"check_key":            check.CheckKey,
 			"check_type":           check.CheckType,
 			"status":               check.Status,
@@ -222,17 +245,29 @@ func (s *PRReadinessStore) CompleteRunWithChecks(ctx context.Context, orgID uuid
 }
 
 func (s *PRReadinessStore) GetLatestBySession(ctx context.Context, orgID, sessionID uuid.UUID) (*models.PRReadinessRun, error) {
+	query := `SELECT ` + prReadinessRunColumns + ` FROM pr_readiness_runs
+		WHERE org_id = @org_id AND session_id = @session_id
+		  AND changeset_id = (SELECT id FROM session_changesets WHERE org_id = @org_id AND session_id = @session_id AND is_primary)
+		ORDER BY created_at DESC, id DESC LIMIT 1`
+	return s.getLatestRun(ctx, orgID, query, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+}
+
+func (s *PRReadinessStore) GetLatestByChangeset(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (*models.PRReadinessRun, error) {
 	query := `
 		SELECT ` + prReadinessRunColumns + `
 		FROM pr_readiness_runs
-		WHERE org_id = @org_id AND session_id = @session_id
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1`
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+	return s.getLatestRun(ctx, orgID, query, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID})
+}
+
+func (s *PRReadinessStore) getLatestRun(ctx context.Context, orgID uuid.UUID, query string, args pgx.NamedArgs) (*models.PRReadinessRun, error) {
+	rows, err := s.db.Query(ctx, query, args)
 	if err != nil {
 		return nil, fmt.Errorf("query latest PR readiness run: %w", err)
 	}
-	run, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PRReadinessRun])
+	run, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PRReadinessRun])
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +294,7 @@ func (s *PRReadinessStore) GetRunByID(ctx context.Context, orgID, runID uuid.UUI
 	if err != nil {
 		return models.PRReadinessRun{}, fmt.Errorf("query PR readiness run: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PRReadinessRun])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PRReadinessRun])
 }
 
 func (s *PRReadinessStore) ListChecksByRun(ctx context.Context, orgID, runID uuid.UUID) ([]models.PRReadinessCheck, error) {
@@ -272,7 +307,7 @@ func (s *PRReadinessStore) ListChecksByRun(ctx context.Context, orgID, runID uui
 	if err != nil {
 		return nil, fmt.Errorf("query PR readiness checks: %w", err)
 	}
-	checks, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PRReadinessCheck])
+	checks, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PRReadinessCheck])
 	if err != nil {
 		return nil, err
 	}
@@ -434,21 +469,38 @@ func (s *PRReadinessStore) createBypass(ctx context.Context, orgID, runID, userI
 func (s *PRReadinessStore) insertBypass(ctx context.Context, orgID uuid.UUID, run models.PRReadinessRun, userID uuid.UUID, reason string, checkBytes []byte) (models.PRReadinessBypass, error) {
 	var bypass models.PRReadinessBypass
 	var bypassedChecks []byte
+	if run.ChangesetID == uuid.Nil {
+		err := s.db.QueryRow(ctx, `INSERT INTO pr_readiness_bypasses (
+			org_id, readiness_run_id, session_id, repository_id, bypassed_by_user_id, reason, bypassed_checks
+		) VALUES (@org_id, @readiness_run_id, @session_id, @repository_id, @bypassed_by_user_id, @reason, @bypassed_checks)
+		RETURNING id, org_id, readiness_run_id, session_id, repository_id, pull_request_id, bypassed_by_user_id, reason, bypassed_checks, created_at`, pgx.NamedArgs{
+			"org_id": orgID, "readiness_run_id": run.ID, "session_id": run.SessionID, "repository_id": run.RepositoryID,
+			"bypassed_by_user_id": userID, "reason": reason, "bypassed_checks": checkBytes,
+		}).Scan(&bypass.ID, &bypass.OrgID, &bypass.ReadinessRunID, &bypass.SessionID, &bypass.RepositoryID, &bypass.PullRequestID, &bypass.BypassedByUserID, &bypass.Reason, &bypassedChecks, &bypass.CreatedAt)
+		if err != nil {
+			return models.PRReadinessBypass{}, fmt.Errorf("insert PR readiness bypass: %w", err)
+		}
+		if err := json.Unmarshal(bypassedChecks, &bypass.BypassedChecks); err != nil {
+			return models.PRReadinessBypass{}, fmt.Errorf("decode PR readiness bypass checks: %w", err)
+		}
+		return bypass, nil
+	}
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO pr_readiness_bypasses (
-			org_id, readiness_run_id, session_id, repository_id, bypassed_by_user_id, reason, bypassed_checks
+			org_id, readiness_run_id, session_id, changeset_id, repository_id, bypassed_by_user_id, reason, bypassed_checks
 		) VALUES (
-			@org_id, @readiness_run_id, @session_id, @repository_id, @bypassed_by_user_id, @reason, @bypassed_checks
+			@org_id, @readiness_run_id, @session_id, @changeset_id, @repository_id, @bypassed_by_user_id, @reason, @bypassed_checks
 		)
-		RETURNING id, org_id, readiness_run_id, session_id, repository_id, pull_request_id, bypassed_by_user_id, reason, bypassed_checks, created_at`, pgx.NamedArgs{
+		RETURNING id, org_id, readiness_run_id, session_id, changeset_id, repository_id, pull_request_id, bypassed_by_user_id, reason, bypassed_checks, created_at`, pgx.NamedArgs{
 		"org_id":              orgID,
 		"readiness_run_id":    run.ID,
 		"session_id":          run.SessionID,
+		"changeset_id":        run.ChangesetID,
 		"repository_id":       run.RepositoryID,
 		"bypassed_by_user_id": userID,
 		"reason":              reason,
 		"bypassed_checks":     checkBytes,
-	}).Scan(&bypass.ID, &bypass.OrgID, &bypass.ReadinessRunID, &bypass.SessionID, &bypass.RepositoryID, &bypass.PullRequestID, &bypass.BypassedByUserID, &bypass.Reason, &bypassedChecks, &bypass.CreatedAt)
+	}).Scan(&bypass.ID, &bypass.OrgID, &bypass.ReadinessRunID, &bypass.SessionID, &bypass.ChangesetID, &bypass.RepositoryID, &bypass.PullRequestID, &bypass.BypassedByUserID, &bypass.Reason, &bypassedChecks, &bypass.CreatedAt)
 	if err != nil {
 		return models.PRReadinessBypass{}, fmt.Errorf("insert PR readiness bypass: %w", err)
 	}

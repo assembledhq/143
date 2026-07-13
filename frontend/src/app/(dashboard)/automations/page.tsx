@@ -38,9 +38,13 @@ import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
 import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { EmptyState } from "@/components/empty-state";
+import { InteractiveCard } from "@/components/interactive-card";
+import { ResourceRow } from "@/components/resource-row";
 import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
+import { SectionGroup } from "@/components/section-group";
 import { useAuth } from "@/hooks/use-auth";
 import { Card, CardContent } from "@/components/ui/card";
+import { StatusLabel } from "@/components/status-label";
 
 const popularCategory = {
   id: "popular",
@@ -104,9 +108,10 @@ function automationScheduleTimezone(automation: Automation) {
 
 function automationStatusBadge(automation: Automation) {
   return (
-    <Badge variant={automation.enabled ? "success" : "secondary"}>
-      {automationStatus(automation)}
-    </Badge>
+    <StatusLabel
+      label={automationStatus(automation)}
+      tone={automation.enabled ? "success" : "neutral"}
+    />
   );
 }
 
@@ -129,17 +134,12 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
   const categories = [popularCategory, ...automationTemplateCategories];
 
   return (
-    <section className="border-t border-border/70 pt-8">
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-1.5">
-          <h2 className="text-sm font-medium text-foreground">Template library</h2>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            Optional starting points for new recurring agents. Templates stay separate from the automations already running.
-          </p>
-        </div>
-      </div>
-
-      <Card>
+    <SectionGroup
+      className="border-t border-border/70 pt-8"
+      title="Template library"
+      description="Optional starting points for new recurring agents. Templates stay separate from the automations already running."
+    >
+      <Card variant="quiet" className="bg-surface-recessed/35">
         <CardContent className="space-y-4 p-3 sm:p-4">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -177,9 +177,9 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
                         const Icon = template.icon;
 
                         return (
-                          <Card
+                          <InteractiveCard
                             key={template.id}
-                            className="min-h-24 rounded-lg border-border/60 shadow-none"
+                            className="min-h-24 rounded-xl bg-card"
                           >
                             <CardContent className="flex items-start gap-3 p-3">
                               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-muted/40">
@@ -223,7 +223,7 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
                                 </div>
                               </div>
                             </CardContent>
-                          </Card>
+                          </InteractiveCard>
                         );
                       })}
                     </div>
@@ -241,7 +241,7 @@ function AutomationTemplateGallery({ canManage }: { canManage: boolean }) {
           </Tabs>
         </CardContent>
       </Card>
-    </section>
+    </SectionGroup>
   );
 }
 
@@ -345,20 +345,13 @@ function AutomationsWorkspace({
   ];
 
   return (
-    <section className="space-y-4" aria-labelledby="your-automations-heading">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-1">
-          <h2 id="your-automations-heading" className="text-sm font-medium text-foreground">
-            Your automations
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            {total > 0
-              ? "Recurring agents currently configured for this team."
-              : "No recurring agents are configured yet."}
-          </p>
-        </div>
-      </div>
-
+    <SectionGroup
+      aria-label="Your automations"
+      title="Your automations"
+      description={total > 0
+        ? "Recurring agents currently configured for this team."
+        : "No recurring agents are configured yet."}
+    >
       {total > 0 ? (
         <div className="space-y-3">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -402,7 +395,7 @@ function AutomationsWorkspace({
           description="Start from a blank setup or use a template below."
         />
       )}
-    </section>
+    </SectionGroup>
   );
 }
 
@@ -468,7 +461,7 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 shrink-0"
+            className="size-11 shrink-0 md:size-8"
             aria-label={`More options for ${automation.name}`}
           >
             <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
@@ -514,38 +507,40 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 function AutomationMobileRow({ automation, canManage }: { automation: Automation; canManage: boolean }) {
   const timezone = automationScheduleTimezone(automation);
   return (
-    <div className="flex items-start gap-3 p-4">
-      <Link href={`/automations/${automation.id}`} className="min-w-0 flex-1 space-y-3">
-        <div className="flex items-start gap-2.5">
-          <span
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
-            aria-label={`Automation icon for ${automation.name}`}
-          >
-            {automation.icon_value || "⚙️"}
-          </span>
-          <div className="min-w-0 flex-1 space-y-1">
-            <h3 className="break-words text-sm font-medium leading-5 text-foreground">
-              {automation.name}
-            </h3>
-            {automationStatusBadge(automation)}
-          </div>
-        </div>
-        <div className="space-y-1 pl-10 text-xs leading-5 text-muted-foreground">
-          <p className="break-words text-foreground">{formatAutomationSchedule(automation)}</p>
-          {timezone ? <p className="break-words">{timezone}</p> : null}
-          <p>
-            {automation.enabled
-              ? `Next ${formatAutomationRunDate(automation.next_run_at)}`
-              : automation.paused_at
-                ? `Paused ${formatTimeAgo(automation.paused_at)}`
-                : "Paused"}
-            <span aria-hidden="true"> · </span>
-            Last {automation.last_run_at ? formatTimeAgo(automation.last_run_at) : "never"}
-          </p>
-        </div>
-      </Link>
-      <AutomationActions automation={automation} canManage={canManage} />
-    </div>
+    <ResourceRow
+      leading={(
+        <span
+          className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-lg leading-none"
+          aria-label={`Automation icon for ${automation.name}`}
+        >
+          {automation.icon_value || "⚙️"}
+        </span>
+      )}
+      title={(
+        <Link href={`/automations/${automation.id}`} className="break-words text-sm leading-5 hover:underline">
+          {automation.name}
+        </Link>
+      )}
+      status={automationStatusBadge(automation)}
+      metadata={(
+        <span>
+          {formatAutomationSchedule(automation)}
+          {timezone ? ` · ${timezone}` : ""}
+        </span>
+      )}
+      detail={(
+        <span>
+          {automation.enabled
+            ? `Next ${formatAutomationRunDate(automation.next_run_at)}`
+            : automation.paused_at
+              ? `Paused ${formatTimeAgo(automation.paused_at)}`
+              : "Paused"}
+          <span aria-hidden="true"> · </span>
+          Last {automation.last_run_at ? formatTimeAgo(automation.last_run_at) : "never"}
+        </span>
+      )}
+      actions={<AutomationActions automation={automation} canManage={canManage} />}
+    />
   );
 }
 

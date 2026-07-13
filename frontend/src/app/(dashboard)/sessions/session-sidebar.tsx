@@ -64,8 +64,8 @@ const filterTabs = [
 ];
 
 const newSessionOptionId = "new-session";
-const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl border border-transparent p-1 transition-all duration-150";
-const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg border border-border/50 bg-card px-3 py-2.5 shadow-sm transition-all duration-150 md:border-transparent md:bg-transparent md:shadow-none";
+const sessionSidebarOptionFrameClass = "flex min-w-0 rounded-xl p-1 transition-colors duration-[175ms]";
+const sessionSidebarLinkSurfaceClass = "relative block min-w-0 flex-1 overflow-hidden rounded-lg px-3 py-2.5 transition-colors duration-[175ms]";
 
 function SessionSidebarOptionFrame({
   id,
@@ -197,7 +197,7 @@ function PRStatusBadge({ prSummary }: { prSummary?: SessionListItem["pr_summary"
   }
 
   return (
-    <span className="inline-flex items-center gap-1 shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5" title={label}>
+    <span className="inline-flex shrink-0 items-center gap-1" title={label}>
       <span className={cn("inline-flex rounded-full h-1.5 w-1.5", dotColor)} />
       <span className="text-xs text-muted-foreground">PR</span>
     </span>
@@ -212,7 +212,7 @@ function SessionDiffBadge({ diffStats }: { diffStats?: { added: number; removed:
   if (!diffStats) return null;
   if (diffStats.added === 0 && diffStats.removed === 0) return null;
   return (
-    <span className="inline-flex shrink-0 rounded-md border border-border/60 bg-muted/50 px-1.5 py-0.5">
+    <span className="inline-flex shrink-0">
       <DiffStatsBadge added={diffStats.added} removed={diffStats.removed} className="text-xs" />
     </span>
   );
@@ -286,12 +286,12 @@ function CurrentSessionContextRow({
       ariaLabel={title}
       ariaSelected={ariaSelected}
       optionRef={optionRef}
-      className="border-primary/25 bg-card shadow-sm ring-1 ring-primary/10"
+      className="bg-accent/45"
     >
       <SessionSidebarRowSurface
         href={href}
         ariaCurrent="page"
-        className="border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
+        className="bg-accent/45"
       >
         <span
           aria-hidden="true"
@@ -310,7 +310,7 @@ function CurrentSessionContextRow({
               <p className="text-xs font-medium text-foreground truncate leading-snug">
                 {title}
               </p>
-              <span className="shrink-0 rounded-md border border-primary/20 bg-card/70 px-1.5 py-0.5 text-xs font-medium text-primary">
+              <span className="shrink-0 text-xs font-medium text-primary">
                 Current
               </span>
             </div>
@@ -982,8 +982,8 @@ export function SessionSidebar() {
           onMouseDown={() => seedSessionDetailCache(session)}
           className={cn(
             "cursor-pointer",
-            currentActiveSessionId === session.id && !isSelected && "border-border/70 bg-muted/40 ring-1 ring-ring/20",
-            isSelected && "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10",
+            currentActiveSessionId === session.id && !isSelected && "bg-surface-recessed/75",
+            isSelected && "bg-accent/55",
           )}
           onClick={(event) => {
             // Clicks on the frame padding (outside the inner link surface)
@@ -1004,8 +1004,8 @@ export function SessionSidebar() {
             onFocus={() => prefetchSessionRoute(sessionHref)}
             className={
               isSelected
-                ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
+                ? "bg-accent/55"
+                : "hover:bg-accent/25"
             }
           >
             <span
@@ -1029,7 +1029,7 @@ export function SessionSidebar() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <p className={cn(
-                    "text-xs font-medium truncate leading-snug",
+                    "type-dense font-medium truncate",
                     hasUnread || isWorkingSession ? "text-foreground" : "text-muted-foreground"
                   )}>
                     {title}
@@ -1111,7 +1111,7 @@ export function SessionSidebar() {
             href={`/sessions/new${newSessionFilterSuffix}`}
             onMouseEnter={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
             onFocus={() => prefetchRoute(`/sessions/new${newSessionFilterSuffix}`)}
-            className="relative flex items-center justify-center gap-2 w-full h-9 rounded-md bg-primary bg-[image:var(--gradient-primary)] text-xs font-medium text-white shadow-sm hover:bg-[image:var(--gradient-primary-hover)] hover:shadow-[var(--glow-primary-sm)] transition-all"
+            className="relative flex h-9 w-full items-center justify-center gap-2 rounded-md bg-primary type-dense font-medium text-primary-foreground shadow-[0_1px_0_rgb(0_0_0_/_12%)] transition-colors hover:bg-primary/90"
           >
             <Plus className="h-4 w-4" />
             New session
@@ -1173,15 +1173,15 @@ export function SessionSidebar() {
               id={`session-sidebar-option-${newSessionOptionId}`}
               ariaLabel="New session draft"
               ariaSelected={!currentActiveSessionId}
-              className={!currentActiveSessionId ? "border-primary/25 bg-card shadow-sm ring-1 ring-primary/10" : undefined}
+                className={!currentActiveSessionId ? "bg-accent/55" : undefined}
             >
               <SessionSidebarRowSurface
                 href={`/sessions/new${newSessionFilterSuffix}`}
                 ariaCurrent="page"
                 className={
                   !currentActiveSessionId
-                    ? "border-transparent bg-primary/5 shadow-none ring-0 md:border-transparent md:bg-primary/5 md:shadow-none"
-                    : "hover:border-border/60 hover:bg-card md:hover:border-transparent md:hover:bg-muted/50"
+                    ? "bg-accent/55"
+                    : "hover:bg-accent/25"
                 }
               >
                 <div className="flex items-center gap-2.5 min-w-0">

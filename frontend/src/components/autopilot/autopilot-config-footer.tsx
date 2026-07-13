@@ -37,7 +37,7 @@ function ConfigRow({
   canEdit: boolean;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 py-3">
+    <div className="flex flex-col items-start gap-2 py-3 sm:flex-row sm:justify-between sm:gap-4">
       <div className="min-w-0">
         <p className="text-sm font-medium text-foreground">{label}</p>
         <div className="mt-0.5 text-sm text-muted-foreground sm:mt-0 sm:inline sm:ml-0">
@@ -48,13 +48,48 @@ function ConfigRow({
         <Button
           variant="ghost"
           size="sm"
-          className="shrink-0 text-muted-foreground"
+          className="min-h-11 shrink-0 self-start text-muted-foreground sm:min-h-0"
           onClick={onAction}
         >
           {actionLabel}
         </Button>
       ) : null}
     </div>
+  );
+}
+
+function ConfigPill({
+  label,
+  actionLabel,
+  canEdit,
+  onClick,
+  className,
+}: {
+  label: string;
+  actionLabel: string;
+  canEdit: boolean;
+  onClick: () => void;
+  className?: string;
+}) {
+  if (!canEdit) {
+    return (
+      <Badge variant="secondary" className={cn("shrink-0 text-xs", className)}>
+        {label}
+      </Badge>
+    );
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="secondary"
+      size="xs"
+      className={cn("min-h-11 shrink-0 rounded-full px-2 text-xs sm:min-h-0", className)}
+      aria-label={actionLabel}
+      onClick={onClick}
+    >
+      {label}
+    </Button>
   );
 }
 
@@ -104,41 +139,41 @@ export function AutopilotConfigFooter({
       <Collapsible open={isOpen} onOpenChange={setIsOpen}>
         {/* Pill bar — always visible */}
         <div className="flex items-center gap-2 py-2.5">
-          <div className="flex flex-1 flex-wrap items-center gap-1.5 min-w-0">
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onEditDirection : undefined}
-            >
-              {directionPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onEditDirection : undefined}
-            >
-              {focusPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onManageDocuments : undefined}
-            >
-              {docsPill}
-            </Badge>
-            <Badge
-              variant="secondary"
-              className={cn("text-xs", canEdit && "cursor-pointer hover:bg-secondary/80")}
-              onClick={canEdit ? onOpenSettings : undefined}
-            >
-              {weightsPill}
-            </Badge>
+          <div className="flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden pb-0.5">
+            <ConfigPill
+              label={directionPill}
+              actionLabel="Edit Autopilot direction"
+              canEdit={canEdit}
+              onClick={onEditDirection}
+              className="max-w-36 truncate"
+            />
+            <ConfigPill
+              label={focusPill}
+              actionLabel="Edit Autopilot focus areas"
+              canEdit={canEdit}
+              onClick={onEditDirection}
+            />
+            <ConfigPill
+              label={docsPill}
+              actionLabel="Manage Autopilot documents"
+              canEdit={canEdit}
+              onClick={onManageDocuments}
+              className="hidden sm:inline-flex"
+            />
+            <ConfigPill
+              label={weightsPill}
+              actionLabel="Open Autopilot settings"
+              canEdit={canEdit}
+              onClick={onOpenSettings}
+              className="hidden sm:inline-flex"
+            />
           </div>
           <CollapsibleTrigger asChild>
             <Button
               variant="ghost"
               size="icon-xs"
-              className="shrink-0 text-muted-foreground"
+              className="size-11 shrink-0 text-muted-foreground sm:size-6"
+              aria-label={isOpen ? "Collapse Autopilot configuration" : "Expand Autopilot configuration"}
             >
               <ChevronRight
                 className={cn(

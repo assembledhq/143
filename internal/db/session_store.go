@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1971,13 +1972,84 @@ func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID u
 }
 
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
-	query := `UPDATE sessions SET title = @title, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
+	return s.UpdateTitleWithSource(ctx, orgID, sessionID, title, models.SessionTitleSourceManual)
+}
+
+func (s *SessionStore) UpdateTitleWithSource(ctx context.Context, orgID, sessionID uuid.UUID, title string, source models.SessionTitleSource) error {
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	query := `
+		UPDATE sessions
+		SET title = @title,
+		    title_source = @title_source,
+		    title_intent = NULL,
+		    title_pivoted_at_turn = NULL,
+		    title_generated_at = CASE WHEN @title_source = 'generated' THEN now() ELSE NULL END,
+		    last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":     sessionID,
-		"org_id": orgID,
-		"title":  title,
+		"id":           sessionID,
+		"org_id":       orgID,
+		"title":        title,
+		"title_source": source,
 	})
 	return err
+}
+
+// UpdateTitleForPivot records a generated title and the accepted primary
+// objective atomically. An unchanged display title preserves last_activity_at
+// while still advancing the accepted intent so the pivot is not rediscovered.
+func (s *SessionStore) UpdateTitleForPivot(ctx context.Context, orgID, sessionID uuid.UUID, title, intent string, pivotedAtTurn int) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET title = @title,
+		    title_source = 'generated',
+		    title_intent = @title_intent,
+		    title_pivoted_at_turn = @pivoted_at_turn,
+		    title_generated_at = CASE WHEN title IS DISTINCT FROM @title THEN now() ELSE title_generated_at END,
+		    last_activity_at = CASE WHEN title IS DISTINCT FROM @title THEN now() ELSE last_activity_at END
+		WHERE id = @id
+		  AND org_id = @org_id`, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"title":           title,
+		"title_intent":    intent,
+		"pivoted_at_turn": pivotedAtTurn,
+	})
+	return err
+}
+
+func (s *SessionStore) GetTitleState(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionTitleState, error) {
+	var state models.SessionTitleState
+	var title sql.NullString
+	var intent sql.NullString
+	var pivotedAtTurn sql.NullInt64
+	var generatedAt sql.NullTime
+	err := s.db.QueryRow(ctx, `
+		SELECT title, title_source, title_intent, title_pivoted_at_turn, title_generated_at, current_turn
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&title, &state.TitleSource, &intent, &pivotedAtTurn, &generatedAt, &state.CurrentTurn)
+	if err != nil {
+		return models.SessionTitleState{}, err
+	}
+	if title.Valid {
+		state.Title = &title.String
+	}
+	if intent.Valid {
+		state.TitleIntent = &intent.String
+	}
+	if pivotedAtTurn.Valid {
+		turn := int(pivotedAtTurn.Int64)
+		state.TitlePivotedAtTurn = &turn
+	}
+	if generatedAt.Valid {
+		state.TitleGeneratedAt = &generatedAt.Time
+	}
+	return state, nil
 }
 
 func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -3572,6 +3644,17 @@ func (s *SessionStore) GetPrimaryChangesetID(ctx context.Context, orgID, session
 		return uuid.Nil, fmt.Errorf("get primary session changeset id: %w", err)
 	}
 	return changesetID, nil
+}
+
+func (s *SessionStore) GetPrimaryChangesetWorktreePath(ctx context.Context, orgID, sessionID uuid.UUID) (*string, error) {
+	var path *string
+	if err := s.db.QueryRow(ctx, `SELECT worktree_path FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&path); err != nil {
+		return nil, fmt.Errorf("get primary changeset worktree path: %w", err)
+	}
+	return path, nil
 }
 
 // ListStalePendingSessions returns pending sessions whose latest pending-state

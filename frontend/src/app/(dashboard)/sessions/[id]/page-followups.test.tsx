@@ -299,7 +299,7 @@ describe('SessionDetailPage follow-up messages', () => {
       );
     });
 
-    expect(await screen.findByText('Implementation Plan')).toBeInTheDocument();
+    expect(await screen.findByText('Implementation plan')).toBeInTheDocument();
     expect(screen.getByText('Plan step 1')).toBeInTheDocument();
     expect(textarea).toHaveValue('');
 
@@ -685,12 +685,12 @@ describe('SessionDetailPage follow-up messages', () => {
     // Enter plan mode
     const planButton = screen.getByTitle('Switch to plan mode (Shift+Tab)');
     await user.click(planButton);
-    expect(screen.getByText('Plan Mode')).toBeInTheDocument();
+    expect(screen.getByText('Plan mode')).toBeInTheDocument();
 
     // Exit plan mode
     const exitButton = screen.getByTitle('Exit plan mode');
     await user.click(exitButton);
-    expect(screen.queryByText('Plan Mode')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plan mode')).not.toBeInTheDocument();
     expect(screen.getByPlaceholderText('Send a follow-up message...')).toBeInTheDocument();
   });
 

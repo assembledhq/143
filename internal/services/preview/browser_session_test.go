@@ -20,6 +20,8 @@ type fakeBrowserSessionStore struct {
 }
 
 func (s *fakeBrowserSessionStore) GetBySession(context.Context, uuid.UUID, uuid.UUID) (*models.PreviewBrowserSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.record, nil
 }
 func (s *fakeBrowserSessionStore) Ensure(_ context.Context, orgID, sessionID, previewID uuid.UUID, contextKey string, viewport models.ViewportSpec) (*models.PreviewBrowserSession, error) {
@@ -35,22 +37,32 @@ func (s *fakeBrowserSessionStore) Ensure(_ context.Context, orgID, sessionID, pr
 	return &copy, nil
 }
 func (s *fakeBrowserSessionStore) GetControl(context.Context, uuid.UUID, uuid.UUID) (*models.PreviewBrowserSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.record, nil
 }
 func (s *fakeBrowserSessionStore) RequestHandoff(_ context.Context, _, _ uuid.UUID, reason string) (*models.PreviewBrowserSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.record.ControlState, s.record.HandoffReason = models.PreviewBrowserControlWaiting, reason
 	return s.record, nil
 }
 func (s *fakeBrowserSessionStore) AcquireHumanControl(_ context.Context, _, _, userID uuid.UUID, duration time.Duration) (*models.PreviewBrowserSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	expires := time.Now().Add(duration)
 	s.record.ControlState, s.record.ControlLeaseOwnerID, s.record.ControlLeaseExpiresAt = models.PreviewBrowserControlHuman, &userID, &expires
 	return s.record, nil
 }
 func (s *fakeBrowserSessionStore) ReturnAgentControl(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PreviewBrowserSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.record.ControlState, s.record.ControlLeaseOwnerID, s.record.ControlLeaseExpiresAt = models.PreviewBrowserControlAgent, nil, nil
 	return s.record, nil
 }
 func (s *fakeBrowserSessionStore) BeginAgentAction(_ context.Context, _, _ uuid.UUID, token uuid.UUID, _ time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.record == nil || s.record.ControlState == "" || s.record.ControlState == models.PreviewBrowserControlAgent {
 		return true, nil
 	}
@@ -60,6 +72,8 @@ func (s *fakeBrowserSessionStore) EndAgentAction(context.Context, uuid.UUID, uui
 	return nil
 }
 func (s *fakeBrowserSessionStore) BeginHumanAction(_ context.Context, _, _, userID, _ uuid.UUID, _ time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.record != nil && s.record.ControlState == models.PreviewBrowserControlHuman && s.record.ControlLeaseOwnerID != nil && *s.record.ControlLeaseOwnerID == userID, nil
 }
 func (s *fakeBrowserSessionStore) SaveState(_ context.Context, _, _ uuid.UUID, currentURL string, viewport models.ViewportSpec, storage json.RawMessage, cursor int64, observedAt time.Time) error {

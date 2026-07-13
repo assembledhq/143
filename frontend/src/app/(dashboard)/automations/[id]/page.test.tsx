@@ -159,12 +159,12 @@ describe("AutomationDetailPage", () => {
     expect(timezoneButton).toHaveClass("w-[12.5rem]", "max-w-full");
     expect(intervalUnitTrigger).toHaveClass(
       "h-9",
-      "text-xs",
+      "type-dense",
       "max-sm:text-base",
     );
-    expect(hourTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
-    expect(minuteTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
-    expect(timezoneButton).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(hourTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(minuteTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(timezoneButton).toHaveClass("h-9", "type-dense", "max-sm:text-base");
     expect(intervalUnitTrigger).not.toHaveClass("text-base");
     expect(timezoneButton).not.toHaveClass("text-base");
     expect(runEveryText).toHaveClass(

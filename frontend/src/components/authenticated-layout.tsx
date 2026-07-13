@@ -168,7 +168,7 @@ function SidebarBody({
   // Touch-friendly sizing on mobile: nav items ~44px tall, icon buttons 44×44.
   const navItemClasses = isMobile
     ? "py-3 text-sm"
-    : "py-[7px] text-xs";
+    : "py-[7px] type-dense";
   const iconBtnClasses = isMobile ? "h-11 w-11" : "h-7 w-7";
   const iconSize = isMobile ? "h-5 w-5" : "h-4 w-4";
 
@@ -252,10 +252,10 @@ function SidebarBody({
               onClick={onNavigate ? (e) => { if (isPlainNavClick(e)) onNavigate(); } : undefined}
               aria-current={isActive ? "page" : undefined}
               className={cn(
-                "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-150 active:bg-sidebar-accent",
+                "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-[175ms] active:bg-sidebar-accent",
                 navItemClasses,
                 isActive
-                  ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                  ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
                   : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground"
               )}
             >
@@ -407,7 +407,7 @@ function CompactSidebarRail({
                     className={cn(
                       "relative flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
                       isActive
-                        ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                        ? "bg-accent/65 text-foreground ring-1 ring-primary/15"
                         : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
                   )}
                 >
@@ -427,7 +427,7 @@ function CompactSidebarRail({
                 className={cn(
                   "flex h-[30px] w-10 items-center justify-center rounded-md transition-colors duration-150",
                   pathname.startsWith("/settings")
-                    ? "bg-card text-foreground shadow-sm ring-1 ring-sidebar-border/60"
+                    ? "bg-accent/65 text-foreground ring-1 ring-primary/15"
                     : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
                 )}
               >

@@ -537,7 +537,7 @@ describe("PreviewsPage", () => {
     const startingLabels = within(runningSection).getAllByText("Starting");
     expect(startingLabels.length).toBeGreaterThan(0);
     for (const label of startingLabels) {
-      expect(label.closest('[data-slot="badge"]')?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
     }
   });
 
@@ -801,7 +801,7 @@ describe("PreviewsPage", () => {
     renderWithProviders(<PreviewsPage />);
 
     const section = await screen.findByRole("region", {
-      name: "Ready to resume (1)",
+      name: "Ready to resume previews",
     });
     expect(
       within(section).getAllByText("assembledhq/docs · PR #24")[0],

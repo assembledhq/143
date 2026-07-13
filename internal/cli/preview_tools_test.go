@@ -2,11 +2,13 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -129,7 +131,7 @@ func TestPreviewToolExecutor_ObserveUsesUnifiedEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"url":"https://preview.test/app","semantic_state":"[]","ready":true}}`))
+		_, err := w.Write([]byte(`{"data":{"url":"https://preview.test/app","semantic_state":"[]","screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, err, "observe response should write")
 	}))
 	defer server.Close()
@@ -137,6 +139,10 @@ func TestPreviewToolExecutor_ObserveUsesUnifiedEndpoint(t *testing.T) {
 	result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "path": "/app", "include_dom": true}))
 	require.False(t, result.IsError, "observe should succeed")
 	require.Equal(t, "/api/v1/sessions/session-1/preview/observe", gotPath, "observe should use the unified endpoint")
+	require.Len(t, result.Content, 2, "observe should return semantic context and a native image")
+	require.Equal(t, "image", result.Content[1].Type, "second observation block should be a native image")
+	require.Equal(t, "image/png", result.Content[1].MIMEType, "native observation should identify PNG content")
+	require.NotContains(t, firstText(result), "png_base64", "semantic context should not duplicate native image bytes")
 }
 
 func TestPreviewToolExecutor_InternalObserveUsesSessionScopedEndpoint(t *testing.T) {
@@ -145,7 +151,7 @@ func TestPreviewToolExecutor_InternalObserveUsesSessionScopedEndpoint(t *testing
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"ready":true}}`))
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, err, "internal observe response should write")
 	}))
 	defer server.Close()
@@ -162,7 +168,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 		require.Equal(t, "/api/v1/sessions/session-1/preview/act", r.URL.Path, "act should use the unified endpoint")
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "act body should decode")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"ready":true}}}`))
+		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","artifact":{"id":"artifact-1"}},"ready":true}}}`))
 		require.NoError(t, err, "act response should write")
 	}))
 	defer server.Close()
@@ -172,6 +178,10 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 	steps, ok := gotBody["steps"].([]any)
 	require.True(t, ok, "act should send steps as a JSON array")
 	require.Len(t, steps, 1, "act should send every requested step")
+	require.Len(t, result.Content, 2, "act should return its structured result and final native image")
+	require.Equal(t, "image", result.Content[1].Type, "act should extract the image from its nested observation")
+	require.Contains(t, firstText(result), "artifact-1", "act should retain durable screenshot artifact metadata")
+	require.NotContains(t, firstText(result), "png_base64", "act text should not duplicate native image bytes")
 }
 
 func TestPreviewToolExecutor_RequestHandoffUsesSessionScopedEndpoint(t *testing.T) {
@@ -207,9 +217,10 @@ func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {
 	require.NoError(t, err, "repository-backed image directory should be created")
 	defer func() { require.NoError(t, os.RemoveAll(dir), "image test directory should be removed") }()
 	output := filepath.Join(dir, "observation.png")
+	require.NoError(t, os.WriteFile(output, []byte("old"), 0o644), "workspace fixture should begin with broad permissions")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, writeErr := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"cG5n"},"ready":true}}`))
+		_, writeErr := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, writeErr, "observe response should write")
 	}))
 	defer server.Close()
@@ -218,9 +229,101 @@ func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {
 	require.False(t, result.IsError, "observe with output should succeed")
 	actual, err := os.ReadFile(output)
 	require.NoError(t, err, "workspace screenshot should be readable")
-	require.Equal(t, []byte("png"), actual, "workspace screenshot should contain decoded PNG bytes")
+	require.Equal(t, pngSignature, actual, "workspace screenshot should contain decoded PNG bytes")
 	require.NotContains(t, firstText(result), "png_base64", "workspace output should remove base64 from the CLI transcript")
 	require.Contains(t, firstText(result), output, "workspace output should report the written path")
+	info, err := os.Stat(output)
+	require.NoError(t, err, "workspace screenshot metadata should be readable")
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "workspace screenshot should remain private")
+	require.Len(t, result.Content, 1, "workspace fallback should not duplicate the screenshot as native image content")
+}
+
+func TestPreviewToolExecutor_ObserveRejectsInvalidImages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		screenshot    string
+		expectedError string
+	}{
+		{name: "missing screenshot", screenshot: ``, expectedError: "did not include a screenshot"},
+		{name: "missing bytes", screenshot: `"screenshot":{}`, expectedError: "did not include screenshot bytes"},
+		{name: "invalid base64", screenshot: `"screenshot":{"png_base64":"%%%"}`, expectedError: "decode preview screenshot"},
+		{name: "invalid png", screenshot: `"screenshot":{"png_base64":"bm90LXBuZw=="}`, expectedError: "not a valid PNG"},
+		{name: "wrong mime", screenshot: `"screenshot":{"png_base64":"iVBORw0KGgo=","mime_type":"image/jpeg"}`, expectedError: "unsupported MIME type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := `{"data":{"ready":true` + func() string {
+				if tt.screenshot == "" {
+					return ""
+				}
+				return "," + tt.screenshot
+			}() + `}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(body))
+				require.NoError(t, err, "invalid image fixture should write")
+			}))
+			defer server.Close()
+
+			executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+			result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+			require.True(t, result.IsError, "invalid screenshot should fail the observation")
+			require.Contains(t, firstText(result), tt.expectedError, "observation error should identify the image problem")
+		})
+	}
+}
+
+func TestPreviewToolExecutor_ObserveRejectsOversizedImageBeforeDecode(t *testing.T) {
+	t.Parallel()
+
+	encoded := strings.Repeat("A", base64.StdEncoding.EncodedLen(maxPreviewImageBytes)+1)
+	result := writePreviewObservationImage(jsonResult(map[string]any{
+		"screenshot": map[string]any{"png_base64": encoded},
+	}), "", false)
+
+	require.True(t, result.IsError, "oversized native image should be rejected")
+	require.Contains(t, firstText(result), "exceeds", "oversized image error should identify the size limit")
+}
+
+func TestWritePrivatePreviewImageRejectsWorkspaceEscape(t *testing.T) {
+	t.Parallel()
+
+	workspace, err := os.Getwd()
+	require.NoError(t, err, "test should resolve the current workspace")
+	outsideDir, err := os.MkdirTemp(filepath.Dir(workspace), "preview-output-outside-")
+	require.NoError(t, err, "outside output directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(outsideDir), "outside output directory should be removed") }()
+
+	insideDir, err := os.MkdirTemp(".", "preview-output-links-")
+	require.NoError(t, err, "workspace symlink directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(insideDir), "workspace symlink directory should be removed") }()
+	symlinkPath := filepath.Join(insideDir, "outside")
+	require.NoError(t, os.Symlink(outsideDir, symlinkPath), "workspace symlink should target the outside directory")
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "parent traversal", path: filepath.Join("..", filepath.Base(outsideDir), "image.png")},
+		{name: "absolute outside path", path: filepath.Join(outsideDir, "image.png")},
+		{name: "symlink escape", path: filepath.Join(symlinkPath, "image.png")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := writePrivatePreviewImage(tt.path, pngSignature)
+			require.Error(t, err, "workspace image writer should reject paths that escape the workspace")
+			_, statErr := os.Stat(filepath.Join(outsideDir, "image.png"))
+			require.ErrorIs(t, statErr, os.ErrNotExist, "rejected output should not create a file outside the workspace")
+		})
+	}
 }
 
 func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {

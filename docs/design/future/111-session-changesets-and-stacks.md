@@ -9,6 +9,17 @@
 > non-primary branch/worktree, its Changes, Preview, readiness, Create PR, and
 > push surfaces are explicitly unavailable rather than falling back to the
 > primary session workspace. The one-PR compatibility path is unchanged.
+>
+> **Implementation note (2026-07-12):** Phase 3 is complete for independent
+> changesets. Split planning freezes an immutable `session_diff_snapshots`
+> source, supports file assignment, confirmed omissions, ordering and folding,
+> applies assigned patches into disk-budgeted sandbox worktrees, and verifies
+> the resulting Git diffs for missing, duplicate, conflicting, or unexpected
+> changes. Readiness runs/checks/bypasses are changeset-scoped and pin the
+> evaluated branch head. Accepting a verified split archives the source, moves
+> the primary flag, and rebuilds the session rollup. The PR details UI and
+> `143-tools changesets` expose the flow. Targeted editing and publishing remain
+> Phase 4; stacked worktrees remain Phase 5.
 
 ## Summary
 

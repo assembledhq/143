@@ -418,6 +418,13 @@ export const handlers = [
     } satisfies SingleResponse<SessionDiff>);
   }),
 
+  http.get('/api/v1/sessions/:id/changesets/split-status', () => {
+    return HttpResponse.json(
+      { error: { code: 'SPLIT_PLAN_NOT_FOUND', message: 'No changeset split plan exists' } },
+      { status: 404 },
+    );
+  }),
+
   http.patch('/api/v1/sessions/:id', async ({ request, params }) => {
     const body = await request.json() as { title: string };
     const session = mockSessions.find((s) => s.id === params.id);

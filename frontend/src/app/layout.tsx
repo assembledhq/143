@@ -1,5 +1,6 @@
 import { GeistSans } from "geist/font/sans";
 import { GeistMono } from "geist/font/mono";
+import "@fontsource-variable/instrument-sans";
 import type { Metadata, Viewport } from "next";
 import { Providers } from "@/components/providers";
 import { AppToaster } from "@/components/ui/app-toaster";
@@ -25,8 +26,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#091f33" },
-    { media: "(prefers-color-scheme: dark)", color: "#091f33" },
+    { media: "(prefers-color-scheme: light)", color: "#f6f5f0" },
+    { media: "(prefers-color-scheme: dark)", color: "#151513" },
   ],
 };
 
