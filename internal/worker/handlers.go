@@ -9437,15 +9437,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 
-		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
+		// Conservatively check for an explicit title pivot every ten turns.
+		// Non-fatal — title maintenance must not fail the agent run.
 		if services.TitleService != nil {
 			var completedThreadID *uuid.UUID
 			if hasThread {
 				threadIDLocal := threadID
 				completedThreadID = &threadIDLocal
 			}
-			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
-				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
+			if titleErr := services.TitleService.MaybeUpdateTitleForPivot(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
+				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to evaluate session title pivot")
 			}
 		}
 		autoRepairAfterContinue := true

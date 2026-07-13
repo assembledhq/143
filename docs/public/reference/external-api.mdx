@@ -182,6 +182,7 @@ Only routes in this table accept external API tokens. Other protected app/admin 
 | `/api/v1/sessions/{id}` and nested read routes | `GET` | `sessions:read` | `sessions:all` |
 | `/api/v1/sessions` | `POST` | `sessions:create` | `sessions:all` |
 | `/api/v1/sessions/{id}/messages` | `POST` | `sessions:write` | `sessions:all` |
+| `/api/v1/sessions/{id}/title/regenerate` | `POST` | `sessions:write` | `sessions:all` |
 | `/api/v1/sessions/{id}/retry` | `POST` | `sessions:write` | `sessions:all` |
 | `/api/v1/sessions/{id}/cancel` | `POST` | `sessions:cancel` | `sessions:all` |
 | `/api/v1/sessions/{id}/end` | `POST` | `sessions:cancel` | `sessions:all` |
@@ -217,6 +218,8 @@ Create a session:
 ```
 
 Required scope: `sessions:create` or `sessions:all`.
+
+To explicitly regenerate a session title from its original primary-thread request, call `POST /api/v1/sessions/{id}/title/regenerate`. This intentionally replaces protected legacy, manual, or issue-derived title ownership. Required scope: `sessions:write` or `sessions:all`.
 
 ## Automations
 
