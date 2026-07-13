@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/llm"
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services"
 	"github.com/assembledhq/143/internal/services/agentcapabilities"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -993,12 +994,27 @@ func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 		return
 	}
+	priorTitleState, titleStateErr := h.runStore.GetTitleState(r.Context(), orgID, sessionID)
+	if titleStateErr != nil {
+		zerolog.Ctx(r.Context()).Warn().Err(titleStateErr).Str("session_id", sessionID.String()).Msg("failed to read title provenance before manual rename")
+	}
 
 	if err := h.runStore.UpdateTitle(r.Context(), orgID, sessionID, title); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "UPDATE_FAILED", "failed to update session title", err)
 		return
 	}
 	session.Title = &title
+	if titleStateErr == nil && priorTitleState.TitleSource == models.SessionTitleSourceGenerated && priorTitleState.TitleGeneratedAt != nil {
+		age := time.Since(*priorTitleState.TitleGeneratedAt)
+		if age >= 0 && age <= 24*time.Hour {
+			metrics.RecordSessionTitleDecision(r.Context(), string(priorTitleState.TitleSource), "manual_override_within_24h")
+			zerolog.Ctx(r.Context()).Debug().
+				Str("session_id", sessionID.String()).
+				Str("title_action", "manual_override_within_24h").
+				Str("title_source", string(priorTitleState.TitleSource)).
+				Msg("manually replaced generated session title")
+		}
+	}
 
 	if h.prTitleSyncer != nil {
 		if err := h.prTitleSyncer.SyncSessionTitle(r.Context(), &session); err != nil {
@@ -1009,6 +1025,60 @@ func (h *SessionHandler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
+}
+
+// RegenerateTitle explicitly replaces any title provenance with a generated
+// title based on the original primary-thread request. Unlike background pivot
+// detection, this user-initiated action may replace manual or issue titles.
+func (h *SessionHandler) RegenerateTitle(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	if h.llmClient == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "TITLE_GENERATION_UNAVAILABLE", "title generation is unavailable")
+		return
+	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+
+	var primaryThreadID *uuid.UUID
+	if h.threadStore != nil {
+		threads, listErr := h.threadStore.ListBySession(r.Context(), orgID, sessionID)
+		if listErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "TITLE_CONTEXT_FAILED", "failed to load title context", listErr)
+			return
+		}
+		if len(threads) > 0 {
+			primaryThreadID = &threads[0].ID
+		}
+	}
+	contextMessages, err := h.messageStore.ListTitleContext(r.Context(), orgID, sessionID, primaryThreadID, -1, 1)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TITLE_CONTEXT_FAILED", "failed to load title context", err)
+		return
+	}
+	if len(contextMessages) == 0 {
+		writeError(w, r, http.StatusConflict, "TITLE_CONTEXT_MISSING", "session has no original request to title")
+		return
+	}
+	if err := h.generateSessionTitle(r.Context(), &session, orgID, contextMessages[0].Content, models.SessionTitleSourceGenerated); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
+		return
+	}
+	metrics.RecordSessionTitleDecision(r.Context(), string(models.SessionTitleSourceGenerated), "explicit_regeneration")
+
+	if h.prTitleSyncer != nil {
+		if err := h.prTitleSyncer.SyncSessionTitle(r.Context(), &session); err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to sync PR title after explicit regeneration")
+		}
+	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.Session]{Data: session})
 }
 
@@ -1173,7 +1243,7 @@ func (h *SessionHandler) TriggerFix(w http.ResponseWriter, r *http.Request) {
 			}
 			titleInput += "\n\n" + desc
 		}
-		if err := h.generateSessionTitle(r.Context(), run, orgID, titleInput); err != nil {
+		if err := h.generateSessionTitle(r.Context(), run, orgID, titleInput, models.SessionTitleSourceIssue); err != nil {
 			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to generate title for issue session")
 		}
 	}
@@ -4405,7 +4475,7 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 			// start".
 			if linearResult.PrimaryTitle != "" && shouldOverrideTitleWithLinearIssue(session.Title) {
 				newTitle := linearResult.PrimaryTitle
-				if err := h.runStore.UpdateTitle(r.Context(), orgID, session.ID, newTitle); err != nil {
+				if err := h.runStore.UpdateTitleWithSource(r.Context(), orgID, session.ID, newTitle, models.SessionTitleSourceIssue); err != nil {
 					h.logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to override session title with linear issue title; keeping placeholder title")
 				} else {
 					session.Title = &newTitle
@@ -4424,7 +4494,7 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	// Generate a concise session title via LLM (with a short timeout so the
 	// request doesn't block for too long).
 	if h.llmClient != nil && body.Message != "" {
-		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message); err != nil {
+		if err := h.generateSessionTitle(r.Context(), session, orgID, body.Message, models.SessionTitleSourceGenerated); err != nil {
 			writeError(w, r, http.StatusInternalServerError, "TITLE_GENERATION_FAILED", "failed to generate session title", err)
 			return
 		}
@@ -4441,13 +4511,11 @@ func (h *SessionHandler) createManual(w http.ResponseWriter, r *http.Request, or
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.Session]{Data: *session})
 }
 
-func (h *SessionHandler) generateSessionTitle(parent context.Context, session *models.Session, orgID uuid.UUID, message string) error {
-	const titlePrompt = "You are a concise title generator. Given a user's task description, produce a short title (max 80 characters) that summarizes what needs to be done. Output ONLY the title, nothing else. No quotes, no punctuation at the end."
-
+func (h *SessionHandler) generateSessionTitle(parent context.Context, session *models.Session, orgID uuid.UUID, message string, source models.SessionTitleSource) error {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
-	generated, err := h.llmClient.Complete(ctx, titlePrompt, message)
+	generated, err := h.llmClient.Complete(ctx, prompts.SessionTitleGenerationPrompt(), message)
 	if err != nil {
 		return fmt.Errorf("llm completion: %w", err)
 	}
@@ -4457,7 +4525,7 @@ func (h *SessionHandler) generateSessionTitle(parent context.Context, session *m
 		return nil
 	}
 
-	if err := h.runStore.UpdateTitle(ctx, orgID, session.ID, title); err != nil {
+	if err := h.runStore.UpdateTitleWithSource(ctx, orgID, session.ID, title, source); err != nil {
 		return fmt.Errorf("update title: %w", err)
 	}
 	session.Title = &title

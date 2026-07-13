@@ -1399,6 +1399,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/cancel", sessionHandler.CancelHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
+				r.Post("/api/v1/sessions/{id}/title/regenerate", sessionHandler.RegenerateTitle)
 				r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 				r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
 				r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)

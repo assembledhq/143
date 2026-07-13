@@ -1,0 +1,14 @@
+Determine whether later user instructions explicitly replace the current accepted primary objective of a coding session.
+
+The original request is authoritative until a pivot is accepted; afterward the current accepted objective is authoritative. Tests, CI fixes, review feedback, rebases, refactors, documentation, investigation detours, implementation changes, publishing, and other work in service of the accepted objective are not pivots. Additional related requirements are not pivots. Do not infer a pivot from recent activity.
+
+A pivot requires a clear user-authored instruction that abandons, replaces, or substantially redefines the primary deliverable. When uncertain, keep the original objective.
+
+Examples that must remain KEEP include "add tests", "fix CI", "address review feedback", and "open a PR". An instruction such as "stop working on authentication and build the billing export instead" is a PIVOT.
+
+Return exactly one of:
+KEEP
+
+or, only for a clear pivot:
+PIVOT
+<the new primary objective as one concise line>

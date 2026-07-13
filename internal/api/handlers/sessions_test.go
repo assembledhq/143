@@ -7046,7 +7046,7 @@ func TestSessionHandler_CreateManual_WithLLMTitle(t *testing.T) {
 
 	// Mock UpdateTitle call
 	mock.ExpectExec("UPDATE sessions SET title").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), models.SessionTitleSourceGenerated, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/manual",
@@ -10090,6 +10090,13 @@ func TestSessionHandler_CancelSession_RecordsPendingCancelWhenWorkerTargetMissin
 	require.NoError(t, mock.ExpectationsWereMet(), "handler should not enqueue a worker job without a known worker target")
 }
 
+func expectSessionTitleState(mock pgxmock.PgxPoolIface, sessionID, orgID uuid.UUID, title string, source models.SessionTitleSource, generatedAt *time.Time) {
+	mock.ExpectQuery("SELECT title, title_source, title_intent, title_pivoted_at_turn, title_generated_at, current_turn FROM sessions WHERE id = .+ AND org_id = .+").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"title", "title_source", "title_intent", "title_pivoted_at_turn", "title_generated_at", "current_turn"}).
+			AddRow(title, source, nil, nil, generatedAt, 1))
+}
+
 func TestSessionHandler_UpdateTitle(t *testing.T) {
 	t.Parallel()
 
@@ -10130,8 +10137,9 @@ func TestSessionHandler_UpdateTitle(t *testing.T) {
 			),
 		)
 
+	expectSessionTitleState(mock, sessionID, orgID, existingTitle, models.SessionTitleSourceGenerated, &now)
 	mock.ExpectExec("UPDATE sessions SET title").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), models.SessionTitleSourceManual, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{"title":"Updated session title"}`))
@@ -10196,8 +10204,9 @@ func TestSessionHandler_UpdateTitle_SyncFailureStillSucceeds(t *testing.T) {
 			),
 		)
 
+	expectSessionTitleState(mock, sessionID, orgID, existingTitle, models.SessionTitleSourceGenerated, &now)
 	mock.ExpectExec("UPDATE sessions SET title").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), models.SessionTitleSourceManual, pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v1/sessions/"+sessionID.String(), strings.NewReader(`{"title":"Updated session title"}`))
@@ -10218,6 +10227,68 @@ func TestSessionHandler_UpdateTitle_SyncFailureStillSucceeds(t *testing.T) {
 	require.NotNil(t, resp.Data.Title, "updated session should include title")
 	require.Equal(t, "Updated session title", *resp.Data.Title, "response should include the updated title")
 	require.True(t, titleSyncer.called, "PR title syncer should still be invoked")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionHandler_RegenerateTitle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	now := time.Now()
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	existingTitle := "Custom title"
+	handler := newSessionHandler(t, mock)
+	handler.llmClient = newMockLLMClient("Fix authentication redirect loop", nil)
+
+	mock.ExpectQuery("SELECT .+ FROM sessions").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(addSessionRow(pgxmock.NewRows(sessionColumns),
+			sessionID, nil, orgID, "claude_code", "completed", "semi", "low",
+			nil, nil, nil, nil,
+			nil, false, &now, &now, nil,
+			nil, nil, nil, false,
+			nil, nil, nil, nil, nil,
+			nil, &existingTitle, nil, nil,
+			nil, nil, nil, nil, 10, now, "none", nil,
+			nil, nil, nil, nil, nil,
+			nil, nil, nil, nil,
+			"idle", (*string)(nil), nil, now,
+		))
+	mock.ExpectQuery("FROM session_threads WHERE org_id = .+ AND session_id = .+").
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows(sessionHandlerThreadColumns).
+			AddRow(sessionHandlerThreadRow(threadID, sessionID, orgID, "Primary", models.ThreadStatusCompleted, 10, now)...))
+	messageColumns := []string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}
+	mock.ExpectQuery("FROM session_messages WHERE org_id = .+ ORDER BY turn_number ASC").
+		WithArgs(orgID, sessionID, threadID).
+		WillReturnRows(pgxmock.NewRows(messageColumns).
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 0, "user", "Fix the login redirect", nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("FROM session_messages WHERE org_id = .+ turn_number > .+ ORDER BY turn_number DESC").
+		WithArgs(orgID, sessionID, threadID, -1, 1).
+		WillReturnRows(pgxmock.NewRows(messageColumns).
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 0, "user", "Fix the login redirect", nil, nil, nil, nil, "", now))
+	mock.ExpectExec("UPDATE sessions SET title").
+		WithArgs("Fix authentication redirect loop", models.SessionTitleSourceGenerated, sessionID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/title/regenerate", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("id", sessionID.String())
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	ctx = middleware.WithOrgID(ctx, orgID)
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+
+	handler.RegenerateTitle(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "explicit regeneration should succeed")
+	var response models.SingleResponse[models.Session]
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response), "response should be valid JSON")
+	require.Equal(t, ptr("Fix authentication redirect loop"), response.Data.Title, "response should contain the regenerated title")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -10340,8 +10411,9 @@ func TestSessionHandler_UpdateTitle_ErrorPaths(t *testing.T) {
 							now,
 						),
 					)
+				expectSessionTitleState(mock, sessionID, orgID, existingTitle, models.SessionTitleSourceGenerated, &now)
 				mock.ExpectExec("UPDATE sessions SET title").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgxmock.AnyArg(), models.SessionTitleSourceManual, pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnError(errors.New("write failed"))
 			},
 			expectedStatus: http.StatusInternalServerError,
