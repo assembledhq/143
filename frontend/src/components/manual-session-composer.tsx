@@ -1304,7 +1304,7 @@ export function ManualSessionComposer({
                         type="button"
                         variant="ghost"
                         size="icon"
-                        className="h-5 w-5 rounded-full"
+                        className="!size-5 rounded-full"
                         aria-label={`Remove ${reference.display}`}
                         onClick={() => removeReference(reference)}
                       >
@@ -1333,7 +1333,7 @@ export function ManualSessionComposer({
                           type="button"
                           variant="ghost"
                           size="icon"
-                          className="h-5 w-5 rounded-full"
+                          className="!size-5 rounded-full"
                           aria-label={`Remove ${command.token}`}
                           onClick={() => removeCommand(command)}
                         >
