@@ -1159,8 +1159,7 @@ export function ManualSessionComposer({
       className={cn(
         "relative flex flex-col rounded-[2rem] border border-transparent transition-all duration-200 ease-out",
         "before:pointer-events-none before:absolute before:inset-0 before:rounded-[inherit] before:border before:border-dashed before:opacity-0 before:transition-opacity before:duration-200",
-        "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.08),transparent_58%)] after:opacity-0 after:transition-opacity after:duration-200",
-        fileDropzone.isDragActive && "border-primary/20 bg-primary/5 shadow-[0_20px_70px_-40px_rgba(59,130,246,0.45)] before:opacity-100 before:border-primary/40 after:opacity-100",
+        fileDropzone.isDragActive && "border-primary/25 bg-primary/5 ring-2 ring-primary/10 before:border-primary/45 before:opacity-100",
         className,
       )}
       data-testid={dataTestId}
@@ -1222,9 +1221,10 @@ export function ManualSessionComposer({
 
           <Card
             ref={composerCardRef}
+            variant="elevated"
             className={cn(
-              "w-full rounded-2xl border-border/60 bg-card shadow-lg transition-all duration-200 ease-out dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_6%)]",
-              fileDropzone.isDragActive && "-translate-y-0.5 border-primary/25 shadow-[0_24px_70px_-45px_rgba(59,130,246,0.55)]",
+              "w-full rounded-2xl border-border-strong bg-card transition-all duration-200 ease-out",
+              fileDropzone.isDragActive && "-translate-y-0.5 border-primary/35 ring-2 ring-primary/10",
               cardClassName,
             )}
             data-testid="manual-session-composer"

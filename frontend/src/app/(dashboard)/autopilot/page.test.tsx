@@ -200,7 +200,7 @@ describe("AutopilotPage", () => {
 
     expect(await screen.findByText("Run analysis")).toBeInTheDocument();
     expect((await screen.findAllByText("TypeError: Cannot read properties of undefined")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Missing retry copy in payment flow")).toBeInTheDocument();
+    expect(screen.getAllByText("Missing retry copy in payment flow")).toHaveLength(2);
     expect(screen.getByText("Auto-runnable now")).toBeInTheDocument();
     // Direction shows in config footer
     expect(screen.getByText(/Payments hardening this quarter/)).toBeInTheDocument();
@@ -387,7 +387,7 @@ describe("AutopilotPage", () => {
     expect((await screen.findAllByText("First page issue")).length).toBeGreaterThan(0);
     await userEvent.click(screen.getByRole("button", { name: "Load more" }));
 
-    expect(await screen.findByText("Late issue after page boundary")).toBeInTheDocument();
+    expect(await screen.findAllByText("Late issue after page boundary")).toHaveLength(2);
   });
 
   it("renders compact issue sources and consistent scoring badges", async () => {
@@ -490,10 +490,10 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    expect(await screen.findByText("VIR-22")).toBeInTheDocument();
+    expect(await screen.findAllByText("VIR-22")).toHaveLength(2);
     expect(screen.getAllByText("Low").length).toBeGreaterThanOrEqual(2);
     expect(screen.getAllByText("Medium").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Internal")).toBeInTheDocument();
+    expect(screen.getAllByText("Internal")).toHaveLength(2);
     expect(screen.queryByText(/737e9a4c/)).not.toBeInTheDocument();
     expect(screen.queryByText(/60685fba/)).not.toBeInTheDocument();
   });
@@ -600,9 +600,14 @@ describe("AutopilotPage", () => {
 
     renderWithProviders(<AutopilotPage />);
 
-    const linkedTitle = await screen.findByRole("link", { name: "Open linked Linear issue" });
-    expect(linkedTitle).toHaveAttribute("href", "https://linear.app/acme/issue/VIR-321/open-linked-linear-issue");
-    expect(linkedTitle).toHaveAttribute("target", "_blank");
-    expect(screen.getByText("Plain unlinked issue").closest("a")).toBeNull();
+    const linkedTitles = await screen.findAllByRole("link", { name: "Open linked Linear issue" });
+    expect(linkedTitles).toHaveLength(2);
+    for (const linkedTitle of linkedTitles) {
+      expect(linkedTitle).toHaveAttribute("href", "https://linear.app/acme/issue/VIR-321/open-linked-linear-issue");
+      expect(linkedTitle).toHaveAttribute("target", "_blank");
+    }
+    for (const plainTitle of screen.getAllByText("Plain unlinked issue")) {
+      expect(plainTitle.closest("a")).toBeNull();
+    }
   });
 });

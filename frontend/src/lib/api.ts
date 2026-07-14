@@ -798,6 +798,9 @@ export const api = {
       browserControl: (sessionId: string) =>
         get<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control`)
           .then(r => r.data),
+      verifications: (sessionId: string) =>
+        get<import('./types').ListResponse<import('./preview-types').PreviewVerificationRun>>(`/api/v1/sessions/${sessionId}/preview/verifications`)
+          .then(r => r.data ?? []),
       acquireBrowserControl: (sessionId: string) =>
         post<import('./types').SingleResponse<import('./preview-types').PreviewBrowserControlStatus>>(`/api/v1/sessions/${sessionId}/preview/control/acquire`, { duration_seconds: 300 })
           .then(r => r.data),

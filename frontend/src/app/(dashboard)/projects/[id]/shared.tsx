@@ -54,7 +54,7 @@ export function ProgressBar({ completed, total }: { completed: number; total: nu
     <div className="flex items-center gap-3">
       <div className="h-2 flex-1 rounded-full bg-muted overflow-hidden">
         <div
-          className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
+          className="h-full rounded-full bg-primary transition-all"
           style={{ width: `${pct}%` }}
         />
       </div>

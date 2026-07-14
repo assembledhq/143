@@ -361,12 +361,14 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, fleetText, `LOG_DIR="$DEPLOY_FLEET_LOG_DIR"`, "fleet deploy should honor a stable log dir override so CI can upload per-host logs as an artifact")
 	require.Contains(t, fleetText, `dump_failed_logs`, "fleet deploy should print failed hosts' log tails so CI output is introspectable without the runner's /tmp")
 	require.Contains(t, fleetText, `deploy_one()`, "fleet deploy should isolate single-host deploy behavior so parallel fan-out keeps role and host context")
+	require.Contains(t, fleetText, `App deployment barrier passed`, "fleet deploy should require app migrations and health checks to finish before post-app nodes start")
+	require.Contains(t, fleetText, `worker deployment was not started`, "fleet deploy should explicitly report when an app failure prevents worker rollout")
 	require.Contains(t, fleetText, `FAILED: one or more deploys failed`, "fleet deploy should finish pending parallel deploys and then fail loudly when any host fails")
 	require.Contains(t, fleetText, `DEPLOY_JOBS=1`, "fleet deploy should document how to recover the old one-host-at-a-time rollout behavior")
 
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read the deploy workflow")
-	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.sha }}"`, "CI should use deploy-fleet's default app/worker role set for routine main-branch deploys")
+	require.Contains(t, string(workflow), `./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"`, "CI should use the successful CI run SHA with deploy-fleet's default app/worker role set")
 	require.Contains(t, string(workflow), `DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs`, "CI should pin the fleet log dir so the artifact upload step can find per-host logs")
 	require.Contains(t, string(workflow), `uses: actions/upload-artifact@v7`, "CI should upload per-host deploy logs on failure; the runner's /tmp vanishes when the job ends")
 
@@ -391,7 +393,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(deployScript), `-e "FORCE_DEPLOY_WITH_ACTIVE_SESSIONS=${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}"`, "worker deploy guardrail container should receive the force override from the deploy environment")
 }
 
-func TestDeployFleetRunsMatchingHostsConcurrently(t *testing.T) {
+func TestDeployFleetRunsPostAppHostsConcurrently(t *testing.T) {
 	t.Parallel()
 
 	tempDir := t.TempDir()
@@ -428,16 +430,16 @@ echo "$role@$ip deployed by fake script"
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "worker")
 	cmd.Env = append(os.Environ(),
 		"DEPLOY_JOBS=2",
 		"FAKE_DEPLOY_STATE="+stateDir,
-		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
+		"FLEET_HOSTS=worker:10.0.0.1,worker:10.0.0.2,db:10.0.0.3,egress:10.0.0.4",
 	)
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "deploy-fleet should complete when two matching hosts can run concurrently: %s", string(output))
-	require.Contains(t, string(output), "Deploying 2 node(s), 2 at a time", "deploy-fleet should report bounded parallel fan-out")
-	require.FileExists(t, filepath.Join(stateDir, "app-10.0.0.1.started"), "fake app deploy should have started")
+	require.Contains(t, string(output), "Deploying 2 post-app node(s), 2 at a time", "deploy-fleet should report bounded post-app parallel fan-out")
+	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.1.started"), "first fake worker deploy should have started")
 	require.FileExists(t, filepath.Join(stateDir, "worker-10.0.0.2.started"), "fake worker deploy should have started")
 	require.NoFileExists(t, filepath.Join(stateDir, "db-10.0.0.3.started"), "unrequested db deploy should not have started")
 }
@@ -501,6 +503,80 @@ echo "$role@$ip deployed by fake script"
 	require.NotEqual(t, -1, appIndex, "order log should include the same-host app deploy")
 	require.NotEqual(t, -1, workerIndex, "order log should include the same-host worker deploy")
 	require.Less(t, appIndex, workerIndex, "same-host deploys should preserve FLEET_HOSTS order")
+}
+
+func TestDeployFleetBlocksWorkersWhenAppDeployFails(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+role="$1"
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+touch "$state/$role.started"
+if [ "$role" = "app" ]; then
+  echo "migration gate failed"
+  exit 1
+fi
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd.Env = append(os.Environ(),
+		"DEPLOY_JOBS=2",
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=app:10.0.0.1,worker:10.0.0.2",
+	)
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err, "deploy-fleet should fail when the app migration barrier fails: %s", string(output))
+	require.FileExists(t, filepath.Join(stateDir, "app.started"), "app deploy should have reached the failing migration gate")
+	require.NoFileExists(t, filepath.Join(stateDir, "worker.started"), "worker deploy must not start after an app deployment failure")
+	require.Contains(t, string(output), "worker deployment was not started", "fleet output should explain that workers were held behind the app barrier")
+}
+
+func TestDeployFleetRequiresRequestedAppBarrier(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	scriptDir := filepath.Join(tempDir, "deploy", "scripts")
+	require.NoError(t, os.MkdirAll(scriptDir, 0o755), "test should create a temporary deploy script directory")
+
+	fleetScript, err := os.ReadFile("../deploy/scripts/deploy-fleet.sh")
+	require.NoError(t, err, "test should read deploy-fleet.sh")
+	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
+	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+
+	stateDir := filepath.Join(tempDir, "state")
+	fakeDeploy := `#!/usr/bin/env bash
+set -euo pipefail
+state="${FAKE_DEPLOY_STATE:?}"
+mkdir -p "$state"
+touch "$state/deploy.started"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "deploy.sh"), []byte(fakeDeploy), 0o755), "test should install a fake deploy.sh")
+
+	cmd := exec.CommandContext(context.Background(), "bash", fleetScriptPath, "fake-key", "test-tag", "app,worker")
+	cmd.Env = append(os.Environ(),
+		"FAKE_DEPLOY_STATE="+stateDir,
+		"FLEET_HOSTS=worker:10.0.0.2",
+	)
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err, "deploy-fleet should fail closed when the requested app barrier has no target: %s", string(output))
+	require.Contains(t, string(output), "no app host exists in FLEET_HOSTS", "fleet output should explain the missing migration barrier")
+	require.NoFileExists(t, filepath.Join(stateDir, "deploy.started"), "post-app deployment must not begin without a requested app barrier")
 }
 
 func TestDeployFleetPrintsFailedHostLogs(t *testing.T) {
@@ -1433,6 +1509,10 @@ func TestCIDeployConfiguresWorkerBlueGreenPortRange(t *testing.T) {
 func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	t.Parallel()
 
+	ciWorkflow, err := os.ReadFile("../.github/workflows/ci.yml")
+	require.NoError(t, err, "test should read CI workflow")
+	require.Contains(t, string(ciWorkflow), "go test ./cmd/migrate -run TestMigrationVersionsAreUnique -count=1", "migration safety should reject duplicate migration slots before attempting a deploy")
+
 	workflow, err := os.ReadFile("../.github/workflows/deploy.yml")
 	require.NoError(t, err, "test should read deploy workflow")
 	workflowText := string(workflow)
@@ -1452,7 +1532,13 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.Less(t, predeployIndex, deployIndex, "deploy should run after the freshness gate")
 
 	buildJob := workflowText[buildIndex:predeployIndex]
-	require.Contains(t, buildJob, `group: deploy-build-${{ github.ref }}-${{ matrix.name }}`, "build job should cancel stale builds independently per image")
+	require.Contains(t, workflowHeader, `workflows: ["CI"]`, "deploy workflow should run only after CI completes")
+	require.Contains(t, workflowHeader, `types: [completed]`, "deploy workflow should wait for a terminal CI result")
+	require.NotContains(t, workflowHeader, "\n  push:", "deploy workflow should not race CI directly on push")
+	require.Contains(t, buildJob, `github.event.workflow_run.conclusion == 'success'`, "image builds should require successful CI")
+	require.Contains(t, buildJob, `github.event.workflow_run.event == 'push'`, "deploys should only follow CI runs for pushes")
+	require.Contains(t, buildJob, `group: deploy-build-${{ github.event.workflow_run.head_branch }}-${{ matrix.name }}`, "build job should cancel stale builds independently per image")
+	require.Contains(t, buildJob, `ref: ${{ github.event.workflow_run.head_sha }}`, "image builds should check out the exact SHA that passed CI")
 	require.Contains(t, buildJob, "cancel-in-progress: true", "build job should cancel in-progress stale image builds")
 
 	predeployJob := workflowText[predeployIndex:deployIndex]
@@ -1467,6 +1553,7 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.Contains(t, deployJob, "group: deploy-fleet", "deploy job should serialize fleet deploys")
 	require.Contains(t, deployJob, "cancel-in-progress: false", "deploy job should never cancel an active production deploy")
 	require.Contains(t, deployJob, "id: deploy_latest", "deploy job should re-check freshness after acquiring the deploy lock")
+	require.Contains(t, deployJob, `ref: ${{ github.event.workflow_run.head_sha }}`, "deploy should check out the exact SHA that passed CI")
 	require.Contains(t, deployJob, `gh api "repos/$REPO/commits/main" --jq .sha`, "deploy job should compare the run SHA to latest main after acquiring the deploy lock")
 	deployFreshnessIndex := strings.Index(deployJob, "id: deploy_latest")
 	deployCheckoutIndex := strings.Index(deployJob, "uses: actions/checkout@v6")

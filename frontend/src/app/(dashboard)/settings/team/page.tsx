@@ -281,7 +281,7 @@ export default function TeamSettingsPage() {
           {canManageTeam && (
             <Button
               size="sm"
-              className="w-full sm:w-auto"
+              className="min-h-11 w-full sm:min-h-0 sm:w-auto"
               onClick={() => {
                 resetInviteForm();
                 setIsInviteDialogOpen(true);
@@ -314,9 +314,10 @@ export default function TeamSettingsPage() {
                   return (
                     <div
                       key={member.id}
-                      className="grid gap-3 px-4 py-3 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center hover:bg-muted/40 dark:hover:bg-primary/[0.03] transition-colors"
+                      data-testid="team-member-row"
+                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 px-3 py-3 transition-colors hover:bg-muted/40 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center md:gap-4 md:px-4 dark:hover:bg-primary/[0.03]"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
+                      <div className="col-span-2 flex min-w-0 items-center gap-3 md:col-span-1">
                         {member.avatar_url ? (
                           /* eslint-disable-next-line @next/next/no-img-element */
                           <img
@@ -342,19 +343,12 @@ export default function TeamSettingsPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="min-w-0 space-y-1">
-                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
-                          Email
-                        </div>
+                      <div className="min-w-0 pl-11 md:pl-0">
                         <div className="text-xs text-muted-foreground truncate">
                           {member.email}
                         </div>
                       </div>
-                      <div className="space-y-1">
-                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
-                          Role
-                        </div>
-                        <div className="flex items-center">
+                      <div className="flex items-center justify-self-end md:justify-self-auto">
                         {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
                             {roleLabel(member.role)}
@@ -369,7 +363,7 @@ export default function TeamSettingsPage() {
                           >
                             <SelectTrigger
                               size="default"
-                              className="h-9 w-full max-w-28"
+                              className="h-11 w-full max-w-28 md:h-9"
                               aria-label={`Role for ${member.name}`}
                             >
                               <SelectValue>
@@ -382,20 +376,15 @@ export default function TeamSettingsPage() {
                               <SelectItem value="builder">Builder</SelectItem>
                               <SelectItem value="viewer">Viewer</SelectItem>
                             </SelectContent>
-                            </Select>
+                          </Select>
                         )}
-                        </div>
                       </div>
-                      <div className="space-y-1">
-                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground md:hidden">
-                          Actions
-                        </div>
-                        <div className="flex items-center justify-start">
+                      <div className="col-span-2 flex min-h-8 items-center justify-end border-t border-border/60 pt-2 md:col-span-1 md:min-h-0 md:justify-start md:border-t-0 md:pt-0">
                         {canManageTeam && !isSelf ? (
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="px-0 text-destructive hover:text-destructive"
+                            className="min-h-11 text-destructive hover:text-destructive md:min-h-0 md:px-0"
                             disabled={removeMemberMutation.isPending}
                             onClick={() => setRemovingMember(member)}
                           >
@@ -410,7 +399,6 @@ export default function TeamSettingsPage() {
                             No access
                           </span>
                         )}
-                        </div>
                       </div>
                     </div>
                   );
@@ -464,7 +452,7 @@ export default function TeamSettingsPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      className="w-full text-destructive hover:text-destructive sm:ml-4 sm:w-auto"
+                      className="min-h-11 w-full text-destructive hover:text-destructive sm:ml-4 sm:min-h-0 sm:w-auto"
                       disabled={revokeMutation.isPending}
                       onClick={() => revokeMutation.mutate(inv.id)}
                     >
@@ -506,7 +494,7 @@ export default function TeamSettingsPage() {
             }
           }}
         >
-          <AlertDialogContent>
+          <AlertDialogContent className="max-h-[calc(100dvh-1rem)] overflow-y-auto p-4 sm:p-6">
             <AlertDialogHeader>
               <AlertDialogTitle>Invite a member</AlertDialogTitle>
               <AlertDialogDescription>
@@ -616,7 +604,7 @@ export default function TeamSettingsPage() {
                               setSelectedGitHubAvatarUrl(undefined);
                               setInviteError("");
                             }}
-                            className="h-9"
+                            className="h-11 sm:h-9"
                           />
                           <p className="text-xs text-muted-foreground">
                             Connect a GitHub App to search for users.
@@ -635,7 +623,7 @@ export default function TeamSettingsPage() {
                           setInviteEmail(e.target.value);
                           setInviteError("");
                         }}
-                        className="h-9"
+                        className="h-11 sm:h-9"
                       />
                       <p className="text-xs text-muted-foreground">
                         We&apos;ll send the invite link here, but acceptance still requires the matching GitHub account.
@@ -656,7 +644,7 @@ export default function TeamSettingsPage() {
                           setInviteEmail(e.target.value);
                           setInviteError("");
                         }}
-                        className="h-9"
+                        className="h-11 sm:h-9"
                       />
                       <p className="text-xs text-muted-foreground">
                         The invitee will accept with this email address.
@@ -726,7 +714,7 @@ export default function TeamSettingsPage() {
               <div className="space-y-1.5">
                 <Label htmlFor="invite-role">Role</Label>
                 <Select value={inviteRole} onValueChange={setInviteRole}>
-                  <SelectTrigger id="invite-role" className="h-9 w-full">
+                  <SelectTrigger id="invite-role" className="h-11 w-full sm:h-9">
                     <SelectValue>{roleLabel(inviteRole)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent>
@@ -744,6 +732,7 @@ export default function TeamSettingsPage() {
                 <AlertDialogCancel type="button">Cancel</AlertDialogCancel>
                 <Button
                   type="submit"
+                  className="min-h-11 sm:min-h-0"
                   disabled={
                     inviteMutation.isPending ||
                     !canSubmitInvite

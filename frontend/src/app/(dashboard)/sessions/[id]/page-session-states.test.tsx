@@ -1044,7 +1044,7 @@ describe('SessionDetailPage session states', () => {
     await user.click(planButton);
 
     // Plan mode indicator should appear
-    expect(screen.getByText('Plan Mode')).toBeInTheDocument();
+    expect(screen.getByText('Plan mode')).toBeInTheDocument();
     expect(screen.getByText('Agent will create a plan for review before making changes')).toBeInTheDocument();
     // Placeholder should change
     expect(screen.getByPlaceholderText('Describe what you want to plan...')).toBeInTheDocument();

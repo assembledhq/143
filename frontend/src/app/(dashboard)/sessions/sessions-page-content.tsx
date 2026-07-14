@@ -359,7 +359,7 @@ export function SessionsPageContent() {
                   )}
                 </span>
                 {isSelected && (
-                  <span className="absolute bottom-0 left-2.5 right-2.5 h-0.5 bg-[image:var(--gradient-primary)] rounded-full" />
+                  <span className="absolute bottom-0 left-2.5 right-2.5 h-0.5 rounded-full bg-primary" />
                 )}
               </button>
             );

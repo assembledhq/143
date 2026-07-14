@@ -907,6 +907,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
+	previewVerificationHandler := handlers.NewPreviewVerificationHandler(db.NewPreviewVerificationRunStore(pool))
 	var browserInspector preview.SessionBrowserInspector
 	if resolved, ok := previewInspector.(preview.SessionBrowserInspector); ok {
 		browserInspector = resolved
@@ -1313,6 +1314,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/preview/watch", previewHandler.WatchBrowser)
 				r.Get("/api/v1/sessions/{id}/preview/control", previewHandler.GetBrowserControl)
 				r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+				r.Get("/api/v1/sessions/{id}/preview/verifications", previewVerificationHandler.ListBySession)
 				r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/previews/{preview_id}/services", previewHandler.GetServices)
 				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)

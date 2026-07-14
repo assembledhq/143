@@ -265,10 +265,10 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
-    expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
-    expect(screen.getByText("Acceptable")).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Evidence/i }));
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    expect(screen.getAllByText("Acceptable")).toHaveLength(2);
+    expect(screen.getAllByText("Approved")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(evidenceSheet).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();

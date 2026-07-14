@@ -160,13 +160,13 @@ function drawSkyGradient(
   w: number,
   h: number,
 ) {
-  // Monochrome off-white wash with the faintest hint of brand-purple at the
-  // top — color is carried by the contrails and the brand glow, not the sky.
+  // Warm mineral wash shared with the product canvas. Color is carried by the
+  // contrails and restrained flight-blue light, not by a separate hero theme.
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, "#F4F2F8");
-  grad.addColorStop(0.4, "#F8F6FB");
-  grad.addColorStop(0.8, "#FAFAFB");
-  grad.addColorStop(1, "#FBFBFC");
+  grad.addColorStop(0, "#efeee8");
+  grad.addColorStop(0.42, "#f4f3ed");
+  grad.addColorStop(0.82, "#f6f5f0");
+  grad.addColorStop(1, "#f8f7f3");
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
 }
@@ -301,8 +301,8 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
       } else {
         drawSkyGradient(ctx, w, h);
 
-        // Soft brand-purple glow at top-right ties the hero to the in-app
-        // --gradient-primary; replaces the previous warm-yellow "sun" wash.
+        // Restrained flight-blue light ties the plane field to the product
+        // focus and selection color without turning the sky into a gradient CTA.
         const grad = ctx.createRadialGradient(
           w * 0.8,
           h * 0.05,
@@ -311,8 +311,8 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
           h * 0.05,
           w * 0.45,
         );
-        grad.addColorStop(0, "rgba(125, 95, 220, 0.18)");
-        grad.addColorStop(0.5, "rgba(125, 95, 220, 0.06)");
+        grad.addColorStop(0, "rgba(49, 92, 232, 0.16)");
+        grad.addColorStop(0.5, "rgba(49, 92, 232, 0.05)");
         grad.addColorStop(1, "transparent");
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, w, h);
@@ -326,8 +326,8 @@ export default function HeroCanvas({ isDark }: HeroCanvasProps) {
           h * 0.95,
           w * 0.35,
         );
-        grad2.addColorStop(0, "rgba(95, 75, 200, 0.10)");
-        grad2.addColorStop(0.6, "rgba(95, 75, 200, 0.03)");
+        grad2.addColorStop(0, "rgba(121, 146, 255, 0.08)");
+        grad2.addColorStop(0.6, "rgba(121, 146, 255, 0.025)");
         grad2.addColorStop(1, "transparent");
         ctx.fillStyle = grad2;
         ctx.fillRect(0, 0, w, h);
