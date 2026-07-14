@@ -104,7 +104,8 @@ type Gateway struct {
 	workerSelect *preview.WorkerSelector
 	hmrWatcher   *preview.HMRWatcher
 	logger       zerolog.Logger
-	appOrigin    string
+	appOrigin    string   // primary app origin, used for "open in app" links
+	appOrigins   []string // full allow-list (primary first) for postMessage + frame-ancestors
 	cookieSecret []byte
 	tokenKeyring auth.PreviewTokenKeyring
 	secureCookie bool   // true when preview origin uses https
@@ -135,9 +136,19 @@ type GatewayConfig struct {
 	Manager               *preview.Manager
 	WorkerSelector        *preview.WorkerSelector
 	HMRWatcher            *preview.HMRWatcher // optional; enables HMR screenshot capture
-	Logger                zerolog.Logger
-	AppOrigin             string // e.g. "https://app.143.dev"
-	CookieSecret          []byte // HMAC key for signing preview session cookies
+	Logger zerolog.Logger
+	// AppOrigin is the primary app origin (e.g. "https://143.dev"): the
+	// target for "open in app" links and the first entry of the
+	// postMessage/CSP allow-list.
+	AppOrigin string
+	// AdditionalAppOrigins are further origins allowed to embed previews and
+	// complete the bootstrap postMessage handshake — the canary plane's
+	// frontend in a canary/stable split. The gateway runs stable code, so
+	// this must be configured on the stable plane before a canary frontend
+	// can open previews. See
+	// docs/design/future/118-canary-stable-release-channels.md.
+	AdditionalAppOrigins []string
+	CookieSecret         []byte // HMAC key for signing preview session cookies
 	PreviewTokenSecret    string
 	PreviewTokenKeyring   auth.PreviewTokenKeyring
 	PreviewOriginTemplate string // e.g. "https://{id}.preview.143.dev"
@@ -248,6 +259,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 			tokenKeyring = fallback
 		}
 	}
+	appOrigins := normalizeAppOrigins(cfg.AppOrigin, cfg.AdditionalAppOrigins)
 	return &Gateway{
 		store:            cfg.Store,
 		manager:          cfg.Manager,
@@ -255,6 +267,7 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 		hmrWatcher:       cfg.HMRWatcher,
 		logger:           cfg.Logger,
 		appOrigin:        cfg.AppOrigin,
+		appOrigins:       appOrigins,
 		cookieSecret:     cfg.CookieSecret,
 		tokenKeyring:     tokenKeyring,
 		secureCookie:     strings.HasPrefix(cfg.PreviewOriginTemplate, "https://"),
@@ -272,10 +285,31 @@ func NewGateway(cfg GatewayConfig) *Gateway {
 			"form-action 'self'",
 			"object-src 'none'",
 			"base-uri 'none'",
-			"frame-ancestors " + cfg.AppOrigin,
+			"frame-ancestors " + strings.Join(appOrigins, " "),
 			"worker-src 'self' blob:",
 		}, "; "),
 	}
+}
+
+// normalizeAppOrigins builds the app-origin allow-list: primary first, then
+// additional origins, trimmed of trailing slashes, deduplicated, empties
+// dropped. Every consumer (bootstrap postMessage, frame-ancestors) uses the
+// same list so an origin can never embed a preview it can't bootstrap.
+func normalizeAppOrigins(primary string, additional []string) []string {
+	seen := make(map[string]struct{})
+	var origins []string
+	for _, origin := range append([]string{primary}, additional...) {
+		origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+		if origin == "" {
+			continue
+		}
+		if _, dup := seen[origin]; dup {
+			continue
+		}
+		seen[origin] = struct{}{}
+		origins = append(origins, origin)
+	}
+	return origins
 }
 
 // newGatewayProxyTransport builds the shared upstream transport for worker
@@ -365,7 +399,18 @@ func (g *Gateway) serveBootstrapPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	// The bootstrap page signals readiness via postMessage, receives the token,
 	// exchanges it for a session cookie, then navigates to the preview root.
-	fmt.Fprintf(w, bootstrapHTML, g.appOrigin)
+	// The embedding app may be the stable or canary frontend, so the page
+	// carries the full origin allow-list; only allow-listed origins may hand
+	// it a token, and replies target the specific origin that spoke.
+	originsJSON, err := json.Marshal(g.appOrigins)
+	if err != nil {
+		// Origins are operator-configured URLs; marshal cannot realistically
+		// fail, but never emit a page with an unset allow-list.
+		g.logger.Error().Err(err).Msg("failed to marshal app origins for bootstrap page")
+		http.Error(w, "bootstrap unavailable", http.StatusInternalServerError)
+		return
+	}
+	fmt.Fprintf(w, bootstrapHTML, originsJSON)
 }
 
 const bootstrapHTML = `<!DOCTYPE html>
@@ -374,10 +419,10 @@ const bootstrapHTML = `<!DOCTYPE html>
 <p>Connecting to preview…</p>
 <script>
 (function() {
-  var appOrigin = %q;
+  var allowedAppOrigins = %s;
 
   window.addEventListener('message', function(event) {
-    if (event.origin !== appOrigin) return;
+    if (allowedAppOrigins.indexOf(event.origin) === -1) return;
     var data = event.data;
     if (!data || data.type !== 'preview_bootstrap_token') return;
 
@@ -389,7 +434,7 @@ const bootstrapHTML = `<!DOCTYPE html>
     }).then(function(resp) {
       if (resp.ok) {
         if (window.parent !== window) {
-          window.parent.postMessage({type: 'preview_bootstrap_complete'}, appOrigin);
+          window.parent.postMessage({type: 'preview_bootstrap_complete'}, event.origin);
         }
         window.location.href = '/';
       } else {
@@ -400,9 +445,13 @@ const bootstrapHTML = `<!DOCTYPE html>
     });
   });
 
-  // Signal readiness to the parent (app origin).
+  // Signal readiness to the parent. Its actual origin is unknown until it
+  // messages us first, so post once per allowed origin — the browser only
+  // delivers the message whose targetOrigin matches the parent.
   if (window.parent !== window) {
-    window.parent.postMessage({type: 'preview_bootstrap_ready'}, appOrigin);
+    for (var i = 0; i < allowedAppOrigins.length; i++) {
+      window.parent.postMessage({type: 'preview_bootstrap_ready'}, allowedAppOrigins[i]);
+    }
   }
 })();
 </script>

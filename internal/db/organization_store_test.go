@@ -14,7 +14,7 @@ import (
 )
 
 var organizationColumns = []string{
-	"id", "name", "settings", "created_at", "updated_at",
+	"id", "name", "release_channel", "settings", "created_at", "updated_at",
 }
 
 func TestOrganizationStore_Create(t *testing.T) {
@@ -63,7 +63,7 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(organizationColumns).
-							AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
+							AddRow(orgID, "Test Org", "canary", json.RawMessage(`{}`), now, now),
 					)
 			},
 		},

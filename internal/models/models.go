@@ -9,11 +9,15 @@ import (
 )
 
 type Organization struct {
-	ID        uuid.UUID       `db:"id" json:"id"`
-	Name      string          `db:"name" json:"name"`
-	Settings  json.RawMessage `db:"settings" json:"settings"`
-	CreatedAt time.Time       `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time       `db:"updated_at" json:"updated_at"`
+	ID   uuid.UUID `db:"id" json:"id"`
+	Name string    `db:"name" json:"name"`
+	// ReleaseChannel selects which compute plane serves and executes this
+	// org's work: "stable" (pinned releases) or "canary" (latest main,
+	// dogfood). Operator-set; flips should happen while the org is quiescent.
+	ReleaseChannel ReleaseChannel  `db:"release_channel" json:"release_channel"`
+	Settings       json.RawMessage `db:"settings" json:"settings"`
+	CreatedAt      time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time       `db:"updated_at" json:"updated_at"`
 }
 
 type User struct {

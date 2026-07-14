@@ -50,6 +50,14 @@ type Config struct {
 	// fail startup — a typo must never silently join the wrong pool. See
 	// docs/design/future/118-canary-stable-release-channels.md.
 	Channel string `env:"CHANNEL" envDefault:"stable"`
+	// CanaryOrigin is the full origin of the canary plane (e.g.
+	// "https://canary.143.dev"). When set it (a) adds the canary origin to
+	// the preview gateway's bootstrap/postMessage app-origin allow-list —
+	// the gateway runs on the stable plane but must serve previews embedded
+	// by the canary frontend — and (b) arms the canary host guard: requests
+	// arriving for this hostname are refused unless the active org's
+	// release_channel is 'canary'. Empty disables both.
+	CanaryOrigin string `env:"CANARY_ORIGIN"`
 	// DemoMode tells the server it is running a dogfood preview with seeded
 	// data and no real GitHub App. Enables a credential banner on the login
 	// page and short-circuits GitHub client construction.
@@ -421,6 +429,21 @@ func Load() *Config {
 	}
 
 	return cfg
+}
+
+// CanaryHostname returns the bare hostname of CanaryOrigin (lowercased, no
+// port), or "" when CanaryOrigin is unset or unparseable. Used by the canary
+// host guard to match request Host headers.
+func (c *Config) CanaryHostname() string {
+	origin := strings.TrimSpace(c.CanaryOrigin)
+	if origin == "" {
+		return ""
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
 }
 
 func normalizePreviewRPCSecrets(secrets []string, sessionSecret string) []string {

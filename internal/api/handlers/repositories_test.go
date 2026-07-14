@@ -74,11 +74,11 @@ func TestRepositoryHandler_List(t *testing.T) {
 							nil, nil, json.RawMessage(`{}`), now, now,
 						),
 					)
-				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+				mock.ExpectQuery("SELECT id, name, release_channel, settings, created_at, updated_at").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "test-org", json.RawMessage(`{"default_work_repository_id":"`+repoID.String()+`"}`), now, now),
+						pgxmock.NewRows([]string{"id", "name", "release_channel", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", "stable", json.RawMessage(`{"default_work_repository_id":"`+repoID.String()+`"}`), now, now),
 					)
 			},
 			expectedCode:  http.StatusOK,
@@ -101,11 +101,11 @@ func TestRepositoryHandler_List(t *testing.T) {
 							nil, nil, json.RawMessage(`{}`), now, now,
 						),
 					)
-				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+				mock.ExpectQuery("SELECT id, name, release_channel, settings, created_at, updated_at").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "test-org", json.RawMessage(`{}`), now, now),
+						pgxmock.NewRows([]string{"id", "name", "release_channel", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", "stable", json.RawMessage(`{}`), now, now),
 					)
 			},
 			expectedCode:  http.StatusOK,
@@ -129,11 +129,11 @@ func TestRepositoryHandler_List(t *testing.T) {
 							nil, nil, json.RawMessage(`{}`), now, now,
 						),
 					)
-				mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
+				mock.ExpectQuery("SELECT id, name, release_channel, settings, created_at, updated_at").
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
-							AddRow(orgID, "test-org", json.RawMessage(`{"default_work_repository_id":"`+deletedRepoID.String()+`"}`), now, now),
+						pgxmock.NewRows([]string{"id", "name", "release_channel", "settings", "created_at", "updated_at"}).
+							AddRow(orgID, "test-org", "stable", json.RawMessage(`{"default_work_repository_id":"`+deletedRepoID.String()+`"}`), now, now),
 					)
 			},
 			expectedCode:  http.StatusOK,
