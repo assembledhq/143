@@ -265,7 +265,7 @@ export function PRHealthBanner({
                     )}
                   </div>
                 )}
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-stretch gap-2">
                   {canShowMergeButton && (
                     <ButtonGroup size="sm">
                       <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
