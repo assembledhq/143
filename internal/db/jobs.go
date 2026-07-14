@@ -71,6 +71,11 @@ type JobStore struct {
 // job type. It intentionally spans orgs so dashboards can show platform-wide
 // pressure rather than one tenant's view.
 type JobQueueHealthSample struct {
+	// Channel splits queue health per release channel so a stuck canary
+	// pool is visible instead of hiding inside (or inflating) stable
+	// numbers. There is no cross-channel claim fallback, so per-channel
+	// backlog age is the signal that a pool is down.
+	Channel                  string
 	Queue                    string
 	JobType                  string
 	PendingRunnable          int64
@@ -339,6 +344,7 @@ func (s *JobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duratio
 func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSample, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT
+			channel,
 			queue,
 			job_type,
 			COUNT(*) FILTER (WHERE status = 'pending' AND run_at <= now()) AS pending_runnable,
@@ -348,8 +354,8 @@ func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSamp
 			EXTRACT(EPOCH FROM now() - MIN(run_at) FILTER (WHERE status = 'pending' AND run_at <= now()))::double precision AS oldest_runnable_age_seconds
 		FROM jobs
 		WHERE status IN ('pending', 'running', 'dead_letter')
-		GROUP BY queue, job_type
-		ORDER BY pending_runnable DESC, running DESC, queue ASC, job_type ASC`)
+		GROUP BY channel, queue, job_type
+		ORDER BY pending_runnable DESC, running DESC, channel ASC, queue ASC, job_type ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("queue health samples: %w", err)
 	}
@@ -360,6 +366,7 @@ func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSamp
 		var sample JobQueueHealthSample
 		var oldest any
 		if err := rows.Scan(
+			&sample.Channel,
 			&sample.Queue,
 			&sample.JobType,
 			&sample.PendingRunnable,

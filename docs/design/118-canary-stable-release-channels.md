@@ -27,10 +27,16 @@ runbook: [docs/self-hosting/release-channels.md](../self-hosting/release-channel
 - `cmd/migrate`: destructive gate (`STABLE_MAX_MIGRATION`), floor recording,
   `verify` subcommand.
 - `promote.yml` (version computation, soak policy, tag-after-verify release
-  cutting, GHCR retags, `stable` branch, rollback via existing tag),
+  cutting, GHCR retags, `stable` branch, rollback via existing tag, the
+  `stable-promotion` environment gate, optional Slack announcement),
   `deploy.yml` `DEPLOY_ROLES` phasing + stable-floor resolution,
   `.github/release.yml`, cross-version compatibility workflow,
   destructive-migration lint in `cmd/lint-schema`.
+- Channel-aware cold-start placement (`WorkerSelectionRequirements.Channel`
+  enforced in every candidate filter, stamped from the org), per-channel
+  queue-health samples, the session reaper gated to stable (recovery loop
+  deliberately on both channels), `migrate up`'s DB-ahead self-guard, and
+  the canary-host 403 → primary-origin browser bounce.
 
 ### Outstanding
 
@@ -182,11 +188,19 @@ In this doc, *channel* always means the `stable`/`canary` release channel.
    promoted stable release*, not merely the previous commit. Enforced by CI
    and deploy gates (see [The compatibility contract](#the-compatibility-contract)).
 4. **Execution is channel-scoped; data is shared.** A job enqueued for a
-   canary org is claimable only by canary workers, and vice versa. There is
-   **no cross-channel fallback**: if the canary pool is down, canary jobs
-   queue (the affected users are the team). Any code path that scans
-   cross-org rows (scheduler, retention, dead-node requeue, queue health)
-   runs on the stable plane and must tolerate rows written by newer code.
+   canary org is claimable only by canary workers, and vice versa — and
+   cold-start placement (preview/session worker selection) only targets
+   nodes on the org's channel, because a job pinned to a wrong-channel node
+   is unclaimable by either pool. There is **no cross-channel fallback**:
+   if the canary pool is down, canary jobs queue (the affected users are
+   the team). Cross-org business sweeps — the periodic scheduler and the
+   session reaper — run only on the stable plane and must tolerate rows
+   written by newer code. Two classes of loop deliberately run on **both**
+   channels: the node/job recovery loop (mutual crash recovery whose
+   requeues preserve each job's channel — gating it to stable would leave
+   a fully-dead stable pool's state frozen until that pool returned) and
+   node-local janitors (sandbox GC, upload-file cleanup, runtime
+   sampling), which touch only their own host.
 5. **UI/API version is host-scoped; execution channel is org-scoped.** A
    dogfood user who visits `143.dev` sees the stable UI, but their org's jobs
    still execute on canary workers. The canary host refuses sessions from
@@ -277,11 +291,13 @@ worker, never by a stable one.
 
 **No new public API routes.** Changes are limited to:
 
-- **Host guard middleware.** Requests to the canary hostname
-  (`CANARY_HOST=canary.143.dev` config) with a session whose org is
-  `stable`-channel are redirected to the primary domain (HTML) or rejected
-  with `403 {"error": "org_not_on_canary"}` (API). The stable hostname
-  serves any org.
+- **Host guard middleware.** API requests to the canary hostname (derived
+  from `CANARY_ORIGIN`) with a session whose org is `stable`-channel are
+  rejected with `403 ORG_NOT_ON_CANARY`; the error details carry a
+  `redirect_origin` (the hostname minus its `canary.` label), and the
+  frontend's shared API client bounces the whole browser session there,
+  path preserved, at most once per page life. The stable hostname serves
+  any org.
 - **Sessions stay host-only — one login per host.** The session cookie is
   deliberately issued with no `Domain` attribute
   (`writeSessionAndCSRFCookies` in `internal/api/handlers/auth.go`), and
@@ -295,8 +311,11 @@ worker, never by a stable one.
   never scoped to `.143.dev`.** Dogfood users log in on each host
   (sessions are DB-backed, so both logins share one account); a signed
   one-time-token SSO handoff between the two hosts — the same pattern as
-  the preview bootstrap exchange — is optional future polish. Allowed
-  origins / CORS config gains the canary origin.
+  the preview bootstrap exchange — is optional future polish. CORS stays
+  per-plane: each api derives its allowed origin from its own
+  `FRONTEND_URL`, and no flow fetches across planes (the preview bootstrap
+  handshake is postMessage, not CORS), so neither plane lists the other's
+  origin.
 - **OAuth callbacks:** the existing GitHub App and Slack app gain
   `canary.143.dev` redirect/callback URLs (both providers support multiple
   callback URLs per app). Webhook URLs are **not** duplicated — see below.
@@ -310,6 +329,18 @@ worker, never by a stable one.
 worker host. It flows into node registration, the claim predicate, log
 fields, and deploy tooling. One dedicated canary worker host is enough to
 start (team-sized load); capacity is added per channel like any other worker.
+
+**Placement is channel-aware, not just claiming.** Any path that
+*pre-selects* a target node — preview cold starts, capacity fallbacks,
+cache-locality placement — must only consider nodes on the org's channel:
+the resulting job is stamped with the org channel and pinned via
+`target_node_id`, so a wrong-channel node makes it unclaimable by either
+pool (channel mismatch on one side, foreign healthy target on the other).
+`WorkerSelectionRequirements.Channel` enforces this in every candidate
+filter; `SelectStartNode*` stamps it automatically from the org via the
+selector's org-channel lookup, and requirements builders stamp it for
+direct least-loaded/resolve fallbacks. Resolving the existing owner of a
+live runtime stays unfiltered — the runtime already lives there.
 
 **Scheduler candidacy is stable-only.** The periodic-jobs scheduler runs an
 advisory-lock leader election among worker-capable nodes
@@ -420,7 +451,10 @@ migration files whose comments carry the annotations.
 stable release's tag and runs its DB-backed store/service test packages
 against a database migrated with **latest `main`'s** migrations. This
 directly exercises "pinned binary, new schema" — the exact failure mode this
-design must prevent. Scope (store-layer subset vs full suite) and the
+design must prevent. The current implementation runs the release's
+`./internal/db/...` packages with `-skip Migration` (the release's own
+migration-behavior tests target its older set) and is not a required PR
+check — it guards `main`, not PRs. Scope (store-layer subset vs full suite) and the
 mechanics of pinning the template DB schema are an open question below.
 
 **(c) Schema preflights everywhere.** Workers already assert
@@ -431,6 +465,10 @@ is ahead of their migration set, so the preflight replaces the step rather
 than wrapping it). The stable preflight additionally enforces the
 destructive floor: the target ref's max migration number must be `>=`
 `max(stable_floor)` over all applied rows in `schema_compat_floors`.
+As defense in depth, `migrate up` itself detects a database ahead of its
+own migration set and degrades to verify-plus-warn instead of invoking
+golang-migrate — so even a manual `deploy.sh app …` run against a pinned
+fleet without `APP_SCHEMA_MODE=verify` cannot take the unsafe path.
 
 **(d) The version ledger.** The GitHub Release marked `make_latest`
 (readable at `GET /repos/assembledhq/143/releases/latest`) is the
@@ -582,8 +620,10 @@ for free — today their options are `:latest` or a raw SHA.
   old, with no unresolved canary regressions newer than it. The dashboard
   split below is what makes "canary has been quiet" checkable rather than
   vibes.
-- **Expedite:** allowed with a second maintainer's approval (the `override`
-  input), e.g. for a customer-blocking fix.
+- **Expedite:** allowed with the `override` input plus a reason. The
+  second-maintainer requirement is enforced by the `stable-promotion`
+  GitHub Environment on `promote.yml` — add required reviewers to it in
+  repo settings and every promotion (expedited or not) waits for approval.
 - **Hotfix path:** prefer promoting a newer soaked SHA. When stable needs a
   fix *now* and `main` has unsoaked risk on top of it: branch
   `hotfix/v1.43.x` from the `v1.43.0` tag, cherry-pick the fix (which must

@@ -84,6 +84,20 @@ type WorkerNode struct {
 type WorkerSelectionRequirements struct {
 	StaticEgressRequired bool
 	StaticEgressPublicIP string
+	// Channel restricts cold-start candidates to nodes on this release
+	// channel. Empty means unconstrained (single-plane deployments and
+	// callers created before the canary/stable split). A job pinned to a
+	// node on the wrong channel is unclaimable — the claim predicate
+	// requires the channel to match while node affinity points elsewhere —
+	// so mixed-plane fleets must always set this. SelectStartNode* stamps
+	// it automatically from the org when an org-channel lookup is wired.
+	Channel models.ReleaseChannel
+}
+
+// OrgReleaseChannelLookup resolves an org's release channel. Implemented by
+// db.OrganizationStore.
+type OrgReleaseChannelLookup interface {
+	GetReleaseChannel(ctx context.Context, id uuid.UUID) (models.ReleaseChannel, error)
 }
 
 type WorkerCachePlacement struct {
@@ -112,11 +126,16 @@ type WorkerSelector struct {
 	previews             *db.PreviewStore
 	maxPreviewsPerWorker int
 	preferredRegion      string
+	orgChannels          OrgReleaseChannelLookup
 }
 
 type WorkerSelectorOptions struct {
 	MaxPreviewsPerWorker int
 	PreferredRegion      string
+	// OrgChannels lets SelectStartNode* restrict candidates to the org's
+	// release channel. Nil disables channel-aware placement (single-plane
+	// deployments); mixed-plane fleets must wire it.
+	OrgChannels OrgReleaseChannelLookup
 }
 
 // NewWorkerSelector creates a new worker selector.
@@ -138,7 +157,25 @@ func NewWorkerSelectorWithOptions(nodes *db.NodeStore, previews *db.PreviewStore
 		previews:             previews,
 		maxPreviewsPerWorker: maxPreviewsPerWorker,
 		preferredRegion:      strings.TrimSpace(opts.PreferredRegion),
+		orgChannels:          opts.OrgChannels,
 	}
+}
+
+// RequireOrgChannel stamps the org's release channel into the requirements so
+// direct node selections (e.g. capacity fallbacks that bypass
+// SelectStartNode*) only consider matching-channel workers. A no-op when the
+// requirements already carry a channel or no org-channel lookup is wired;
+// fails closed otherwise — placing work on the wrong plane would strand it.
+func (s *WorkerSelector) RequireOrgChannel(ctx context.Context, orgID uuid.UUID, req WorkerSelectionRequirements) (WorkerSelectionRequirements, error) {
+	if req.Channel != "" || s.orgChannels == nil || orgID == uuid.Nil {
+		return req, nil
+	}
+	channel, err := s.orgChannels.GetReleaseChannel(ctx, orgID)
+	if err != nil {
+		return req, fmt.Errorf("resolve org release channel for worker selection: %w", err)
+	}
+	req.Channel = channel
+	return req, nil
 }
 
 func parseWorkerNodeMetadata(node models.Node) (WorkerNodeMetadata, error) {
@@ -179,6 +216,9 @@ func parseWorkerNode(node models.Node) (WorkerNode, error) {
 }
 
 func parseWorkerNodeWithRequirements(node models.Node, req WorkerSelectionRequirements) (WorkerNode, error) {
+	if req.Channel != "" && node.Channel != req.Channel {
+		return WorkerNode{}, fmt.Errorf("node %s is on release channel %q, need %q", node.ID, node.Channel, req.Channel)
+	}
 	metadata, err := parseWorkerNodeMetadata(node)
 	if err != nil {
 		return WorkerNode{}, err
@@ -289,6 +329,14 @@ func (s *WorkerSelector) SelectStartNodeWithPlacementAndRequirements(ctx context
 func (s *WorkerSelector) SelectStartNodeWithCachePlacementsAndRequirements(ctx context.Context, orgID uuid.UUID, session *models.Session, repoID uuid.UUID, placements []WorkerCachePlacement, req WorkerSelectionRequirements) (WorkerNode, error) {
 	if session == nil {
 		return WorkerNode{}, fmt.Errorf("session is required")
+	}
+
+	// Cold starts must land on the org's release channel: the start job is
+	// stamped with the org channel and pinned to the selected node, so a
+	// wrong-channel node makes the job unclaimable by either pool.
+	req, err := s.RequireOrgChannel(ctx, orgID, req)
+	if err != nil {
+		return WorkerNode{}, err
 	}
 
 	instance, err := s.previews.GetActivePreviewForSession(ctx, orgID, session.ID)

@@ -857,6 +857,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	workerSelector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
 		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 		PreferredRegion:      cfg.NodeRegion,
+		OrgChannels:          orgStore,
 	})
 	previewRPCSecrets := cfg.PreviewRPCSecrets
 	if len(previewRPCSecrets) == 0 && strings.TrimSpace(cfg.SessionSecret) != "" {

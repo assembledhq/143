@@ -42,10 +42,14 @@ func (m NodeMode) Validate() error {
 
 // Node is a row in the cluster nodes table.
 type Node struct {
-	ID                   string          `db:"id" json:"id"`
-	Mode                 NodeMode        `db:"mode" json:"mode"`
-	Host                 string          `db:"host" json:"host"`
-	Status               NodeStatus      `db:"status" json:"status"`
+	ID   string   `db:"id" json:"id"`
+	Mode NodeMode `db:"mode" json:"mode"`
+	// Channel is the release channel this node serves (stable|canary).
+	// Cold-start placement must only target nodes matching the org's
+	// channel; jobs pinned across channels are unclaimable by design.
+	Channel ReleaseChannel `db:"channel" json:"channel"`
+	Host    string         `db:"host" json:"host"`
+	Status  NodeStatus     `db:"status" json:"status"`
 	DrainIntent          DrainIntent     `db:"drain_intent" json:"drain_intent"`
 	Metadata             json.RawMessage `db:"metadata" json:"metadata"`
 	StartedAt            time.Time       `db:"started_at" json:"started_at"`

@@ -96,13 +96,38 @@ func RequireCanaryChannelForHost(canaryHost string, lookup ReleaseChannelLookup,
 			if channel != models.ReleaseChannelCanary {
 				logger.Debug().Str("org_id", orgID.String()).Str("host", r.Host).
 					Msg("refusing non-canary org on canary host")
-				writeError(w, http.StatusForbidden, "ORG_NOT_ON_CANARY",
-					"this org is not on the canary release channel; use the primary domain")
+				// redirect_origin lets the frontend bounce browser sessions
+				// back to the primary domain instead of rendering a shell
+				// whose every API call fails. Derivable only under the
+				// canary.<primary-domain> convention; omitted otherwise.
+				var details any
+				if primary := primaryOriginForCanaryHost(r); primary != "" {
+					details = map[string]string{"redirect_origin": primary}
+				}
+				writeErrorDetails(w, http.StatusForbidden, "ORG_NOT_ON_CANARY",
+					"this org is not on the canary release channel; use the primary domain", details)
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// primaryOriginForCanaryHost derives the stable plane's origin from a
+// request to the canary host by stripping the leading "canary." label —
+// the naming convention the whole split uses (canary.<primary-domain>).
+// Returns "" when the host doesn't follow the convention.
+func primaryOriginForCanaryHost(r *http.Request) string {
+	host := normalizeHost(r.Host)
+	primary, ok := strings.CutPrefix(host, "canary.")
+	if !ok || primary == "" {
+		return ""
+	}
+	scheme := "https"
+	if !IsRequestSecure(r) {
+		scheme = "http"
+	}
+	return scheme + "://" + primary
 }
 
 // normalizeHost lowercases and strips any port so "Canary.143.dev:443"

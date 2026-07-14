@@ -28,6 +28,11 @@ before the split.
      release workflow and maintainers; block deletion and updates.
    - The `stable` branch and `v*` tags are owned by `promote.yml` — no
      branch protection that would reject its force-pushes to `stable`.
+   - The `stable-promotion` environment (auto-created on the first
+     promotion run): add **required reviewers** to it so every promotion —
+     including soak overrides — needs a second maintainer's approval.
+   - Optional: a `PROMOTE_SLACK_WEBHOOK_URL` secret (Slack incoming
+     webhook) announces promotions and rollbacks; skipped when unset.
 
 ## Phased rollout
 
@@ -91,8 +96,11 @@ Run Promote Stable with the **existing release tag** (e.g. `v1.42.0`) as
 The schema preflight enforces the destructive floor: a target older than an
 applied destructive migration's floor is refused.
 
-Canary rollback is just redeploying an older `main` SHA (re-run the deploy
-workflow or push a revert); the schema never rolls back — old code on newer
+Canary rollback is a revert on `main` (or a manual
+`deploy/scripts/deploy-fleet.sh <key> <sha> app-canary,worker-canary` run
+from a machine with the secrets checkout) — re-running an old deploy
+workflow run does nothing, because `deploy.yml` skips any SHA that is no
+longer the head of `main`. The schema never rolls back — old code on newer
 schema is the supported direction.
 
 ## Destructive migrations

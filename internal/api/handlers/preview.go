@@ -1143,7 +1143,17 @@ func (h *PreviewHandler) workerSelectionRequirements(ctx context.Context, orgID 
 	if h == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
-	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgress.PublicIP)
+	reqs, err := previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgress.PublicIP)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	if h.workerSelector == nil {
+		return reqs, nil
+	}
+	// Pin the org's release channel so every downstream selection —
+	// including direct resolve/least-loaded paths — stays on the org's
+	// plane; a wrong-channel placement strands the pinned start job.
+	return h.workerSelector.RequireOrgChannel(ctx, orgID, reqs)
 }
 
 func previewWorkerSelectionRequirements(ctx context.Context, orgStore agent.OrgSettingsReader, orgID uuid.UUID, staticEgressPublicIP string) (preview.WorkerSelectionRequirements, error) {

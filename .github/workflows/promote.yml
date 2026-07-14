@@ -45,6 +45,11 @@ jobs:
   promote:
     if: github.repository == 'assembledhq/143'
     runs-on: ubuntu-latest
+    # The environment is the enforcement point for "expedites need a second
+    # maintainer": add required reviewers to `stable-promotion` in repo
+    # settings and every promotion waits for approval. Without protection
+    # rules the environment is inert and promotions run immediately.
+    environment: stable-promotion
     permissions:
       contents: write # annotated tag, release, stable branch
       packages: write # version-tag the GHCR images by reference
@@ -319,3 +324,29 @@ jobs:
           # rollback legitimately moves it backwards; the branch is owned by
           # this workflow.
           git push --force origin "$SHA:refs/heads/stable"
+
+      - name: Post release to Slack
+        # Optional: set the PROMOTE_SLACK_WEBHOOK_URL secret (an incoming
+        # webhook) to announce promotions; skipped silently when unset.
+        if: always() && steps.resolve.outputs.sha != ''
+        env:
+          WEBHOOK_URL: ${{ secrets.PROMOTE_SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version || steps.resolve.outputs.version }}
+          MODE: ${{ steps.resolve.outputs.mode }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "PROMOTE_SLACK_WEBHOOK_URL not set; skipping Slack announcement."
+            exit 0
+          fi
+          release_url="$(gh release view "$VERSION" --json url --jq .url 2>/dev/null || echo "")"
+          if [ "$MODE" = "rollback" ]; then
+            text="⏪ Stable rolled back to $VERSION ($OUTCOME). $release_url"
+          else
+            text="🚀 Stable promoted to $VERSION ($OUTCOME). $release_url"
+          fi
+          curl -sf -X POST -H 'Content-Type: application/json' \
+            --data "$(printf '{"text": "%s"}' "$text")" \
+            "$WEBHOOK_URL" || echo "WARNING: Slack announcement failed; promotion is unaffected."

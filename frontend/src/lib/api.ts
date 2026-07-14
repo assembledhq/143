@@ -48,6 +48,21 @@ function maybeDispatchRevoked(): void {
   window.dispatchEvent(new CustomEvent(ORG_MEMBERSHIP_REVOKED_EVENT));
 }
 
+// The canary host only serves orgs on the canary release channel; the API
+// answers other orgs with ORG_NOT_ON_CANARY plus the primary origin. Bounce
+// the whole browser session there (preserving the path) instead of rendering
+// a shell whose every request fails. Once per page life — parallel requests
+// all see the same 403 and must not stack navigations.
+let redirectedOffCanary = false;
+function maybeRedirectOffCanary(redirectOrigin: unknown): void {
+  if (redirectedOffCanary || typeof window === 'undefined') return;
+  if (typeof redirectOrigin !== 'string' || !/^https?:\/\//.test(redirectOrigin)) return;
+  redirectedOffCanary = true;
+  window.location.assign(
+    redirectOrigin.replace(/\/$/, '') + window.location.pathname + window.location.search,
+  );
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -89,6 +104,9 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    if (body?.error?.code === 'ORG_NOT_ON_CANARY') {
+      maybeRedirectOffCanary(body?.error?.details?.redirect_origin);
+    }
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,
@@ -167,6 +185,9 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    if (body?.error?.code === 'ORG_NOT_ON_CANARY') {
+      maybeRedirectOffCanary(body?.error?.details?.redirect_origin);
+    }
     throw new ApiError(
       body?.error?.code || 'UNKNOWN',
       body?.error?.message || res.statusText,

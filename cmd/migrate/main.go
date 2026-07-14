@@ -69,6 +69,21 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Destructive migration gate refused the run: %v\n", err)
 			os.Exit(1)
 		}
+		// A database ahead of this checkout means this binary belongs to the
+		// stable (pinned) plane and the canary pipeline owns the schema.
+		// golang-migrate's behavior with a source set older than the DB
+		// version is version-dependent, so never invoke it: degrade to the
+		// stable preflight (schema + destructive-floor assertions) instead.
+		// This makes a manual `deploy.sh app ...` against a pinned fleet
+		// safe even without APP_SCHEMA_MODE=verify.
+		if localMax, lmErr := maxLocalMigrationVersion(migrationDir); lmErr == nil && verr != migrate.ErrNilVersion && uint64(dbVersion) > localMax {
+			fmt.Fprintf(os.Stderr, "WARNING: database schema (%d) is ahead of this checkout's migration set (%06d); running verify instead of up.\n", dbVersion, localMax)
+			if err := runVerify(context.Background(), dbURL, migrationDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Schema verify FAILED: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("up", m, err)
 			os.Exit(1)

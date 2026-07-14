@@ -1022,8 +1022,9 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 	defer mock.Close()
 
 	store := NewJobStore(mock)
-	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+	mock.ExpectQuery("SELECT\\s+channel,\\s+queue,\\s+job_type").
 		WillReturnRows(pgxmock.NewRows([]string{
+			"channel",
 			"queue",
 			"job_type",
 			"pending_runnable",
@@ -1031,13 +1032,15 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			"running",
 			"dead_letter",
 			"oldest_runnable_age_seconds",
-		}).AddRow("agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
-			AddRow("default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
+		}).AddRow("stable", "agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
+			AddRow("canary", "agent", "run_agent", int64(1), int64(0), int64(0), int64(0), float64(7)).
+			AddRow("stable", "default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
 
 	samples, err := store.QueueHealthSamples(context.Background())
 	require.NoError(t, err, "QueueHealthSamples should not return an error")
 	require.Equal(t, []JobQueueHealthSample{
 		{
+			Channel:                  "stable",
 			Queue:                    "agent",
 			JobType:                  "run_agent",
 			PendingRunnable:          3,
@@ -1047,6 +1050,17 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			OldestRunnableAgeSeconds: 42,
 		},
 		{
+			Channel:                  "canary",
+			Queue:                    "agent",
+			JobType:                  "run_agent",
+			PendingRunnable:          1,
+			PendingDeferred:          0,
+			Running:                  0,
+			DeadLetter:               0,
+			OldestRunnableAgeSeconds: 7,
+		},
+		{
+			Channel:                  "stable",
 			Queue:                    "default",
 			JobType:                  "open_pr",
 			PendingRunnable:          0,
@@ -1055,7 +1069,7 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			DeadLetter:               2,
 			OldestRunnableAgeSeconds: 0,
 		},
-	}, samples, "QueueHealthSamples should return grouped queue health rows")
+	}, samples, "QueueHealthSamples should return queue health rows grouped per release channel")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1067,7 +1081,7 @@ func TestJobStore_QueueHealthSamples_ReturnsWrappedErrors(t *testing.T) {
 	defer mock.Close()
 
 	store := NewJobStore(mock)
-	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+	mock.ExpectQuery("SELECT\\s+channel,\\s+queue,\\s+job_type").
 		WillReturnError(errors.New("query failed"))
 
 	samples, err := store.QueueHealthSamples(context.Background())

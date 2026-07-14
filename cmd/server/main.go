@@ -571,6 +571,7 @@ func main() {
 						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
 							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 							PreferredRegion:      cfg.NodeRegion,
+							OrgChannels:          db.NewOrganizationStore(pool),
 						})
 						previewStopper := preview.NewWorkerStopper(previewStore, autoPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID, previewManager)
 						prSvc.SetPreviewTeardown(previewStore, previewStopper)
@@ -584,6 +585,7 @@ func main() {
 					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
 						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 						PreferredRegion:      cfg.NodeRegion,
+						OrgChannels:          db.NewOrganizationStore(pool),
 					})
 					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
 					slackPreviewHandler.SetJobStore(jobStore)
@@ -743,34 +745,47 @@ func main() {
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
-		reaperOpts := []agent.SessionReaperOption{
-			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
-			agent.WithUsageRoller(usageRollupStore),
-			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
-			agent.WithRuntimeJobTerminalizer(jobStore),
-			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
-			// Phase 0.5b safety net: fails session_threads stuck in 'running'
-			// past maxRunningAge. Catches orphans the orchestrator/handler
-			// thread.status reset paths couldn't unwind themselves.
-			agent.WithStuckThreadLister(sessionThreadStore),
-		}
-		if previewManager != nil {
-			previewStore := db.NewPreviewStore(pool)
-			nodeStore := db.NewNodeStore(pool)
-			selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
-				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
-				PreferredRegion:      cfg.NodeRegion,
-			})
-			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
-			if keyringErr != nil {
-				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
-				previewRPCKeyring = auth.PreviewTokenKeyring{}
+		// The session reaper is a fleet-global, cross-org sweep of stale
+		// sessions/threads/snapshots. Like the scheduler, it runs only on
+		// the stable channel so unreleased canary code never performs
+		// cross-org writes; a stable-run reaper covers canary orgs' rows
+		// too (its preview stops go over the worker RPC contract, which is
+		// old-caller→new-worker compatible by design). The node/job
+		// recovery loop deliberately stays on BOTH channels — it is mutual
+		// crash recovery whose requeues preserve each job's channel.
+		if cfg.Channel == string(models.ReleaseChannelStable) {
+			reaperOpts := []agent.SessionReaperOption{
+				agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
+				agent.WithUsageRoller(usageRollupStore),
+				agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+				agent.WithRuntimeJobTerminalizer(jobStore),
+				agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
+				// Phase 0.5b safety net: fails session_threads stuck in 'running'
+				// past maxRunningAge. Catches orphans the orchestrator/handler
+				// thread.status reset paths couldn't unwind themselves.
+				agent.WithStuckThreadLister(sessionThreadStore),
 			}
-			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
-			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
+			if previewManager != nil {
+				previewStore := db.NewPreviewStore(pool)
+				nodeStore := db.NewNodeStore(pool)
+				selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+					MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+					PreferredRegion:      cfg.NodeRegion,
+					OrgChannels:          db.NewOrganizationStore(pool),
+				})
+				previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+				if keyringErr != nil {
+					logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+					previewRPCKeyring = auth.PreviewTokenKeyring{}
+				}
+				client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
+				reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
+			}
+			reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
+			go reaper.Run(ctx)
+		} else {
+			logger.Info().Msg("session reaper disabled: this node is not on the stable release channel")
 		}
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
-		go reaper.Run(ctx)
 
 		// Runtime resource sampler — emits live memory/CPU histograms per
 		// running sandbox so operators can size SANDBOX_* limits against

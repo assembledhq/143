@@ -60,13 +60,15 @@ func TestRequireCanaryChannelForHost(t *testing.T) {
 		require.Zero(t, lookup.calls, "stable-host requests must not pay a channel lookup")
 	})
 
-	t.Run("canary host refuses stable-channel orgs", func(t *testing.T) {
+	t.Run("canary host refuses stable-channel orgs with a redirect target", func(t *testing.T) {
 		t.Parallel()
 		lookup := &fakeChannelLookup{channel: models.ReleaseChannelStable}
 		guard := RequireCanaryChannelForHost("canary.143.dev", lookup, zerolog.Nop())
 		rr := channelGuardRequest(t, guard, "canary.143.dev", uuid.New())
 		require.Equal(t, http.StatusForbidden, rr.Code, "a stable org must not be served canary code")
 		require.Contains(t, rr.Body.String(), "ORG_NOT_ON_CANARY")
+		require.Contains(t, rr.Body.String(), `"redirect_origin":"http://143.dev"`,
+			"the 403 must carry the primary origin so browser sessions can bounce off the canary host")
 	})
 
 	t.Run("canary host serves canary-channel orgs", func(t *testing.T) {
