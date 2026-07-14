@@ -39,6 +39,7 @@ import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -744,7 +745,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                 )}
               </CardTitle>
               {session.failure_retry_advised && (
-                <div className="inline-flex">
+                <ButtonGroup size="xs">
                   <DisabledTooltip
                     disabled={retryMutation.isPending || checkpointRetryUnavailable}
                     content={recoveryActive ? "Runtime recovery is already in progress." : checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
@@ -778,7 +779,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                </div>
+                </ButtonGroup>
               )}
             </div>
           </CardHeader>
@@ -6505,7 +6506,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 ) : null}
                 <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                  <div className="inline-flex">
+                  <ButtonGroup size="sm">
                     <Button
                       variant="outline"
                       size="sm"
@@ -6564,7 +6565,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                  </div>
+                  </ButtonGroup>
                 </DisabledTooltip>
               </>
             ) : null}
