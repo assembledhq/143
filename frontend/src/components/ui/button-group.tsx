@@ -2,6 +2,7 @@ import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 
 import { cn } from "@/lib/utils"
+import { ButtonGroupSizeContext, type ButtonGroupSize } from "./button-group-context"
 
 const buttonGroupVariants = cva(
   "inline-flex w-fit items-stretch [&_[data-slot=button]]:!h-full",
@@ -25,14 +26,18 @@ function ButtonGroup({
   size = "default",
   ...props
 }: React.ComponentProps<"div"> & VariantProps<typeof buttonGroupVariants>) {
+  const resolvedSize: ButtonGroupSize = size ?? "default"
+
   return (
-    <div
-      role="group"
-      data-slot="button-group"
-      data-size={size}
-      className={cn(buttonGroupVariants({ size }), className)}
-      {...props}
-    />
+    <ButtonGroupSizeContext.Provider value={resolvedSize}>
+      <div
+        role="group"
+        data-slot="button-group"
+        data-size={resolvedSize}
+        className={cn(buttonGroupVariants({ size: resolvedSize }), className)}
+        {...props}
+      />
+    </ButtonGroupSizeContext.Provider>
   )
 }
 

@@ -19,5 +19,8 @@ describe("ButtonGroup", () => {
     const group = screen.getByRole("group", { name: "Publish actions" })
     expect(group).toHaveAttribute("data-size", "sm")
     expect(group).toHaveClass("h-10", "sm:h-7", "[&_[data-slot=button]]:!h-full")
+    expect(screen.getByRole("button", { name: "Publish" })).toHaveAttribute("data-size", "sm")
+    expect(screen.getByRole("button", { name: "More publish actions" })).toHaveAttribute("data-size", "icon-sm")
+    expect(screen.getByRole("button", { name: "More publish actions" })).toHaveClass("size-10", "sm:size-7")
   })
 })
