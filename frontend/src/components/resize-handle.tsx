@@ -8,11 +8,15 @@ interface ResizeHandleProps {
   direction?: "horizontal";
   /** Called continuously during drag with the delta in px (positive = right/down) */
   onResize: (delta: number) => void;
+  /** Called once when a drag begins */
+  onResizeStart?: () => void;
+  /** Called once when a drag ends (pointer up or cancel) */
+  onResizeEnd?: () => void;
   className?: string;
   testId?: string;
 }
 
-export function ResizeHandle({ direction = "horizontal", onResize, className, testId }: ResizeHandleProps) {
+export function ResizeHandle({ direction = "horizontal", onResize, onResizeStart, onResizeEnd, className, testId }: ResizeHandleProps) {
   const activePointerId = useRef<number | null>(null);
   const lastPos = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -37,11 +41,13 @@ export function ResizeHandle({ direction = "horizontal", onResize, className, te
 
   const stopDragging = useCallback((pointerId?: number) => {
     if (pointerId !== undefined && activePointerId.current !== pointerId) return;
+    if (activePointerId.current === null) return;
 
     activePointerId.current = null;
     setIsDragging(false);
     resetDocumentDragStyles();
-  }, [resetDocumentDragStyles]);
+    onResizeEnd?.();
+  }, [resetDocumentDragStyles, onResizeEnd]);
 
   const handlePointerUp = useCallback((e: PointerEvent) => {
     stopDragging(e.pointerId);
@@ -71,6 +77,7 @@ export function ResizeHandle({ direction = "horizontal", onResize, className, te
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     e.currentTarget.setPointerCapture?.(e.pointerId);
+    onResizeStart?.();
   }
 
   return (

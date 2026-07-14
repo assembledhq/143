@@ -80,8 +80,9 @@ function isPlainNavClick(e: React.MouseEvent): boolean {
 const buildSha = process.env.NEXT_PUBLIC_BUILD_SHA || "dev";
 const shortSha = buildSha === "dev" ? "dev" : buildSha.slice(0, 7);
 const APP_SIDEBAR_DEFAULT_WIDTH = 236;
-const APP_SIDEBAR_MIN_WIDTH = 200;
+const APP_SIDEBAR_MIN_WIDTH = 56;
 const APP_SIDEBAR_MAX_WIDTH = 300;
+const APP_SIDEBAR_COLLAPSE_AT = 152;
 const APP_SIDEBAR_STORAGE_KEY = "143:app-sidebar-width";
 
 function prefetchAuthGateRouteData(queryClient: QueryClient, pathname: string): void {
@@ -151,6 +152,7 @@ type SidebarBodyProps = {
   canCreateSession: boolean;
   onNavigate?: () => void;
   onLogout: () => void;
+  collapsed?: boolean;
 };
 
 function SidebarBody({
@@ -162,6 +164,7 @@ function SidebarBody({
   canCreateSession,
   onNavigate,
   onLogout,
+  collapsed = false,
 }: SidebarBodyProps) {
   const isMobile = variant === "mobile";
   // Touch-friendly sizing on mobile: nav items ~44px tall, icon buttons 44×44.
@@ -177,10 +180,15 @@ function SidebarBody({
       <div
         className={cn(
           "relative flex items-center justify-between",
-          isMobile ? "px-3 py-3" : "px-4 py-3.5"
+          isMobile ? "px-3 py-3" : "h-14 px-2",
+          collapsed && "justify-center",
         )}
       >
-        <div className="flex items-center min-w-0 flex-1">
+        <div
+          aria-hidden={collapsed || undefined}
+          inert={collapsed || undefined}
+          className={cn("flex items-center min-w-0 flex-1 transition-opacity duration-150", collapsed && "pointer-events-none absolute opacity-0")}
+        >
           <OrgSwitcher userEmail={user?.email} />
         </div>
         {isMobile ? (
@@ -196,7 +204,7 @@ function SidebarBody({
           </SheetClose>
         ) : (
           <TooltipProvider>
-            <div className="flex items-center gap-0.5">
+            <div className={cn("flex items-center gap-0.5", collapsed && "w-full justify-center")}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -216,7 +224,7 @@ function SidebarBody({
                   Search <Kbd variant="inverted">⌘K</Kbd>
                 </TooltipContent>
               </Tooltip>
-              {canCreateSession && (
+              {canCreateSession && !collapsed && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -241,17 +249,19 @@ function SidebarBody({
       </div>
 
       {/* Navigation */}
-      <nav className="relative flex-1 px-2 space-y-0.5 overflow-y-auto">
+      <nav className="relative flex-1 px-2 space-y-0.5 overflow-y-auto overflow-x-hidden">
         {navItems.map((item) => {
           const isActive = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
             <Link
               key={item.href}
               href={item.href}
+              title={collapsed ? item.label : undefined}
               onClick={onNavigate ? (e) => { if (isPlainNavClick(e)) onNavigate(); } : undefined}
               aria-current={isActive ? "page" : undefined}
               className={cn(
-                "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-colors duration-[175ms] active:bg-sidebar-accent",
+                "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-all duration-[175ms] active:bg-sidebar-accent",
+                collapsed && "justify-center px-0",
                 navItemClasses,
                 isActive
                   ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
@@ -259,7 +269,7 @@ function SidebarBody({
               )}
             >
               <item.icon className="h-4 w-4 shrink-0" />
-              <span className="flex-1">{item.label}</span>
+              <span className={cn("flex-1 overflow-hidden whitespace-nowrap transition-[max-width,opacity] duration-150", collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100")}>{item.label}</span>
             </Link>
           );
         })}
@@ -268,13 +278,14 @@ function SidebarBody({
           userRole={user?.role}
           onNavigate={onNavigate}
           variant={variant}
+          collapsed={collapsed}
         />
       </nav>
 
       {/* Repo context switcher */}
       <div
         data-testid="repo-context-switcher-slot"
-        className="relative px-2 pb-1 border-t border-sidebar-border/70 pt-2 empty:hidden"
+        className={cn("relative px-2 pb-1 border-t border-sidebar-border/70 pt-2 empty:hidden", collapsed && "hidden")}
       >
         <RepoContextSwitcher />
       </div>
@@ -292,8 +303,10 @@ function SidebarBody({
               <Button
                 variant="ghost"
                 size="sm"
+                title={collapsed ? user.name : undefined}
                 className={cn(
-                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-colors duration-150 text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                  "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-all duration-150 text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                  collapsed && "justify-center px-0",
                   isMobile ? "h-11 text-sm" : "h-8 text-xs"
                 )}
               >
@@ -309,8 +322,8 @@ function SidebarBody({
                     {user.name?.[0]?.toUpperCase() ?? "?"}
                   </div>
                 )}
-                <span className="truncate flex-1 text-left">{user.name}</span>
-                <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-40" />
+                <span className={cn("truncate flex-1 text-left transition-[max-width,opacity] duration-150", collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100")}>{user.name}</span>
+                <ChevronsUpDown className={cn("h-3.5 w-3.5 shrink-0 opacity-40", collapsed && "hidden")} />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top" className="w-48">
@@ -601,12 +614,20 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
     prefetchedPathRef.current = pathname;
     prefetchAuthGateRouteData(queryClient, pathname);
   }, [isLoading, pathname, queryClient, user]);
-  const { width: appSidebarWidth, resizeBy: resizeAppSidebar } = usePersistedPanelWidth({
+  const { width: appSidebarWidth, resizeBy: resizeAppSidebar, settle: settleAppSidebar } = usePersistedPanelWidth({
     storageKey: APP_SIDEBAR_STORAGE_KEY,
     defaultWidth: APP_SIDEBAR_DEFAULT_WIDTH,
     minWidth: APP_SIDEBAR_MIN_WIDTH,
     maxWidth: APP_SIDEBAR_MAX_WIDTH,
+    collapseBelow: APP_SIDEBAR_COLLAPSE_AT,
   });
+  const appSidebarCollapsed = appSidebarWidth < APP_SIDEBAR_COLLAPSE_AT;
+  const [isResizingAppSidebar, setIsResizingAppSidebar] = useState(false);
+  const handleAppSidebarResizeStart = useCallback(() => setIsResizingAppSidebar(true), []);
+  const handleAppSidebarResizeEnd = useCallback(() => {
+    setIsResizingAppSidebar(false);
+    settleAppSidebar();
+  }, [settleAppSidebar]);
 
   // Global Cmd+K / Ctrl+K shortcut
   useEffect(() => {
@@ -723,7 +744,8 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           data-testid="app-sidebar"
           style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
           className={cn(
-            "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)]"
+            "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col w-[var(--app-sidebar-w)] overflow-hidden",
+            !isResizingAppSidebar && "transition-[width] duration-150 ease-out"
           )}
         >
           <div className="px-4 py-4">
@@ -745,7 +767,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           </div>
         </aside>
         <div className="hidden xl:block">
-          <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+          <ResizeHandle
+            onResize={resizeAppSidebar}
+            onResizeStart={handleAppSidebarResizeStart}
+            onResizeEnd={handleAppSidebarResizeEnd}
+            testId="app-sidebar-resize-handle"
+          />
         </div>
         <div className="flex flex-1 min-w-0 flex-col">
           <header className="md:hidden flex h-14 items-center gap-2 border-b border-sidebar-border bg-sidebar px-3">
@@ -793,8 +820,12 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
         data-testid="app-sidebar"
         style={{ "--app-sidebar-w": `${appSidebarWidth}px` } as React.CSSProperties}
         className={cn(
-          "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col relative w-[var(--app-sidebar-w)]"
+          "hidden xl:flex bg-sidebar border-r border-sidebar-border flex-col relative w-[var(--app-sidebar-w)] overflow-hidden",
+          // Animate width only when settling/collapsing, not while the pointer is
+          // driving the width directly — otherwise the edge lags behind the cursor.
+          !isResizingAppSidebar && "transition-[width] duration-150 ease-out"
         )}
+        data-collapsed={appSidebarCollapsed ? "true" : "false"}
       >
         <SidebarBody
           variant="desktop"
@@ -804,10 +835,16 @@ export function AuthenticatedLayout({ children }: { children: React.ReactNode })
           onCreateSession={handleCreateSessionOpen}
           canCreateSession={canCreateSession}
           onLogout={logout}
+          collapsed={appSidebarCollapsed}
         />
       </aside>
       <div className="hidden xl:block">
-        <ResizeHandle onResize={resizeAppSidebar} testId="app-sidebar-resize-handle" />
+        <ResizeHandle
+          onResize={resizeAppSidebar}
+          onResizeStart={handleAppSidebarResizeStart}
+          onResizeEnd={handleAppSidebarResizeEnd}
+          testId="app-sidebar-resize-handle"
+        />
       </div>
 
       {/* Mobile drawer (below md) */}
