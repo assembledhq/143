@@ -529,9 +529,14 @@ func main() {
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
 					if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+						var sessionBrowserInspector preview.SessionBrowserInspector
+						if inspector, ok := previewManager.Inspector().(preview.SessionBrowserInspector); ok {
+							sessionBrowserInspector = inspector
+						}
 						concreteOrchestrator.SetSuccessfulTurnVerifier(preview.NewSuccessfulTurnVerifier(
 							previewManager,
 							previewStore,
+							preview.NewBrowserSessionService(db.NewPreviewBrowserSessionStore(pool), sessionBrowserInspector),
 							db.NewPreviewVerificationRunStore(pool),
 						))
 					}
