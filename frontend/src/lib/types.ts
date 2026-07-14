@@ -1657,20 +1657,6 @@ export interface ChangesetSummary {
   updated_at: string;
 }
 
-export interface ChangesetSplitStatus {
-  status: "draft" | "accepted";
-  source_diff_snapshot_id: string;
-  source_paths: string[];
-  assignments: Array<{ changeset_id: string; paths: string[] }>;
-  unassigned_paths: string[];
-  duplicates: Array<{ path: string; changeset_ids: string[] }>;
-  conflicts: Array<{ path: string; changeset_id: string; reason: string }>;
-  omissions: Array<{ path: string; reason: string; confirmed_by_user_id: string; created_at: string }>;
-  unexpected_paths: string[];
-  verification: "planned" | "verified";
-  complete: boolean;
-}
-
 export interface SessionDiff {
   session_id: string;
   diff?: string;

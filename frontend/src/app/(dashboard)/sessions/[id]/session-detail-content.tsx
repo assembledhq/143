@@ -144,7 +144,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSplitStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -3410,103 +3410,22 @@ export function PullRequestList({
   );
 }
 
-export function ChangesetSplitPlanner({
-  sessionID,
-  changesets,
+export function ChangesetSplitPrompt({
   additions,
+  onRequestSplit,
+  requestSplitPending = false,
 }: {
-  sessionID: string;
-  changesets: ChangesetSummary[];
   additions?: number;
+  onRequestSplit?: () => void;
+  requestSplitPending?: boolean;
 }) {
-  const queryClient = useQueryClient();
-  const splitKey = ["session", sessionID, "changeset-split"] as const;
-  const splitQuery = useQuery({
-    queryKey: splitKey,
-    queryFn: () => api.sessions.getChangesetSplitStatus(sessionID),
-    enabled: true,
-    retry: false,
-  });
-  const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: splitKey });
-    await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(sessionID) });
-  };
-  const action = useMutation({
-    mutationFn: async (run: () => Promise<unknown>) => run(),
-    onSuccess: refresh,
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Split action failed"),
-  });
-  if (splitQuery.isError) {
-    if (!shouldOfferChangesetSplit(additions)) return null;
-    return (
-      <Card className="border-border/60">
-        <CardContent className="flex items-center justify-between gap-3 p-4">
-          <div><p className="text-sm font-medium">Need smaller pull requests?</p><p className="text-xs text-muted-foreground">Freeze the current diff and split it into reviewable branches.</p></div>
-          <Button size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.initializeChangesetSplit(sessionID))}>Split into PRs</Button>
-        </CardContent>
-      </Card>
-    );
-  }
-  const status: ChangesetSplitStatus | undefined = splitQuery.data?.data;
-  if (!status) return null;
-  if (status.status === "accepted") {
-    return <Card className="border-border/60"><CardContent className="p-4"><p className="text-sm font-medium">Split accepted</p><p className="text-xs text-muted-foreground">The original session diff is archived and the pull request branches are now the session rollup.</p></CardContent></Card>;
-  }
-  const candidates = changesets.filter((changeset) => !changeset.is_primary);
-  const ownerByPath = new Map(status.assignments.flatMap((assignment) => assignment.paths.map((path) => [path, assignment.changeset_id] as const)));
-  const omittedPaths = new Set(status.omissions.map((omission) => omission.path));
-  const assign = async (path: string, nextOwner: string) => {
-    const previous = ownerByPath.get(path);
-    if (previous && previous !== nextOwner) {
-      const paths = status.assignments.find((assignment) => assignment.changeset_id === previous)?.paths.filter((item) => item !== path) ?? [];
-      await api.sessions.replaceChangesetSplitPaths(sessionID, previous, paths);
-    }
-    if (nextOwner === "__omit") {
-      await api.sessions.replaceChangesetSplitOmissions(sessionID, [
-        ...status.omissions.filter((omission) => omission.path !== path).map(({ path: omittedPath, reason }) => ({ path: omittedPath, reason })),
-        { path, reason: "Explicitly omitted while accepting the split" },
-      ]);
-      return;
-    }
-    if (omittedPaths.has(path)) {
-      await api.sessions.replaceChangesetSplitOmissions(sessionID, status.omissions.filter((omission) => omission.path !== path).map(({ path: omittedPath, reason }) => ({ path: omittedPath, reason })));
-    }
-    const paths = status.assignments.find((assignment) => assignment.changeset_id === nextOwner)?.paths ?? [];
-    await api.sessions.replaceChangesetSplitPaths(sessionID, nextOwner, [...paths, path]);
-  };
+  if (!shouldOfferChangesetSplit(additions)) return null;
+
   return (
-    <Card className="border-border/60" data-testid="changeset-split-planner">
-      <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center justify-between text-sm"><span>Split progress</span><Badge variant={status.complete ? "default" : "secondary"}>{status.verification === "verified" ? "Verified" : "Planning"}</Badge></CardTitle></CardHeader>
-      <CardContent className="space-y-3 p-4 pt-1">
-        <p className="text-xs text-muted-foreground">{status.source_paths.length - status.unassigned_paths.length} of {status.source_paths.length} files accounted for</p>
-        <div className="max-h-64 space-y-1 overflow-y-auto">
-          {status.source_paths.map((path) => (
-            <div key={path} className="flex items-center gap-2 rounded-md border border-border p-2">
-              <span className="min-w-0 flex-1 truncate text-xs" title={path}>{path}</span>
-              <Select value={ownerByPath.get(path) ?? (omittedPaths.has(path) ? "__omit" : "unassigned")} onValueChange={(value) => value !== "unassigned" && action.mutate(() => assign(path, value))}>
-                <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent><SelectItem value="unassigned">Unassigned</SelectItem><SelectItem value="__omit">Omit with confirmation</SelectItem>{candidates.map((changeset) => <SelectItem key={changeset.id} value={changeset.id}>{changeset.title}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-          ))}
-        </div>
-        {(status.duplicates.length > 0 || status.conflicts.length > 0 || status.unexpected_paths.length > 0) && <ErrorNotice title={`${status.duplicates.length} duplicate, ${status.conflicts.length} conflicting, and ${status.unexpected_paths.length} unexpected files require attention.`} />}
-        <div className="space-y-1">
-          {candidates.map((changeset, index) => (
-            <div key={changeset.id} className="flex items-center gap-2 text-xs">
-              <span className="min-w-0 flex-1 truncate">PR {index + 1}: {changeset.title}</span>
-              {index > 0 && !changeset.worktree_path && !candidates[index - 1].worktree_path && <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.foldChangeset(sessionID, changeset.id, candidates[index - 1].id))}>Fold up</Button>}
-              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={index === 0 || action.isPending} aria-label={`Move ${changeset.title} up`} onClick={() => action.mutate(() => { const ids = candidates.map((item) => item.id); [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]]; return api.sessions.reorderChangesets(sessionID, ids); })}><ArrowUp className="h-3.5 w-3.5" /></Button>
-              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={index === candidates.length - 1 || action.isPending} aria-label={`Move ${changeset.title} down`} onClick={() => action.mutate(() => { const ids = candidates.map((item) => item.id); [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]]; return api.sessions.reorderChangesets(sessionID, ids); })}><ArrowDown className="h-3.5 w-3.5" /></Button>
-            </div>
-          ))}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.createChangeset(sessionID, { title: `Pull request ${candidates.length + 1}` }))}><Plus className="h-3.5 w-3.5" />Add PR</Button>
-          {candidates.filter((changeset) => !changeset.worktree_path).map((changeset) => <Button key={changeset.id} size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.materializeChangeset(sessionID, changeset.id))}>Materialize {changeset.title}</Button>)}
-          <Button size="sm" variant="outline" disabled={action.isPending || candidates.some((changeset) => !changeset.worktree_path)} onClick={() => action.mutate(() => api.sessions.verifyChangesetSplit(sessionID))}>Verify split</Button>
-          <Button size="sm" disabled={action.isPending || !status.complete} onClick={() => action.mutate(() => api.sessions.acceptChangesetSplit(sessionID))}>Accept split</Button>
-        </div>
+    <Card className="border-border/60">
+      <CardContent className="flex items-center justify-between gap-3 p-4">
+        <div><p className="text-sm font-medium">Need smaller pull requests?</p><p className="text-xs text-muted-foreground">Ask the coding agent to split the current diff into reviewable branches.</p></div>
+        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>Split PRs</Button>
       </CardContent>
     </Card>
   );
@@ -6646,10 +6565,12 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <ChangesetSplitPlanner
-            sessionID={id}
-            changesets={changesets}
+          <ChangesetSplitPrompt
             additions={session.diff_stats?.added}
+            onRequestSplit={() => queueSend({
+              overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
+            })}
+            requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
           />
           {hasMultipleChangesets && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">

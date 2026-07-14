@@ -130,13 +130,6 @@ function patch<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
-function put<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, {
-    method: 'PUT',
-    body: JSON.stringify(body),
-  });
-}
-
 function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
@@ -562,16 +555,6 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
     updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
       patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
-    getChangesetSplitStatus: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-status`),
-    replaceChangesetSplitPaths: (sessionId: string, changesetId: string, paths: string[]) =>
-      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/split-paths`, { paths }),
-    initializeChangesetSplit: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split`),
-    replaceChangesetSplitOmissions: (sessionId: string, omissions: Array<{ path: string; reason: string }>) =>
-      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-omissions`, { omissions }),
-    materializeChangeset: (sessionId: string, changesetId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/materialize`),
     publishChangeset: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id?: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/publish`),
     publishChangesetStack: (sessionId: string) =>
@@ -580,14 +563,6 @@ export const api = {
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
     confirmChangesetRestack: (sessionId: string, changesetId: string) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/confirm-restack`),
-    verifyChangesetSplit: (sessionId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/verify`),
-    acceptChangesetSplit: (sessionId: string) =>
-      post<void>(`/api/v1/sessions/${sessionId}/changesets/accept-split`),
-    reorderChangesets: (sessionId: string, changesetIds: string[]) =>
-      put<void>(`/api/v1/sessions/${sessionId}/changesets/order`, { changeset_ids: changesetIds }),
-    foldChangeset: (sessionId: string, sourceId: string, targetId: string) =>
-      post<void>(`/api/v1/sessions/${sessionId}/changesets/${sourceId}/fold`, { target_changeset_id: targetId }),
     getReadiness: (sessionId: string, changesetId?: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`),
     runReadiness: (sessionId: string, changesetId?: string) =>
