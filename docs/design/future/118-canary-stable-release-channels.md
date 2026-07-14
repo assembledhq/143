@@ -111,10 +111,12 @@ In this doc, *channel* always means the `stable`/`canary` release channel.
                 └────────────────┘  └─────────────────┘
 ```
 
-- The app host runs **two compose projects**: the existing stable
-  `api`/`frontend` pair and a canary `api-canary`/`frontend-canary` pair on
-  the same Docker network. Caddy routes by hostname to container DNS names —
-  no new host ports, no second origin server.
+- The app host runs the canary `api-canary`/`frontend-canary` services **in
+  the same compose project** as the stable `api`/`frontend` pair (additional
+  services in `docker-compose.app.yml`, not a second project — a separate
+  compose project would land on its own default network, invisible to
+  Caddy's `dynamic a` DNS resolution). Caddy routes by hostname to container
+  DNS names — no new host ports, no second origin server.
 - Worker hosts are assigned a channel. Stable workers run the pinned tag;
   canary worker(s) run latest `main`.
 - Postgres, Redis, and logging hosts are shared and unchanged.
@@ -150,8 +152,8 @@ In this doc, *channel* always means the `stable`/`canary` release channel.
 
 ## Database Schema
 
-All three changes are additive and metadata-only on PG17 (column with
-constant default).
+All changes are additive. The column adds are metadata-only on the fleet's
+Postgres 18 (constant defaults take the fast path on PG11+).
 
 ```sql
 ALTER TABLE organizations
@@ -174,18 +176,43 @@ ALTER TABLE nodes
   ADD COLUMN channel text NOT NULL DEFAULT 'stable'
   CONSTRAINT nodes_channel_check
   CHECK (channel IN ('stable', 'canary'));
+
+-- Written by the canary migration gate when it applies a destructive
+-- migration; read by stable promote/rollback preflights. Exists because
+-- schema_migrations stores only a bare version integer, and a checkout of
+-- an older SHA does not contain the newer migration files that carry the
+-- destructive-ok-after annotations. See "The compatibility contract".
+-- lint:no-org-id reason="schema compatibility metadata, not tenant data"
+CREATE TABLE schema_compat_floors (
+    migration_version bigint PRIMARY KEY,  -- the destructive migration that was applied
+    stable_floor      bigint NOT NULL,     -- min max-migration a deployable stable ref must contain
+    applied_at        timestamptz NOT NULL DEFAULT now()
+);
 ```
 
 - `organizations.release_channel` is the single source of truth for org
   assignment. Channel assignment is an operator action (SQL via the
-  privileged path initially; an admin surface is future work).
-- `jobs.channel` is **stamped at enqueue time** from the enqueuing org's
-  `release_channel`. It is a snapshot, not a live join: moving an org
-  between channels affects new jobs only, and in-flight/pending jobs finish
-  on the channel they were enqueued for. Jobs with no org context (system
-  cleanup, retention, cross-org scans) are stamped `stable`.
+  privileged path initially; an admin surface is future work). **Flip orgs
+  only while quiescent** — no active session executors or preview runtimes.
+  Those are pinned to nodes via `target_node_id`; after a flip, new turn
+  jobs carry the new channel while targeting an old-channel node, and are
+  claimable only once that node looks dead/draining, at which point the
+  other pool recovers them via the snapshot-hydration path built for
+  crashes. Legal, but a degraded experience — drain first.
+- `jobs.channel` is **stamped at enqueue time**, inside the single
+  `INSERT INTO jobs` chokepoint in `internal/db/jobs.go`, via
+  `COALESCE((SELECT release_channel FROM organizations WHERE id = @org_id), 'stable')`.
+  One store-level change covers every enqueue helper and is immune to new
+  call sites. It is a snapshot, not a live join: moving an org between
+  channels affects new jobs only, and in-flight/pending jobs finish on the
+  channel they were enqueued for. Jobs with no org context (system cleanup,
+  retention, cross-org scans) are stamped `stable`.
 - `nodes.channel` is reported at registration from worker/app config, for
   dashboards, deploy tooling, and claim-side validation.
+- `schema_compat_floors` is written exactly when the canary migration gate
+  applies a gated destructive migration (recording that migration's version
+  and its annotated floor) and is queried by stable deploy preflights — no
+  annotation parsing or extra git checkout at promote/rollback time.
 - Tenancy lints: `organizations` and `nodes` are already `allowedNoOrgID`
   tables; `jobs` already carries `org_id`. No new exemptions needed.
 
@@ -213,8 +240,21 @@ worker, never by a stable one.
   `stable`-channel are redirected to the primary domain (HTML) or rejected
   with `403 {"error": "org_not_on_canary"}` (API). The stable hostname
   serves any org.
-- **Session cookies** are issued with `Domain=.143.dev` so one login works on
-  both hosts. Allowed origins / CORS config gains the canary origin.
+- **Sessions stay host-only — one login per host.** The session cookie is
+  deliberately issued with no `Domain` attribute
+  (`writeSessionAndCSRFCookies` in `internal/api/handlers/auth.go`), and
+  that is load-bearing: `*.preview.143.dev` serves untrusted preview apps,
+  and the preview gateway forwards every request cookie except its own
+  `__Host-preview_session` to the proxied app (`stripPreviewCookie` in
+  `internal/api/gateway/preview_gateway.go`). A cookie widened to
+  `Domain=.143.dev` would be attached by browsers to every
+  `{id}.preview.143.dev` request and proxied straight into arbitrary repo
+  code — full session takeover. **Invariant: the app session cookie is
+  never scoped to `.143.dev`.** Dogfood users log in on each host
+  (sessions are DB-backed, so both logins share one account); a signed
+  one-time-token SSO handoff between the two hosts — the same pattern as
+  the preview bootstrap exchange — is optional future polish. Allowed
+  origins / CORS config gains the canary origin.
 - **OAuth callbacks:** the existing GitHub App and Slack app gain
   `canary.143.dev` redirect/callback URLs (both providers support multiple
   callback URLs per app). Webhook URLs are **not** duplicated — see below.
@@ -258,9 +298,21 @@ promotion — a standing reason to keep that layer thin.
 **Preview gateway stays on stable.** `*.preview.143.dev` terminates at the
 stable `api:9090` gateway, which looks up the runtime in the shared DB and
 proxies to the owning worker — including runtimes owned by canary workers for
-dogfood sessions. The gateway↔worker runtime protocol therefore joins the
-compatibility window: canary (newer) workers must keep serving the stable
-(older) gateway's protocol until promotion catches up.
+dogfood sessions. Two protocol surfaces therefore join the compatibility
+window:
+
+- *Gateway↔worker*: canary (newer) workers must keep serving the stable
+  (older) gateway's runtime protocol until promotion catches up.
+- *Gateway↔app*: the preview bootstrap page pins its `postMessage` token
+  handshake to a **single** app origin today (`GatewayConfig.AppOrigin` /
+  `bootstrapHTML` in `internal/api/gateway/preview_gateway.go` — token
+  messages from any other origin are ignored), and the CSP is derived from
+  the same value. Previews opened from `canary.143.dev` will not bootstrap
+  until the gateway accepts an **allow-list** of app origins
+  (`{https://143.dev, https://canary.143.dev}`). Because the gateway runs
+  stable code, that change must be live on the stable plane *before* the
+  dogfood org flips to canary — free during Phase 2, while both planes
+  still track `main`, but a hard sequencing constraint thereafter.
 
 ## The Compatibility Contract
 
@@ -314,6 +366,13 @@ migration whose threshold exceeds it. The deploy gate, not PR CI, is
 authoritative: PR CI can't know when promotion will happen; the gate blocks
 the migration until stable has actually moved.
 
+When the gate *does* apply a destructive migration, it records
+`(migration_version, stable_floor)` in `schema_compat_floors` (schema
+above). This persistence is what makes the floor enforceable later:
+`schema_migrations` stores only a bare version integer, and a
+promote-or-rollback checkout of an older SHA does not contain the newer
+migration files whose comments carry the annotations.
+
 **(b) Cross-version test job.** A CI job on `main` checks out the
 `stable-current` ref and runs its DB-backed store/service test packages
 against a database migrated with **latest `main`'s** migrations. This
@@ -323,8 +382,12 @@ mechanics of pinning the template DB schema are an open question below.
 
 **(c) Schema preflights everywhere.** Workers already assert
 `schema >= expected` at deploy. Stable **app** deploys get the same check in
-place of the `migrate up` step (golang-migrate against a newer DB version
-no-ops, but an explicit assertion fails loudly and documents intent).
+place of the `migrate up` step — stable never invokes `migrate` at all
+(older golang-migrate binaries have version-dependent behavior when the DB
+is ahead of their migration set, so the preflight replaces the step rather
+than wrapping it). The stable preflight additionally enforces the
+destructive floor: the target ref's max migration number must be `>=`
+`max(stable_floor)` over all applied rows in `schema_compat_floors`.
 
 **(d) `stable-current` pointer.** A git tag maintained exclusively by the
 promote workflow, pointing at the currently-deployed stable SHA. Immutable
@@ -340,17 +403,28 @@ rebuild at promotion time.
 
 **Canary deploy (the current `deploy.yml`, retargeted).** On green `main`:
 
-1. Run migrations via the canary app compose project (same app-barrier
-   semantics as today, plus the destructive-migration gate from (a)).
-2. Roll `api-canary`/`frontend-canary` on the app host
-   (`docker-compose.app-canary.yml`, compose project `143-canary`, container
-   DNS names `api-canary`/`frontend-canary`, `CHANNEL=canary`).
+1. Run migrations via the canary api service
+   (`docker compose run --rm --no-deps api-canary /bin/migrate up` — same
+   app-barrier semantics as today, plus the destructive-migration gate and
+   floor recording from (a)).
+2. Roll `api-canary`/`frontend-canary` on the app host. These are
+   additional services **in `docker-compose.app.yml` itself** — the same
+   compose project as the stable plane — so Caddy's `dynamic a` DNS
+   resolution reaches them on the shared project network. (A second compose
+   project would create its own default network, invisible to Caddy; the
+   app compose file declares no shareable network today.) The file
+   interpolates two tags — `IMAGE_TAG` (stable, pinned) and
+   `CANARY_IMAGE_TAG` (latest) — and each plane's deploy updates only its
+   own variable and runs a service-scoped
+   `up -d --no-deps <its services>`, so a canary rollout never recreates
+   stable containers and vice versa (deploy.sh's recreate helpers get an
+   explicit per-plane service list).
 3. Roll canary worker hosts (existing blue/green machinery, `CHANNEL=canary`).
 
 `FLEET_HOSTS` grows channel-suffixed roles, e.g.
 `app:10.0.0.2,worker:10.0.0.4,worker-canary:10.0.0.8,db:10.0.0.3,…`. The
 canary app plane is colocated on the existing app host (a role variant of
-`app` in `deploy.sh` selecting the canary compose file), so no new app host
+`app` in `deploy.sh` scoped to the canary services), so no new app host
 is required. Caddy gains a `canary.{$DOMAIN}` vhost mirroring the main-domain
 blocks with `api-canary`/`frontend-canary` upstreams; `*.preview.{$DOMAIN}`
 is untouched.
@@ -367,9 +441,11 @@ input (default: a suggested candidate, below):
 
 **Rollback.**
 
-- *Stable*: re-run `promote.yml` with an earlier SHA. Legal floor: no
-  destructive migration whose threshold exceeds that SHA's migration set may
-  have been applied — the preflight computes and enforces this; in practice
+- *Stable*: re-run `promote.yml` with an earlier SHA. Legal floor: the
+  target SHA's migration set must satisfy every recorded row in
+  `schema_compat_floors` — the preflight enforces this with one query, no
+  annotation parsing or extra checkout needed, because the floors were
+  persisted when the destructive migrations were applied. In practice
   destructive migrations are rare and gated, so almost any recent release is
   a valid target.
 - *Canary*: redeploy an older `main` SHA. Never requires schema rollback
@@ -432,9 +508,9 @@ Stated plainly, because this is the trade the design makes:
   fully exercised at promotion. Both are deliberately thin; keep them thin.
 - **No cross-channel job fallback.** A dead canary pool means dogfood work
   queues until it's fixed. Accepted: the affected users are us.
-- **Two compose projects on one app host** share that host's headroom.
-  Frontend/API are lightweight relative to workers; revisit (dedicated
-  canary app host) only if resource contention shows up.
+- **Both planes' app containers share one host's headroom.** Frontend/API
+  are lightweight relative to workers; revisit (dedicated canary app host)
+  only if resource contention shows up.
 - **Redis is shared.** App-level caches (e.g. mention index) must treat
   cached shapes like DB shapes (old code may read new entries) — or, cheaper,
   the canary plane uses a separate Redis logical DB index and dodges the
@@ -446,15 +522,21 @@ Each phase ships alone and changes nothing for customers until Phase 3.
 
 1. **Channel plumbing (no behavior change).** Migration for
    `organizations.release_channel`, `jobs.channel` (+ claim index),
-   `nodes.channel`; stamp channel at every enqueue site; add `CHANNEL`
+   `nodes.channel`, and `schema_compat_floors`; stamp channel in the
+   jobs-store insert chokepoint (`internal/db/jobs.go`); add `CHANNEL`
    config; claim predicate; scheduler candidacy gate. Everything defaults
    `stable`; the fleet is untouched.
-2. **Stand up the canary plane.** `docker-compose.app-canary.yml`, Caddy
-   vhost, host guard middleware, cookie/origin/OAuth-callback config, one
-   `worker-canary` host, `FLEET_HOSTS` roles, deploy script role variants.
-   Transitionally, `deploy.yml` deploys *both* planes from `main` (identical
-   code, so behavior is unchanged). Flip the Assembled org to `canary`;
-   verify routing, job isolation, logging labels.
+2. **Stand up the canary plane.** `api-canary`/`frontend-canary` services in
+   `docker-compose.app.yml` (+ `CANARY_IMAGE_TAG`), Caddy vhost, host guard
+   middleware, per-host session/origin/OAuth-callback config, the
+   preview-gateway app-origin allow-list (must be live on the stable plane
+   before any org flips — automatic during this phase, while both planes
+   still track `main`), one `worker-canary` host, `FLEET_HOSTS` roles,
+   deploy script role variants. Transitionally, `deploy.yml` deploys *both*
+   planes from `main` (identical code, so behavior is unchanged). Flip the
+   Assembled org to `canary` **while it has no active sessions or preview
+   runtimes**; verify routing, job isolation, preview bootstrap from the
+   canary host, logging labels.
 3. **Pin stable.** `deploy.yml` deploys canary only; add `promote.yml`;
    first promotion is the then-current head (a no-op deploy that starts the
    clock); stable app deploys switch from `migrate up` to schema preflight;
@@ -477,3 +559,7 @@ Each phase ships alone and changes nothing for customers until Phase 3.
 - **Preview gateway channelization:** if gateway↔worker protocol changes
   become frequent, revisit routing `*.preview` per runtime-owner channel
   instead of pinning the gateway to stable.
+- **Cross-host login ergonomics:** is one login per host acceptable
+  long-term, or is the signed one-time-token SSO handoff (preview-bootstrap
+  pattern) worth building? Widening the session cookie is not an option
+  (see API Contract).
