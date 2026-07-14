@@ -14,7 +14,7 @@ import (
 )
 
 var organizationColumns = []string{
-	"id", "name", "release_channel", "settings", "created_at", "updated_at",
+	"id", "name", "settings", "created_at", "updated_at",
 }
 
 func TestOrganizationStore_Create(t *testing.T) {
@@ -63,7 +63,7 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 					WithArgs(pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(organizationColumns).
-							AddRow(orgID, "Test Org", "canary", json.RawMessage(`{}`), now, now),
+							AddRow(orgID, "Test Org", json.RawMessage(`{}`), now, now),
 					)
 			},
 		},
@@ -102,6 +102,26 @@ func TestOrganizationStore_GetByID(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestOrganizationStore_GetReleaseChannel(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewOrganizationStore(mock)
+	orgID := uuid.New()
+
+	mock.ExpectQuery("SELECT release_channel").
+		WithArgs(orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"release_channel"}).AddRow("canary"))
+
+	channel, err := store.GetReleaseChannel(context.Background(), orgID)
+	require.NoError(t, err, "GetReleaseChannel should not return an error")
+	require.Equal(t, models.ReleaseChannelCanary, channel, "should scan the org's release channel")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestOrganizationStore_Update(t *testing.T) {

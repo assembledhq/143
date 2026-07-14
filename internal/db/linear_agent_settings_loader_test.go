@@ -24,10 +24,10 @@ func TestLinearAgentSettingsView_LoadDefaultWorkRepositoryIDFallsBackToFirstActi
 	integrationID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT id, name, release_channel, settings, created_at, updated_at").
+	mock.ExpectQuery("SELECT id, name, settings, created_at, updated_at").
 		WithArgs(orgID).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "release_channel", "settings", "created_at", "updated_at"}).
-			AddRow(orgID, "Acme", "stable", json.RawMessage(`{}`), now, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "settings", "created_at", "updated_at"}).
+			AddRow(orgID, "Acme", json.RawMessage(`{}`), now, now))
 	mock.ExpectQuery("SELECT id, org_id, integration_id, github_id, full_name").
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(repoColumns).

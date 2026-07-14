@@ -37,10 +37,13 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 }
 
 // GetByID returns the organization with the given id.
+// The release_channel column is deliberately not part of the model yet —
+// only the canary host guard consumes it, via GetReleaseChannel below; an
+// admin surface exposing it on the org payload is future work.
 // lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `
-		SELECT id, name, release_channel, settings, created_at, updated_at
+		SELECT id, name, settings, created_at, updated_at
 		FROM organizations
 		WHERE id = @id`
 
