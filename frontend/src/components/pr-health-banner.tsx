@@ -7,6 +7,7 @@ import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { Card, CardContent } from "@/components/ui/card";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -266,7 +267,7 @@ export function PRHealthBanner({
                 )}
                 <div className="flex flex-wrap gap-2">
                   {canShowMergeButton && (
-                    <div className="inline-flex">
+                    <ButtonGroup size="sm">
                       <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
                         <Button
                           size="sm"
@@ -288,9 +289,9 @@ export function PRHealthBanner({
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
-                              size="icon"
+                              size="icon-sm"
                               variant="default"
-                              className="h-7 w-7 rounded-l-none"
+                              className="rounded-l-none"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"
@@ -314,11 +315,11 @@ export function PRHealthBanner({
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
-                    </div>
+                    </ButtonGroup>
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="sm">
                         <Button
                           size="sm"
                           variant="outline"
@@ -338,9 +339,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-sm"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More resolve conflicts actions"}
                                 aria-label="More resolve conflicts actions"
@@ -356,12 +357,12 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="sm">
                         <Button
                           size="sm"
                           variant="outline"
@@ -381,9 +382,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-sm"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More fix tests actions"}
                                 aria-label="More fix tests actions"
@@ -399,7 +400,7 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowReviewAction && reviewAction && (

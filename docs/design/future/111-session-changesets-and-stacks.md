@@ -20,6 +20,19 @@
 > the primary flag, and rebuilds the session rollup. The PR details UI and
 > `143-tools changesets` expose the flow. Targeted editing and publishing remain
 > Phase 4; stacked worktrees remain Phase 5.
+>
+> **Implementation note (2026-07-13):** Phases 4 and 5 and the Phase 6 stack
+> safety path are implemented. Composer turns can target a materialized pull
+> request worktree, with durable heartbeat leases and per-turn Git checkpoints.
+> Publishing and pushing are changeset-scoped and guarded by the expected
+> remote head. Stacked worktrees materialize and publish in topology order;
+> lower edits invalidate descendants; clean restacks replay and push in order;
+> merge attempts are blocked behind an unmerged parent. Parent merges retarget
+> the stored child base, invalidate the complete descendant chain, and enqueue
+> restacking on the sandbox-owning worker. Conflicts stop automatic replay and
+> surface an explicitly targeted agent-resolution flow whose result is not
+> pushed until the user confirms it. Stack health remains derived rather than
+> stored.
 
 ## Summary
 

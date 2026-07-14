@@ -20,7 +20,7 @@ describe("SelectTrigger", () => {
     const trigger = screen.getByRole("combobox", { name: "Schedule" });
     expect(trigger).toHaveClass("max-sm:text-base");
     expect(trigger).toHaveClass("type-dense");
-    expect(trigger).toHaveClass("data-[size=default]:h-11", "sm:data-[size=default]:h-9");
+    expect(trigger).toHaveClass("data-[size=default]:h-10", "px-2", "sm:data-[size=default]:h-9");
     expect(trigger).not.toHaveClass("text-base");
   });
 });

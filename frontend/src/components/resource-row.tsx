@@ -9,16 +9,18 @@ type ResourceRowProps = Omit<HTMLAttributes<HTMLDivElement>, "title"> & {
   status?: ReactNode;
   detail?: ReactNode;
   actions?: ReactNode;
+  actionLayout?: "wrap" | "side";
   selected?: boolean;
 };
 
-export function ResourceRow({ leading, title, metadata, status, detail, actions, selected = false, className, ...props }: ResourceRowProps) {
+export function ResourceRow({ leading, title, metadata, status, detail, actions, actionLayout = "wrap", selected = false, className, ...props }: ResourceRowProps) {
   return (
     <div
       data-slot="resource-row"
       data-selected={selected || undefined}
       className={cn(
-        "group/resource-row relative flex min-w-0 flex-wrap items-start gap-3 px-3.5 py-3 type-dense transition-colors duration-[175ms] hover:bg-accent/25 data-[selected=true]:bg-accent/55 sm:flex-nowrap",
+        "group/resource-row relative flex min-w-0 items-start gap-3 px-3.5 py-3 type-dense transition-colors duration-[175ms] hover:bg-accent/25 data-[selected=true]:bg-accent/55",
+        actionLayout === "wrap" && "flex-wrap sm:flex-nowrap",
         selected && "bg-accent/55 before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full before:bg-primary",
         className,
       )}
@@ -33,7 +35,17 @@ export function ResourceRow({ leading, title, metadata, status, detail, actions,
         {metadata ? <div className="mt-0.5 truncate text-muted-foreground">{metadata}</div> : null}
         {detail ? <div className="mt-1.5 text-muted-foreground">{detail}</div> : null}
       </div>
-      {actions ? <div className="ml-7 w-full shrink-0 self-center sm:ml-0 sm:w-auto">{actions}</div> : null}
+      {actions ? (
+        <div
+          data-slot="resource-row-actions"
+          className={cn(
+            "shrink-0 self-center",
+            actionLayout === "wrap" && "ml-7 w-full sm:ml-0 sm:w-auto",
+          )}
+        >
+          {actions}
+        </div>
+      ) : null}
     </div>
   );
 }

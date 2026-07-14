@@ -548,8 +548,9 @@ func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft      *bool  `json:"draft,omitempty"`
-	AuthorMode string `json:"author_mode,omitempty"`
+	Draft       *bool      `json:"draft,omitempty"`
+	AuthorMode  string     `json:"author_mode,omitempty"`
+	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
 }
 
 type CreateBranchResult struct {
@@ -590,11 +591,44 @@ func targetBranchForPR(run *models.Session, repo *models.Repository) string {
 // Returns ErrNoChanges when the pushed branch produces no diff against the
 // base branch; the session's snapshot has no meaningful changes to ship.
 func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.Draft != nil {
+			opts.Draft = param.Draft
+		}
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+		if param.ChangesetID != nil {
+			opts.ChangesetID = param.ChangesetID
+		}
+	}
+	var targetChangeset *models.SessionChangeset
+	if s.changesets != nil {
+		var changeset models.SessionChangeset
+		var changesetErr error
+		if opts.ChangesetID != nil {
+			changeset, changesetErr = s.changesets.GetByID(ctx, run.OrgID, run.ID, *opts.ChangesetID)
+		} else {
+			changeset, changesetErr = s.changesets.GetPrimary(ctx, run.OrgID, run.ID)
+		}
+		if changesetErr != nil {
+			return nil, fmt.Errorf("resolve changeset for PR creation: %w", changesetErr)
+		}
+		targetChangeset = &changeset
+	}
 	// Idempotency: a worker retry after a partial success (push landed, PR
 	// created, but state update crashed) would otherwise create a duplicate
 	// PR. If a PR already exists for this session, return it without
 	// re-pushing.
-	if existing, err := s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID); err == nil {
+	var existing models.PullRequest
+	var existingErr error
+	if targetChangeset != nil {
+		existing, existingErr = s.pullRequests.GetByChangesetID(ctx, run.OrgID, run.ID, targetChangeset.ID)
+	} else {
+		existing, existingErr = s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
+	}
+	if existingErr == nil {
 		// If the original CreatePR crashed mid-upload, the session may
 		// still carry a pending_snapshot_key with no in-flight uploader.
 		// Surface that here so the stuck-resume case is observable; the
@@ -607,24 +641,24 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 				Msg("CreatePR retry hit existing PR with pending_snapshot_key still set; resume will block until cleared")
 		}
 		return &existing, nil
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return nil, fmt.Errorf("check existing pull request: %w", err)
+	} else if !errors.Is(existingErr, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("check existing pull request: %w", existingErr)
 	}
 	var changesetID *uuid.UUID
-	if s.changesets != nil {
-		primary, primaryErr := s.changesets.GetPrimary(ctx, run.OrgID, run.ID)
-		if primaryErr != nil {
-			return nil, fmt.Errorf("resolve primary changeset for PR creation: %w", primaryErr)
-		}
-		changesetID = &primary.ID
+	if targetChangeset != nil {
+		changesetID = &targetChangeset.ID
 	}
 
 	if s.sandboxProvider == nil || s.snapshots == nil {
 		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
 	}
 
-	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+	materializedTarget := targetChangeset != nil && targetChangeset.WorktreePath != nil && targetChangeset.WorkingBranch != nil
+	if !materializedTarget && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 		return nil, ErrSnapshotNotCaptured
+	}
+	if targetChangeset != nil && !targetChangeset.IsPrimary && !materializedTarget {
+		return nil, errors.New("changeset must be materialized before PR creation")
 	}
 
 	// Issue lookup is optional — sessions may not have an associated issue.
@@ -671,16 +705,6 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	var opts CreatePRParams
-	for _, param := range params {
-		if param.Draft != nil {
-			opts.Draft = param.Draft
-		}
-		if param.AuthorMode != "" {
-			opts.AuthorMode = param.AuthorMode
-		}
-	}
-
 	resolution, err := s.resolveToken(ctx, run, &repo, orgSettings, opts.AuthorMode)
 	if err != nil {
 		return nil, fmt.Errorf("resolve token: %w", err)
@@ -691,6 +715,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	defaultBranch := targetBranchForPR(run, &repo)
 
 	branchName := formatBranchName(run, issue)
+	if targetChangeset != nil {
+		defaultBranch = targetChangeset.BaseBranch
+		if targetChangeset.WorkingBranch != nil && strings.TrimSpace(*targetChangeset.WorkingBranch) != "" {
+			branchName = *targetChangeset.WorkingBranch
+		}
+	}
 	commitMsg := formatCommitMessage(run, issue)
 	authorName, authorEmail := identity.CommitIdentity(resolution)
 	if !resolution.IsUserToken() && run.TriggeredByUserID != nil && s.users != nil {
@@ -703,7 +733,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail)
+	var pushed *pushResult
+	if materializedTarget {
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+	} else {
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, defaultBranch, commitMsg, authorName, authorEmail)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -737,8 +772,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if title == "" {
 		title = formatPRTitle(run, issue)
 	}
+	if targetChangeset != nil && strings.TrimSpace(targetChangeset.Title) != "" {
+		title = strings.TrimSpace(targetChangeset.Title)
+	}
 	if body == "" {
 		body = s.formatPRBody(ctx, run, issue)
+	}
+	if targetChangeset != nil && targetChangeset.StackedOnChangesetID != nil {
+		body = fmt.Sprintf("> Stacked pull request. Base: `%s`; target after the stack lands: `%s`.\n\n%s", targetChangeset.BaseBranch, targetChangeset.TargetBranch, body)
 	}
 
 	draft := orgSettings.PRDraftDefault
@@ -800,7 +841,14 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		return nil, fmt.Errorf("store pull request: %w", err)
 	}
 	if s.readiness != nil {
-		if latest, readinessErr := s.readiness.GetLatestBySession(ctx, run.OrgID, run.ID); readinessErr == nil && latest != nil {
+		var latest *models.PRReadinessRun
+		var readinessErr error
+		if changesetID != nil {
+			latest, readinessErr = s.readiness.GetLatestByChangeset(ctx, run.OrgID, run.ID, *changesetID)
+		} else {
+			latest, readinessErr = s.readiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+		}
+		if readinessErr == nil && latest != nil {
 			if attachErr := s.readiness.AttachBypassesToPullRequest(ctx, run.OrgID, latest.ID, pr.ID); attachErr != nil {
 				s.logger.Warn().Err(attachErr).Str("session_id", run.ID.String()).Str("pull_request_id", pr.ID.String()).Msg("failed to attach PR readiness bypasses to pull request")
 			}
@@ -808,8 +856,15 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			s.logger.Warn().Err(readinessErr).Str("session_id", run.ID.String()).Msg("failed to load PR readiness for bypass attachment")
 		}
 	}
-	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, headSHA); err != nil {
-		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR creation")
+	if targetChangeset != nil && s.changesets != nil {
+		if err := s.changesets.RecordPublishedHead(ctx, run.OrgID, run.ID, targetChangeset.ID, headSHA, true); err != nil {
+			s.logger.Warn().Err(err).Str("changeset_id", targetChangeset.ID.String()).Msg("failed to record published changeset head")
+		}
+	}
+	if !materializedTarget {
+		if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, headSHA); err != nil {
+			s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR creation")
+		}
 	}
 
 	// Record the pending snapshot, then dispatch the upload. If capture
@@ -856,6 +911,74 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 
 	return pr, nil
+}
+
+func (s *PRService) pushChangesetBranch(
+	ctx context.Context,
+	run *models.Session,
+	repo *models.Repository,
+	orgSettings models.OrgSettings,
+	changeset models.SessionChangeset,
+	commitMsg, authorName, authorEmail string,
+) (*pushResult, error) {
+	if s.sandboxAuth == nil {
+		return nil, fmt.Errorf("%w: sandbox auth socket not configured", ErrSandboxAuthUnavailable)
+	}
+	if run.ContainerID == nil || strings.TrimSpace(*run.ContainerID) == "" || changeset.WorktreePath == nil || changeset.WorkingBranch == nil {
+		return nil, errors.New("materialized changeset sandbox is unavailable")
+	}
+	if _, err := s.sandboxAuth.Listen(ctx, run.ID, run, repo, orgSettings); err != nil {
+		return nil, fmt.Errorf("%w: open sandbox auth socket: %w", ErrSandboxAuthUnavailable, err)
+	}
+	defer s.sandboxAuth.Close(run.ID)
+	sandbox := &agent.Sandbox{ID: *run.ContainerID, Provider: s.sandboxProvider.Name(), WorkDir: *changeset.WorktreePath, HomeDir: agent.DefaultSandboxConfig().HomeDir}
+
+	remoteCmd := fmt.Sprintf("git -C %s ls-remote origin %s", shellQuote(*changeset.WorktreePath), shellQuote("refs/heads/"+*changeset.WorkingBranch))
+	var remoteOut, remoteErr bytes.Buffer
+	exitCode, execErr := s.sandboxProvider.Exec(ctx, sandbox, remoteCmd, &remoteOut, &remoteErr)
+	if execErr != nil || exitCode != 0 {
+		return nil, fmt.Errorf("inspect changeset remote head: %w: %s", execErr, strings.TrimSpace(remoteErr.String()))
+	}
+	remoteHead := ""
+	if fields := strings.Fields(remoteOut.String()); len(fields) > 0 {
+		remoteHead = fields[0]
+	}
+	expected := ""
+	if changeset.ExpectedRemoteHeadSHA != nil {
+		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
+	}
+	if remoteHead != expected {
+		if markErr := s.changesets.MarkExternalUpdateDetected(ctx, run.OrgID, run.ID, changeset.ID); markErr != nil {
+			s.logger.Warn().Err(markErr).Str("changeset_id", changeset.ID.String()).Msg("failed to mark unexpected remote changeset update")
+		}
+		return nil, fmt.Errorf("%w: expected %q, found %q", db.ErrChangesetRemoteChanged, expected, remoteHead)
+	}
+
+	commitMsgPath := pushCommitMsgPath(sandbox.HomeDir)
+	if err := s.sandboxProvider.WriteFile(ctx, sandbox, commitMsgPath, []byte(commitMsg)); err != nil {
+		return nil, fmt.Errorf("write changeset commit message: %w", err)
+	}
+	baseHead := ""
+	if changeset.BaseHeadSHA != nil {
+		baseHead = *changeset.BaseHeadSHA
+	}
+	script := buildPushScript(sandbox.WorkDir, commitMsgPath, authorName, authorEmail, *changeset.WorkingBranch, changeset.BaseBranch, baseHead, fmt.Sprintf("https://github.com/%s.git", repo.FullName))
+	var stdout, stderr bytes.Buffer
+	exitCode, execErr = s.sandboxProvider.Exec(ctx, sandbox, script, &stdout, &stderr)
+	if execErr != nil {
+		return nil, fmt.Errorf("exec changeset push: %w", execErr)
+	}
+	if exitCode != 0 {
+		if exitCode == pushExitNoChanges && remoteHead != "" {
+			return &pushResult{HeadSHA: remoteHead}, nil
+		}
+		return nil, fmt.Errorf("changeset push failed (exit %d): %s", exitCode, strings.TrimSpace(stderr.String()))
+	}
+	headSHA, err := parsePushHeadSHA(stdout.String())
+	if err != nil {
+		return nil, fmt.Errorf("parse changeset push head: %w", err)
+	}
+	return &pushResult{HeadSHA: headSHA}, nil
 }
 
 // CreateBranch pushes the session snapshot to the same remote branch that
@@ -995,7 +1118,30 @@ var ErrLegacyPRMissingHeadRef = errors.New("pull request was created before head
 // persisted branch name, ErrNoChanges when there is nothing to push, and the
 // same snapshot sentinels as CreatePR when the sandbox is unavailable.
 func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, params ...CreatePRParams) (*models.PullRequest, error) {
-	pr, err := s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
+	var opts CreatePRParams
+	for _, param := range params {
+		if param.AuthorMode != "" {
+			opts.AuthorMode = param.AuthorMode
+		}
+		if param.ChangesetID != nil {
+			opts.ChangesetID = param.ChangesetID
+		}
+	}
+	var targetChangeset *models.SessionChangeset
+	if opts.ChangesetID != nil && s.changesets != nil {
+		changeset, changesetErr := s.changesets.GetByID(ctx, run.OrgID, run.ID, *opts.ChangesetID)
+		if changesetErr != nil {
+			return nil, fmt.Errorf("load push changeset: %w", changesetErr)
+		}
+		targetChangeset = &changeset
+	}
+	var pr models.PullRequest
+	var err error
+	if targetChangeset != nil {
+		pr, err = s.pullRequests.GetByChangesetID(ctx, run.OrgID, run.ID, targetChangeset.ID)
+	} else {
+		pr, err = s.pullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNoPullRequest
@@ -1011,10 +1157,10 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		return nil, ErrLegacyPRMissingHeadRef
 	}
 
-	if s.sandboxProvider == nil || s.snapshots == nil {
+	if s.sandboxProvider == nil || (targetChangeset == nil && s.snapshots == nil) {
 		return nil, fmt.Errorf("PRService: sandbox push dependencies not configured")
 	}
-	if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+	if targetChangeset == nil && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 		return nil, ErrSnapshotNotCaptured
 	}
 	if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
@@ -1048,16 +1194,6 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
-	var opts CreatePRParams
-	for _, param := range params {
-		if param.Draft != nil {
-			opts.Draft = param.Draft
-		}
-		if param.AuthorMode != "" {
-			opts.AuthorMode = param.AuthorMode
-		}
-	}
-
 	// Resolve identity for the commit name/email and the co-author trailer.
 	// The push token itself flows via the per-session credential socket (see
 	// pushSessionBranch), so resolution.Token isn't read here — we resolve
@@ -1082,7 +1218,12 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 		}
 	}
 
-	pushed, err := s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail)
+	var pushed *pushResult
+	if targetChangeset != nil {
+		pushed, err = s.pushChangesetBranch(ctx, run, &repo, orgSettings, *targetChangeset, commitMsg, authorName, authorEmail)
+	} else {
+		pushed, err = s.pushSessionBranch(ctx, run, &repo, orgSettings, *run.SnapshotKey, branchName, "", commitMsg, authorName, authorEmail)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1099,7 +1240,11 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 	if err := s.pullRequests.UpdateHeadSHA(ctx, run.OrgID, pr.ID, pushed.HeadSHA); err != nil {
 		return nil, fmt.Errorf("update pull request head sha: %w", err)
 	}
-	if s.changesets != nil {
+	if targetChangeset != nil && s.changesets != nil {
+		if recordErr := s.changesets.RecordPushedHead(ctx, run.OrgID, run.ID, targetChangeset.ID, pushed.HeadSHA); recordErr != nil {
+			return nil, fmt.Errorf("record pushed changeset head: %w", recordErr)
+		}
+	} else if s.changesets != nil {
 		primary, primaryErr := s.changesets.GetPrimary(ctx, run.OrgID, run.ID)
 		if primaryErr != nil {
 			return nil, fmt.Errorf("resolve pushed PR changeset: %w", primaryErr)
@@ -1108,12 +1253,17 @@ func (s *PRService) PushChangesToPR(ctx context.Context, run *models.Session, pa
 			return nil, fmt.Errorf("record pushed changeset head: %w", recordErr)
 		}
 	}
-	if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
-		s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
+	if targetChangeset == nil {
+		if err := s.sessions.MarkLatestDiffSnapshotPushed(ctx, run.OrgID, run.ID, pushed.HeadSHA); err != nil {
+			s.logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to mark latest diff snapshot as pushed after PR push")
+		}
 	}
 	pr.HeadSHA = &pushed.HeadSHA
 	s.enqueuePullRequestStateSync(ctx, pr)
 
+	if targetChangeset != nil {
+		return &pr, nil
+	}
 	if pushed.CapturedSnapshotErr != nil {
 		s.logger.Warn().
 			Err(pushed.CapturedSnapshotErr).
@@ -2055,6 +2205,41 @@ func (s *PRService) applyClosedPRTransition(ctx context.Context, pr models.PullR
 }
 
 func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models.PullRequest, commitSHA string) {
+	stackComplete := true
+	stackNeedsRestack := false
+	if pr.ChangesetID != nil && pr.SessionID != nil && s.changesets != nil {
+		if err := s.changesets.HandleMerged(ctx, pr.OrgID, *pr.SessionID, *pr.ChangesetID); err != nil {
+			s.logger.Warn().Err(err).Str("changeset_id", pr.ChangesetID.String()).Msg("failed to advance stack after parent merge")
+		}
+		if changesets, err := s.changesets.ListFullBySession(ctx, pr.OrgID, *pr.SessionID); err != nil {
+			stackComplete = false
+			s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to determine whether merged stack is complete")
+		} else {
+			for _, changeset := range changesets {
+				if changeset.Status == models.ChangesetStatusNeedsRestack {
+					stackNeedsRestack = true
+				}
+				if changeset.Status != models.ChangesetStatusAbandoned && changeset.Status != models.ChangesetStatusMerged {
+					stackComplete = false
+				}
+			}
+			s.reconcileChildPRBasesAfterParentMerge(ctx, pr, changesets)
+		}
+		if stackNeedsRestack && s.jobs != nil && s.sessions != nil {
+			run, runErr := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
+			if runErr != nil {
+				s.logger.Warn().Err(runErr).Str("session_id", pr.SessionID.String()).Msg("failed to load session for automatic descendant restack")
+			} else {
+				dedupeKey := fmt.Sprintf("restack_after_merge:%s:%s", pr.ChangesetID.String(), commitSHA)
+				_, enqueueErr := s.jobs.EnqueueWithTarget(ctx, pr.OrgID, "default", models.JobTypeRestackChangesets, map[string]any{
+					"org_id": pr.OrgID, "session_id": *pr.SessionID, "from_changeset_id": *pr.ChangesetID,
+				}, 5, &dedupeKey, run.WorkerNodeID)
+				if enqueueErr != nil {
+					s.logger.Warn().Err(enqueueErr).Str("changeset_id", pr.ChangesetID.String()).Msg("failed to enqueue descendant restack after parent merge")
+				}
+			}
+		}
+	}
 	// Fire the Linear PR-merged milestone. Coexistence guards inside the
 	// linker suppress this when Linear's GitHub integration is already
 	// active on the issue (avoiding double cycle/sprint membership).
@@ -2064,7 +2249,7 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 
 	var snapshotKey *string
 
-	if pr.SessionID != nil && s.sessions != nil {
+	if stackComplete && pr.SessionID != nil && s.sessions != nil {
 		run, err := s.sessions.GetByID(ctx, pr.OrgID, *pr.SessionID)
 		if err != nil {
 			s.logger.Warn().Err(err).Str("session_id", pr.SessionID.String()).Msg("failed to load session for merged pull request follow-ups")
@@ -2115,7 +2300,70 @@ func (s *PRService) runMergedPullRequestFollowUps(ctx context.Context, pr models
 	}
 
 	s.teardownPRPreview(ctx, pr, true)
-	s.maybeAutoArchiveSessionOnPRClose(ctx, pr, snapshotKey, true)
+	if stackComplete {
+		s.maybeAutoArchiveSessionOnPRClose(ctx, pr, snapshotKey, true)
+	}
+}
+
+func (s *PRService) reconcileChildPRBasesAfterParentMerge(ctx context.Context, parentPR models.PullRequest, changesets []models.SessionChangeset) {
+	if parentPR.ChangesetID == nil || parentPR.SessionID == nil || parentPR.HeadRef == nil || s.repos == nil || s.sessions == nil || s.orgs == nil {
+		return
+	}
+	run, err := s.sessions.GetByID(ctx, parentPR.OrgID, *parentPR.SessionID)
+	if err != nil || run.RepositoryID == nil {
+		return
+	}
+	repo, err := s.repos.GetByID(ctx, parentPR.OrgID, *run.RepositoryID)
+	if err != nil {
+		return
+	}
+	orgSettings := models.OrgSettings{PRAuthorship: models.PRAuthorshipUserPreferred}
+	if org, orgErr := s.orgs.GetByID(ctx, parentPR.OrgID); orgErr == nil {
+		if parsed, parseErr := models.ParseOrgSettings(org.Settings); parseErr == nil {
+			orgSettings = parsed
+		}
+	}
+	resolution, err := s.resolveToken(ctx, &run, &repo, orgSettings, "")
+	if err != nil {
+		s.logger.Warn().Err(err).Str("changeset_id", parentPR.ChangesetID.String()).Msg("failed to resolve GitHub token for child PR retarget")
+		return
+	}
+	owner, repoName := splitRepo(repo.FullName)
+	for _, child := range changesets {
+		if child.StackedOnChangesetID == nil || *child.StackedOnChangesetID != *parentPR.ChangesetID || child.Status == models.ChangesetStatusMerged || child.Status == models.ChangesetStatusAbandoned {
+			continue
+		}
+		childPR, loadErr := s.pullRequests.GetByChangesetID(ctx, parentPR.OrgID, *parentPR.SessionID, child.ID)
+		if loadErr != nil {
+			continue
+		}
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d", owner, repoName, childPR.GitHubPRNumber)
+		body, getErr := s.doGitHubRequest(ctx, resolution.Token, http.MethodGet, path, nil)
+		if getErr != nil {
+			s.logger.Warn().Err(getErr).Str("changeset_id", child.ID.String()).Msg("failed to inspect child PR base after parent merge")
+			continue
+		}
+		var remote struct {
+			Base struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+		}
+		if jsonErr := json.Unmarshal(body, &remote); jsonErr != nil {
+			continue
+		}
+		if remote.Base.Ref == child.BaseBranch {
+			continue
+		}
+		if remote.Base.Ref != *parentPR.HeadRef {
+			if markErr := s.changesets.MarkExternalUpdateDetected(ctx, parentPR.OrgID, *parentPR.SessionID, child.ID); markErr != nil {
+				s.logger.Warn().Err(markErr).Str("changeset_id", child.ID.String()).Msg("failed to mark unexpected child PR base")
+			}
+			continue
+		}
+		if _, patchErr := s.doGitHubRequest(ctx, resolution.Token, http.MethodPatch, path, map[string]any{"base": child.BaseBranch}); patchErr != nil {
+			s.logger.Warn().Err(patchErr).Str("changeset_id", child.ID.String()).Str("base_branch", child.BaseBranch).Msg("failed to retarget child PR after parent merge")
+		}
+	}
 }
 
 func (s *PRService) maybeAutoArchiveSessionOnPRClose(ctx context.Context, pr models.PullRequest, snapshotKey *string, merged bool) {

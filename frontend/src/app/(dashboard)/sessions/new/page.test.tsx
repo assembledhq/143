@@ -677,6 +677,20 @@ describe('ManualSessionCreatePage', () => {
     });
   });
 
+  it('grows the prompt to reserve space for wrapped text', () => {
+    renderWithProviders(<ManualSessionCreatePageContent />);
+
+    const textarea = screen.getByPlaceholderText('Tell the agent what to do...') as HTMLTextAreaElement;
+    Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value: 112 });
+
+    fireEvent.change(textarea, {
+      target: { value: 'A long prompt that wraps across several lines before its attachment.' },
+    });
+
+    expect(textarea.style.height).toBe('112px');
+    expect(textarea.style.overflowY).toBe('hidden');
+  });
+
   it('opens an image lightbox from the composer attachment thumbnail', async () => {
     const user = userEvent.setup();
 

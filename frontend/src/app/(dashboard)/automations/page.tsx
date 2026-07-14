@@ -536,6 +536,7 @@ function AutomationMobileRow({ automation, canManage }: { automation: Automation
         </span>
       )}
       actions={<AutomationActions automation={automation} canManage={canManage} />}
+      actionLayout="side"
     />
   );
 }

@@ -521,6 +521,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	transcriptStore := db.NewSessionTranscriptStore(pool)
 	threadSvc.SetTranscriptStore(transcriptStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
+	sessionThreadHandler.SetChangesetStore(sessionChangesetStore)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
 	// Mirror sessionHandler.SetLinearLinker so Linear refs typed into a
@@ -906,6 +907,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
+	previewVerificationHandler := handlers.NewPreviewVerificationHandler(db.NewPreviewVerificationRunStore(pool))
 	var browserInspector preview.SessionBrowserInspector
 	if resolved, ok := previewInspector.(preview.SessionBrowserInspector); ok {
 		browserInspector = resolved
@@ -1056,6 +1058,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)
 			r.Post("/sessions/{id}/changesets", internalChangesetHandler.Create)
 			r.Post("/sessions/{id}/changesets/{changeset_id}/materialize", internalChangesetHandler.Materialize)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/publish", internalChangesetHandler.Publish)
+			r.Post("/sessions/{id}/changesets/publish-stack", internalChangesetHandler.PublishStack)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/restack-descendants", internalChangesetHandler.Restack)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/import-remote", internalChangesetHandler.ImportRemote)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/confirm-restack", internalChangesetHandler.ConfirmRestack)
 			r.Post("/sessions/{id}/changesets/verify", internalChangesetHandler.Verify)
 			r.Get("/sessions/{id}/changesets/diff", internalChangesetHandler.Diff)
 			r.Post("/slack/messages", internalSlackMessageHandler.Send)
@@ -1307,6 +1314,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/preview/watch", previewHandler.WatchBrowser)
 				r.Get("/api/v1/sessions/{id}/preview/control", previewHandler.GetBrowserControl)
 				r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+				r.Get("/api/v1/sessions/{id}/preview/verifications", previewVerificationHandler.ListBySession)
 				r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/previews/{preview_id}/services", previewHandler.GetServices)
 				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)
@@ -1516,6 +1524,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Patch("/api/v1/sessions/{id}/changesets/{changeset_id}", sessionHandler.UpdateChangeset)
 				r.Put("/api/v1/sessions/{id}/changesets/{changeset_id}/split-paths", sessionHandler.ReplaceChangesetSplitPaths)
 				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/materialize", sessionHandler.MaterializeChangeset)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/publish", sessionHandler.PublishChangeset)
+				r.Post("/api/v1/sessions/{id}/changesets/publish-stack", sessionHandler.PublishChangesetStack)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/restack-descendants", sessionHandler.RestackChangesetDescendants)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/import-remote", sessionHandler.ImportChangesetRemote)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/confirm-restack", sessionHandler.ConfirmChangesetRestack)
 				r.Post("/api/v1/sessions/{id}/changesets/verify", sessionHandler.VerifyChangesetSplit)
 				r.Put("/api/v1/sessions/{id}/changesets/split-omissions", sessionHandler.ReplaceChangesetSplitOmissions)
 				r.Post("/api/v1/sessions/{id}/changesets/accept-split", sessionHandler.AcceptChangesetSplit)

@@ -4,9 +4,10 @@ import { Loader2 } from "lucide-react"
 import { Slot } from "radix-ui"
 
 import { cn } from "@/lib/utils"
+import { ButtonGroupSizeContext, type ButtonGroupSize } from "./button-group-context"
 
 const buttonVariants = cva(
-  "inline-flex cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-md type-dense font-medium transition-[color,background-color,border-color,box-shadow,transform] duration-[125ms] ease-[cubic-bezier(0.16,1,0.3,1)] disabled:pointer-events-none disabled:opacity-50 disabled:data-[loading=true]:opacity-100 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/25 focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex cursor-pointer items-center justify-center gap-1 whitespace-nowrap rounded-md type-dense font-medium transition-[color,background-color,border-color,box-shadow,transform] duration-[125ms] ease-[cubic-bezier(0.16,1,0.3,1)] disabled:pointer-events-none disabled:opacity-50 disabled:data-[loading=true]:opacity-100 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/25 focus-visible:ring-2 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
   {
     variants: {
       variant: {
@@ -22,14 +23,14 @@ const buttonVariants = cva(
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-11 px-3 py-1.5 sm:h-8 has-[>svg]:px-2.5",
-        xs: "h-11 gap-1 rounded-md px-2 text-xs sm:h-6 has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",
-        sm: "h-11 rounded-md gap-1 px-2.5 sm:h-7 has-[>svg]:px-2",
-        lg: "h-11 px-5 sm:h-9 has-[>svg]:px-3.5",
-        icon: "size-11 sm:size-8",
-        "icon-xs": "size-11 rounded-md sm:size-6 [&_svg:not([class*='size-'])]:size-3",
-        "icon-sm": "size-11 sm:size-7",
-        "icon-lg": "size-11 sm:size-9",
+        default: "h-10 px-2.5 py-1 sm:h-8 has-[>svg]:px-2",
+        xs: "h-10 gap-1 rounded-md px-1.5 text-xs sm:h-6 has-[>svg]:px-1.5 [&_svg:not([class*='size-'])]:size-3",
+        sm: "h-10 rounded-md gap-1 px-2 sm:h-7 has-[>svg]:px-1.5",
+        lg: "h-10 px-4 sm:h-9 has-[>svg]:px-3",
+        icon: "size-10 sm:size-8",
+        "icon-xs": "size-10 rounded-md sm:size-6 [&_svg:not([class*='size-'])]:size-3",
+        "icon-sm": "size-10 sm:size-7",
+        "icon-lg": "size-10 sm:size-9",
       },
     },
     defaultVariants: {
@@ -52,7 +53,9 @@ function Button({
   VariantProps<typeof buttonVariants> & {
     asChild?: boolean
     loading?: boolean
-  }) {
+}) {
+  const groupSize = React.useContext(ButtonGroupSizeContext)
+  const resolvedSize = resolveGroupedButtonSize(size, groupSize)
   const Comp = asChild ? Slot.Root : "button"
   const isDisabled = loading || disabled
   const showSpinner = loading && !asChild
@@ -73,14 +76,34 @@ function Button({
     <Comp
       data-slot="button"
       data-variant={variant}
-      data-size={size}
+      data-size={resolvedSize}
       data-loading={loading ? "true" : undefined}
-      className={cn(buttonVariants({ variant, size, className }), isDisabled && "pointer-events-none")}
+      className={cn(buttonVariants({ variant, size: resolvedSize, className }), isDisabled && "pointer-events-none")}
       disabled={!asChild ? isDisabled : undefined}
       aria-disabled={isDisabled || undefined}
       {...props}
     >{content}</Comp>
   )
 }
+
+function resolveGroupedButtonSize(
+  size: VariantProps<typeof buttonVariants>["size"],
+  groupSize: ButtonGroupSize | null,
+) {
+  if (!groupSize) return size
+
+  if (size?.startsWith("icon")) {
+    return groupedIconSizes[groupSize]
+  }
+
+  return groupSize
+}
+
+const groupedIconSizes = {
+  default: "icon",
+  xs: "icon-xs",
+  sm: "icon-sm",
+  lg: "icon-lg",
+} as const satisfies Record<ButtonGroupSize, NonNullable<VariantProps<typeof buttonVariants>["size"]>>
 
 export { Button, buttonVariants }
