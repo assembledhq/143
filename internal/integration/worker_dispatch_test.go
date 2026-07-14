@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/worker"
 )
 
@@ -72,7 +73,7 @@ func TestIntegration_WorkerDispatch_PicksUpAndCallsHandler(t *testing.T) {
 	received := make(chan recvJob, 1)
 	nodeID := "test-node-" + jobID.String()[:8]
 	seedWorkerNode(t, pool, nodeID)
-	w := worker.New(pool, zerolog.Nop(), nodeID)
+	w := worker.New(pool, zerolog.Nop(), nodeID, models.ReleaseChannelStable)
 	w.Register("continue_session", func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		received <- recvJob{JobType: jobType, Payload: payload}
 		return nil
@@ -137,7 +138,7 @@ func TestIntegration_WorkerDispatch_UnknownJobTypeDeadLetters(t *testing.T) {
 
 	nodeID := "test-node-deadletter-" + jobID.String()[:8]
 	seedWorkerNode(t, pool, nodeID)
-	w := worker.New(pool, zerolog.Nop(), nodeID)
+	w := worker.New(pool, zerolog.Nop(), nodeID, models.ReleaseChannelStable)
 	// Deliberately do *not* Register a handler for "no_such_handler".
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -184,7 +185,7 @@ func TestIntegration_ClaimNextRunnable_DrainingTargetNodeReleasesPinnedJob(t *te
 	claimer := "active-node-" + session.ID.String()[:8]
 	seedWorkerNode(t, pool, claimer)
 
-	job, err := store.ClaimNextRunnable(context.Background(), claimer, claimer, uuid.New(), 30*time.Second)
+	job, err := store.ClaimNextRunnable(context.Background(), claimer, claimer, models.ReleaseChannelStable, uuid.New(), 30*time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, job, "a job pinned to a draining node must fall through to an active worker, not starve until the node dies")
 	require.Equal(t, jobID, job.ID, "the claimed job should be the one pinned to the draining node")
@@ -217,12 +218,12 @@ func TestIntegration_ClaimNextRunnable_HealthyTargetNodePinHoldsJob(t *testing.T
 	// A sibling worker must NOT be able to claim the pinned job.
 	sibling := "sibling-node-" + session.ID.String()[:8]
 	seedWorkerNode(t, pool, sibling)
-	job, err := store.ClaimNextRunnable(context.Background(), sibling, sibling, uuid.New(), 30*time.Second)
+	job, err := store.ClaimNextRunnable(context.Background(), sibling, sibling, models.ReleaseChannelStable, uuid.New(), 30*time.Second)
 	require.NoError(t, err)
 	require.Nil(t, job, "a sibling worker must not claim a job pinned to a healthy owning node")
 
 	// The owning node still can.
-	owned, err := store.ClaimNextRunnable(context.Background(), ownerNode, ownerNode, uuid.New(), 30*time.Second)
+	owned, err := store.ClaimNextRunnable(context.Background(), ownerNode, ownerNode, models.ReleaseChannelStable, uuid.New(), 30*time.Second)
 	require.NoError(t, err)
 	require.NotNil(t, owned, "the owning node must still be able to claim its pinned job")
 	require.Equal(t, jobID, owned.ID)
