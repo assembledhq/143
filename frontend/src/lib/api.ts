@@ -59,7 +59,10 @@ function maybeRedirectOffCanary(redirectOrigin: unknown): void {
   if (typeof redirectOrigin !== 'string' || !/^https?:\/\//.test(redirectOrigin)) return;
   redirectedOffCanary = true;
   window.location.assign(
-    redirectOrigin.replace(/\/$/, '') + window.location.pathname + window.location.search,
+    redirectOrigin.replace(/\/$/, '') +
+      window.location.pathname +
+      window.location.search +
+      window.location.hash,
   );
 }
 

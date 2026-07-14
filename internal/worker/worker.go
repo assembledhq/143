@@ -137,6 +137,12 @@ func New(pool db.DBTX, logger zerolog.Logger, nodeID string, channel models.Rele
 	if channel.Validate() != nil {
 		// A worker on an unknown channel must never claim from a real pool;
 		// callers validate config at startup, so this is a defensive default.
+		// Coercing an intended-canary worker onto stable would silently mix
+		// planes, so make the fallback loud.
+		logger.Warn().
+			Str("requested_channel", string(channel)).
+			Str("channel", string(models.ReleaseChannelStable)).
+			Msg("invalid release channel passed to worker; defaulting to stable")
 		channel = models.ReleaseChannelStable
 	}
 	return &Worker{

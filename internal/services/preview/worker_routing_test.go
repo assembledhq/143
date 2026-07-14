@@ -593,7 +593,7 @@ func TestWorkerSelector_HasStaticEgressCapableWorker(t *testing.T) {
 				WillReturnRows(rows)
 
 			selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
-			ok, err := selector.HasStaticEgressCapableWorker(context.Background(), "203.0.113.10")
+			ok, err := selector.HasStaticEgressCapableWorker(context.Background(), uuid.Nil, "203.0.113.10")
 			require.NoError(t, err, "HasStaticEgressCapableWorker should not error when listing active nodes succeeds")
 			require.Equal(t, tt.expected, ok, "HasStaticEgressCapableWorker should report whether all active session workers can serve static egress")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -713,7 +713,7 @@ func TestWorkerSelector_StaticEgressWorkerDiagnosticsIdentifiesMismatches(t *tes
 				WillReturnRows(rows)
 
 			selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
-			got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), "203.0.113.10")
+			got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), uuid.Nil, "203.0.113.10")
 			require.NoError(t, err, "StaticEgressWorkerDiagnostics should not error when listing active nodes succeeds")
 			require.Equal(t, tt.expected, got, "StaticEgressWorkerDiagnostics should identify static egress blockers")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
@@ -736,7 +736,7 @@ func TestWorkerSelector_StaticEgressWorkerDiagnosticsEmptyPublicIP(t *testing.T)
 			AddRow("worker-1", "worker", "worker-1.internal", "active", raw, now, now))
 
 	selector := NewWorkerSelector(db.NewNodeStore(mock), db.NewPreviewStore(mock))
-	got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), "")
+	got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), uuid.Nil, "")
 	require.NoError(t, err, "StaticEgressWorkerDiagnostics should not error")
 	require.False(t, got.Available, "should be unavailable when configured public IP is empty")
 	require.Len(t, got.Mismatches, 1, "should report one mismatch")

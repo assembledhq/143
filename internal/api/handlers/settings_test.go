@@ -37,7 +37,7 @@ type testStaticEgressWorkerChecker struct {
 	err       error
 }
 
-func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Context, string) (bool, error) {
+func (c testStaticEgressWorkerChecker) HasStaticEgressCapableWorker(context.Context, uuid.UUID, string) (bool, error) {
 	return c.available, c.err
 }
 

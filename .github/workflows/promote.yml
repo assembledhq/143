@@ -134,10 +134,26 @@ jobs:
           BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          current="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")"
+          # Only an HTTP 404 (no releases yet) may seed v1.0.0. Any other
+          # failure (auth, rate limit, outage) aborts — treating it as "no
+          # releases" would re-mint v1.0.0 and fail late at tag creation.
+          err_file="$(mktemp)"
+          if current="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>"$err_file")"; then
+            :
+          elif grep -q "HTTP 404" "$err_file"; then
+            current=""
+          else
+            echo "ERROR: failed to resolve the latest release:" >&2
+            cat "$err_file" >&2
+            exit 1
+          fi
           if [ -z "$current" ]; then
             next="v1.0.0" # first promotion seeds the ledger
           else
+            if ! [[ "$current" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "ERROR: latest release tag '$current' is not vX.Y.Z; refusing to bump from it." >&2
+              exit 1
+            fi
             IFS='.' read -r major minor patch <<< "${current#v}"
             case "$BUMP" in
               major) next="v$((major + 1)).0.0" ;;

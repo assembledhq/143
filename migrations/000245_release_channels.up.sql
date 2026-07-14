@@ -2,6 +2,14 @@
 -- orgs) and a stable plane (pinned releases, customer orgs) over one shared
 -- database. See docs/design/118-canary-stable-release-channels.md.
 
+-- jobs is hot (claim polling) and organizations sits on every request path.
+-- Each ADD COLUMN below is metadata-only (constant default on PG ≥11) and the
+-- index build is on pending jobs only, but acquiring ACCESS EXCLUSIVE behind a
+-- long-running transaction would stall every query on these tables. Fail fast
+-- instead; the deploy can retry. lock_timeout is transaction-local (this file
+-- runs as one transaction) and resets at commit.
+SET LOCAL lock_timeout = '5s';
+
 -- Which plane serves and executes work for this org. Flips are operator
 -- actions and should happen while the org has no active session executors or
 -- preview runtimes (pinned target_node_id jobs would otherwise take the

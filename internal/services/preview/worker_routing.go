@@ -471,18 +471,26 @@ func (s *WorkerSelector) SelectLeastLoadedNodeExceptWithRequirements(ctx context
 }
 
 // HasStaticEgressCapableWorker reports whether all active workers that can
-// claim session jobs are verified for static egress. Session jobs are claimed
-// from the generic jobs queue, so mixed-capability worker fleets cannot safely
-// expose the org setting as available.
-func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error) {
-	diagnostics, err := s.StaticEgressWorkerDiagnostics(ctx, publicIP)
+// claim the org's session jobs are verified for static egress. Session jobs
+// are claimed from the generic jobs queue, so mixed-capability worker fleets
+// cannot safely expose the org setting as available.
+func (s *WorkerSelector) HasStaticEgressCapableWorker(ctx context.Context, orgID uuid.UUID, publicIP string) (bool, error) {
+	diagnostics, err := s.StaticEgressWorkerDiagnostics(ctx, orgID, publicIP)
 	if err != nil {
 		return false, err
 	}
 	return diagnostics.Available, nil
 }
 
-func (s *WorkerSelector) StaticEgressWorkerDiagnostics(ctx context.Context, publicIP string) (StaticEgressWorkerDiagnostics, error) {
+func (s *WorkerSelector) StaticEgressWorkerDiagnostics(ctx context.Context, orgID uuid.UUID, publicIP string) (StaticEgressWorkerDiagnostics, error) {
+	// Only workers on the org's release channel can claim its session jobs,
+	// so availability is judged per channel: a worker on the other plane must
+	// neither grant nor veto the setting. Falls back to fleet-wide when no
+	// org-channel lookup is wired (single-plane deployments).
+	req, err := s.RequireOrgChannel(ctx, orgID, WorkerSelectionRequirements{})
+	if err != nil {
+		return StaticEgressWorkerDiagnostics{}, err
+	}
 	nodes, err := s.nodes.ListActive(ctx)
 	if err != nil {
 		return StaticEgressWorkerDiagnostics{}, err
@@ -491,6 +499,9 @@ func (s *WorkerSelector) StaticEgressWorkerDiagnostics(ctx context.Context, publ
 	hasSessionWorker := false
 	for _, node := range nodes {
 		if !nodeCanClaimSessionJobs(node) {
+			continue
+		}
+		if req.Channel != "" && node.Channel != req.Channel {
 			continue
 		}
 		hasSessionWorker = true
@@ -518,9 +529,13 @@ func (s *WorkerSelector) StaticEgressWorkerDiagnostics(ctx context.Context, publ
 		}
 	}
 	if !hasSessionWorker {
+		reason := "no active session workers"
+		if req.Channel != "" {
+			reason = fmt.Sprintf("no active session workers on release channel %q", req.Channel)
+		}
 		diagnostics.Available = false
 		diagnostics.Mismatches = append(diagnostics.Mismatches, StaticEgressWorkerMismatch{
-			Reason: "no active session workers",
+			Reason: reason,
 		})
 	}
 	return diagnostics, nil

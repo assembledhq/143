@@ -43,6 +43,13 @@ before the split.
 | 2 | `app-canary,app,worker,worker-canary` | Both planes track `main` (identical code). Flip dogfood orgs to canary; verify routing, job isolation, preview bootstrap from the canary host. |
 | 3 | `app-canary,worker-canary` | Stable is pinned. `main` merges deploy canary only; stable moves via `promote.yml`. The first promotion cuts `v1.0.0`. |
 
+Caddy config rides the stable plane: `deploy.sh` syncs the Caddyfile (and
+reloads/recreates the `caddy` container) only on `app` deploys — the lean
+`app-canary` path never touches the shared proxy. Past Phase 3 a Caddyfile
+change, including one to the `canary.*` vhost itself, reaches the host with
+the next promotion rather than with the canary deploy of the merge that
+carried it.
+
 ## Flipping an org's channel
 
 Flips are operator actions, performed **while the org is quiescent** (no

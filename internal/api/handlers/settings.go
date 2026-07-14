@@ -26,12 +26,15 @@ type OrgSettingsInvalidator interface {
 	InvalidateOrg(orgID uuid.UUID)
 }
 
+// StaticEgressWorkerChecker reports static-egress worker availability for an
+// org. The org ID scopes the check to workers on the org's release channel —
+// only those can claim its session jobs.
 type StaticEgressWorkerChecker interface {
-	HasStaticEgressCapableWorker(ctx context.Context, publicIP string) (bool, error)
+	HasStaticEgressCapableWorker(ctx context.Context, orgID uuid.UUID, publicIP string) (bool, error)
 }
 
 type StaticEgressWorkerDiagnosticsProvider interface {
-	StaticEgressWorkerDiagnostics(ctx context.Context, publicIP string) (preview.StaticEgressWorkerDiagnostics, error)
+	StaticEgressWorkerDiagnostics(ctx context.Context, orgID uuid.UUID, publicIP string) (preview.StaticEgressWorkerDiagnostics, error)
 }
 
 type RuntimeStatusSessionCounter interface {
@@ -177,7 +180,7 @@ func (h *SettingsHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusInternalServerError, "INVALID_SETTINGS", "failed to parse organization settings", err)
 		return
 	}
-	status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), false)
+	status, reason, availabilityErr := h.staticEgressAvailability(r.Context(), orgID, false)
 	if availabilityErr != nil {
 		h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress worker availability")
 	}
@@ -202,7 +205,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	status, _, availabilityErr := h.staticEgressAvailability(r.Context(), false)
+	status, _, availabilityErr := h.staticEgressAvailability(r.Context(), orgID, false)
 	if availabilityErr != nil {
 		h.logger.Warn().Err(availabilityErr).Msg("failed to verify static egress worker availability")
 	}
@@ -246,7 +249,7 @@ func (h *SettingsHandler) GetRuntimeStatus(w http.ResponseWriter, r *http.Reques
 	}})
 }
 
-func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireWorkerChecker bool) (StaticEgressStatus, string, error) {
+func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, orgID uuid.UUID, requireWorkerChecker bool) (StaticEgressStatus, string, error) {
 	status := h.staticEgress
 	reason := status.UnavailableReason
 	if status.Available {
@@ -256,7 +259,7 @@ func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireW
 				reason = "static egress worker availability checker is not configured"
 			}
 		} else {
-			hasWorker, diagnostics, workerErr := h.staticEgressWorkerAvailability(ctx, status.PublicIP)
+			hasWorker, diagnostics, workerErr := h.staticEgressWorkerAvailability(ctx, orgID, status.PublicIP)
 			if workerErr != nil {
 				status.Available = false
 				reason = "failed to verify static egress worker availability"
@@ -278,15 +281,15 @@ func (h *SettingsHandler) staticEgressAvailability(ctx context.Context, requireW
 	return status, reason, nil
 }
 
-func (h *SettingsHandler) staticEgressWorkerAvailability(ctx context.Context, publicIP string) (bool, preview.StaticEgressWorkerDiagnostics, error) {
+func (h *SettingsHandler) staticEgressWorkerAvailability(ctx context.Context, orgID uuid.UUID, publicIP string) (bool, preview.StaticEgressWorkerDiagnostics, error) {
 	if diagnosticsProvider, ok := h.workers.(StaticEgressWorkerDiagnosticsProvider); ok {
-		diagnostics, err := diagnosticsProvider.StaticEgressWorkerDiagnostics(ctx, publicIP)
+		diagnostics, err := diagnosticsProvider.StaticEgressWorkerDiagnostics(ctx, orgID, publicIP)
 		if err != nil {
 			return false, preview.StaticEgressWorkerDiagnostics{}, err
 		}
 		return diagnostics.Available, diagnostics, nil
 	}
-	hasWorker, err := h.workers.HasStaticEgressCapableWorker(ctx, publicIP)
+	hasWorker, err := h.workers.HasStaticEgressCapableWorker(ctx, orgID, publicIP)
 	return hasWorker, preview.StaticEgressWorkerDiagnostics{Available: hasWorker}, err
 }
 
@@ -376,7 +379,7 @@ func (h *SettingsHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if enableStaticEgress {
-			status, _, availabilityErr := h.staticEgressAvailability(r.Context(), false)
+			status, _, availabilityErr := h.staticEgressAvailability(r.Context(), orgID, false)
 			if availabilityErr != nil {
 				logger.Warn().Err(availabilityErr).Msg("failed to verify static egress availability before settings update")
 			} else if !status.Available {

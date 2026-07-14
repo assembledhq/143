@@ -166,3 +166,71 @@ func TestWorkerSelector_RequireOrgChannel(t *testing.T) {
 		require.Zero(t, lookup.calls, "a preset channel must not trigger a lookup")
 	})
 }
+
+func TestWorkerSelector_StaticEgressDiagnostics_ScopedToOrgChannel(t *testing.T) {
+	t.Parallel()
+
+	// A stable worker without static egress must not veto availability for a
+	// canary org (and vice versa): only same-channel workers can claim the
+	// org's session jobs.
+	activeNodes := func(t *testing.T, mock pgxmock.PgxPoolIface) {
+		t.Helper()
+		now := time.Now().UTC()
+		egressMeta, err := json.Marshal(WorkerNodeMetadata{
+			StaticEgressCapable:  true,
+			StaticEgressPublicIP: "203.0.113.10",
+		})
+		require.NoError(t, err, "should marshal worker metadata")
+		rows := pgxmock.NewRows(workerNodeChannelTestCols).
+			AddRow("worker-stable-1", "worker", "stable", "worker-stable-1.internal", "active",
+				json.RawMessage(`{}`), now, now).
+			AddRow("worker-canary-1", "worker", "canary", "worker-canary-1.internal", "active",
+				egressMeta, now, now)
+		mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' ORDER BY id ASC").
+			WillReturnRows(rows)
+	}
+
+	t.Run("canary org sees only its capable canary worker", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgxmock pool")
+		defer mock.Close()
+		activeNodes(t, mock)
+
+		selector := NewWorkerSelectorWithOptions(db.NewNodeStore(mock), db.NewPreviewStore(mock), WorkerSelectorOptions{
+			OrgChannels: &fakeOrgChannelLookup{channel: models.ReleaseChannelCanary},
+		})
+		got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), uuid.New(), "203.0.113.10")
+		require.NoError(t, err, "StaticEgressWorkerDiagnostics should not error")
+		require.True(t, got.Available,
+			"an incapable stable worker must not veto static egress for a canary org")
+		require.Empty(t, got.Mismatches, "no same-channel mismatches expected")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("stable org is not granted availability by a capable canary worker", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "should create pgxmock pool")
+		defer mock.Close()
+		activeNodes(t, mock)
+
+		selector := NewWorkerSelectorWithOptions(db.NewNodeStore(mock), db.NewPreviewStore(mock), WorkerSelectorOptions{
+			OrgChannels: &fakeOrgChannelLookup{channel: models.ReleaseChannelStable},
+		})
+		got, err := selector.StaticEgressWorkerDiagnostics(context.Background(), uuid.New(), "203.0.113.10")
+		require.NoError(t, err, "StaticEgressWorkerDiagnostics should not error")
+		require.False(t, got.Available,
+			"a capable canary worker must not grant static egress to a stable org whose own worker lacks it")
+		require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+	})
+
+	t.Run("lookup failure surfaces instead of judging the wrong fleet", func(t *testing.T) {
+		t.Parallel()
+		selector := NewWorkerSelectorWithOptions(nil, nil, WorkerSelectorOptions{
+			OrgChannels: &fakeOrgChannelLookup{err: errors.New("db down")},
+		})
+		_, err := selector.StaticEgressWorkerDiagnostics(context.Background(), uuid.New(), "203.0.113.10")
+		require.Error(t, err, "an unknown org channel must fail the check, not fall back to fleet-wide")
+	})
+}

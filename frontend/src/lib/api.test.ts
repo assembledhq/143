@@ -1992,6 +1992,7 @@ describe('api client', () => {
           assign,
           pathname: '/sessions/abc',
           search: '?tab=diff',
+          hash: '#message-42',
         },
         writable: true,
         configurable: true,
@@ -2012,7 +2013,7 @@ describe('api client', () => {
       );
 
       await expect(api.issues.list()).rejects.toThrow();
-      expect(assign).toHaveBeenCalledWith('https://143.dev/sessions/abc?tab=diff');
+      expect(assign).toHaveBeenCalledWith('https://143.dev/sessions/abc?tab=diff#message-42');
       // The once-guard must keep parallel 403s from stacking navigations.
       await expect(api.issues.list()).rejects.toThrow();
       expect(assign).toHaveBeenCalledTimes(1);
