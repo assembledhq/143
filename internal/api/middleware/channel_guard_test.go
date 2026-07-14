@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -116,5 +117,54 @@ func TestRequireCanaryChannelForHost(t *testing.T) {
 			require.Equal(t, http.StatusOK, rr.Code)
 		}
 		require.Equal(t, 1, lookup.calls, "repeat requests within the TTL must reuse the cached channel")
+	})
+}
+
+func TestChannelGuardCacheEviction(t *testing.T) {
+	t.Parallel()
+
+	t.Run("expired entries are dropped on read", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now()
+		cache := newChannelGuardCache(func() time.Time { return now })
+		orgID := uuid.New()
+		cache.put(orgID, models.ReleaseChannelCanary)
+
+		channel, ok := cache.get(orgID)
+		require.True(t, ok)
+		require.Equal(t, models.ReleaseChannelCanary, channel)
+
+		now = now.Add(channelGuardCacheTTL + time.Second)
+		_, ok = cache.get(orgID)
+		require.False(t, ok, "an entry past its TTL must read as a miss")
+		require.Empty(t, cache.entries, "the expired entry must be removed, not linger for a deleted org")
+	})
+
+	t.Run("stores sweep expired entries once the map is large", func(t *testing.T) {
+		t.Parallel()
+		now := time.Now()
+		cache := newChannelGuardCache(func() time.Time { return now })
+		for range channelGuardCacheSweepAt - 1 {
+			cache.put(uuid.New(), models.ReleaseChannelCanary)
+		}
+		// Inserted later, so it is still inside its TTL when the older batch
+		// has expired — it must survive the sweep below.
+		now = now.Add(30 * time.Second)
+		liveOrg := uuid.New()
+		cache.put(liveOrg, models.ReleaseChannelStable)
+		require.Len(t, cache.entries, channelGuardCacheSweepAt)
+
+		// Past the first batch's TTL but not liveOrg's; the next store finds
+		// the map at the sweep threshold and evicts only the expired batch.
+		now = now.Add(channelGuardCacheTTL - 20*time.Second)
+		trigger := uuid.New()
+		cache.put(trigger, models.ReleaseChannelCanary)
+
+		require.Len(t, cache.entries, 2, "the sweep must drop the expired batch and keep live entries")
+		channel, ok := cache.get(liveOrg)
+		require.True(t, ok, "a live entry must survive the sweep")
+		require.Equal(t, models.ReleaseChannelStable, channel)
+		_, ok = cache.get(trigger)
+		require.True(t, ok)
 	})
 }

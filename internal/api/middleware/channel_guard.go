@@ -25,9 +25,59 @@ type ReleaseChannelLookup interface {
 // DB for repeat requests.
 const channelGuardCacheTTL = time.Minute
 
+// channelGuardCacheSweepAt is the map size at which a store first sweeps
+// expired entries, so orgs that stopped hitting the canary host (or were
+// deleted outright) don't accumulate forever. Live entries always survive a
+// sweep; the map can exceed this bound only while that many orgs are actively
+// inside their TTL window.
+const channelGuardCacheSweepAt = 1024
+
 type channelCacheEntry struct {
 	channel    models.ReleaseChannel
 	validUntil time.Time
+}
+
+// channelGuardCache is a TTL cache of org release channels. now is injectable
+// for tests; nil means time.Now.
+type channelGuardCache struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	entries map[uuid.UUID]channelCacheEntry
+}
+
+func newChannelGuardCache(now func() time.Time) *channelGuardCache {
+	if now == nil {
+		now = time.Now
+	}
+	return &channelGuardCache{now: now, entries: make(map[uuid.UUID]channelCacheEntry)}
+}
+
+func (c *channelGuardCache) get(orgID uuid.UUID) (models.ReleaseChannel, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[orgID]
+	if !ok {
+		return "", false
+	}
+	if c.now().After(entry.validUntil) {
+		delete(c.entries, orgID)
+		return "", false
+	}
+	return entry.channel, true
+}
+
+func (c *channelGuardCache) put(orgID uuid.UUID, channel models.ReleaseChannel) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= channelGuardCacheSweepAt {
+		now := c.now()
+		for id, entry := range c.entries {
+			if now.After(entry.validUntil) {
+				delete(c.entries, id)
+			}
+		}
+	}
+	c.entries[orgID] = channelCacheEntry{channel: channel, validUntil: c.now().Add(channelGuardCacheTTL)}
 }
 
 // RequireCanaryChannelForHost guards the canary hostname: authenticated
@@ -45,23 +95,7 @@ type channelCacheEntry struct {
 //     and local dev).
 func RequireCanaryChannelForHost(canaryHost string, lookup ReleaseChannelLookup, logger zerolog.Logger) func(http.Handler) http.Handler {
 	canaryHost = normalizeHost(canaryHost)
-	var mu sync.Mutex
-	cache := make(map[uuid.UUID]channelCacheEntry)
-
-	cachedChannel := func(orgID uuid.UUID) (models.ReleaseChannel, bool) {
-		mu.Lock()
-		defer mu.Unlock()
-		entry, ok := cache[orgID]
-		if !ok || time.Now().After(entry.validUntil) {
-			return "", false
-		}
-		return entry.channel, true
-	}
-	storeChannel := func(orgID uuid.UUID, channel models.ReleaseChannel) {
-		mu.Lock()
-		defer mu.Unlock()
-		cache[orgID] = channelCacheEntry{channel: channel, validUntil: time.Now().Add(channelGuardCacheTTL)}
-	}
+	cache := newChannelGuardCache(nil)
 
 	return func(next http.Handler) http.Handler {
 		if canaryHost == "" {
@@ -78,7 +112,7 @@ func RequireCanaryChannelForHost(canaryHost string, lookup ReleaseChannelLookup,
 				return
 			}
 
-			channel, ok := cachedChannel(orgID)
+			channel, ok := cache.get(orgID)
 			if !ok {
 				fetched, err := lookup.GetReleaseChannel(r.Context(), orgID)
 				if err != nil {
@@ -90,7 +124,7 @@ func RequireCanaryChannelForHost(canaryHost string, lookup ReleaseChannelLookup,
 					return
 				}
 				channel = fetched
-				storeChannel(orgID, channel)
+				cache.put(orgID, channel)
 			}
 
 			if channel != models.ReleaseChannelCanary {
