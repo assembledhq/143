@@ -2750,18 +2750,9 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				mappedUserID = resolved
 			}
 		}
-		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
-			link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, payload.TeamID, payload.SlackUserID)
-			if linkErr == nil && link.UserID != nil {
-				if mappedUserID == nil {
-					mappedUserID = link.UserID
-				}
-			} else if linkErr != nil && !errors.Is(linkErr, pgx.ErrNoRows) {
-				logger.Warn().Err(linkErr).Str("slack_user_id", payload.SlackUserID).Msg("failed to resolve Slack user mapping")
-			} else if mappedUserID == nil && errors.Is(linkErr, pgx.ErrNoRows) && stores.Users != nil {
-				if matchedID := resolveSlackUserByEmail(ctx, stores, slackClient, slackCfg.AccessToken, orgID, installationID, payload.TeamID, payload.SlackUserID, logger); matchedID != nil {
-					mappedUserID = matchedID
-				}
+		if mappedUserID == nil && payload.SlackUserID != "" && stores.Users != nil {
+			if matchedID := resolveSlackUserByEmail(ctx, stores, slackClient, slackCfg.AccessToken, orgID, installationID, payload.TeamID, payload.SlackUserID, logger); matchedID != nil {
+				mappedUserID = matchedID
 			}
 		}
 
@@ -2908,11 +2899,19 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			return fmt.Errorf("persist slack session link: %w", err)
 		}
 		if stores.SessionAttributions != nil {
+			var externalLink *models.ExternalUserLink
+			if stores.ExternalUserLinks != nil && payload.SlackUserID != "" {
+				if resolvedLink, externalErr := stores.ExternalUserLinks.GetActiveByExternal(ctx, orgID, models.ExternalIdentityProviderSlack, payload.TeamID, payload.SlackUserID); externalErr == nil {
+					externalLink = &resolvedLink
+				} else if !errors.Is(externalErr, pgx.ErrNoRows) {
+					logger.Warn().Err(externalErr).Msg("failed to snapshot Slack external identity attribution")
+				}
+			}
 			attribution := &models.SessionAttribution{
 				OrgID:          orgID,
 				SessionID:      session.ID,
 				Source:         models.SessionAttributionSourceSlack,
-				SourceMetadata: slackSessionAttributionMetadata(*link),
+				SourceMetadata: slackSessionAttributionMetadata(*link, externalLink),
 			}
 			if err := stores.SessionAttributions.Create(ctx, attribution); err != nil {
 				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
@@ -2941,7 +2940,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 	}
 }
 
-func slackSessionAttributionMetadata(link models.SlackSessionLink) json.RawMessage {
+func slackSessionAttributionMetadata(link models.SlackSessionLink, externalLink *models.ExternalUserLink) json.RawMessage {
 	metadata := map[string]any{
 		"slack_team_id":           link.SlackTeamID,
 		"slack_channel_id":        link.SlackChannelID,
@@ -2953,6 +2952,11 @@ func slackSessionAttributionMetadata(link models.SlackSessionLink) json.RawMessa
 	}
 	if link.MappedUserID != nil {
 		metadata["mapped_user_id"] = link.MappedUserID.String()
+	}
+	if externalLink != nil {
+		metadata["external_user_link_id"] = externalLink.ID.String()
+		metadata["attribution_source"] = externalLink.Source
+		metadata["attribution_confidence"] = externalLink.Confidence
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
@@ -3180,6 +3184,8 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	memberships := []models.MembershipSummary{}
 	var botSettings *models.SlackBotSettings
 	var defaultRepo *models.Repository
+	var mappedUserID *uuid.UUID
+	var mappedUserName string
 	if stores != nil && stores.SlackSessionLinks != nil {
 		var err error
 		pending, err = stores.SlackSessionLinks.ListPendingHumanInputsForSlackUser(ctx, orgID, teamID, slackUserID, 5)
@@ -3200,7 +3206,6 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 		}
 	}
 	if stores != nil && stores.Memberships != nil {
-		var mappedUserID *uuid.UUID
 		if stores.ExternalUserLinks != nil {
 			if externalUserID, externalErr := lookupExternalSlackMappedUserID(ctx, stores.ExternalUserLinks, orgID, teamID, slackUserID); externalErr == nil && externalUserID != nil {
 				mappedUserID = externalUserID
@@ -3208,14 +3213,14 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 				logger.Warn().Err(externalErr).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home external org memberships")
 			}
 		}
-		if stores.SlackUserLinks != nil {
-			if link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, teamID, slackUserID); err == nil && link.UserID != nil {
-				if mappedUserID == nil {
-					mappedUserID = link.UserID
+		if mappedUserID != nil {
+			if stores.Users != nil {
+				if mappedUser, userErr := stores.Users.GetByID(ctx, orgID, *mappedUserID); userErr == nil {
+					mappedUserName = strings.TrimSpace(mappedUser.Name)
+				} else if !errors.Is(userErr, pgx.ErrNoRows) {
+					logger.Warn().Err(userErr).Msg("failed to load Slack App Home mapped user")
 				}
 			}
-		}
-		if mappedUserID != nil {
 			if userMemberships, membershipErr := stores.Memberships.ListByUser(ctx, *mappedUserID); membershipErr == nil {
 				memberships = userMemberships
 			} else {
@@ -3237,6 +3242,12 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home defaults")
 		}
 	}
+	accountText := "Connect account"
+	accountAction := "slack_link_account"
+	if mappedUserID != nil {
+		accountText = "Account connected"
+		accountAction = "slack_account_connected"
+	}
 	blocks := []ingestion.SlackBlock{
 		{
 			Type: "header",
@@ -3250,9 +3261,12 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			Type: "actions",
 			Elements: []map[string]any{
 				{"type": "button", "action_id": "slack_start_from_home", "text": map[string]string{"type": "plain_text", "text": "Start session"}, "value": "{}"},
-				{"type": "button", "action_id": "slack_link_account", "text": map[string]string{"type": "plain_text", "text": "Link account"}, "value": "{}"},
+				{"type": "button", "action_id": accountAction, "text": map[string]string{"type": "plain_text", "text": accountText}, "value": "{}"},
 			},
 		},
+	}
+	if mappedUserName != "" {
+		blocks = append(blocks, ingestion.SlackBlock{Type: "section", Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Connected 143 account*\n" + mappedUserName}})
 	}
 	blocks = append(blocks, slackHomePendingBlocks(services, pending)...)
 	blocks = append(blocks, slackHomePersonalDefaultsBlock(botSettings, defaultRepo))
@@ -3728,6 +3742,10 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			return nil
 		}
 		state := slackLifecycleStateForProgress(progress)
+		var statusActions []slackbotsvc.SlackAction
+		if link.TeamSession && progress.Terminal {
+			statusActions = append(statusActions, slackbotsvc.SlackAction{Text: "Connect account", ActionID: "slack_link_account", Value: "{}"})
+		}
 		rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
 			Session:    models.Session{ID: sessionID},
 			Link:       link,
@@ -3735,6 +3753,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			Title:      progress.Title,
 			Summary:    progress.Summary,
 			SessionURL: slackSessionURL(services, sessionID),
+			Actions:    statusActions,
 		})
 		text := rendered.Text
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
@@ -4656,7 +4675,19 @@ func slackHumanInputDeliveryTarget(ctx context.Context, stores *Stores, slackCli
 	if req.AssignedUserID != nil {
 		needsDM = true
 		slackUserID = ""
-		if stores != nil && stores.SlackUserLinks != nil {
+		if stores != nil && stores.ExternalUserLinks != nil {
+			assignedLinks, err := stores.ExternalUserLinks.ListActiveByUser(ctx, req.OrgID, *req.AssignedUserID)
+			if err == nil {
+				for _, assignedLink := range assignedLinks {
+					if assignedLink.Provider == models.ExternalIdentityProviderSlack && assignedLink.ProviderWorkspaceID == link.SlackTeamID {
+						slackUserID = assignedLink.ProviderUserID
+						break
+					}
+				}
+			} else {
+				logger.Warn().Err(err).Str("assigned_user_id", req.AssignedUserID.String()).Msg("failed to resolve assigned external Slack identity")
+			}
+		} else if stores != nil && stores.SlackUserLinks != nil {
 			assignedLink, err := stores.SlackUserLinks.GetByUser(ctx, req.OrgID, *req.AssignedUserID, link.SlackTeamID)
 			if err == nil {
 				slackUserID = assignedLink.SlackUserID
@@ -4791,6 +4822,8 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			return handleSlackStartFromHome(ctx, stores, slackClient, input)
 		case "slack_link_account":
 			return handleSlackLinkAccount(ctx, stores, services, slackClient, input)
+		case "slack_account_connected":
+			return handleSlackAccountConnected(ctx, stores, services, slackClient, input)
 		case "slack_select_org":
 			return handleSlackSelectOrg(ctx, stores, services, slackClient, input)
 		case "slack_select_repository":
@@ -5053,7 +5086,7 @@ func slackModalSelectedValues(raw json.RawMessage, blockID, actionID string) []s
 }
 
 func handleSlackLinkAccount(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil {
+	if stores == nil || stores.Credentials == nil || stores.ExternalUserLinks == nil {
 		return fmt.Errorf("slack account-link dependencies are not configured")
 	}
 	orgID, err := uuid.Parse(input.OrgID)
@@ -5068,10 +5101,48 @@ func handleSlackLinkAccount(ctx context.Context, stores *Stores, services *Servi
 	if !ok {
 		return fmt.Errorf("unexpected slack credential type")
 	}
-	integrationsURL := slackFrontendURL(services, "/integrations?slack_user_id="+url.QueryEscape(input.UserID))
+	sourceContext, err := json.Marshal(map[string]string{"surface": "slack", "channel_id": input.ChannelID})
+	if err != nil {
+		return fmt.Errorf("marshal slack identity claim context: %w", err)
+	}
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, stores.ExternalUserLinks, stores.Users, externalidentity.Options{})
+	_, rawToken, err := resolver.CreateSelfLinkClaim(ctx, orgID, externalidentity.ExternalActorInput{
+		Provider: models.ExternalIdentityProviderSlack, ProviderWorkspaceID: input.TeamID, ProviderUserID: input.UserID,
+	}, sourceContext)
+	if err != nil {
+		return fmt.Errorf("create slack account claim: %w", err)
+	}
+	integrationsURL := slackFrontendURL(services, "/external-identities/claim?token="+url.QueryEscape(rawToken))
 	text := "Link your Slack account from 143 to enable personal approvals, DMs, and user-specific defaults.\n\nOpen 143: " + integrationsURL
 	if input.TriggerID != "" {
 		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackLinkAccountModal(integrationsURL))
+	}
+	if input.ChannelID != "" && input.UserID != "" {
+		return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
+	}
+	return nil
+}
+
+func handleSlackAccountConnected(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil {
+		return fmt.Errorf("slack account status dependencies are not configured")
+	}
+	orgID, err := uuid.Parse(input.OrgID)
+	if err != nil {
+		return fmt.Errorf("parse org_id: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	accountURL := slackFrontendURL(services, "/settings/account#external-identities")
+	text := "Your Slack account is connected to 143. Manage or disconnect it from account settings.\n\nOpen 143: " + accountURL
+	if input.TriggerID != "" {
+		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackInfoModal("Account connected", text))
 	}
 	if input.ChannelID != "" && input.UserID != "" {
 		return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
@@ -6128,6 +6199,9 @@ func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	if stores.ExternalUserLinks != nil {
+		authorizer = slackbotsvc.NewAuthorizerWithExternal(stores.ExternalUserLinks, stores.Memberships, stores.SlackChannels)
+	}
 	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
@@ -6174,6 +6248,9 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	if stores.ExternalUserLinks != nil {
+		authorizer = slackbotsvc.NewAuthorizerWithExternal(stores.ExternalUserLinks, stores.Memberships, stores.SlackChannels)
+	}
 	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
@@ -6804,6 +6881,9 @@ func slackTeamSessionLine(link models.SlackSessionLink) string {
 	if !link.TeamSession {
 		return ""
 	}
+	if strings.TrimSpace(link.SlackUserID) != "" {
+		return fmt.Sprintf("_Slack <@%s> started this team session without a connected 143 account._", link.SlackUserID)
+	}
 	return slackbotsvc.TeamSessionLine()
 }
 
@@ -7419,43 +7499,23 @@ func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *i
 	} else if resolved != nil {
 		return resolved
 	}
-	user, err := stores.Users.GetByEmail(ctx, email)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to resolve Slack email to 143 user")
-		}
-		return nil
-	}
-	if user.OrgID != orgID {
-		return nil
-	}
-	link := &models.SlackUserLink{
-		OrgID:               orgID,
-		SlackInstallationID: installationID,
-		UserID:              &user.ID,
-		SlackTeamID:         teamID,
-		SlackUserID:         slackUserID,
-		SlackEmail:          &email,
-		SlackDisplayName:    displayName,
-	}
-	if err := stores.SlackUserLinks.UpsertEmailMatch(ctx, link); err != nil {
-		logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to persist Slack email match")
-	}
-	return &user.ID
+	return nil
 }
 
 func resolveExternalSlackUser(ctx context.Context, stores *Stores, orgID uuid.UUID, teamID, slackUserID string, email, displayName *string, logger zerolog.Logger) (*uuid.UUID, error) {
 	if stores == nil || stores.ExternalUserLinks == nil || stores.Users == nil {
 		return nil, nil
 	}
-	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, nil, stores.Users, externalidentity.Options{})
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, stores.ExternalUserLinks, stores.Users, externalidentity.Options{AllowVerifiedEmailAutoLink: email != nil})
 	input := externalidentity.ExternalActorInput{
 		Provider:            models.ExternalIdentityProviderSlack,
 		ProviderWorkspaceID: strings.TrimSpace(teamID),
 		ProviderUserID:      strings.TrimSpace(slackUserID),
 		Email:               email,
-		EmailVerified:       false,
-		DisplayName:         displayName,
+		// Slack's authenticated users.info response is the authoritative workspace
+		// profile source; unlike display names, its email is safe for exact matching.
+		EmailVerified: email != nil,
+		DisplayName:   displayName,
 	}
 	resolution, err := resolver.ResolveExternalActor(ctx, orgID, input)
 	if err != nil {
@@ -7533,6 +7593,9 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 		URL:  slackSessionURL(services, sessionID),
 	}}
 	if session != nil {
+		if session.TriggeredByUserID == nil {
+			actions = append(actions, slackbotsvc.SlackAction{Text: "Connect account", ActionID: "slack_link_account", Value: "{}"})
+		}
 		actions = append(actions, slackbotsvc.SlackAction{
 			Text:     "Change repo",
 			ActionID: "slack_configure_channel",

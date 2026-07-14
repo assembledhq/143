@@ -1,6 +1,6 @@
 # Design: External User Identity Attribution
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-25
+> **Status:** Implemented | **Last reviewed:** 2026-07-14
 >
 > **Depends on:** [../implemented/69-linear-agent.md](../implemented/69-linear-agent.md), [../implemented/101-slackbot-implementation-plan.md](../implemented/101-slackbot-implementation-plan.md), [./92-slackbot-product-surface.md](./92-slackbot-product-surface.md), [./50-multi-organization-membership.md](./50-multi-organization-membership.md)
 
@@ -140,15 +140,17 @@ linking feel like an upgrade for tracking, credit, and personal defaults.
 1. **Shipped 2026-06-25:** unified data model, Linear-link backfill migration,
    typed Go models, direct pgx stores, resolver service, admin/user API
    endpoints, suggestion queue actions, audit enum coverage, and tenancy tests.
-2. Add self-link claim links for Slack App Home, Slack mention fallback, and
-   Linear-started session fallback.
-3. Add settings table for mappings, suggestions, scope health, and unlinking.
-4. Route personal capabilities through trusted mappings and provide team
-   fallbacks where policy allows.
-5. Migrate Slack mapping rows into the unified table and continue moving
-   Slack/Linear callers from provider-specific stores to the resolver. Existing
-   `linear_user_links` rows with resolved users are backfilled into
-   `external_user_links`; compatibility helpers remain for older callers.
+2. **Shipped 2026-07-14:** one-time self-link claim links for Slack App Home,
+   Slack acknowledgements/final messages, and Linear-started team sessions.
+3. **Shipped 2026-07-14:** Team and personal settings surfaces for mappings,
+   suggestions, provider health, recently seen unmapped actors, and unlinking.
+4. **Shipped 2026-07-14:** personal credentials, PR attribution, sensitive DM
+   delivery, and Slack approvals route through trusted mappings with visible
+   team fallbacks.
+5. **Shipped 2026-07-14:** Slack mappings are backfilled into the unified table;
+   live Slack/Linear attribution and authorization use the resolver/unified
+   store. Provider-specific stores remain compatibility-only for rolling
+   deploys and older data paths.
 
 ## Non-Goals
 
@@ -266,6 +268,11 @@ CREATE UNIQUE INDEX idx_external_user_link_suggestions_open
     WHERE dismissed_at IS NULL;
 ```
 
+Recently seen actors without an authoritative link are recorded in
+`external_user_observations`. This powers the admin operational queue without
+turning an observation or display-name hint into an identity assertion. Active
+links are excluded from the queue at read time.
+
 Provider-specific tables such as `linear_user_links` may remain during
 migration, but new code should depend on `external_user_links`.
 
@@ -297,10 +304,12 @@ at most 30 minutes.
 type ExternalIdentityResolver interface {
     ResolveExternalActor(ctx context.Context, orgID uuid.UUID, input ExternalActorInput) (ExternalActorResolution, error)
     CreateSelfLinkClaim(ctx context.Context, orgID uuid.UUID, input ExternalActorInput, sourceContext map[string]any) (ExternalUserLinkClaim, string, error)
-    ClaimSelfLink(ctx context.Context, token string, claimingUserID uuid.UUID) (ExternalUserLink, error)
-    AdminLinkExternalUser(ctx context.Context, orgID uuid.UUID, req AdminExternalUserLinkRequest) (ExternalUserLink, error)
-    RevokeExternalUserLink(ctx context.Context, orgID uuid.UUID, linkID uuid.UUID, revokedByUserID uuid.UUID) error
 }
+
+Claim consumption, admin linking/relinking, suggestion approval, and revocation
+are transactional store operations invoked by the authenticated HTTP
+application service. Keeping those mutations out of the read-path resolver
+prevents Slack/Linear workers from acquiring administrative authority.
 
 type ExternalActorInput struct {
     Provider            ExternalIdentityProvider
@@ -320,7 +329,6 @@ type ExternalActorResolution struct {
     TeamFallback      bool
     LinkRequiredFor   []string
     SuggestedUserID   *uuid.UUID
-    ClaimURL          *string
 }
 ```
 

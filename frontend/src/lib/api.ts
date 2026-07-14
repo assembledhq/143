@@ -898,6 +898,17 @@ export const api = {
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
+    listExternalUserLinks: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/integrations/external-user-links'),
+    createExternalUserLink: (body: { provider: import('./types').ExternalIdentityProvider; provider_workspace_id: string; provider_user_id: string; user_id: string; external_email?: string; external_handle?: string; external_display_name?: string; replace?: boolean }) =>
+      post<import('./types').SingleResponse<import('./types').ExternalUserLink>>('/api/v1/integrations/external-user-links', body),
+    deleteExternalUserLink: (id: string) => del<void>(`/api/v1/integrations/external-user-links/${encodeURIComponent(id)}`),
+    listExternalUserLinkSuggestions: () => get<import('./types').ListResponse<import('./types').ExternalUserLinkSuggestion>>('/api/v1/integrations/external-user-link-suggestions'),
+    listUnmappedExternalUsers: () => get<import('./types').ListResponse<import('./types').ExternalUserObservation>>('/api/v1/integrations/external-unmapped-users'),
+    approveExternalUserLinkSuggestion: (id: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-suggestions/${encodeURIComponent(id)}/approve`),
+    dismissExternalUserLinkSuggestion: (id: string) => post<void>(`/api/v1/integrations/external-user-link-suggestions/${encodeURIComponent(id)}/dismiss`),
+    listMyExternalIdentities: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/users/me/external-identities'),
+    deleteMyExternalIdentity: (id: string) => del<void>(`/api/v1/users/me/external-identities/${encodeURIComponent(id)}`),
+    claimExternalIdentity: (token: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-claims/${encodeURIComponent(token)}/claim`),
     loginGitHub: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/github/login`;
     },

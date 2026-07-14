@@ -2290,6 +2290,7 @@ export default function IntegrationsPage() {
         <PageHeader
           title="Integrations"
           description="Connect external services to your organization."
+          action={isAdmin ? <Button asChild variant="outline"><Link href="/settings/team#external-identities">People mappings</Link></Button> : undefined}
         />
       {!isAdmin && (
         <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">

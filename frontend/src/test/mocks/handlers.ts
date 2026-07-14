@@ -855,6 +855,10 @@ export const handlers = [
       meta: {},
     } satisfies ListResponse<User>);
   }),
+  http.get('/api/v1/integrations/external-user-links', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/integrations/external-user-link-suggestions', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/integrations/external-unmapped-users', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/users/me/external-identities', () => HttpResponse.json({ data: [], meta: {} })),
 
   http.get('/api/v1/repositories/summary', () => {
     return HttpResponse.json({

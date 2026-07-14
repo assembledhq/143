@@ -136,6 +136,7 @@ const (
 	AuditActionIntegrationDisconnected             AuditAction = "integration.disconnected"
 	AuditActionIntegrationWriteback                AuditAction = "integration.writeback"
 	AuditActionExternalUserLinkCreated             AuditAction = "external_user_link.created"
+	AuditActionExternalUserLinkReplaced            AuditAction = "external_user_link.replaced"
 	AuditActionExternalUserLinkClaimed             AuditAction = "external_user_link.claimed"
 	AuditActionExternalUserLinkRevoked             AuditAction = "external_user_link.revoked"
 	AuditActionExternalUserLinkSuggestionApproved  AuditAction = "external_user_link_suggestion.approved"
@@ -225,7 +226,7 @@ func (a AuditAction) Validate() error {
 		AuditActionTeamGitHubOrgAutoJoinEnabled, AuditActionTeamGitHubOrgAutoJoinDisabled,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionIntegrationUpdated, AuditActionIntegrationDisconnected, AuditActionIntegrationWriteback,
-		AuditActionExternalUserLinkCreated, AuditActionExternalUserLinkClaimed, AuditActionExternalUserLinkRevoked,
+		AuditActionExternalUserLinkCreated, AuditActionExternalUserLinkReplaced, AuditActionExternalUserLinkClaimed, AuditActionExternalUserLinkRevoked,
 		AuditActionExternalUserLinkSuggestionApproved, AuditActionExternalUserLinkSuggestionDismissed,
 		AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,

@@ -103,3 +103,15 @@ type ExternalUserLinkClaim struct {
 	ClaimedAt           *time.Time               `db:"claimed_at" json:"claimed_at,omitempty"`
 	CreatedAt           time.Time                `db:"created_at" json:"created_at"`
 }
+
+type ExternalUserObservation struct {
+	ID                  uuid.UUID                `db:"id" json:"id"`
+	OrgID               uuid.UUID                `db:"org_id" json:"org_id"`
+	Provider            ExternalIdentityProvider `db:"provider" json:"provider"`
+	ProviderWorkspaceID string                   `db:"provider_workspace_id" json:"provider_workspace_id"`
+	ProviderUserID      string                   `db:"provider_user_id" json:"provider_user_id"`
+	ExternalEmail       *string                  `db:"external_email" json:"external_email,omitempty"`
+	ExternalHandle      *string                  `db:"external_handle" json:"external_handle,omitempty"`
+	ExternalDisplayName *string                  `db:"external_display_name" json:"external_display_name,omitempty"`
+	LastSeenAt          time.Time                `db:"last_seen_at" json:"last_seen_at"`
+}
