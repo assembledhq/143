@@ -135,14 +135,18 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 				return 1
 			}
 			branch := strings.TrimSpace(string(branchOutput))
-			remoteOutput, remoteErr := exec.CommandContext(ctx, "git", "ls-remote", "origin", "refs/heads/"+branch).Output()
+			remoteOutput, remoteErr := exec.CommandContext(ctx, "git", "ls-remote", "--heads", "origin").Output()
 			if remoteErr != nil {
 				fmt.Fprintf(stderr, "error: inspect remote changeset branch: %s\n", remoteErr)
 				return 1
 			}
-			fields := strings.Fields(string(remoteOutput))
-			if len(fields) > 0 {
-				headSHA = strings.TrimSpace(fields[0])
+			wantedRef := "refs/heads/" + branch
+			for line := range strings.SplitSeq(string(remoteOutput), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) == 2 && fields[1] == wantedRef {
+					headSHA = strings.TrimSpace(fields[0])
+					break
+				}
 			}
 		}
 		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(headSHA) {
