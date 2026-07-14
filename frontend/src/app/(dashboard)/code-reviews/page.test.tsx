@@ -268,6 +268,12 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
+    const filterToggle = screen.getByRole("button", { name: /Filter reviews/i });
+    expect(filterToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(filterToggle);
+    expect(filterToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(evidenceSheet).toBeInTheDocument();
@@ -277,9 +283,9 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
-    await user.click(screen.getByRole("combobox", { name: /Repository/i }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("combobox", { name: "Policy repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
