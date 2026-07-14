@@ -193,6 +193,9 @@ function SettingsTab({
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(
     automation.identity_scope ?? "org",
   );
+  const [publishPolicy, setPublishPolicy] = useState<"pull_request" | "none">(
+    automation.publish_policy ?? "pull_request",
+  );
   const [prePRReviewLoops, setPrePRReviewLoops] = useState(
     automation.pre_pr_review_loops ?? 0,
   );
@@ -313,6 +316,7 @@ function SettingsTab({
         github_event_filters: githubEventFilters,
         model: model ?? "",
         identity_scope: identityScope,
+        publish_policy: publishPolicy,
         pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort:
           showReasoningSelector && reasoningEffort ? reasoningEffort : "",
@@ -447,9 +451,9 @@ function SettingsTab({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
-          Organization automations use team credentials and open PRs as 143-bot.
-          Personal automations use the creator&apos;s coding-agent preferences
-          and GitHub identity.
+          Organization automations use team credentials and publish as 143-bot.
+          Personal automations use the creator&apos;s coding-agent preferences and
+          GitHub identity.
         </p>
       </div>
       <div className="space-y-2">
@@ -643,6 +647,29 @@ function SettingsTab({
               buttonClassName="w-full justify-between"
               contentClassName="w-[var(--radix-popover-trigger-width)]"
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label>After a successful run</Label>
+            <Select
+              value={publishPolicy}
+              onValueChange={(value) => {
+                if (value === "pull_request" || value === "none") {
+                  setPublishPolicy(value);
+                }
+              }}
+              disabled={!canManage}
+            >
+              <SelectTrigger aria-label="After a successful run">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pull_request">Open a pull request</SelectItem>
+                <SelectItem value="none">Do not publish</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Pull requests are also skipped when the run produces no diff.
+            </p>
           </div>
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
@@ -1255,6 +1282,12 @@ function AutomationDetailRail({
             ],
             ["Reasoning", automation.reasoning_effort || "Default"],
             ["Base branch", automation.base_branch || "-"],
+            [
+              "After success",
+              automation.publish_policy === "none"
+                ? "Do not publish"
+                : "Open a pull request",
+            ],
             ["Priority", priorityLabel(automation.priority)],
             ["Scope", automation.scope || "-"],
           ]}

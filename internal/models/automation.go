@@ -28,6 +28,7 @@ type Automation struct {
 	MaxConcurrent    int                     `db:"max_concurrent"   json:"max_concurrent"`
 	BaseBranch       string                  `db:"base_branch"      json:"base_branch"`
 	IdentityScope    AutomationIdentityScope `db:"identity_scope"   json:"identity_scope"`
+	PublishPolicy    AutomationPublishPolicy `db:"publish_policy"   json:"publish_policy"`
 	PrePRReviewLoops int                     `db:"pre_pr_review_loops" json:"pre_pr_review_loops"`
 	ScheduleType     AutomationScheduleType  `db:"schedule_type"    json:"schedule_type"`
 	IntervalValue    *int                    `db:"interval_value"   json:"interval_value,omitempty"`
@@ -324,6 +325,53 @@ func (s AutomationIdentityScope) OrDefault() AutomationIdentityScope {
 	return s
 }
 
+// AutomationPublishPolicy controls whether a successful automation run should
+// automatically open a pull request. Branch-only publication is intentionally
+// not supported: review/reporting automations use none, while coding
+// automations use pull_request.
+type AutomationPublishPolicy string
+
+const (
+	AutomationPublishPolicyPullRequest AutomationPublishPolicy = "pull_request"
+	AutomationPublishPolicyNone        AutomationPublishPolicy = "none"
+)
+
+func (p AutomationPublishPolicy) Validate() error {
+	switch p {
+	case AutomationPublishPolicyPullRequest, AutomationPublishPolicyNone:
+		return nil
+	default:
+		return fmt.Errorf("invalid publish_policy: %q (must be pull_request or none)", p)
+	}
+}
+
+func (p AutomationPublishPolicy) OrDefault() AutomationPublishPolicy {
+	if p == "" {
+		return AutomationPublishPolicyPullRequest
+	}
+	return p
+}
+
+// AutomationPublishPolicyFromConfigSnapshot resolves the policy captured when
+// an automation run started. Snapshots created before publish_policy existed
+// retain the historical pull-request behavior.
+func AutomationPublishPolicyFromConfigSnapshot(raw json.RawMessage) (AutomationPublishPolicy, error) {
+	if len(raw) == 0 {
+		return AutomationPublishPolicyPullRequest, nil
+	}
+	var snapshot struct {
+		PublishPolicy AutomationPublishPolicy `json:"publish_policy"`
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return "", fmt.Errorf("parse automation publish policy snapshot: %w", err)
+	}
+	policy := snapshot.PublishPolicy.OrDefault()
+	if err := policy.Validate(); err != nil {
+		return "", err
+	}
+	return policy, nil
+}
+
 // AutomationIconType is intentionally separated from IconValue so future
 // image-backed automation icons can reuse the same API shape without changing
 // callers that already persist a typed visual identity.
@@ -376,6 +424,7 @@ func (a *Automation) BuildConfigSnapshot() (json.RawMessage, error) {
 		"reasoning_effort":    a.ReasoningEffort,
 		"scope":               a.Scope,
 		"identity_scope":      a.IdentityScope.OrDefault(),
+		"publish_policy":      a.PublishPolicy.OrDefault(),
 		"pre_pr_review_loops": a.PrePRReviewLoops,
 		"base_branch":         a.BaseBranch,
 		"previous_run_at":     previousRunAt,

@@ -866,6 +866,7 @@ func savedAutomationInputConfig(a models.Automation) json.RawMessage {
 		"reasoning_effort":      a.ReasoningEffort,
 		"execution_mode":        a.ExecutionMode,
 		"max_concurrent":        a.MaxConcurrent,
+		"publish_policy":        a.PublishPolicy.OrDefault(),
 		"pre_pr_review_loops":   a.PrePRReviewLoops,
 	})
 	if err != nil {

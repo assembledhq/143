@@ -236,6 +236,7 @@ Create an automation:
     "timezone": "UTC"
   },
   "identity": {"scope": "org"},
+  "pull_request": {"publish_policy": "pull_request"},
   "metadata": {
     "caller": "platform",
     "workflow_id": "deps-nightly"
@@ -244,6 +245,8 @@ Create an automation:
 ```
 
 Required scope: `automations:create` or `automations:all`. External API automations must use `identity.scope=org`.
+
+`pull_request.publish_policy` accepts only `pull_request` (the default) or `none`. Use `none` for review/reporting automations that must never publish. Even with `pull_request`, the platform skips PR creation when the run produces no diff; there is no branch-only automation publish policy.
 
 ## Previews
 
