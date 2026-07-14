@@ -359,7 +359,8 @@ ALTER TABLE issues DROP COLUMN legacy_state;
 The threshold is a migration number: *the stable plane's deployed ref must
 itself contain migration `000240`* (i.e., stable code was built after the
 expand step landed). The **canary deploy pipeline** resolves the
-`stable-current` tag (below), computes that ref's max migration number — the
+current stable release (the version ledger, (d) below), checks out its tag,
+and computes that ref's max migration number — the
 same computation `worker_expected_schema_version` does in
 `deploy/scripts/deploy.sh` — and refuses to run any pending destructive
 migration whose threshold exceeds it. The deploy gate, not PR CI, is
@@ -373,8 +374,8 @@ above). This persistence is what makes the floor enforceable later:
 promote-or-rollback checkout of an older SHA does not contain the newer
 migration files whose comments carry the annotations.
 
-**(b) Cross-version test job.** A CI job on `main` checks out the
-`stable-current` ref and runs its DB-backed store/service test packages
+**(b) Cross-version test job.** A CI job on `main` checks out the current
+stable release's tag and runs its DB-backed store/service test packages
 against a database migrated with **latest `main`'s** migrations. This
 directly exercises "pinned binary, new schema" — the exact failure mode this
 design must prevent. Scope (store-layer subset vs full suite) and the
@@ -389,10 +390,14 @@ than wrapping it). The stable preflight additionally enforces the
 destructive floor: the target ref's max migration number must be `>=`
 `max(stable_floor)` over all applied rows in `schema_compat_floors`.
 
-**(d) `stable-current` pointer.** A git tag maintained exclusively by the
-promote workflow, pointing at the currently-deployed stable SHA. Immutable
-`release/vN` tags record history. Both gates above read it via the GitHub
-API; operators read it with `git fetch --tags`.
+**(d) The version ledger.** The GitHub Release marked `make_latest`
+(readable at `GET /repos/assembledhq/143/releases/latest`) is the
+authoritative pointer to the currently-deployed stable version. Immutable
+`vX.Y.Z` tags record history, and a workflow-maintained `stable` branch
+mirrors the pointer for git-native consumers. Both gates above resolve the
+pointer via the Releases API (branch as fallback). Full mechanics under
+"Version scheme and GitHub release mechanics" in the Deploy Pipeline
+section.
 
 ## Deploy Pipeline
 
@@ -430,24 +435,101 @@ blocks with `api-canary`/`frontend-canary` upstreams; `*.preview.{$DOMAIN}`
 is untouched.
 
 **Stable deploy (new `promote.yml`).** `workflow_dispatch` with a `sha`
-input (default: a suggested candidate, below):
+input (default: a suggested candidate, below) and a `bump` input
+(`minor` default | `patch` | `major`):
 
 1. Verify the SHA passed CI, images exist in GHCR, and the soak policy is
    satisfied (or an explicit `override` input with reason is set).
-2. Run the stable schema preflight (no migrations).
-3. Deploy `app,worker` roles at that SHA — the same `deploy-fleet.sh` path
+2. Resolve the current stable release via the Releases API and compute the
+   next version from `bump` (e.g. `v1.42.0` → `v1.43.0`). The promote
+   concurrency group serializes runs, so version numbering cannot race.
+3. Run the stable schema preflight (no migrations; includes the
+   `schema_compat_floors` check).
+4. Deploy `app,worker` roles at that SHA — the same `deploy-fleet.sh` path
    and concurrency lock used today, so overlapping promotions queue.
-4. Move `stable-current`, create `release/vN`, post release notes to Slack.
+5. Only after the fleet verifies green: cut the release — annotated tag,
+   GitHub Release, image retags, `stable` branch fast-forward (mechanics
+   below) — and post the release link to Slack. **Tag-after-verify is
+   deliberate**: a failed promotion mints no version, so the ledger only
+   ever contains releases that actually reached customers, and numbering
+   stays clean at any promotion frequency.
+
+**Version scheme and GitHub release mechanics.** Promotions are frequent,
+so most releases are minor bumps of a `vMAJOR.MINOR.PATCH` scheme:
+
+- **MINOR** — every routine promotion (`v1.42.0` → `v1.43.0`). At a
+  weekly-or-faster cadence the minor number grows quickly; that is normal
+  and expected.
+- **PATCH** — hotfix promotions on the current line (`v1.43.0` → `v1.43.1`).
+- **MAJOR** — reserved for deliberate milestones, chiefly self-hoster
+  breaking changes (renamed env vars, required infra changes, migration
+  floor jumps). Never bumped automatically.
+
+This is a release-train marker for an application, not library semver: the
+number encodes promotion history, not an API-compatibility promise. Start at
+`v1.0.0` on the first promotion — the product already serves customers.
+
+Cutting a version involves, in GitHub terms:
+
+- **An annotated tag** `vX.Y.Z` at the promoted SHA, created by the
+  workflow via the Git Data API (a tag *object* plus its ref, not a
+  lightweight ref) so it carries tagger, date, and message, and
+  `git describe` works for local tooling.
+- **A GitHub Release** on that tag created with
+  `generate_release_notes: true` — GitHub compiles the merged-PR list
+  between the previous release tag and this one automatically.
+  `.github/release.yml` groups the notes by PR label (e.g. its own section
+  for `143-generated` PRs, exclusions for chores), which makes changelog
+  curation nearly free given most PRs already carry labels.
+- **The "latest" pointer is the release marked `make_latest`**, readable at
+  `GET /repos/assembledhq/143/releases/latest`. This — not a moving git
+  tag — is the authoritative "what is stable running" pointer that the
+  destructive-migration gate and the cross-version CI job resolve. A moving
+  `stable-current` tag was considered and rejected: moved tags do not
+  propagate on a plain `git fetch` (clients silently keep the stale one)
+  and conflict with tag-immutability rules. A **`stable` branch**,
+  fast-forwarded by the workflow at cut time, is the git-native mirror for
+  humans and the fallback when the API is unavailable.
+- **A repository ruleset targeting `v*` tags** restricts tag creation to
+  the release workflow and maintainers and blocks deletion and updates —
+  version tags are immutable once cut.
+- **GHCR version tags by digest**: the workflow retags all three images
+  without rebuilding
+  (`docker buildx imagetools create -t ghcr.io/assembledhq/143-server:v1.43.0
+  ghcr.io/assembledhq/143-server@<digest>`), so `:v1.43.0` is byte-identical
+  to the `:sha` image that soaked on canary. An optional floating `:stable`
+  image tag gives self-hosters an auto-tracking pin, while `:latest` keeps
+  meaning latest `main` (canary).
+- **The version string is deploy metadata, not build metadata.** Images are
+  promoted by SHA and never rebuilt, so the version cannot be baked in via
+  ldflags the way `internal/version.BuildSHA` is. Stable deploys pass
+  `RELEASE_VERSION` as container env; the status/health surface and UI
+  footer show both (`v1.43.0` + short SHA). Canary surfaces SHA only.
+
+An alternative wiring — publish a Release in the GitHub UI and let a
+`release: published` (or `push: tags: 'v*'`) workflow run the deploy — is
+more GitHub-native but mints the version before the deploy is known-good
+and moves the preflights after the tag exists. Rejected in favor of
+dispatch-then-tag; the Releases page remains the human-facing record either
+way.
+
+The self-hosting dividend: versioned releases with generated notes and
+digest-pinned images give self-hosters a supported pin-and-upgrade cadence
+for free — today their options are `:latest` or a raw SHA.
 
 **Rollback.**
 
-- *Stable*: re-run `promote.yml` with an earlier SHA. Legal floor: the
-  target SHA's migration set must satisfy every recorded row in
-  `schema_compat_floors` — the preflight enforces this with one query, no
-  annotation parsing or extra checkout needed, because the floors were
-  persisted when the destructive migrations were applied. In practice
-  destructive migrations are rare and gated, so almost any recent release is
-  a valid target.
+- *Stable*: re-run `promote.yml` pointing at an existing release tag
+  (`vX.Y.Z`). A rollback mints **no new version** — the workflow redeploys
+  that release's SHA, re-marks the release `make_latest` (the Releases API
+  supports flipping it on older releases), and moves the `stable` branch
+  back, so the ledger records only forward code progress while the pointer
+  reflects reality. Legal floor: the target SHA's migration set must
+  satisfy every recorded row in `schema_compat_floors` — the preflight
+  enforces this with one query, no annotation parsing or extra checkout
+  needed, because the floors were persisted when the destructive
+  migrations were applied. In practice destructive migrations are rare and
+  gated, so almost any recent release is a valid target.
 - *Canary*: redeploy an older `main` SHA. Never requires schema rollback
   (invariant 2).
 
@@ -462,9 +544,10 @@ input (default: a suggested candidate, below):
   input), e.g. for a customer-blocking fix.
 - **Hotfix path:** prefer promoting a newer soaked SHA. When stable needs a
   fix *now* and `main` has unsoaked risk on top of it: branch
-  `hotfix/vN.x` from `stable-current`, cherry-pick the fix (which must land
-  on `main` first), no migration files permitted, promote that SHA, move
-  `stable-current`. The next regular promotion from `main` supersedes the
+  `hotfix/v1.43.x` from the `v1.43.0` tag, cherry-pick the fix (which must
+  land on `main` first), no migration files permitted, promote that SHA
+  with `bump=patch` → `v1.43.1` (marked `make_latest`, since it is the
+  current line). The next regular promotion from `main` supersedes the
   hotfix branch.
 - A promotion also **unblocks** any destructive migrations that were waiting
   on it; expect the following canary deploys to apply queued contract steps.
@@ -537,10 +620,11 @@ Each phase ships alone and changes nothing for customers until Phase 3.
    Assembled org to `canary` **while it has no active sessions or preview
    runtimes**; verify routing, job isolation, preview bootstrap from the
    canary host, logging labels.
-3. **Pin stable.** `deploy.yml` deploys canary only; add `promote.yml`;
-   first promotion is the then-current head (a no-op deploy that starts the
-   clock); stable app deploys switch from `migrate up` to schema preflight;
-   create `stable-current`.
+3. **Pin stable.** `deploy.yml` deploys canary only; add `promote.yml` and
+   the `v*` tag ruleset + `.github/release.yml` notes config; first
+   promotion is the then-current head (a no-op deploy that starts the
+   clock) and cuts `v1.0.0`, seeding the version ledger and the `stable`
+   branch; stable app deploys switch from `migrate up` to schema preflight.
 4. **Enforcement + polish.** Destructive-migration lint and canary deploy
    gate; cross-version test job; per-channel dashboards and alert routing
    split; promotion runbook in `docs/guides`.
