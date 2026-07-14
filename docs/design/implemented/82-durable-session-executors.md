@@ -1,6 +1,6 @@
 # Durable Session Executors
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-07-13
 
 Long-running `run_agent` and `continue_session` jobs should not be owned by the deployable worker process for the full turn. The durable executor design splits workers into short-lived dispatchers and per-session executor containers that own one active session turn until it completes, checkpoints, drains, or fails.
 
@@ -24,6 +24,8 @@ Long-running `run_agent` and `continue_session` jobs should not be owned by the 
 - Worker startup may rehydrate auth listeners for containers it already owns, but it must not broadly sweep the shared auth socket directory. Rolling deploys intentionally overlap worker generations on the same host, so a new worker cannot prove that another generation's session directory is stale. Cleanup is owner-local: listener close removes its own socket, and the next `Listen` for the same session replaces only that session's socket path.
 - Executor boot validates the executor row, running job state, `owner_kind=session_executor`, and matching lock token. It waits briefly for the dispatcher handoff to become visible because the container is launched before the handoff update.
 - Executors heartbeat every 10s, renew the job lease every 20s, and fence terminal writes by the preserved lock token plus executor owner id. Final job writes use bounded contexts detached from process SIGTERM so graceful exits can persist terminal state.
+- The runtime-control watchdog requires a matching running `run_agent` or `continue_session` job with a non-expired lease before classifying an overdue session as `runtime_control_stalled`. Stale session status without positive job-liveness evidence falls through to the broader stale-running recovery path instead of being mislabeled as a worker shutdown failure.
+- Continuation startup failures that occur while resolving the primary changeset worktree restore the session to `idle` and its durable sandbox state to `snapshotted`, leaving it immediately retryable; the user-visible error remains deferred until the job is actually dead-lettered so transient retries do not duplicate messages.
 - Executor SIGTERM marks the row `draining` and asks the orchestrator cancel registry for a typed `worker_drain` graceful stop. This path is explicitly not a user cancel: a drain interruption restores a retryable session status, records `runtime_stop_reason='worker_drain'`, snapshots the workspace when possible without advancing `current_turn`, and requeues the original job instead of closing it as succeeded or terminally marking the session `cancelled`.
 - `run_agent` publishes a bootstrap checkpoint after sandbox creation, repo clone, working branch creation, auth bootstrap, and attachment materialization, before agent execution starts. Executor-owned first turns fail closed if bootstrap checkpoint metadata cannot be published; `turn_complete` and `graceful_stop` remain the primary recovery boundaries.
 - A worker-owned retry clears any active pre-handoff executor reservation for the same session job before creating a new executor. This keeps a dispatcher crash or deploy between row creation and job handoff from burning retry attempts on the active-executor uniqueness constraint while waiting for the periodic recovery loop.

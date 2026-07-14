@@ -38,7 +38,7 @@ func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T
 
 func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 	t.Parallel()
-	body, err := os.ReadFile("../../migrations/000241_session_changeset_split_plans.up.sql")
+	body, err := os.ReadFile("../../migrations/000242_session_changeset_split_plans.up.sql")
 	require.NoError(t, err, "test should read the changeset split migration")
 	sql := string(body)
 	require.Contains(t, sql, "source_diff_snapshot_id uuid NOT NULL", "split plans should freeze an immutable diff snapshot")
