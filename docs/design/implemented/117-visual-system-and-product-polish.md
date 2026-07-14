@@ -1,6 +1,6 @@
 # Design: Visual System and Product Polish
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-12
+> **Status:** Implemented | **Last reviewed:** 2026-07-14
 
 The visual-system migration is implemented across the authenticated product, public site, authentication, and shared component library. The global navigation remains in its existing location and retains its route hierarchy. Instrument Sans, the warm mineral/charcoal token system, semantic surface roles, dense/readable type roles, shared status and resource primitives, solid primary treatments, and the 143 flight-program public identity are now the frontend defaults. Legacy gradient/glow consumers and the obsolete unused radar canvas were removed during the final audit.
 
@@ -554,8 +554,8 @@ Keep phases short, migrate shared primitives before feature pages, and remove le
 ## Related Documents
 
 - [Frontend Architecture](../03-frontend.md)
-- [Homepage Positioning Refresh](../implemented/81-homepage-positioning-refresh.md)
+- [Homepage Positioning Refresh](81-homepage-positioning-refresh.md)
 - [Homepage Product Screenshots](88-homepage-product-screenshots.md)
-- [Autopilot Visual Simplification](../implemented/38-autopilot-visual-simplification.md)
-- [Code Review Display](../implemented/36-code-review-display.md)
+- [Autopilot Visual Simplification](38-autopilot-visual-simplification.md)
+- [Code Review Display](36-code-review-display.md)
 - [Current-Oriented Preview Index](102-preview-index-current-targets.md)

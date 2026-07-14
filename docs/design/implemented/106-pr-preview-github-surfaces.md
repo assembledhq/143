@@ -1,6 +1,6 @@
 # Design: PR Preview GitHub Surfaces
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-07-14
 
 ## Summary
 
@@ -22,9 +22,9 @@ Opening the link should use the implemented PR preview launch controller, which 
 
 ## Existing Pieces
 
-- [implemented/100-pr-preview-launch-controller.md](../implemented/100-pr-preview-launch-controller.md): stable PR route and launch decisions.
-- [implemented/99-previews-index-and-auto-preview-policy.md](../implemented/99-previews-index-and-auto-preview-policy.md): repository `auto_mode` and warm/on behavior.
-- [future/102-preview-index-current-targets.md](102-preview-index-current-targets.md): `preview_groups`, current summaries, and current-preview actions.
+- [100-pr-preview-launch-controller.md](100-pr-preview-launch-controller.md): stable PR route and launch decisions.
+- [99-previews-index-and-auto-preview-policy.md](99-previews-index-and-auto-preview-policy.md): repository `auto_mode` and warm/on behavior.
+- [102-preview-index-current-targets.md](102-preview-index-current-targets.md): `preview_groups`, current summaries, and current-preview actions.
 - `PRService.stablePRPreviewURL`: already emits the stable launch URL.
 - 143-created PRs: already append/replace a `Preview:` footer.
 - `repository_preview_policies`: currently stores `auto_mode`.
