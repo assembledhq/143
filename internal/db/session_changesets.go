@@ -40,6 +40,12 @@ const changesetSummaryColumns = `id, is_primary, order_index, title, summary, st
 	base_branch, working_branch, stacked_on_changeset_id, head_sha, worktree_path, materialization_error,
 	(head_sha IS NOT NULL AND head_sha IS DISTINCT FROM expected_remote_head_sha) AS has_unpushed_changes,
 	restack_delta_kind, restack_delta_summary, restack_confirmation_required,
+	(SELECT holder_type FROM session_changeset_leases l
+		WHERE l.org_id = session_changesets.org_id AND l.session_id = session_changesets.session_id
+			AND l.changeset_id = session_changesets.id AND l.expires_at > now()) AS active_lease_holder_type,
+	(SELECT holder_label FROM session_changeset_leases l
+		WHERE l.org_id = session_changesets.org_id AND l.session_id = session_changesets.session_id
+			AND l.changeset_id = session_changesets.id AND l.expires_at > now()) AS active_lease_holder_label,
 	created_at, updated_at`
 
 func (s *SessionChangesetStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ChangesetSummary, error) {

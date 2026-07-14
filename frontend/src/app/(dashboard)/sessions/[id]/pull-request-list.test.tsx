@@ -46,6 +46,8 @@ describe('PullRequestList', () => {
             is_primary: false,
             order_index: 1,
             title: 'API integration',
+            active_lease_holder_type: 'agent_turn',
+            active_lease_holder_label: 'Tab 2',
             pull_request: {
               id: 'pr-2', session_id: 'session-1', org_id: 'org-1', changeset_id: 'changeset-2',
               github_pr_number: 102, github_pr_url: 'https://github.test/pull/102', github_repo: 'acme/repo',
@@ -61,6 +63,7 @@ describe('PullRequestList', () => {
 
     expect(screen.getByTestId('pull-request-list')).toBeInTheDocument();
     expect(screen.getByText('#102 · open')).toBeInTheDocument();
+    expect(screen.getByText('Being edited in Tab 2')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /API integration/ }));
     expect(onSelect).toHaveBeenCalledWith('changeset-2');
   });

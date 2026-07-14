@@ -100,6 +100,8 @@ type ChangesetSummary struct {
 	RestackDeltaKind            *ChangesetRestackDeltaKind `db:"restack_delta_kind" json:"restack_delta_kind,omitempty"`
 	RestackDeltaSummary         *string                    `db:"restack_delta_summary" json:"restack_delta_summary,omitempty"`
 	RestackConfirmationRequired bool                       `db:"restack_confirmation_required" json:"restack_confirmation_required"`
+	ActiveLeaseHolderType       *ChangesetLeaseType        `db:"active_lease_holder_type" json:"active_lease_holder_type,omitempty"`
+	ActiveLeaseHolderLabel      *string                    `db:"active_lease_holder_label" json:"active_lease_holder_label,omitempty"`
 	PullRequest                 *PullRequest               `json:"pull_request,omitempty"`
 	CreatedAt                   time.Time                  `db:"created_at" json:"created_at"`
 	UpdatedAt                   time.Time                  `db:"updated_at" json:"updated_at"`
