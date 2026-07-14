@@ -52,7 +52,7 @@ func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 
 func TestScalableLiveEventsMigrationPreservesRelatedProjectionBumps(t *testing.T) {
 	t.Parallel()
-	body, err := os.ReadFile("../../migrations/000244_scalable_live_events.up.sql")
+	body, err := os.ReadFile("../../migrations/000245_scalable_live_events.up.sql")
 	require.NoError(t, err, "test should read the scalable live-events migration")
 	sql := string(body)
 
