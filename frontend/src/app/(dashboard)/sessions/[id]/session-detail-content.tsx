@@ -3391,6 +3391,11 @@ export function PullRequestList({
                   {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
                 </span>
                 {changeset.has_unpushed_changes && <span className="block text-xs text-amber-600">Unpushed changes</span>}
+                {changeset.active_lease_holder_label && (
+                  <span className="block truncate text-xs text-blue-600">
+                    {changeset.active_lease_holder_type === "agent_turn" ? "Being edited in" : "In use by"} {changeset.active_lease_holder_label}
+                  </span>
+                )}
               </span>
               <span className="flex shrink-0 items-center gap-1">
                 {pr?.ci_status && <Badge variant="outline" className="h-5 px-1 text-xs">CI {pr.ci_status}</Badge>}

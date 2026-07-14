@@ -128,6 +128,40 @@ func TestSessionChangesetStoreGetPrimaryScopesByOrgAndSession(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionChangesetStoreListBySessionIncludesActiveLeaseOwnership(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	holderLabel := "Tab 2"
+	holderType := models.ChangesetLeaseTypeAgentTurn
+	workingBranch := "143/api"
+	worktreePath := "/workspace/api"
+	mock.ExpectQuery(`SELECT .+holder_type.+expires_at > now\(\).+holder_label.+expires_at > now\(\).+FROM session_changesets.+WHERE org_id = .+ AND session_id = .+ORDER BY`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "is_primary", "order_index", "title", "summary", "status", "target_branch", "base_branch",
+			"working_branch", "stacked_on_changeset_id", "head_sha", "worktree_path", "materialization_error",
+			"has_unpushed_changes", "restack_delta_kind", "restack_delta_summary", "restack_confirmation_required",
+			"active_lease_holder_type", "active_lease_holder_label", "created_at", "updated_at",
+		}).AddRow(
+			changesetID, false, 1, "API", "", models.ChangesetStatusPROpen, "main", "143/foundation",
+			&workingBranch, nil, nil, &worktreePath, nil, false, nil, nil, false,
+			&holderType, &holderLabel, now, now,
+		))
+
+	changesets, err := NewSessionChangesetStore(mock).ListBySession(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "ListBySession should load active lease ownership")
+	require.Equal(t, 1, len(changesets), "ListBySession should return the changeset")
+	require.Equal(t, models.ChangesetLeaseTypeAgentTurn, *changesets[0].ActiveLeaseHolderType, "summary should identify an editing turn")
+	require.Equal(t, holderLabel, *changesets[0].ActiveLeaseHolderLabel, "summary should identify the owning tab")
+	require.NoError(t, mock.ExpectationsWereMet(), "the ownership query should remain tenant and session scoped")
+}
+
 func TestSessionChangesetStoreUpdatePrimaryBranchesScopesByOrgAndSession(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()

@@ -1650,6 +1650,8 @@ export interface ChangesetSummary {
   restack_delta_kind?: "clean_replay" | "mechanical_fallout" | "semantic_change";
   restack_delta_summary?: string;
   restack_confirmation_required?: boolean;
+  active_lease_holder_type?: "agent_turn" | "materialize" | "publish" | "restack" | "readiness" | "preview";
+  active_lease_holder_label?: string;
   pull_request?: PullRequest;
   created_at: string;
   updated_at: string;
