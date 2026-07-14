@@ -45,6 +45,22 @@ Previews let you click through the app inside the session instead of pulling the
 
 Repository-native CI remains the source of truth. 143 can help repair failures, resolve conflicts, or continue the session, but branch protection and required checks should still live in GitHub.
 
+## Split a session into multiple pull requests
+
+For a large result, the Pull requests panel can divide the session diff into
+independent or stacked branches. Assign the source changes, materialize each
+branch, verify that the split has no unassigned or duplicate work, then publish
+one pull request or the complete stack.
+
+Select a pull request before asking the agent to edit it. The target chip keeps
+the turn in that branch's worktree. Editing a lower pull request marks dependent
+pull requests as needing a restack. 143 can replay and push clean restacks in
+order; conflicts stop for an agent-assisted resolution and your confirmation.
+
+Stacked pull requests merge from the bottom up. 143 blocks merging a child
+while its parent remains open, guards pushes against unexpected remote branch
+changes, and shows the current stack health in the session.
+
 <Callout type="info" title="Shipping boundary">
 143 creates and updates branches. Your repository's review, CI, merge, and deploy rules still decide what ships.
 </Callout>

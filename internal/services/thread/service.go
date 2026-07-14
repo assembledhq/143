@@ -228,6 +228,7 @@ type SendMessageInput struct {
 	SessionID               uuid.UUID
 	OrgID                   uuid.UUID
 	ThreadID                uuid.UUID
+	ChangesetID             *uuid.UUID
 	ClientMessageID         string
 	UserID                  *uuid.UUID
 	Message                 string
@@ -863,6 +864,10 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		"session_id": thread.SessionID.String(),
 		"thread_id":  input.ThreadID.String(),
 		"org_id":     input.OrgID.String(),
+	}
+	if input.ChangesetID != nil {
+		payload["changeset_id"] = input.ChangesetID.String()
+		payload["changeset_lease_holder_id"] = uuid.NewString()
 	}
 	if input.PostSuccessAction != "" {
 		payload["post_success_action"] = input.PostSuccessAction

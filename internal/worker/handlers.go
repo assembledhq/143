@@ -492,6 +492,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("run_pr_readiness", newRunPRReadinessHandler(stores, services, logger))
 		w.Register(models.JobTypeMaterializeChangeset, newMaterializeChangesetHandler(stores, services, logger))
 		w.Register(models.JobTypeVerifyChangesetSplit, newVerifyChangesetSplitHandler(stores, services, logger))
+		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
+		w.Register(models.JobTypePublishChangesetStack, newPublishChangesetStackHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
@@ -630,14 +632,21 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 func updateChangesetPRCreationState(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, changesetID *uuid.UUID, state models.PRCreationState, errMsg string) error {
 	if stores != nil && stores.SessionChangesets != nil {
 		var targetID uuid.UUID
+		var targetIsPrimary bool
 		if changesetID != nil {
 			targetID = *changesetID
+			target, err := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, targetID)
+			if err != nil {
+				return err
+			}
+			targetIsPrimary = target.IsPrimary
 		} else {
 			primary, err := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
 			if err != nil {
 				return err
 			}
 			targetID = primary.ID
+			targetIsPrimary = true
 		}
 		// Publish through SessionStore FIRST so the session-status SSE fires while
 		// the publish-state row is still in its prior value. If the changeset were
@@ -648,8 +657,10 @@ func updateChangesetPRCreationState(ctx context.Context, stores *Stores, orgID, 
 		// UI depends on. The changeset write below then reconciles the changeset
 		// row (idempotent under the bidirectional mirror triggers) and remains the
 		// source of truth.
-		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg); err != nil {
-			return err
+		if targetIsPrimary {
+			if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg); err != nil {
+				return err
+			}
 		}
 		return stores.SessionChangesets.UpdatePRCreationState(ctx, orgID, sessionID, targetID, state, errMsg)
 	}
@@ -860,6 +871,8 @@ type orchestratorService interface {
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
 	MaterializeChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, patch string) (agent.ChangesetMaterializationResult, error)
 	CaptureChangesetDiff(ctx context.Context, session *models.Session, changeset models.SessionChangeset) (agent.ChangesetDiffResult, error)
+	CheckpointChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, message string) (agent.ChangesetDiffResult, error)
+	RestackChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, baseRef string) (agent.ChangesetRestackResult, error)
 }
 
 func newMaterializeChangesetHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -892,6 +905,18 @@ func newMaterializeChangesetHandler(stores *Stores, services *Services, logger z
 		if err != nil {
 			return fmt.Errorf("claim changeset materialization: %w", err)
 		}
+		holderID := uuid.New()
+		if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changesetID, holderID, models.ChangesetLeaseTypeMaterialize, "materialize pull request", 5*time.Minute, true); err != nil {
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to reset changeset materialization after lease failure")
+			}
+			return err
+		}
+		defer func() {
+			if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changesetID, holderID); releaseErr != nil {
+				logger.Warn().Err(releaseErr).Str("changeset_id", changesetID.String()).Msg("failed to release changeset materialization lease")
+			}
+		}()
 		patch, err := stores.SessionChangesets.GetAssignedPatch(ctx, orgID, sessionID, changesetID)
 		if err != nil {
 			// The row was already claimed as 'materializing' above; reset it so the
@@ -957,6 +982,181 @@ func newVerifyChangesetSplitHandler(stores *Stores, services *Services, logger z
 			if err := stores.SessionChangesets.RecordMaterializedDiff(ctx, orgID, sessionID, changeset.ID, captured.HeadSHA, captured.Diff); err != nil {
 				return err
 			}
+		}
+		return nil
+	}
+}
+
+func newRestackChangesetsHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID           string `json:"org_id"`
+			SessionID       string `json:"session_id"`
+			FromChangesetID string `json:"from_changeset_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal restack_changesets payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse restack session ID: %w", err)
+		}
+		fromID, err := uuid.Parse(input.FromChangesetID)
+		if err != nil {
+			return fmt.Errorf("parse restack root changeset ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load restack session: %w", err)
+		}
+		changesets, err := stores.SessionChangesets.ListFullBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		byID := make(map[uuid.UUID]models.SessionChangeset, len(changesets))
+		descendant := map[uuid.UUID]bool{fromID: true}
+		blocked := make(map[uuid.UUID]bool)
+		for _, changeset := range changesets {
+			byID[changeset.ID] = changeset
+			if changeset.StackedOnChangesetID != nil && descendant[*changeset.StackedOnChangesetID] {
+				descendant[changeset.ID] = true
+			}
+			if changeset.Status == models.ChangesetStatusExternalUpdateDetected || changeset.Status == models.ChangesetStatusRestackConflict ||
+				(changeset.StackedOnChangesetID != nil && blocked[*changeset.StackedOnChangesetID]) {
+				blocked[changeset.ID] = true
+			}
+		}
+		for _, changeset := range changesets {
+			if changeset.ID == fromID || !descendant[changeset.ID] || blocked[changeset.ID] || changeset.Status != models.ChangesetStatusNeedsRestack {
+				continue
+			}
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypeRestack, "stack restack", 5*time.Minute, true); err != nil {
+				return err
+			}
+			func() {
+				defer func() {
+					if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+						logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release restack lease")
+					}
+				}()
+				if err = stores.SessionChangesets.MarkRestacking(ctx, orgID, sessionID, changeset.ID); err != nil {
+					return
+				}
+				baseRef := ""
+				if changeset.StackedOnChangesetID != nil {
+					parent := byID[*changeset.StackedOnChangesetID]
+					if parent.Status != models.ChangesetStatusMerged && parent.WorkingBranch != nil {
+						baseRef = *parent.WorkingBranch
+					}
+				}
+				var result agent.ChangesetRestackResult
+				result, err = services.Orchestrator.RestackChangeset(ctx, &session, changeset, baseRef)
+				if err != nil {
+					return
+				}
+				if result.Conflict {
+					err = stores.SessionChangesets.MarkRestackConflict(ctx, orgID, sessionID, changeset.ID, result.Message)
+					if err == nil {
+						err = &FatalError{Err: fmt.Errorf("changeset %s restack requires conflict resolution", changeset.ID)}
+					}
+					return
+				}
+				err = stores.SessionChangesets.CompleteRestack(ctx, orgID, sessionID, changeset.ID, result.BaseHeadSHA, result.HeadSHA, result.Diff)
+				if err == nil {
+					changeset.BaseHeadSHA = &result.BaseHeadSHA
+					changeset.HeadSHA = &result.HeadSHA
+					byID[changeset.ID] = changeset
+				}
+				if err == nil && changeset.ExpectedRemoteHeadSHA != nil {
+					_, err = services.PR.PushChangesToPR(ctx, &session, ghservice.CreatePRParams{ChangesetID: &changeset.ID})
+				}
+			}()
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func newPublishChangesetStackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID      string `json:"org_id"`
+			SessionID  string `json:"session_id"`
+			AuthorMode string `json:"author_mode"`
+			Draft      *bool  `json:"draft"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal publish_changeset_stack payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse publish stack session ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load publish stack session: %w", err)
+		}
+		changesets, err := stores.SessionChangesets.ListFullBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		published := make(map[uuid.UUID]bool, len(changesets))
+		for _, changeset := range changesets {
+			if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
+				published[changeset.ID] = true
+				continue
+			}
+			if changeset.WorktreePath == nil || changeset.WorkingBranch == nil {
+				return fmt.Errorf("changeset %s is not materialized", changeset.ID)
+			}
+			if changeset.RestackConfirmationRequired {
+				return fmt.Errorf("changeset %s has an unconfirmed restack delta", changeset.ID)
+			}
+			if changeset.StackedOnChangesetID != nil && !published[*changeset.StackedOnChangesetID] {
+				return fmt.Errorf("changeset %s appears before its stack parent", changeset.ID)
+			}
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypePublish, "publish stack", 5*time.Minute, true); err != nil {
+				return err
+			}
+			func() {
+				defer func() {
+					if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+						logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release stack publish lease")
+					}
+				}()
+				if err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStatePushing, ""); err != nil {
+					return
+				}
+				_, err = services.PR.CreatePR(ctx, &session, ghservice.CreatePRParams{
+					ChangesetID: &changeset.ID,
+					AuthorMode:  input.AuthorMode,
+					Draft:       input.Draft,
+				})
+				if err != nil {
+					stateErr := updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateFailed, userFacingPRError(err))
+					if stateErr != nil {
+						logger.Error().Err(stateErr).Str("changeset_id", changeset.ID.String()).Msg("failed to persist stack publish failure")
+					}
+					return
+				}
+				err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateSucceeded, "")
+			}()
+			if err != nil {
+				return err
+			}
+			published[changeset.ID] = true
 		}
 		return nil
 	}
@@ -9120,21 +9320,23 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID             string `json:"session_id"`
-			OrgID                 string `json:"org_id"`
-			ThreadID              string `json:"thread_id"`
-			PullRequestID         string `json:"pull_request_id"`
-			RepairRunID           string `json:"repair_run_id"`
-			CommandType           string `json:"command_type"`
-			HealthVersion         int64  `json:"health_version"`
-			HeadSHA               string `json:"head_sha"`
-			WorkspaceMode         string `json:"workspace_mode"`
-			PullRequestNumber     int    `json:"pull_request_number"`
-			AutoAttempt           bool   `json:"auto_attempt"`
-			HumanInputRequestID   string `json:"human_input_request_id"`
-			QueuedMessageID       string `json:"queued_message_id"`
-			PostSuccessAction     string `json:"post_success_action"`
-			PostSuccessAuthorMode string `json:"post_success_author_mode"`
+			SessionID              string `json:"session_id"`
+			OrgID                  string `json:"org_id"`
+			ThreadID               string `json:"thread_id"`
+			ChangesetID            string `json:"changeset_id"`
+			ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
+			PullRequestID          string `json:"pull_request_id"`
+			RepairRunID            string `json:"repair_run_id"`
+			CommandType            string `json:"command_type"`
+			HealthVersion          int64  `json:"health_version"`
+			HeadSHA                string `json:"head_sha"`
+			WorkspaceMode          string `json:"workspace_mode"`
+			PullRequestNumber      int    `json:"pull_request_number"`
+			AutoAttempt            bool   `json:"auto_attempt"`
+			HumanInputRequestID    string `json:"human_input_request_id"`
+			QueuedMessageID        string `json:"queued_message_id"`
+			PostSuccessAction      string `json:"post_success_action"`
+			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -9156,7 +9358,6 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
 		}
-
 		// Apply the per-session wall-clock timeout (see newRunAgentHandler for
 		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
 		// after the timeout fires without racing the handler context.
@@ -9182,6 +9383,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var resultAgentSessionID string
 		var humanInputRequestID *uuid.UUID
 		var queuedMessageID *int64
+		var targetChangeset *models.SessionChangeset
 		if input.HumanInputRequestID != "" {
 			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
 			if parseErr != nil {
@@ -9195,6 +9397,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return fmt.Errorf("parse queued message ID: %w", parseErr)
 			}
 			queuedMessageID = &parsedQueuedMessageID
+		}
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse target changeset ID: %w", parseErr)
+			}
+			if stores.SessionChangesets == nil {
+				return errors.New("target changeset store unavailable")
+			}
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, changesetID)
+			if loadErr != nil {
+				return fmt.Errorf("load target changeset: %w", loadErr)
+			}
+			if changeset.WorktreePath == nil {
+				return errors.New("target changeset is not materialized")
+			}
+			targetChangeset = &changeset
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
@@ -9308,6 +9527,55 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts.HumanInputRequestID = humanInputRequestID
 			}
 			continueOpts.QueuedMessageID = queuedMessageID
+		}
+		if targetChangeset != nil {
+			if continueOpts == nil {
+				continueOpts = &agent.ContinueSessionOptions{}
+			}
+			changesetID := targetChangeset.ID
+			continueOpts.ChangesetID = &changesetID
+		}
+
+		var stopLeaseHeartbeat context.CancelFunc
+		if targetChangeset != nil {
+			holderID := uuid.New()
+			if input.ChangesetLeaseHolderID != "" {
+				parsedHolderID, parseErr := uuid.Parse(input.ChangesetLeaseHolderID)
+				if parseErr != nil {
+					return fmt.Errorf("parse changeset lease holder ID: %w", parseErr)
+				}
+				holderID = parsedHolderID
+			}
+			const leaseTTL = 2 * time.Minute
+			label := "session turn"
+			if input.ThreadID != "" {
+				label = "tab " + input.ThreadID
+			}
+			if _, leaseErr := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, targetChangeset.ID, holderID, models.ChangesetLeaseTypeAgentTurn, label, leaseTTL, true); leaseErr != nil {
+				return leaseErr
+			}
+			heartbeatCtx, cancelHeartbeat := context.WithCancel(context.WithoutCancel(ctx))
+			stopLeaseHeartbeat = cancelHeartbeat
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-heartbeatCtx.Done():
+						return
+					case <-ticker.C:
+						if heartbeatErr := stores.SessionChangesets.HeartbeatLease(heartbeatCtx, orgID, sessionID, targetChangeset.ID, holderID, leaseTTL); heartbeatErr != nil {
+							logger.Warn().Err(heartbeatErr).Str("changeset_id", targetChangeset.ID.String()).Msg("changeset turn lease heartbeat failed")
+						}
+					}
+				}
+			}()
+			defer func() {
+				cancelHeartbeat()
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, targetChangeset.ID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", targetChangeset.ID.String()).Msg("failed to release changeset turn lease")
+				}
+			}()
 		}
 
 		var dispatchThreadID *uuid.UUID
@@ -9492,6 +9760,18 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return &FatalError{Err: err}
 			}
 			return err
+		}
+		if stopLeaseHeartbeat != nil {
+			stopLeaseHeartbeat()
+		}
+		if targetChangeset != nil {
+			captured, captureErr := services.Orchestrator.CheckpointChangeset(ctx, &session, *targetChangeset, "Agent update: "+targetChangeset.Title)
+			if captureErr != nil {
+				return fmt.Errorf("capture targeted changeset turn: %w", captureErr)
+			}
+			if recordErr := stores.SessionChangesets.RecordLocalHead(ctx, orgID, sessionID, targetChangeset.ID, captured.HeadSHA, captured.Diff); recordErr != nil {
+				return fmt.Errorf("record targeted changeset turn: %w", recordErr)
+			}
 		}
 
 		if hasThread {
@@ -10421,23 +10701,23 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
 		var changesetID *uuid.UUID
+		var targetChangeset models.SessionChangeset
 		if stores.SessionChangesets != nil {
-			primary, primaryErr := stores.SessionChangesets.GetPrimary(ctx, orgID, runID)
-			if primaryErr != nil {
-				return fmt.Errorf("resolve open_pr primary changeset: %w", primaryErr)
-			}
 			if input.ChangesetID != "" {
 				parsed, parseErr := uuid.Parse(input.ChangesetID)
 				if parseErr != nil {
 					return fmt.Errorf("parse changeset ID: %w", parseErr)
 				}
-				if parsed != primary.ID {
-					return fmt.Errorf("changeset %s is not the primary changeset for session %s", parsed, runID)
-				}
+				targetChangeset, err = stores.SessionChangesets.GetByID(ctx, orgID, runID, parsed)
+			} else {
+				targetChangeset, err = stores.SessionChangesets.GetPrimary(ctx, orgID, runID)
 			}
-			changesetID = &primary.ID
+			if err != nil {
+				return fmt.Errorf("resolve open_pr changeset: %w", err)
+			}
+			changesetID = &targetChangeset.ID
 		}
-		if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		if (changesetID == nil || targetChangeset.WorktreePath == nil) && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 			if run.Status == models.SessionStatusRunning {
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -10463,7 +10743,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 
 		if input.RequestedRole == string(models.RoleBuilder) {
-			if err := ensureBuilderReadinessFresh(ctx, stores, run); err != nil {
+			if err := ensureBuilderReadinessFresh(ctx, stores, run, changesetID); err != nil {
 				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by readiness")
 				}
@@ -10516,6 +10796,9 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 		if input.AuthorMode != "" {
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+		if changesetID != nil {
+			params = append(params, ghservice.CreatePRParams{ChangesetID: changesetID})
 		}
 
 		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
@@ -10612,7 +10895,7 @@ func registerOpenPRDeadLetterMilestone(ctx context.Context, stores *Stores, logg
 	})
 }
 
-func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models.Session) error {
+func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models.Session, changesetID *uuid.UUID) error {
 	if stores == nil || stores.PRReadiness == nil {
 		return fmt.Errorf("PR readiness policy is not configured")
 	}
@@ -10623,7 +10906,12 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
 		return nil
 	}
-	readinessRun, err := stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	var readinessRun *models.PRReadinessRun
+	if changesetID != nil {
+		readinessRun, err = stores.PRReadiness.GetLatestByChangeset(ctx, run.OrgID, run.ID, *changesetID)
+	} else {
+		readinessRun, err = stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("PR readiness is required before builder PR creation")
@@ -10633,7 +10921,15 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if readinessRun.Status == models.PRReadinessRunStatusQueued || readinessRun.Status == models.PRReadinessRunStatusRunning {
 		return fmt.Errorf("PR readiness is still running")
 	}
-	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
+	stale := readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey)
+	if changesetID != nil && stores.SessionChangesets != nil {
+		changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+		if loadErr != nil {
+			return fmt.Errorf("load changeset for builder readiness: %w", loadErr)
+		}
+		stale = stringValue(readinessRun.EvaluatedHeadSHA) != stringValue(changeset.HeadSHA)
+	}
+	if stale {
 		return fmt.Errorf("PR readiness is stale for current workspace revision")
 	}
 	if readinessRun.Status == models.PRReadinessRunStatusFailed {
@@ -10705,6 +11001,17 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			if err != nil {
 				return fmt.Errorf("load readiness changeset: %w", err)
 			}
+		}
+		if !changeset.IsPrimary && changeset.WorktreePath != nil {
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypeReadiness, "pull request readiness", 10*time.Minute, true); err != nil {
+				return err
+			}
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release changeset readiness lease")
+				}
+			}()
 		}
 		if run.EvaluatedHeadSHA != nil && (changeset.HeadSHA == nil || *run.EvaluatedHeadSHA != *changeset.HeadSHA) {
 			return stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, "Readiness became stale after pull request changes")
@@ -11158,9 +11465,10 @@ func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Se
 func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID  string `json:"session_id"`
-			OrgID      string `json:"org_id"`
-			AuthorMode string `json:"author_mode,omitempty"`
+			SessionID   string `json:"session_id"`
+			OrgID       string `json:"org_id"`
+			ChangesetID string `json:"changeset_id,omitempty"`
+			AuthorMode  string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal create_branch payload: %w", err)
@@ -11353,7 +11661,7 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return ghservice.PushBranchDivergedPRMessage
 	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return ghservice.BaseBranchUnrelatedPRMessage
@@ -11366,7 +11674,7 @@ func userFacingPRError(err error) string {
 
 func prPushErrorCode(err error) models.PRPushErrorCode {
 	switch {
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return models.PRPushErrorCodeBranchDiverged
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return models.PRPushErrorCodePushRejected
@@ -11498,9 +11806,10 @@ func prPushReconciliationMessage(repo, headRef string, pushErr error) string {
 func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID  string `json:"session_id"`
-			OrgID      string `json:"org_id"`
-			AuthorMode string `json:"author_mode,omitempty"`
+			SessionID   string `json:"session_id"`
+			OrgID       string `json:"org_id"`
+			ChangesetID string `json:"changeset_id,omitempty"`
+			AuthorMode  string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal push_pr_changes payload: %w", err)
@@ -11519,7 +11828,28 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
 		}
-		if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		mirrorSessionState := input.ChangesetID == ""
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse push changeset ID: %w", parseErr)
+			}
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, orgID, runID, changesetID)
+			if loadErr != nil {
+				return fmt.Errorf("load push changeset: %w", loadErr)
+			}
+			mirrorSessionState = changeset.IsPrimary
+			holderID := uuid.New()
+			if _, leaseErr := stores.SessionChangesets.AcquireLease(ctx, orgID, runID, changesetID, holderID, models.ChangesetLeaseTypePublish, "push pull request", 5*time.Minute, true); leaseErr != nil {
+				return leaseErr
+			}
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, runID, changesetID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", changesetID.String()).Msg("failed to release changeset push lease")
+				}
+			}()
+		}
+		if input.ChangesetID == "" && run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
 			logger.Info().
 				Str("session_id", runID.String()).
 				Str("pending_snapshot_key", *run.PendingSnapshotKey).
@@ -11547,13 +11877,22 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			Str("org_id", orgID.String()).
 			Msg("starting push_pr_changes job")
 
-		if err := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStatePushing, ""); err != nil {
-			logger.Error().Err(err).Msg("failed to mark PR push as pushing")
+		if mirrorSessionState {
+			if err := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStatePushing, ""); err != nil {
+				logger.Error().Err(err).Msg("failed to mark PR push as pushing")
+			}
 		}
 
 		var params []ghservice.CreatePRParams
 		if input.AuthorMode != "" {
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse push changeset ID: %w", parseErr)
+			}
+			params = append(params, ghservice.CreatePRParams{ChangesetID: &changesetID})
 		}
 
 		_, pushErr := services.PR.PushChangesToPR(ctx, &run, params...)
@@ -11570,8 +11909,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				logger.Info().
 					Str("session_id", runID.String()).
 					Msg("push_pr_changes: nothing to push (already up to date)")
-				if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
-					logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+				if mirrorSessionState {
+					if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+						logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+					}
 				}
 				return nil
 			}
@@ -11579,8 +11920,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				Str("session_id", runID.String()).
 				Msg("push_pr_changes failed")
 			msg := userFacingPRError(pushErr)
-			if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
-				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+			if mirrorSessionState {
+				if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+				}
 			}
 			if shouldAutoReconcilePRPushError(pushErr) {
 				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr, input.AuthorMode); reconcileErr != nil {
@@ -11600,8 +11943,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			return pushErr
 		}
 
-		if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
-			logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+		if mirrorSessionState {
+			if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+			}
 		}
 		return nil
 	}
@@ -11623,7 +11968,7 @@ func shouldDeadLetterPRError(err error) bool {
 		return true
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return true
 	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return true

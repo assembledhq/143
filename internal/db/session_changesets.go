@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,6 +19,8 @@ import (
 
 var ErrSplitSourceUnavailable = errors.New("session has no complete diff snapshot")
 var ErrInvalidSplitPath = errors.New("split path is invalid or absent from the source diff")
+var ErrChangesetLeaseHeld = errors.New("changeset worktree is already leased")
+var ErrChangesetRemoteChanged = errors.New("changeset remote branch head changed unexpectedly")
 
 type SessionChangesetStore struct {
 	db DBTX
@@ -30,10 +33,14 @@ func NewSessionChangesetStore(db DBTX) *SessionChangesetStore {
 const changesetSelectColumns = `id, org_id, session_id, is_primary, order_index, title, summary,
 	status, target_branch, base_branch, working_branch, stacked_on_changeset_id, head_sha,
 	expected_remote_head_sha, base_head_sha, worktree_path, materialization_error, materialized_diff,
+	restack_delta_kind, restack_delta_summary, restack_confirmation_required,
 	pr_creation_state, pr_creation_error, created_at, updated_at`
 
 const changesetSummaryColumns = `id, is_primary, order_index, title, summary, status, target_branch,
-	base_branch, working_branch, stacked_on_changeset_id, head_sha, worktree_path, materialization_error, created_at, updated_at`
+	base_branch, working_branch, stacked_on_changeset_id, head_sha, worktree_path, materialization_error,
+	(head_sha IS NOT NULL AND head_sha IS DISTINCT FROM expected_remote_head_sha) AS has_unpushed_changes,
+	restack_delta_kind, restack_delta_summary, restack_confirmation_required,
+	created_at, updated_at`
 
 func (s *SessionChangesetStore) ListBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.ChangesetSummary, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+changesetSummaryColumns+`
@@ -137,6 +144,316 @@ func (s *SessionChangesetStore) GetByID(ctx context.Context, orgID, sessionID, c
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionChangeset])
 }
 
+func (s *SessionChangesetStore) ListFullBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionChangeset, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+changesetSelectColumns+`
+		FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id
+		ORDER BY order_index, created_at, id`, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID})
+	if err != nil {
+		return nil, fmt.Errorf("list full session changesets: %w", err)
+	}
+	changesets, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.SessionChangeset])
+	if err != nil {
+		return nil, fmt.Errorf("collect full session changesets: %w", err)
+	}
+	return changesets, nil
+}
+
+func (s *SessionChangesetStore) AcquireLease(
+	ctx context.Context,
+	orgID, sessionID, changesetID, holderID uuid.UUID,
+	holderType models.ChangesetLeaseType,
+	holderLabel string,
+	ttl time.Duration,
+	takeoverExpired bool,
+) (models.SessionChangesetLease, error) {
+	if err := holderType.Validate(); err != nil {
+		return models.SessionChangesetLease{}, err
+	}
+	if ttl <= 0 {
+		return models.SessionChangesetLease{}, errors.New("changeset lease TTL must be positive")
+	}
+	rows, err := s.db.Query(ctx, `INSERT INTO session_changeset_leases (
+		changeset_id, org_id, session_id, holder_id, holder_type, holder_label, expires_at
+	) SELECT c.id, c.org_id, c.session_id, @holder_id, @holder_type, @holder_label, now() + @ttl
+	FROM session_changesets c
+	WHERE c.org_id = @org_id AND c.session_id = @session_id AND c.id = @changeset_id
+	  AND (c.worktree_path IS NOT NULL OR @holder_type = 'materialize')
+	  AND c.status <> 'abandoned'
+	ON CONFLICT (changeset_id) DO UPDATE SET
+		holder_id = EXCLUDED.holder_id,
+		holder_type = EXCLUDED.holder_type,
+		holder_label = EXCLUDED.holder_label,
+		acquired_at = CASE WHEN session_changeset_leases.holder_id = EXCLUDED.holder_id
+			THEN session_changeset_leases.acquired_at ELSE now() END,
+		heartbeat_at = now(),
+		expires_at = EXCLUDED.expires_at
+	WHERE session_changeset_leases.org_id = @org_id
+	  AND session_changeset_leases.session_id = @session_id
+	  AND (session_changeset_leases.holder_id = @holder_id
+		OR (@takeover_expired AND session_changeset_leases.expires_at <= now()))
+	RETURNING changeset_id, org_id, session_id, holder_id, holder_type, holder_label,
+		acquired_at, heartbeat_at, expires_at`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"holder_id": holderID, "holder_type": holderType, "holder_label": strings.TrimSpace(holderLabel),
+		"ttl": ttl, "takeover_expired": takeoverExpired,
+	})
+	if err != nil {
+		return models.SessionChangesetLease{}, fmt.Errorf("acquire changeset lease: %w", err)
+	}
+	lease, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionChangesetLease])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return models.SessionChangesetLease{}, ErrChangesetLeaseHeld
+	}
+	if err != nil {
+		return models.SessionChangesetLease{}, fmt.Errorf("collect acquired changeset lease: %w", err)
+	}
+	return lease, nil
+}
+
+func (s *SessionChangesetStore) HeartbeatLease(ctx context.Context, orgID, sessionID, changesetID, holderID uuid.UUID, ttl time.Duration) error {
+	if ttl <= 0 {
+		return errors.New("changeset lease TTL must be positive")
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_changeset_leases
+		SET heartbeat_at = now(), expires_at = now() + @ttl
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND holder_id = @holder_id AND expires_at > now()`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "holder_id": holderID, "ttl": ttl,
+	})
+	if err != nil {
+		return fmt.Errorf("heartbeat changeset lease: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrChangesetLeaseHeld
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) ReleaseLease(ctx context.Context, orgID, sessionID, changesetID, holderID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM session_changeset_leases
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id AND holder_id = @holder_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "holder_id": holderID,
+	})
+	if err != nil {
+		return fmt.Errorf("release changeset lease: %w", err)
+	}
+	return nil
+}
+
+// RecordLocalHead implements the lower-edit SHA protocol. A changed parent
+// invalidates every non-terminal descendant whose recorded base no longer
+// matches its parent's current head.
+func (s *SessionChangesetStore) RecordLocalHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, headSHA, diff string) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return errors.New("record changeset head requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin record changeset head: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `UPDATE session_changesets SET head_sha = @head_sha,
+		materialized_diff = @diff,
+		base_head_sha = CASE WHEN status = 'restack_conflict' THEN COALESCE((
+			SELECT parent.head_sha FROM session_changesets parent
+			WHERE parent.org_id = @org_id AND parent.session_id = @session_id
+			  AND parent.id = session_changesets.stacked_on_changeset_id
+		), base_head_sha) ELSE base_head_sha END,
+		status = CASE WHEN status = 'restack_conflict' THEN 'ready' ELSE status END,
+		materialization_error = CASE WHEN status = 'restack_conflict' THEN NULL ELSE materialization_error END,
+		restack_delta_kind = CASE WHEN status = 'restack_conflict' THEN 'semantic_change' ELSE restack_delta_kind END,
+		restack_delta_summary = CASE WHEN status = 'restack_conflict' THEN 'Agent-resolved restack; review the branch diff before pushing.' ELSE restack_delta_summary END,
+		restack_confirmation_required = CASE WHEN status = 'restack_conflict' THEN true ELSE restack_confirmation_required END,
+		updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND worktree_path IS NOT NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA, "diff": diff,
+	})
+	if err != nil {
+		return fmt.Errorf("record local changeset head: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if _, err := tx.Exec(ctx, `WITH RECURSIVE descendants AS (
+		SELECT id FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND stacked_on_changeset_id = @changeset_id
+		UNION ALL
+		SELECT child.id FROM session_changesets child JOIN descendants parent
+		  ON child.stacked_on_changeset_id = parent.id
+		WHERE child.org_id = @org_id AND child.session_id = @session_id
+	)
+	UPDATE session_changesets SET status = 'needs_restack', updated_at = now()
+	WHERE org_id = @org_id AND session_id = @session_id AND id IN (SELECT id FROM descendants)
+	  AND status NOT IN ('merged', 'abandoned', 'restack_conflict')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}); err != nil {
+		return fmt.Errorf("mark changeset descendants stale: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *SessionChangesetStore) RecordPublishedHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, headSHA string, hasPR bool) error {
+	status := models.ChangesetStatusPublishedBranch
+	if hasPR {
+		status = models.ChangesetStatusPROpen
+	}
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET head_sha = @head_sha,
+		expected_remote_head_sha = @head_sha, status = @status, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA, "status": status,
+	})
+	if err != nil {
+		return fmt.Errorf("record published changeset head: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) ImportRemoteHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, headSHA string) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET
+		expected_remote_head_sha = @head_sha, status = 'external_update_detected', updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND working_branch IS NOT NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("import remote changeset head: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) MarkExternalUpdateDetected(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET status = 'external_update_detected', updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND working_branch IS NOT NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return fmt.Errorf("mark external changeset update: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+// HandleMerged marks the merged node and advances its direct children to the
+// parent's former base. The restack worker then rebuilds each descendant so
+// the merged commits disappear from its GitHub diff.
+func (s *SessionChangesetStore) HandleMerged(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return errors.New("handle merged changeset requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin merged changeset transition: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var parentBase string
+	if err := tx.QueryRow(ctx, `UPDATE session_changesets SET status = 'merged', updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		RETURNING base_branch`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).Scan(&parentBase); err != nil {
+		return fmt.Errorf("mark changeset merged: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `WITH RECURSIVE descendants AS (
+		SELECT id, stacked_on_changeset_id FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND stacked_on_changeset_id = @changeset_id
+		UNION ALL
+		SELECT child.id, child.stacked_on_changeset_id FROM session_changesets child
+		JOIN descendants parent ON child.stacked_on_changeset_id = parent.id
+		WHERE child.org_id = @org_id AND child.session_id = @session_id
+	)
+	UPDATE session_changesets c SET
+		base_branch = CASE WHEN c.stacked_on_changeset_id = @changeset_id THEN @parent_base ELSE c.base_branch END,
+		status = 'needs_restack', updated_at = now()
+	FROM descendants d
+	WHERE c.org_id = @org_id AND c.session_id = @session_id AND c.id = d.id
+	  AND c.status NOT IN ('merged', 'abandoned')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "parent_base": parentBase,
+	}); err != nil {
+		return fmt.Errorf("retarget merged changeset children: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *SessionChangesetStore) MarkRestacking(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET status = 'restacking',
+		materialization_error = NULL, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND status = 'needs_restack'`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return fmt.Errorf("mark changeset restacking: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) CompleteRestack(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, baseHeadSHA, headSHA, diff string) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET base_head_sha = @base_head_sha,
+		head_sha = @head_sha, materialized_diff = @diff,
+		status = CASE WHEN expected_remote_head_sha IS NULL THEN 'planned' ELSE 'pr_open' END,
+		materialization_error = NULL, restack_delta_kind = 'clean_replay',
+		restack_delta_summary = 'Clean replay completed without conflict.',
+		restack_confirmation_required = false, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND status IN ('needs_restack', 'restacking')`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"base_head_sha": baseHeadSHA, "head_sha": headSHA, "diff": diff,
+	})
+	if err != nil {
+		return fmt.Errorf("complete changeset restack: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) ConfirmRestackDelta(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET restack_confirmation_required = false, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND restack_confirmation_required`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return fmt.Errorf("confirm restack delta: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
+func (s *SessionChangesetStore) MarkRestackConflict(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, message string) error {
+	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET status = 'restack_conflict',
+		materialization_error = @message, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "message": message,
+	})
+	if err != nil {
+		return fmt.Errorf("mark changeset restack conflict: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
+}
+
 func (s *SessionChangesetStore) UpdatePrimaryBranches(
 	ctx context.Context,
 	orgID, sessionID uuid.UUID,
@@ -199,7 +516,8 @@ func (s *SessionChangesetStore) UpdatePRCreationState(ctx context.Context, orgID
 
 func (s *SessionChangesetStore) RecordPushedHead(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, headSHA string) error {
 	result, err := s.db.Exec(ctx, `UPDATE session_changesets
-		SET head_sha = @head_sha, expected_remote_head_sha = @head_sha, updated_at = now()
+		SET head_sha = @head_sha, expected_remote_head_sha = @head_sha,
+		status = 'pr_open', materialization_error = NULL, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
 	})
@@ -216,8 +534,14 @@ func (s *SessionChangesetStore) BeginMaterialization(ctx context.Context, orgID,
 	rows, err := s.db.Query(ctx, `UPDATE session_changesets SET
 		status = 'materializing', materialization_error = NULL, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
-		  AND NOT is_primary AND stacked_on_changeset_id IS NULL
+		  AND NOT is_primary
 		  AND status = 'planned' AND worktree_path IS NULL
+		  AND (stacked_on_changeset_id IS NULL OR EXISTS (
+			SELECT 1 FROM session_changesets parent
+			WHERE parent.org_id = @org_id AND parent.session_id = @session_id
+			  AND parent.id = session_changesets.stacked_on_changeset_id
+			  AND parent.worktree_path IS NOT NULL AND parent.working_branch IS NOT NULL
+		  ))
 		  AND NOT EXISTS (SELECT 1 FROM session_changesets active
 			WHERE active.org_id = @org_id AND active.session_id = @session_id AND active.status = 'materializing')
 		RETURNING `+changesetSelectColumns, pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID})
@@ -232,7 +556,16 @@ func (s *SessionChangesetStore) BeginMaterialization(ctx context.Context, orgID,
 }
 
 func (s *SessionChangesetStore) CompleteMaterialization(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, workingBranch, worktreePath, baseHeadSHA, headSHA, diff string) error {
-	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return errors.New("complete changeset materialization requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete changeset materialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := tx.Exec(ctx, `UPDATE session_changesets SET
 		status = 'planned', working_branch = @working_branch, worktree_path = @worktree_path,
 		base_head_sha = @base_head_sha, head_sha = @head_sha, materialized_diff = @diff,
 		materialization_error = NULL, updated_at = now()
@@ -247,7 +580,14 @@ func (s *SessionChangesetStore) CompleteMaterialization(ctx context.Context, org
 	if result.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
-	return nil
+	if _, err := tx.Exec(ctx, `UPDATE session_changesets SET base_branch = @working_branch, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND stacked_on_changeset_id = @changeset_id
+		  AND worktree_path IS NULL`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "working_branch": workingBranch,
+	}); err != nil {
+		return fmt.Errorf("update child changeset base branch: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *SessionChangesetStore) FailMaterialization(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, message string) error {
