@@ -424,6 +424,7 @@ export interface PreviewVerificationRun {
   plan: Array<{ path: string; viewport: { width: number; height: number } }>;
   steps: Array<{
     index: number;
+    attempt?: number;
     path: string;
     viewport: { width: number; height: number };
     outcome: string;

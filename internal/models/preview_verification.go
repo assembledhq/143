@@ -52,6 +52,7 @@ type PreviewVerificationPlanStep struct {
 
 type PreviewVerificationStep struct {
 	Index        int              `json:"index"`
+	Attempt      int              `json:"attempt"`
 	Path         string           `json:"path"`
 	Viewport     ViewportSpec     `json:"viewport"`
 	Outcome      string           `json:"outcome"`

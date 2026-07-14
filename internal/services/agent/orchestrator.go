@@ -584,6 +584,24 @@ type EvalBootstrapLookup interface {
 	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
 }
 
+// SuccessfulTurnVerification describes the adapter-independent output of a
+// completed coding turn. Preview verification is deliberately attached here,
+// rather than to individual adapters, so credential retries and resume
+// fallbacks cannot bypass it.
+type SuccessfulTurnVerification struct {
+	Session           *models.Session
+	Sandbox           *Sandbox
+	Result            *AgentResult
+	WorkspaceRevision int64
+	Diff              string
+}
+
+// SuccessfulTurnVerifier runs bounded, evidence-producing verification after
+// a successful turn has been durably persisted.
+type SuccessfulTurnVerifier interface {
+	VerifySuccessfulTurn(ctx context.Context, input SuccessfulTurnVerification) error
+}
+
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
 // agent invocation, log streaming, result handling, and follow-up job enqueuing.
 type Orchestrator struct {
@@ -627,6 +645,7 @@ type Orchestrator struct {
 	sandboxAuth                SandboxAuthServer  // can be nil — paired with identityResolver
 	users                      UserLookup         // can be nil — needed for App-token Co-authored-by trailer
 	evalBootstraps             EvalBootstrapLookup
+	successfulTurnVerifier     SuccessfulTurnVerifier
 	internalAPIURL             string
 	internalAPISecret          string
 	logger                     zerolog.Logger
@@ -1034,14 +1053,15 @@ type OrchestratorConfig struct {
 	// Users looks up the triggering user record for the App-token
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
-	Users             UserLookup
-	EvalBootstraps    EvalBootstrapLookup
-	InternalAPIURL    string
-	InternalAPISecret string
-	NodeID            string
-	IsDraining        func() bool
-	Logger            zerolog.Logger
-	MaxConcurrent     int
+	Users                  UserLookup
+	EvalBootstraps         EvalBootstrapLookup
+	SuccessfulTurnVerifier SuccessfulTurnVerifier // optional — automatic preview verification
+	InternalAPIURL         string
+	InternalAPISecret      string
+	NodeID                 string
+	IsDraining             func() bool
+	Logger                 zerolog.Logger
+	MaxConcurrent          int
 }
 
 type sandboxGitHubAuthState struct {
@@ -1113,6 +1133,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sandboxAuth:                cfg.SandboxAuth,
 		users:                      cfg.Users,
 		evalBootstraps:             cfg.EvalBootstraps,
+		successfulTurnVerifier:     cfg.SuccessfulTurnVerifier,
 		internalAPIURL:             cfg.InternalAPIURL,
 		internalAPISecret:          cfg.InternalAPISecret,
 		cancels:                    cfg.Cancels,
@@ -1121,6 +1142,28 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		maxConcurrent:              maxConcurrent,
 		nodeID:                     cfg.NodeID,
 		isDraining:                 cfg.IsDraining,
+	}
+}
+
+// SetSuccessfulTurnVerifier supports late binding on worker processes, where
+// the preview manager is constructed after the core agent services.
+func (o *Orchestrator) SetSuccessfulTurnVerifier(verifier SuccessfulTurnVerifier) {
+	o.successfulTurnVerifier = verifier
+}
+
+func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) {
+	if o.successfulTurnVerifier == nil || session == nil || result == nil {
+		return
+	}
+	diff := strings.TrimSpace(result.Diff)
+	revision := session.WorkspaceRevision
+	if diff != "" {
+		revision++
+	}
+	if err := o.successfulTurnVerifier.VerifySuccessfulTurn(ctx, SuccessfulTurnVerification{
+		Session: session, Sandbox: sandbox, Result: result, WorkspaceRevision: revision, Diff: diff,
+	}); err != nil {
+		log.Warn().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
 	}
 }
 
@@ -3328,6 +3371,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
 			}
 		}
+		o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 
 		log.Info().
 			Int("turn", turnNumber).
@@ -3343,6 +3387,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
+	o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 	if primaryThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
 			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
@@ -4821,6 +4866,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
+	o.verifySuccessfulTurn(ctx, session, sandbox, result, log)
 
 	drainAfterRelease = true
 
