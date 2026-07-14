@@ -92,7 +92,6 @@ func (v *SuccessfulTurnVerifier) resolvePreviewAndConfig(ctx context.Context, in
 	if err == nil {
 		recycleInput, loadErr := loadRecycleInput(instance)
 		if loadErr != nil {
-			request.Config.Auto = true
 			request.SkipReason = "active preview has no reusable repository configuration"
 			request.PreviewInstanceID = &instance.ID
 			request.ConfigDigest = instance.ConfigDigest
@@ -110,13 +109,11 @@ func (v *SuccessfulTurnVerifier) resolvePreviewAndConfig(ctx context.Context, in
 	}
 	data, readErr := v.manager.sandboxProvider.ReadFile(ctx, input.Sandbox, repoconfig.ConfigPath)
 	if readErr != nil {
-		request.Config.Auto = true
 		request.SkipReason = fmt.Sprintf("repository preview configuration is unavailable: %v", readErr)
 		return nil, nil, nil
 	}
 	cfg, parseErr := ParseConfig(data)
 	if parseErr != nil {
-		request.Config.Auto = true
 		request.SkipReason = fmt.Sprintf("repository preview configuration is invalid: %v", parseErr)
 		return nil, nil, nil
 	}
@@ -135,16 +132,9 @@ func (v *SuccessfulTurnVerifier) startConfiguredPreview(ctx context.Context, inp
 	return v.manager.StartPreview(ctx, StartPreviewInput{
 		SessionID: input.Session.ID, OrgID: input.Session.OrgID, UserID: userID,
 		Sandbox: input.Sandbox, Config: cfg, RepositoryID: uuidPointerValue(input.Session.RepositoryID),
-		BaseCommitSHA: stringPointerValue(input.Session.BaseCommitSHA), WorkspaceRevision: input.WorkspaceRevision,
+		BaseCommitSHA: derefStringPtr(input.Session.BaseCommitSHA), WorkspaceRevision: input.WorkspaceRevision,
 		WorkspaceRevisionUpdatedAt: time.Now().UTC(), Initiator: "automatic_verification",
 	})
-}
-
-func stringPointerValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 func verificationOutcomeError(run models.PreviewVerificationRun, err error) error {

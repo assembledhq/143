@@ -1151,9 +1151,9 @@ func (o *Orchestrator) SetSuccessfulTurnVerifier(verifier SuccessfulTurnVerifier
 	o.successfulTurnVerifier = verifier
 }
 
-func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) error {
+func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) {
 	if o.successfulTurnVerifier == nil || session == nil || result == nil {
-		return nil
+		return
 	}
 	diff := strings.TrimSpace(result.Diff)
 	revision := session.WorkspaceRevision
@@ -1163,10 +1163,14 @@ func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models
 	if err := o.successfulTurnVerifier.VerifySuccessfulTurn(ctx, SuccessfulTurnVerification{
 		Session: session, Sandbox: sandbox, Result: result, WorkspaceRevision: revision, Diff: diff,
 	}); err != nil {
-		log.Error().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
-		return fmt.Errorf("automatic preview verification: %w", err)
+		// Automatic preview verification is advisory: it records durable
+		// evidence and surfaces results in the session preview UI, but must not
+		// fail an otherwise-successful coding turn. Adapter fix-and-resume is not
+		// yet wired (see design doc Phase 3), so a verification failure has no
+		// in-turn remediation path and gating it would drop the completed turn's
+		// output and mark the session failed with no way to recover.
+		log.Warn().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
 	}
-	return nil
 }
 
 func (o *Orchestrator) SetPagerDutyWritebacker(writebacker PagerDutySessionWritebacker) {
@@ -3356,9 +3360,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if isInteractive {
 		turnNumber := run.CurrentTurn + 1
-		if err := o.verifySuccessfulTurn(ctx, run, sandbox, result, log); err != nil {
-			return err
-		}
 		if err := o.createAssistantMessage(ctx, run.ID, run.OrgID, primaryThreadID, turnNumber, result); err != nil {
 			log.Warn().Err(err).Msg("failed to persist assistant message for interactive turn")
 		}
@@ -3376,6 +3377,8 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
 			}
 		}
+		o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
+
 		log.Info().
 			Int("turn", turnNumber).
 			Msg("interactive session turn completed and returned to idle")
@@ -3386,13 +3389,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		return nil
 	}
 
-	if err := o.verifySuccessfulTurn(ctx, run, sandbox, result, log); err != nil {
-		return err
-	}
 	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, status, runResult); err != nil {
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
+	o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 	if primaryThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
 			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
@@ -4867,13 +4868,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		snapshotKey = *session.SnapshotKey
 	}
 	runResult := o.buildRunResult(ctx, session, sandbox, result)
-	if err := o.verifySuccessfulTurn(ctx, session, sandbox, result, log); err != nil {
-		return err
-	}
 	if err := o.sessions.UpdateTurnComplete(ctx, session.OrgID, session.ID, sessionTurnNumber, runResult, agentSessionID, snapshotKey); err != nil {
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
+	o.verifySuccessfulTurn(ctx, session, sandbox, result, log)
 
 	drainAfterRelease = true
 

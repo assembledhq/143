@@ -30,11 +30,13 @@ func TestVerifySuccessfulTurn(t *testing.T) {
 		diff             string
 		expectedRevision int64
 		verifierErr      error
-		expectErr        bool
 	}{
 		{name: "increments revision for changed workspace", diff: "diff --git a/page.tsx b/page.tsx", expectedRevision: 8},
 		{name: "keeps revision for unchanged workspace", diff: "", expectedRevision: 7},
-		{name: "propagates verification failure", diff: "diff --git a/page.tsx b/page.tsx", expectedRevision: 8, verifierErr: errors.New("browser check failed"), expectErr: true},
+		// Automatic verification is advisory: a verifier failure must not abort
+		// the successful turn, but it must still be invoked and recorded so its
+		// evidence is durably captured and surfaced in the UI.
+		{name: "tolerates verification failure without aborting the turn", diff: "diff --git a/page.tsx b/page.tsx", expectedRevision: 8, verifierErr: errors.New("browser check failed")},
 	}
 
 	for _, tt := range tests {
@@ -45,13 +47,8 @@ func TestVerifySuccessfulTurn(t *testing.T) {
 			session := &models.Session{ID: uuid.New(), WorkspaceRevision: 7}
 			result := &AgentResult{Diff: tt.diff}
 
-			err := orchestrator.verifySuccessfulTurn(context.Background(), session, &Sandbox{ID: "sandbox-1"}, result, zerolog.Nop())
+			orchestrator.verifySuccessfulTurn(context.Background(), session, &Sandbox{ID: "sandbox-1"}, result, zerolog.Nop())
 
-			if tt.expectErr {
-				require.Error(t, err, "verification failure should gate successful turn completion")
-			} else {
-				require.NoError(t, err, "successful verification should allow turn completion")
-			}
 			require.Len(t, verifier.inputs, 1, "successful coding turns should invoke preview verification exactly once")
 			require.Equal(t, tt.expectedRevision, verifier.inputs[0].WorkspaceRevision, "verification evidence should use the resulting workspace revision")
 			require.Equal(t, tt.diff, verifier.inputs[0].Diff, "verification should receive the adapter-produced workspace diff")
