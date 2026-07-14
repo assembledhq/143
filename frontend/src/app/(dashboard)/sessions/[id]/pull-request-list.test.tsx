@@ -63,9 +63,30 @@ describe('PullRequestList', () => {
 
     expect(screen.getByTestId('pull-request-list')).toBeInTheDocument();
     expect(screen.getByText('#102 · open')).toBeInTheDocument();
-    expect(screen.getByText('Being edited in Tab 2')).toBeInTheDocument();
+    expect(screen.getByText('Being edited in Tab 2')).toHaveClass('text-info');
     await userEvent.click(screen.getByRole('button', { name: /API integration/ }));
     expect(onSelect).toHaveBeenCalledWith('changeset-2');
+  });
+
+  it('uses the warning token for unpushed changes', () => {
+    render(
+      <PullRequestList
+        changesets={[
+          changeset(),
+          changeset({
+            id: 'changeset-2',
+            is_primary: false,
+            order_index: 1,
+            title: 'Unpushed work',
+            has_unpushed_changes: true,
+          }),
+        ]}
+        selectedID="changeset-1"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Unpushed changes')).toHaveClass('text-warning');
   });
 });
 
