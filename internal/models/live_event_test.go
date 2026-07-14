@@ -24,7 +24,14 @@ func TestLiveEventValidate(t *testing.T) {
 		{name: "resource missing id", mutate: func(e *LiveEvent) { e.ResourceID = nil }, wantErr: true},
 		{name: "collection carrying id", mutate: func(e *LiveEvent) { e.Scope = LiveEventScopeCollection }, wantErr: true},
 		{name: "repository audience missing repository", mutate: func(e *LiveEvent) { e.Audience = LiveAudienceRepository }, wantErr: true},
+		{name: "event resource mismatch", mutate: func(e *LiveEvent) { e.ResourceType = LiveResourcePreview }, wantErr: true},
+		{name: "parent id missing parent type", mutate: func(e *LiveEvent) { parentID := uuid.New(); e.ParentID = &parentID }, wantErr: true},
+		{name: "parent type missing parent id", mutate: func(e *LiveEvent) { parentType := LiveResourceAutomation; e.ParentType = &parentType }, wantErr: true},
 		{name: "nonpositive version", mutate: func(e *LiveEvent) { zero := int64(0); e.Version = &zero }, wantErr: true},
+		{name: "unknown payload field", mutate: func(e *LiveEvent) {
+			e.Payload = json.RawMessage(`{"list_affected":true,"arbitrary_user_text":"secret"}`)
+		}, wantErr: true},
+		{name: "null payload", mutate: func(e *LiveEvent) { e.Payload = json.RawMessage(`null`) }, wantErr: true},
 		{name: "oversized payload", mutate: func(e *LiveEvent) { e.Payload = make([]byte, LiveEventMaxPayloadSize+1) }, wantErr: true},
 	}
 	for _, tt := range tests {

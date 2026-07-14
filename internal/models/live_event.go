@@ -1,9 +1,11 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -154,6 +156,9 @@ type AuthorizationChangedPayload struct {
 }
 
 func validateLivePayload(eventType LiveEventType, payload json.RawMessage) error {
+	if trimmed := bytes.TrimSpace(payload); len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return fmt.Errorf("payload for %s must be a JSON object", eventType)
+	}
 	var target any
 	switch eventType {
 	case LiveEventSessionCreated, LiveEventSessionUpdated:
@@ -169,8 +174,13 @@ func validateLivePayload(eventType LiveEventType, payload json.RawMessage) error
 	default:
 		target = &LiveInvalidationPayload{}
 	}
-	if err := json.Unmarshal(payload, target); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("payload does not match %s: %w", eventType, err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("payload for %s must contain exactly one JSON object", eventType)
 	}
 	if auth, ok := target.(*AuthorizationChangedPayload); ok && auth.UserID == uuid.Nil {
 		return errors.New("authorization payload requires user_id")
@@ -218,6 +228,31 @@ func validateLivePayload(eventType LiveEventType, payload json.RawMessage) error
 	return nil
 }
 
+func expectedLiveResourceType(eventType LiveEventType) LiveResourceType {
+	switch eventType {
+	case LiveEventSessionCreated, LiveEventSessionUpdated:
+		return LiveResourceSession
+	case LiveEventPreviewUpdated:
+		return LiveResourcePreview
+	case LiveEventAutomationUpdated:
+		return LiveResourceAutomation
+	case LiveEventAutomationRunUpdated:
+		return LiveResourceAutomationRun
+	case LiveEventCodeReviewUpdated:
+		return LiveResourceCodeReview
+	case LiveEventPullRequestUpdated:
+		return LiveResourcePullRequest
+	case LiveEventEvalBatchUpdated:
+		return LiveResourceEvalBatch
+	case LiveEventEvalBootstrapUpdated:
+		return LiveResourceEvalBootstrap
+	case LiveEventAuthorizationChanged:
+		return LiveResourceAuthorization
+	default:
+		return ""
+	}
+}
+
 func (e LiveEvent) Validate() error {
 	if e.SchemaVersion != LiveEventSchemaVersion {
 		return fmt.Errorf("unsupported schema version %d", e.SchemaVersion)
@@ -230,6 +265,9 @@ func (e LiveEvent) Validate() error {
 	}
 	if err := e.ResourceType.Validate(); err != nil {
 		return err
+	}
+	if expected := expectedLiveResourceType(e.Type); e.ResourceType != expected {
+		return fmt.Errorf("live event type %q requires resource type %q", e.Type, expected)
 	}
 	if err := e.Scope.Validate(); err != nil {
 		return err
@@ -248,6 +286,14 @@ func (e LiveEvent) Validate() error {
 	}
 	if e.Audience == LiveAudienceResource && e.ResourceID == nil {
 		return errors.New("resource audience requires resource_id")
+	}
+	if (e.ParentType == nil) != (e.ParentID == nil) {
+		return errors.New("parent_type and parent_id must be provided together")
+	}
+	if e.ParentType != nil {
+		if err := e.ParentType.Validate(); err != nil {
+			return fmt.Errorf("invalid parent resource type: %w", err)
+		}
 	}
 	if e.Version != nil && *e.Version <= 0 {
 		return errors.New("version must be positive")

@@ -44,3 +44,25 @@ func TestLiveReplayBudgetShedsRetentionWithoutStoppingLivePublication(t *testing
 	require.NoError(t, err, "replay bounds should remain readable after retention shedding")
 	require.LessOrEqual(t, bounds.Count, int64(1), "hard replay budget should retain only a minimal resync tail")
 }
+
+func TestProbeLivePublishExercisesBusWithoutCreatingReplay(t *testing.T) {
+	t.Parallel()
+	client, _ := testRedisClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	subscriber := client.SubscribeLiveShard(ctx, 0)
+	require.NotNil(t, subscriber, "live bus probe test should create a shard subscription")
+	defer func() {
+		require.NoError(t, subscriber.Close(), "live bus probe subscription should close cleanly")
+	}()
+	_, err := subscriber.Receive(ctx)
+	require.NoError(t, err, "live bus shard subscription should acknowledge before probing")
+
+	require.NoError(t, client.ProbeLivePublish(ctx), "recovery probe should exercise the live publish command")
+	message, err := subscriber.ReceiveMessage(ctx)
+	require.NoError(t, err, "subscribed shard should receive the recovery probe")
+	var decoded LiveBusMessage
+	require.NoError(t, json.Unmarshal([]byte(message.Payload), &decoded), "recovery probe should use the typed bus envelope")
+	require.True(t, decoded.Probe, "recovery probe should be distinguishable from product events")
+	require.Equal(t, int64(0), client.raw().DBSize(ctx).Val(), "recovery probe should not create replay keys")
+}

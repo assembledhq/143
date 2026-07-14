@@ -24,6 +24,7 @@ export function LiveEventProvider({ children }: { children: React.ReactNode }) {
     let followerScheduler: LiveInvalidationScheduler | null = null;
     let sustainedTimer: ReturnType<typeof setTimeout> | null = null;
     let leaseTimer: ReturnType<typeof setInterval> | null = null;
+    let leaseStorageListener: ((event: StorageEvent) => void) | null = null;
     const tabId = crypto.randomUUID();
     let currentHealth: LiveHealth = "connecting";
 
@@ -55,6 +56,8 @@ export function LiveEventProvider({ children }: { children: React.ReactNode }) {
       electionTimer = null;
       if (leaseTimer) clearInterval(leaseTimer);
       leaseTimer = null;
+      if (leaseStorageListener) window.removeEventListener("storage", leaseStorageListener);
+      leaseStorageListener = null;
       if (sustainedTimer) clearTimeout(sustainedTimer);
       sustainedTimer = null;
     };
@@ -138,13 +141,25 @@ export function LiveEventProvider({ children }: { children: React.ReactNode }) {
           try { lease = JSON.parse(localStorage.getItem(leaseKey) ?? "null") as { owner: string; expiresAt: number } | null; } catch { lease = null; }
           if (!lease || lease.expiresAt <= now || lease.owner === tabId) {
             localStorage.setItem(leaseKey, JSON.stringify({ owner: tabId, expiresAt: now + 6_000 }));
-            startLeader();
+            let confirmedOwner: string | undefined;
+            try { confirmedOwner = (JSON.parse(localStorage.getItem(leaseKey) ?? "null") as { owner?: string } | null)?.owner; } catch { confirmedOwner = undefined; }
+            if (confirmedOwner === tabId) startLeader();
           } else if (client) {
             client.stop(); client = null;
           }
         };
         tryLease();
         leaseTimer = setInterval(tryLease, 2_000);
+        leaseStorageListener = (event) => {
+          if (event.key !== leaseKey || !client) return;
+          let owner: string | undefined;
+          try { owner = (JSON.parse(event.newValue ?? "null") as { owner?: string } | null)?.owner; } catch { owner = undefined; }
+          if (owner !== tabId) {
+            client.stop();
+            client = null;
+          }
+        };
+        window.addEventListener("storage", leaseStorageListener);
         releaseLeadership = () => {
           try {
             const lease = JSON.parse(localStorage.getItem(leaseKey) ?? "null") as { owner?: string } | null;

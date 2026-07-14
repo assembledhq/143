@@ -13,9 +13,10 @@ import { LiveEventProvider } from "./live-event-provider";
 class TestEventSource {
   static instances: TestEventSource[] = [];
   onerror: (() => void) | null = null;
+  closed = false;
   constructor(public url: string) { TestEventSource.instances.push(this); }
   addEventListener() {}
-  close() {}
+  close() { this.closed = true; }
 }
 
 class TestBroadcastChannel {
@@ -55,5 +56,21 @@ describe("LiveEventProvider connection sharing", () => {
     await vi.advanceTimersByTimeAsync(2_100);
     expect(TestEventSource.instances).toHaveLength(2);
     second.unmount();
+  });
+
+  it("relinquishes a fallback lease immediately when another tab takes ownership", async () => {
+    const rendered = provider();
+    await vi.advanceTimersByTimeAsync(0);
+    const source = TestEventSource.instances[0];
+    const leaseKey = "143:live-events-leader:11111111-1111-1111-1111-111111111111";
+    const replacement = JSON.stringify({ owner: "another-tab", expiresAt: Date.now() + 6_000 });
+    localStorage.setItem(leaseKey, replacement);
+    window.dispatchEvent(new StorageEvent("storage", { key: leaseKey, newValue: replacement }));
+
+    expect(source.closed).toBe(true);
+    expect(TestEventSource.instances).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(6_100);
+    expect(TestEventSource.instances).toHaveLength(2);
+    rendered.unmount();
   });
 });

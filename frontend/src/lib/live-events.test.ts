@@ -1,6 +1,6 @@
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyLiveProjection, decodeLiveEvent, LiveEventClient, LiveInvalidationScheduler, registerLiveQuery, type LiveEvent } from "./live-events";
+import { applyLiveProjection, decodeLiveEvent, LiveEventClient, LiveInvalidationScheduler, registerClientMutation, registerLiveQuery, type LiveEvent } from "./live-events";
 
 const orgId = "11111111-1111-1111-1111-111111111111";
 const resourceId = "22222222-2222-2222-2222-222222222222";
@@ -29,6 +29,8 @@ describe("live event decoding and projections", () => {
     expect(decodeLiveEvent(JSON.stringify(event({ version: undefined })))).toBeNull();
     expect(decodeLiveEvent(JSON.stringify(event({ resource_type: "preview" })))).toBeNull();
     expect(decodeLiveEvent(JSON.stringify(event({ payload: { status_projection: { made_up: "value" } } })))).toBeNull();
+    expect(decodeLiveEvent(JSON.stringify(event({ payload: { list_affected: true, arbitrary_user_text: "secret" } as LiveEvent["payload"] })))).toBeNull();
+    expect(decodeLiveEvent(JSON.stringify(event({ parent_id: crypto.randomUUID() })))).toBeNull();
   });
 
   it("applies only newer projections across detail and list caches", () => {
@@ -80,6 +82,34 @@ describe("LiveInvalidationScheduler", () => {
     await scheduler.catchUpVisible(true);
     expect(queryFn).toHaveBeenCalledTimes(3);
     unregister(); unsubscribeObserver();
+  });
+
+  it("starts independent critical reconciliations without waiting for a slow query", async () => {
+    const queryClient = new QueryClient();
+    let resolveSlow!: (value: { data: unknown[] }) => void;
+    const slowQuery = vi.fn(() => new Promise<{ data: unknown[] }>((resolve) => { resolveSlow = resolve; }));
+    const fastQuery = vi.fn().mockResolvedValue({ data: { id: resourceId, live_version: 2 } });
+    queryClient.setQueryData(["sessions"], { data: [] });
+    queryClient.setQueryData(["session", resourceId], { data: { id: resourceId, live_version: 1 } });
+    const slowObserver = new QueryObserver(queryClient, { queryKey: ["sessions"], queryFn: slowQuery, staleTime: Infinity });
+    const fastObserver = new QueryObserver(queryClient, { queryKey: ["session", resourceId], queryFn: fastQuery, staleTime: Infinity });
+    const unsubscribeSlow = slowObserver.subscribe(() => undefined);
+    const unsubscribeFast = fastObserver.subscribe(() => undefined);
+    const unregisterSlow = registerLiveQuery(queryClient, { queryKey: ["sessions"], families: ["session.list"], priority: "critical", visible: true });
+    const unregisterFast = registerLiveQuery(queryClient, { queryKey: ["session", resourceId], families: ["session.detail"], resourceId, priority: "critical", visible: true });
+
+    const reconciliation = new LiveInvalidationScheduler(queryClient).dirty(event());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(slowQuery).toHaveBeenCalledTimes(1);
+    expect(fastQuery).toHaveBeenCalledTimes(1);
+
+    resolveSlow({ data: [] });
+    await reconciliation;
+    unregisterSlow();
+    unregisterFast();
+    unsubscribeSlow();
+    unsubscribeFast();
   });
 
   it("scopes automation-run events to the owning automation's runs list", async () => {
@@ -173,6 +203,54 @@ describe("LiveEventClient cursors and reconnect", () => {
     } finally {
       randomSpy.mockRestore();
     }
+  });
+
+  it("evicts only the oldest dedupe ID when the bounded window fills", async () => {
+    const processed = vi.fn();
+    const client = new LiveEventClient({ apiBase: "", orgId, queryClient: new QueryClient(), onEventProcessed: processed });
+    client.start();
+    const source = MockEventSource.instances[0];
+    let newest = event({ event_id: "event-0" });
+    source.emit("live.event", newest, "1-0");
+    for (let index = 1; index <= 2048; index++) {
+      newest = event({ event_id: `event-${index}` });
+      source.emit("live.event", newest, `${index + 1}-0`);
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(processed).toHaveBeenCalledTimes(2049);
+
+    source.emit("live.event", newest, "2050-0");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(processed).toHaveBeenCalledTimes(2049);
+    expect(localStorage.getItem(`143:live-cursor:${orgId}`)).toBe("2050-0");
+    client.stop();
+  });
+
+  it("does not suppress canonical reconciliation for an expired causation echo", async () => {
+    const queryClient = new QueryClient();
+    const queryFn = vi.fn().mockResolvedValue({ data: { id: resourceId, status: "running", live_version: 3 } });
+    await queryClient.fetchQuery({ queryKey: ["session", resourceId], queryFn });
+    queryFn.mockClear();
+    const observer = new QueryObserver(queryClient, { queryKey: ["session", resourceId], queryFn, staleTime: Infinity });
+    const unsubscribeObserver = observer.subscribe(() => undefined);
+    const unregister = registerLiveQuery(queryClient, { queryKey: ["session", resourceId], families: ["session.detail"], resourceId, priority: "critical", visible: true });
+    const mutationID = crypto.randomUUID();
+    registerClientMutation(mutationID);
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+
+    const client = new LiveEventClient({ apiBase: "", orgId, queryClient });
+    client.start();
+    MockEventSource.instances[0].emit("live.event", event({ causation_id: mutationID }), "300-0");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    client.stop();
+    unregister();
+    unsubscribeObserver();
   });
 
   it("does not advance a resync checkpoint until canonical synchronization succeeds", async () => {

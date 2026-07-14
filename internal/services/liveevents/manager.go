@@ -145,6 +145,13 @@ func (m *Manager) StartHealthMonitor(ctx context.Context, store *db.LiveEventSto
 				if err == nil {
 					metrics.pending(ctx, age)
 				}
+				if !m.publishProbeHealthy.Load() && m.redis != nil {
+					if probeErr := m.redis.ProbeLivePublish(ctx); probeErr == nil {
+						m.publishProbeHealthy.Store(true)
+					} else {
+						m.logger.Debug().Err(probeErr).Msg("live event publish recovery probe failed")
+					}
+				}
 				if err != nil || age > 2*time.Second {
 					high++
 					low = 0
@@ -246,6 +253,9 @@ func (m *Manager) runShard(ctx context.Context, shard int) {
 				var event cache.LiveBusMessage
 				if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
 					m.logger.Warn().Err(err).Int("bus_shard", shard).Msg("invalid live bus message")
+					continue
+				}
+				if event.Probe {
 					continue
 				}
 				m.deliver(event)

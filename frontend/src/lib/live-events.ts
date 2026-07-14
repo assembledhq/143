@@ -81,9 +81,18 @@ const effectRoots: Record<LiveEventType, readonly string[]> = {
 };
 
 const recentClientMutations = new Map<string, number>();
+const CLIENT_MUTATION_ECHO_WINDOW_MS = 5 * 60_000;
 export function registerClientMutation(id: string): void {
-  const now = Date.now(); recentClientMutations.set(id, now);
-  for (const [key, createdAt] of recentClientMutations) if (now - createdAt > 5 * 60_000) recentClientMutations.delete(key);
+	const now = Date.now(); recentClientMutations.set(id, now);
+	for (const [key, createdAt] of recentClientMutations) if (now - createdAt > CLIENT_MUTATION_ECHO_WINDOW_MS) recentClientMutations.delete(key);
+}
+
+function isRecentClientMutation(id: string): boolean {
+	const createdAt = recentClientMutations.get(id);
+	if (createdAt === undefined) return false;
+	if (Date.now() - createdAt <= CLIENT_MUTATION_ECHO_WINDOW_MS) return true;
+	recentClientMutations.delete(id);
+	return false;
 }
 
 type ProjectionRecord = { resourceId: string; version: number; projection: Record<string, unknown>; roots: readonly string[] };
@@ -154,13 +163,32 @@ export function decodeLiveEvent(raw: string): LiveEvent | null {
         (event.scope === "collection" && event.resource_id !== undefined) ||
         (event.audience === "repository" && typeof event.repository_id !== "string") ||
         (event.audience === "resource" && typeof event.resource_id !== "string") ||
+        ((event.parent_type === undefined) !== (event.parent_id === undefined)) ||
         typeof event.changed_at !== "string" || Number.isNaN(Date.parse(event.changed_at)) ||
         typeof event.payload !== "object" || event.payload === null ||
+        !validPayloadShape(event.payload as LiveEvent["payload"]) ||
+        (event.scope === "resource" && isPatchableEvent(event.type as LiveEventType) &&
+          (typeof event.version !== "number" || !Number.isSafeInteger(event.version) || event.version <= 0)) ||
         (event.payload.status_projection !== undefined &&
           (typeof event.version !== "number" || !Number.isSafeInteger(event.version) || event.version <= 0))) return null;
     if (!validProjection(event as LiveEvent)) return null;
     return event as LiveEvent;
   } catch { return null; }
+}
+
+const patchableEvents = new Set<LiveEventType>([
+  "session.updated", "preview.updated", "automation.updated", "automation.run.updated",
+]);
+
+function isPatchableEvent(type: LiveEventType): boolean {
+  return patchableEvents.has(type);
+}
+
+function validPayloadShape(payload: LiveEvent["payload"]): boolean {
+  const allowed = new Set(["status_projection", "list_affected", "counts_affected"]);
+  if (Object.keys(payload).some((key) => !allowed.has(key))) return false;
+  return (payload.list_affected === undefined || typeof payload.list_affected === "boolean") &&
+    (payload.counts_affected === undefined || typeof payload.counts_affected === "boolean");
 }
 
 const resourceTypeByEvent: Record<LiveEventType, string> = {
@@ -241,6 +269,7 @@ export class LiveInvalidationScheduler {
     const roots = effectRoots[event.type];
     const registered = registrations.get(this.queryClient);
     const dirty = dirtyQueries.get(this.queryClient) ?? new Set<string>();
+    const scheduled: Array<Promise<void>> = [];
     dirtyQueries.set(this.queryClient, dirty);
     for (const query of this.queryClient.getQueryCache().getAll()) {
       if (!roots.includes(String(query.queryKey[0]))) continue;
@@ -262,8 +291,9 @@ export class LiveInvalidationScheduler {
         emitLiveTelemetry("hidden_refetch_suppressed", { family: registration?.families[0] ?? String(query.queryKey[0]) });
         continue;
       }
-      await this.schedule(query.queryKey, registration.priority ?? "secondary");
+      scheduled.push(this.schedule(query.queryKey, registration.priority ?? "secondary"));
     }
+    await Promise.all(scheduled);
   }
 
   async catchUpVisible(force = false): Promise<void> {
@@ -325,6 +355,7 @@ export class LiveEventClient {
   private resumeCursor = "";
   private scheduler: LiveInvalidationScheduler;
   private seen = new Set<string>();
+  private seenOrder: string[] = [];
   private pendingCheckpoint: { cursor: string; cause: string; jitterApplied: boolean } | null = null;
   private checkpointSync: Promise<void> | null = null;
   private currentHealth: LiveHealth = "connecting";
@@ -435,11 +466,16 @@ export class LiveEventClient {
       return;
     }
     if (this.seen.has(event.event_id)) { this.acknowledge(cursor); return; }
-    this.seen.add(event.event_id); if (this.seen.size > 2048) this.seen.clear();
+    this.seen.add(event.event_id);
+    this.seenOrder.push(event.event_id);
+    if (this.seen.size > 2048) {
+      const oldest = this.seenOrder.shift();
+      if (oldest) this.seen.delete(oldest);
+    }
     const projectionApplied = applyLiveProjection(this.options.queryClient, event);
     emitLiveTelemetry("event_processed", { type: event.type, lag_ms: Math.max(0, Date.now() - Date.parse(event.changed_at)), projection_applied: projectionApplied });
     if (projectionApplied) requestAnimationFrame(() => emitLiveTelemetry("projection_rendered", { type: event.type, duration_ms: Math.max(0, performance.now() - startedAt) }));
-    const isCausationEcho = !!event.causation_id && recentClientMutations.has(event.causation_id);
+    const isCausationEcho = !!event.causation_id && isRecentClientMutation(event.causation_id);
     if (!(isCausationEcho && projectionApplied)) await this.scheduler.dirty(event);
     this.acknowledge(cursor);
     this.options.onEventProcessed?.(event, cursor);

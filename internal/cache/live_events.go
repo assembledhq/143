@@ -38,6 +38,7 @@ const (
 type LiveBusMessage struct {
 	StreamID string           `json:"stream_id"`
 	Event    models.LiveEvent `json:"event"`
+	Probe    bool             `json:"probe,omitempty"`
 }
 
 type LiveReplayBounds struct {
@@ -142,6 +143,26 @@ func (c *Client) AcquireLiveCoalesceLease(ctx context.Context, key string, windo
 		return false, errors.New("redis unavailable")
 	}
 	return c.rdb.SetNX(ctx, "143:live_coalesce:"+key, "1", window).Result()
+}
+
+// ProbeLivePublish verifies the fixed-shard publication command path without
+// creating replay data or delivering a product event. Subscription health is
+// tracked independently by each manager shard's acknowledgement epoch.
+func (c *Client) ProbeLivePublish(ctx context.Context) error {
+	if c == nil || c.rdb == nil {
+		return errors.New("redis unavailable")
+	}
+	payload, err := json.Marshal(LiveBusMessage{Probe: true})
+	if err != nil {
+		return fmt.Errorf("marshal live publish probe: %w", err)
+	}
+	return c.doCommand(ctx, "live_publish_probe", func() error {
+		channel := liveBusChannel(0)
+		if cluster, ok := c.rdb.(*redis.ClusterClient); ok {
+			return cluster.Do(ctx, "SPUBLISH", channel, payload).Err()
+		}
+		return c.rdb.Publish(ctx, channel, payload).Err()
+	})
 }
 
 func (c *Client) PublishLiveEvent(ctx context.Context, event models.LiveEvent, shards int) (string, error) {
