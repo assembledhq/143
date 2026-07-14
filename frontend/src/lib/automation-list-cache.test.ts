@@ -1,7 +1,9 @@
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import {
+  optimisticallySetAutomationEnabled,
   removeAutomationFromListCaches,
+  restoreAutomationEnabledSnapshot,
   upsertAutomationInListCaches,
 } from "./automation-list-cache";
 import { queryKeys } from "./query-keys";
@@ -128,5 +130,34 @@ describe("removeAutomationFromListCaches", () => {
     expect(
       queryClient.getQueryData(queryKeys.automations.detail(deleted.id)),
     ).toEqual({ data: deleted });
+  });
+});
+
+describe("optimisticallySetAutomationEnabled", () => {
+  it("patches list and detail immediately without inventing a live version", () => {
+    const queryClient = new QueryClient();
+    const automation = makeAutomation({ enabled: true, live_version: 7 });
+    queryClient.setQueryData<ListResponse<Automation>>(queryKeys.automations.all, { data: [automation], meta: {} });
+    queryClient.setQueryData(queryKeys.automations.detail(automation.id), { data: automation });
+
+    optimisticallySetAutomationEnabled(queryClient, automation.id, false);
+
+    expect(queryClient.getQueryData<ListResponse<Automation>>(queryKeys.automations.all)?.data[0]).toMatchObject({ enabled: false, live_version: 7 });
+    expect(queryClient.getQueryData<{ data: Automation }>(queryKeys.automations.detail(automation.id))?.data).toMatchObject({ enabled: false, live_version: 7 });
+  });
+
+  it("restores the exact cache snapshot after a failed mutation", () => {
+    const queryClient = new QueryClient();
+    const automation = makeAutomation({ enabled: false, live_version: 4 });
+    const list = { data: [automation], meta: {} };
+    const detail = { data: automation };
+    queryClient.setQueryData(queryKeys.automations.all, list);
+    queryClient.setQueryData(queryKeys.automations.detail(automation.id), detail);
+
+    const snapshot = optimisticallySetAutomationEnabled(queryClient, automation.id, true);
+    restoreAutomationEnabledSnapshot(queryClient, automation.id, snapshot);
+
+    expect(queryClient.getQueryData(queryKeys.automations.all)).toEqual(list);
+    expect(queryClient.getQueryData(queryKeys.automations.detail(automation.id))).toEqual(detail);
   });
 });

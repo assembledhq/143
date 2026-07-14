@@ -6,7 +6,9 @@ import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "l
 import Link from "next/link";
 import { api } from "@/lib/api";
 import {
+  optimisticallySetAutomationEnabled,
   removeAutomationFromListCaches,
+  restoreAutomationEnabledSnapshot,
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
@@ -404,6 +406,16 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automation.id),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.detail(automation.id), exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automation.id, false);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automation.id, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
@@ -413,6 +425,16 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automation.id),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.detail(automation.id), exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automation.id, true);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automation.id, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);

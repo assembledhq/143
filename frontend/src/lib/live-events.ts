@@ -57,15 +57,39 @@ export interface LiveQueryRegistration {
   resourceStreamOwnsDetail?: boolean;
 }
 
-const registrations = new WeakMap<QueryClient, Map<string, LiveQueryRegistration>>();
+const registrations = new WeakMap<QueryClient, Map<string, Map<symbol, LiveQueryRegistration>>>();
 const dirtyQueries = new WeakMap<QueryClient, Set<string>>();
 
 export function registerLiveQuery(queryClient: QueryClient, registration: LiveQueryRegistration): () => void {
   let values = registrations.get(queryClient);
   if (!values) { values = new Map(); registrations.set(queryClient, values); }
   const hash = JSON.stringify(registration.queryKey);
-  values.set(hash, registration);
-  return () => values?.delete(hash);
+  const owners = values.get(hash) ?? new Map<symbol, LiveQueryRegistration>();
+  const token = Symbol(hash);
+  owners.set(token, registration);
+  values.set(hash, owners);
+  return () => {
+    owners.delete(token);
+    if (owners.size === 0) values?.delete(hash);
+  };
+}
+
+function effectiveRegistration(owners: Map<symbol, LiveQueryRegistration> | undefined): LiveQueryRegistration | undefined {
+  if (!owners || owners.size === 0) return undefined;
+  const entries = [...owners.values()];
+  const first = entries[0];
+  const priority = entries.some((entry) => entry.priority === "critical")
+    ? "critical"
+    : entries.some((entry) => entry.priority === "secondary" || entry.priority === undefined)
+      ? "secondary"
+      : "inactive";
+  return {
+    ...first,
+    families: [...new Set(entries.flatMap((entry) => entry.families))],
+    visible: entries.some((entry) => entry.visible),
+    priority,
+    resourceStreamOwnsDetail: entries.some((entry) => entry.resourceStreamOwnsDetail),
+  };
 }
 
 const effectRoots: Record<LiveEventType, readonly string[]> = {
@@ -274,7 +298,7 @@ export class LiveInvalidationScheduler {
     for (const query of this.queryClient.getQueryCache().getAll()) {
       if (!roots.includes(String(query.queryKey[0]))) continue;
       const hash = JSON.stringify(query.queryKey);
-      const registration = registered?.get(hash);
+      const registration = effectiveRegistration(registered?.get(hash));
 	  if (registration && !registration.families.some((family) => eventAffectsFamily(event, family))) continue;
       if (event.resource_id && registration?.resourceId && registration.resourceId !== event.resource_id && registration.resourceId !== event.parent_id) continue;
       if (event.resource_id && registration?.resourceStreamOwnsDetail && registration.resourceId === event.resource_id) continue;
@@ -301,7 +325,12 @@ export class LiveInvalidationScheduler {
     const registered = registrations.get(this.queryClient);
     const dirty = dirtyQueries.get(this.queryClient);
     if (!registered) return;
-    const visible = [...registered.entries()].filter(([hash, value]) => (force || dirty?.has(hash)) && value.visible && value.priority !== "inactive");
+    const visible = [...registered.entries()]
+      .map(([hash, owners]) => [hash, effectiveRegistration(owners)] as const)
+      .filter((entry): entry is readonly [string, LiveQueryRegistration] => {
+        const [hash, value] = entry;
+        return !!value && (force || dirty?.has(hash) === true) && value.visible && value.priority !== "inactive";
+      });
     visible.sort(([, left], [, right]) => (left.priority === "critical" ? -1 : 1) - (right.priority === "critical" ? -1 : 1));
     await Promise.all(visible.map(([, value]) => this.schedule(value.queryKey, value.priority ?? "secondary")));
   }

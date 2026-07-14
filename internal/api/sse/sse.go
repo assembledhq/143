@@ -48,6 +48,7 @@ type Writer struct {
 	w             http.ResponseWriter
 	flusher       http.Flusher
 	frameDeadline time.Duration
+	setupErr      error
 }
 
 // NewWriter creates an SSE writer after setting the required headers.
@@ -66,12 +67,18 @@ func NewWriter(w http.ResponseWriter) *Writer {
 	// Clear the per-connection write deadline so Server.WriteTimeout does not
 	// kill long-lived SSE streams mid-response. Without this, HTTP/2 clients
 	// see the terminated stream as ERR_HTTP2_PROTOCOL_ERROR.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	setupErr := http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	if errors.Is(setupErr, http.ErrNotSupported) {
+		setupErr = nil
+	}
 
-	return &Writer{w: w, flusher: flusher, frameDeadline: 5 * time.Second}
+	return &Writer{w: w, flusher: flusher, frameDeadline: 5 * time.Second, setupErr: setupErr}
 }
 
 func (sw *Writer) beginFrame() error {
+	if sw.setupErr != nil {
+		return fmt.Errorf("sse: clear connection write deadline: %w", sw.setupErr)
+	}
 	if err := http.NewResponseController(sw.w).SetWriteDeadline(time.Now().Add(sw.frameDeadline)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return fmt.Errorf("sse: set frame write deadline: %w", err)
 	}

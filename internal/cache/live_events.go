@@ -52,7 +52,12 @@ func LiveBusShard(orgID uuid.UUID, shards int) int {
 		shards = DefaultLiveBusShards
 	}
 	h := fnv.New32a()
-	_, _ = h.Write(orgID[:])
+	if _, err := h.Write(orgID[:]); err != nil {
+		// hash.Hash implementations are specified to return a nil error. Keep a
+		// deterministic fallback if a non-standard implementation ever violates
+		// that contract rather than silently discarding the failure.
+		return 0
+	}
 	// #nosec G115 -- the modulo result is bounded by the positive configured shard count.
 	return int(uint64(h.Sum32()) % uint64(shards))
 }

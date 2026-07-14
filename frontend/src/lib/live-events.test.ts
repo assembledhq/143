@@ -112,6 +112,24 @@ describe("LiveInvalidationScheduler", () => {
     unsubscribeFast();
   });
 
+  it("keeps a shared query registered until its final component owner unmounts", async () => {
+    const queryClient = new QueryClient();
+    const queryFn = vi.fn().mockResolvedValue({ data: [] });
+    await queryClient.fetchQuery({ queryKey: ["sessions"], queryFn });
+    queryFn.mockClear();
+    const observer = new QueryObserver(queryClient, { queryKey: ["sessions"], queryFn, staleTime: Infinity });
+    const unsubscribeObserver = observer.subscribe(() => undefined);
+    const unregisterSidebar = registerLiveQuery(queryClient, { queryKey: ["sessions"], families: ["session.list"], priority: "secondary", visible: true });
+    const unregisterPage = registerLiveQuery(queryClient, { queryKey: ["sessions"], families: ["session.list"], priority: "critical", visible: true });
+    unregisterSidebar();
+
+    await new LiveInvalidationScheduler(queryClient).dirty(event());
+
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    unregisterPage();
+    unsubscribeObserver();
+  });
+
   it("scopes automation-run events to the owning automation's runs list", async () => {
     const automationId = "33333333-3333-3333-3333-333333333333";
     Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });

@@ -5,7 +5,7 @@ ALTER TABLE automation_runs ADD COLUMN live_version bigint NOT NULL DEFAULT 1;
 
 CREATE FUNCTION validate_live_event_json(value jsonb) RETURNS boolean
 LANGUAGE sql IMMUTABLE STRICT AS $$
-    SELECT
+    SELECT COALESCE((
         value->>'schema_version' = '1'
         AND (value->>'event_id')::uuid IS NOT NULL
         AND (value->>'org_id')::uuid IS NOT NULL
@@ -16,12 +16,41 @@ LANGUAGE sql IMMUTABLE STRICT AS $$
         )
         AND value->>'scope' IN ('resource', 'collection')
         AND value->>'audience' IN ('org', 'repository', 'resource')
+        AND value->>'resource_type' = CASE value->>'type'
+            WHEN 'session.created' THEN 'session'
+            WHEN 'session.updated' THEN 'session'
+            WHEN 'preview.updated' THEN 'preview'
+            WHEN 'automation.updated' THEN 'automation'
+            WHEN 'automation.run.updated' THEN 'automation_run'
+            WHEN 'code_review.updated' THEN 'code_review'
+            WHEN 'pull_request.updated' THEN 'pull_request'
+            WHEN 'eval_batch.updated' THEN 'eval_batch'
+            WHEN 'eval_bootstrap.updated' THEN 'eval_bootstrap'
+            WHEN 'authorization.changed' THEN 'authorization'
+        END
+        AND COALESCE((value->>'changed_at')::timestamptz IS NOT NULL, false)
         AND jsonb_typeof(value->'payload') = 'object'
         AND octet_length((value->'payload')::text) <= 4096
-        AND ((value->>'scope' = 'resource') = (value ? 'resource_id'))
-        AND (value->>'audience' <> 'repository' OR value ? 'repository_id')
-        AND (value->>'audience' <> 'resource' OR value ? 'resource_id')
+        AND (
+            (value->>'scope' = 'collection' AND NOT (value ? 'resource_id'))
+            OR (value->>'scope' = 'resource' AND COALESCE((value->>'resource_id')::uuid IS NOT NULL, false))
+        )
+        AND (value->>'audience' <> 'repository' OR COALESCE((value->>'repository_id')::uuid IS NOT NULL, false))
+        AND (value->>'audience' <> 'resource' OR COALESCE((value->>'resource_id')::uuid IS NOT NULL, false))
+        AND ((value ? 'parent_type') = (value ? 'parent_id'))
+        AND (NOT (value ? 'parent_type') OR (
+            COALESCE(value->>'parent_type' IN (
+                'session', 'preview', 'automation', 'automation_run', 'code_review',
+                'pull_request', 'eval_batch', 'eval_bootstrap', 'authorization'
+            ), false)
+            AND COALESCE((value->>'parent_id')::uuid IS NOT NULL, false)
+        ))
+        AND (value->>'type' <> 'authorization.changed' OR COALESCE((value->'payload'->>'user_id')::uuid IS NOT NULL, false))
+        AND (value->>'scope' <> 'resource' OR value->>'type' NOT IN (
+            'session.updated', 'preview.updated', 'automation.updated', 'automation.run.updated'
+        ) OR COALESCE((value->>'version')::bigint, 0) > 0)
         AND (NOT (value->'payload' ? 'status_projection') OR COALESCE((value->>'version')::bigint, 0) > 0)
+    ), false)
 $$;
 
 CREATE TABLE live_event_outbox (
@@ -65,6 +94,17 @@ DECLARE
     old_projection jsonb;
     new_projection jsonb;
 BEGIN
+    -- Related-table triggers (for example session_publish_state below) bump
+    -- the owning projection revision explicitly. Preserve only the expected
+    -- one-step increment; otherwise the generic row comparison would erase it
+    -- because live_version itself is intentionally excluded from projection
+    -- equality.
+    IF NEW.live_version IS DISTINCT FROM OLD.live_version THEN
+        IF NEW.live_version <> OLD.live_version + 1 THEN
+            RAISE EXCEPTION 'live_version must advance exactly once';
+        END IF;
+        RETURN NEW;
+    END IF;
     old_projection := to_jsonb(OLD) - 'live_version' - 'updated_at';
     new_projection := to_jsonb(NEW) - 'live_version' - 'updated_at';
     IF TG_TABLE_NAME = 'preview_instances' THEN

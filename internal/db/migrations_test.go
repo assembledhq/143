@@ -50,6 +50,21 @@ func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 	require.Contains(t, sql, "pr_readiness_bypasses_changeset_scope_fkey", "readiness bypasses should be changeset scoped")
 }
 
+func TestScalableLiveEventsMigrationPreservesRelatedProjectionBumps(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("../../migrations/000244_scalable_live_events.up.sql")
+	require.NoError(t, err, "test should read the scalable live-events migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "IF NEW.live_version IS DISTINCT FROM OLD.live_version THEN", "projection trigger should recognize explicit related-table revision bumps")
+	require.Contains(t, sql, "NEW.live_version <> OLD.live_version + 1", "projection trigger should reject non-monotonic explicit revisions")
+	require.Contains(t, sql, "SET live_version = live_version + 1", "session publish-state changes should advance the owning session revision")
+	require.Contains(t, sql, "AFTER INSERT OR UPDATE OF pr_creation_state, pr_push_state, branch_creation_state", "all session action-state projections should trigger a revision bump")
+	require.Contains(t, sql, "value->>'resource_type' = CASE value->>'type'", "transactional validator should reject event and resource type mismatches before commit")
+	require.Contains(t, sql, "COALESCE((value->>'resource_id')::uuid IS NOT NULL, false)", "transactional validator should reject null resource identifiers")
+	require.Contains(t, sql, "((value ? 'parent_type') = (value ? 'parent_id'))", "transactional validator should require complete parent identifiers")
+}
+
 func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

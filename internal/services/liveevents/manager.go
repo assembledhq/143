@@ -228,7 +228,9 @@ func (m *Manager) runShard(ctx context.Context, shard int) {
 		if _, err := pubsub.Receive(ctx); err != nil {
 			metrics.reconnect(ctx, shard)
 			m.setHealthy(shard, false)
-			_ = pubsub.Close()
+			if closeErr := pubsub.Close(); closeErr != nil {
+				m.logger.Warn().Err(closeErr).Int("bus_shard", shard).Msg("failed to close unacknowledged live bus subscription")
+			}
 			if !waitForReconnect(ctx) {
 				return
 			}
@@ -240,13 +242,17 @@ func (m *Manager) runShard(ctx context.Context, shard int) {
 			select {
 			case <-ctx.Done():
 				m.setHealthy(shard, false)
-				_ = pubsub.Close()
+				if closeErr := pubsub.Close(); closeErr != nil {
+					m.logger.Warn().Err(closeErr).Int("bus_shard", shard).Msg("failed to close live bus subscription during shutdown")
+				}
 				return
 			case msg, ok := <-channel:
 				if !ok {
 					metrics.reconnect(ctx, shard)
 					m.setHealthy(shard, false)
-					_ = pubsub.Close()
+					if closeErr := pubsub.Close(); closeErr != nil {
+						m.logger.Warn().Err(closeErr).Int("bus_shard", shard).Msg("failed to close disconnected live bus subscription")
+					}
 					goto reconnect
 				}
 				metrics.received(ctx, shard, len(msg.Payload))

@@ -54,7 +54,9 @@ import { AutomationModelSelect } from "@/components/automation-model-select";
 import { api } from "@/lib/api";
 import { parseAutomationIntervalInput } from "@/lib/automation-draft";
 import {
+  optimisticallySetAutomationEnabled,
   removeAutomationFromListCaches,
+  restoreAutomationEnabledSnapshot,
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
@@ -855,6 +857,16 @@ export default function AutomationDetailPage() {
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automationId),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: automationKey, exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automationId, false);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automationId, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
@@ -869,6 +881,16 @@ export default function AutomationDetailPage() {
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automationId),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: automationKey, exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automationId, true);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automationId, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);

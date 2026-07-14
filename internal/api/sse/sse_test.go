@@ -36,6 +36,12 @@ type deadlineWriter struct {
 	deadlines []time.Time
 }
 
+type failingDeadlineWriter struct{ *httptest.ResponseRecorder }
+
+func (w *failingDeadlineWriter) SetWriteDeadline(time.Time) error {
+	return errors.New("deadline setup failed")
+}
+
 func (w *deadlineWriter) SetWriteDeadline(deadline time.Time) error {
 	w.deadlines = append(w.deadlines, deadline)
 	return nil
@@ -163,4 +169,14 @@ func TestWriterBoundsEveryFrameWithAWriteDeadline(t *testing.T) {
 	require.NoError(t, sw.Flush(), "event frame should flush")
 	require.GreaterOrEqual(t, len(w.deadlines), 3, "initial deadline clear, frame write, and flush should all set deadlines")
 	require.True(t, w.deadlines[len(w.deadlines)-1].After(time.Now()), "flush deadline should bound a stalled consumer")
+}
+
+func TestWriterSurfacesInitialDeadlineFailure(t *testing.T) {
+	t.Parallel()
+	w := &failingDeadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	sw := NewWriter(w)
+	require.NotNil(t, sw, "deadline failure should remain observable through the writer")
+	err := sw.WriteEvent(EventStatus, map[string]string{"status": "running"})
+	require.Error(t, err, "initial deadline failure should prevent an apparently healthy frame")
+	require.Contains(t, err.Error(), "clear connection write deadline", "error should identify connection deadline setup")
 }
