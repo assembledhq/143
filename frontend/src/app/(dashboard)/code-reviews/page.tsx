@@ -53,6 +53,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { DurationInput } from "@/components/duration-input";
 import { ModelOptionGroups } from "@/components/model-option-groups";
+import { RadioCard } from "@/components/radio-card";
+import { RadioGroup } from "@/components/ui/radio-group";
 import { ApiError, api } from "@/lib/api";
 import { notify as toast } from "@/lib/notify";
 import { queryKeys } from "@/lib/query-keys";
@@ -1095,29 +1097,23 @@ function OutcomeControl({
   ];
 
   return (
-    <div className="grid gap-2 rounded-md border border-border p-2 md:grid-cols-3">
-      {options.map((option) => {
-        const active = option.value === selected;
-        return (
-          <Button
-            key={option.value}
-            type="button"
-            variant={active ? "secondary" : "ghost"}
-            className="h-auto justify-start whitespace-normal px-3 py-3 text-left"
-            disabled={disabled}
-            aria-pressed={active}
-            onClick={() => {
-              if (!active) onChange(option.value);
-            }}
-          >
-            <span className="flex min-w-0 flex-col gap-1">
-              <span className="text-sm font-medium">{option.title}</span>
-              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
-            </span>
-          </Button>
-        );
-      })}
-    </div>
+    <RadioGroup
+      value={selected}
+      onValueChange={(value) => onChange(value as "disabled" | "comment" | "approve")}
+      disabled={disabled}
+      className="grid gap-2 md:grid-cols-3"
+    >
+      {options.map((option) => (
+        <RadioCard
+          key={option.value}
+          value={option.value}
+          label={option.title}
+          description={option.description}
+          selected={option.value === selected}
+          ariaLabel={option.title}
+        />
+      ))}
+    </RadioGroup>
   );
 }
 
