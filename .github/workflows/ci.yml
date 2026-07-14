@@ -126,7 +126,7 @@ jobs:
 
       - name: Run go vet and migrations
         run: |
-          go run cmd/migrate/main.go up
+          go run ./cmd/migrate up
           go vet ./...
 
       - name: Run tests (PR — no race)
@@ -316,13 +316,13 @@ jobs:
         run: go test ./cmd/migrate -run TestMigrationVersionsAreUnique -count=1
 
       - name: Migrate up
-        run: go run cmd/migrate/main.go up
+        run: go run ./cmd/migrate up
 
       - name: Migrate down
-        run: go run cmd/migrate/main.go down
+        run: go run ./cmd/migrate down
 
       - name: Migrate up again (idempotency check)
-        run: go run cmd/migrate/main.go up
+        run: go run ./cmd/migrate up
 
   docker-build:
     name: Docker Build

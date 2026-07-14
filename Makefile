@@ -143,10 +143,10 @@ test-integration:
 	go test -tags=integration -timeout=120s ./internal/integration/...
 
 migrate-up:
-	go run cmd/migrate/main.go up
+	go run ./cmd/migrate up
 
 migrate-down:
-	go run cmd/migrate/main.go down
+	go run ./cmd/migrate down
 
 # Validates the dogfood preview seed without mutating the source database.
 # Creates a temporary sibling database on the configured Postgres server,

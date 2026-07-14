@@ -264,7 +264,7 @@ if [ -f go.mod ]; then
 
   if [ -d cmd/migrate ]; then
     info "Running database migrations..."
-    go run cmd/migrate/main.go up
+    go run ./cmd/migrate up
   elif [ -d migrations ]; then
     info "Migrations directory found — run migrations after the migrate tool is built."
   fi

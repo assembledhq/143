@@ -81,7 +81,7 @@ jobs:
 
       - name: Migrate to latest main schema
         if: steps.stable.outputs.tag != ''
-        run: go run cmd/migrate/main.go up
+        run: go run ./cmd/migrate up
 
       - name: Run the stable release's store tests against the newer schema
         if: steps.stable.outputs.tag != ''
