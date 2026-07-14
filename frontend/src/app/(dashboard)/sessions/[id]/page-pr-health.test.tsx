@@ -301,6 +301,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(viewPRLink).toHaveAttribute('href', 'https://github.com/example/repo/pull/42');
     expect(viewPRLink).toHaveAttribute('target', '_blank');
     expect(viewPRLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(viewPRLink).toHaveAttribute('data-size', 'xs');
     expect(within(viewPRLink).queryByRole('button')).not.toBeInTheDocument();
   });
 
