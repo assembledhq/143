@@ -43,6 +43,13 @@ type Config struct {
 	FrontendURL             string        `env:"FRONTEND_URL"`
 	CORSAllowedOrigins      []string      `env:"CORS_ALLOWED_ORIGINS"  envSeparator:","`
 	Mode                    string        `env:"MODE"                  envDefault:"all"`
+	// Channel is this process's release channel: "stable" (pinned releases,
+	// serves customer orgs) or "canary" (latest main, serves dogfood orgs).
+	// Workers claim only jobs stamped with their channel, and the periodic
+	// scheduler runs only on stable-channel worker processes. Invalid values
+	// fail startup — a typo must never silently join the wrong pool. See
+	// docs/design/future/118-canary-stable-release-channels.md.
+	Channel string `env:"CHANNEL" envDefault:"stable"`
 	// DemoMode tells the server it is running a dogfood preview with seeded
 	// data and no real GitHub App. Enables a credential banner on the login
 	// page and short-circuits GitHub client construction.

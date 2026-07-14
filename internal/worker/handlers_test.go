@@ -6288,7 +6288,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	defer mock.Close()
 	logger := zerolog.Nop()
 
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w, stores, nil, DataRetentionConfig{}, logger)
 
 	expectedHandlers := []string{
@@ -6313,7 +6313,7 @@ func TestRegisterHandlers_AllRegistered(t *testing.T) {
 	}
 
 	// Now test with PM service — pm_analyze and project_cycle should be registered
-	w2 := New(nil, logger, "test-node")
+	w2 := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w2, stores, &Services{PM: &mockPMService{}}, DataRetentionConfig{}, logger)
 	for _, name := range []string{"pm_analyze", "project_cycle"} {
 		_, ok := w2.handlers[name]
@@ -6341,7 +6341,7 @@ func TestRegisterHandlers_AutomationRunRegisteredWithoutPMService(t *testing.T) 
 	stores.AutomationRuns = db.NewAutomationRunStore(mock)
 
 	logger := zerolog.Nop()
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 
 	RegisterHandlers(w, stores, nil, DataRetentionConfig{}, logger)
 
@@ -6359,7 +6359,7 @@ func TestRegisterHandlers_LegacyEvalJobsRemainRegisteredDuringRollout(t *testing
 	stores.EvalBootstraps = db.NewEvalBootstrapStore(mock)
 
 	logger := zerolog.Nop()
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 
 	RegisterHandlers(w, stores, &Services{}, DataRetentionConfig{}, logger)
 
@@ -6413,7 +6413,7 @@ func TestRegisterHandlers_StartPreviewRegisteredWithPreviewStarter(t *testing.T)
 	logger := zerolog.Nop()
 	starter := &mockPreviewStarter{}
 	services := &Services{PreviewStarter: starter}
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
@@ -8172,7 +8172,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 func TestWorker_Register(t *testing.T) {
 	t.Parallel()
 
-	w := New(nil, zerolog.Nop(), "test-node")
+	w := New(nil, zerolog.Nop(), "test-node", models.ReleaseChannelStable)
 
 	called := false
 	handler := func(ctx context.Context, jobType string, payload json.RawMessage) error {
@@ -8597,7 +8597,7 @@ func TestRegisterHandlers_WithAllServices(t *testing.T) {
 		Linear:          linearservice.NewService(linearservice.Config{}),
 	}
 
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	allExpected := []string{
@@ -8634,7 +8634,7 @@ func TestRegisterHandlers_WithOnlyPrioritization(t *testing.T) {
 		Prioritization: &prioritization.Service{},
 	}
 
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["prioritize"]
@@ -8657,7 +8657,7 @@ func TestRegisterHandlers_WithOnlyFeedback(t *testing.T) {
 		Feedback: feedbackService,
 	}
 
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["process_review_comment"]
@@ -8679,7 +8679,7 @@ func TestRegisterHandlers_WithOnlyPM(t *testing.T) {
 		PM: &mockPMService{},
 	}
 
-	w := New(nil, logger, "test-node")
+	w := New(nil, logger, "test-node", models.ReleaseChannelStable)
 	RegisterHandlers(w, stores, services, DataRetentionConfig{}, logger)
 
 	_, ok := w.handlers["pm_analyze"]

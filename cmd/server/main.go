@@ -83,6 +83,15 @@ func main() {
 
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
+	if err := models.ReleaseChannel(cfg.Channel).Validate(); err != nil {
+		// Fail closed: a typo'd CHANNEL must never silently join a real
+		// worker pool (a mislabeled canary worker would run unreleased code
+		// against stable orgs' jobs).
+		logger.Fatal().Err(err).Str("channel", cfg.Channel).Msg("invalid CHANNEL configuration")
+	}
+	// Every log line carries the release channel so per-channel log queries
+	// and dashboards can split canary from stable.
+	logger = logger.With().Str("channel", cfg.Channel).Logger()
 	cfg.LogStatus(logger)
 
 	if version.IsDev() {
@@ -384,7 +393,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
-	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
+	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode, cfg.Channel)
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
@@ -702,6 +711,7 @@ func main() {
 			pool,
 			logger,
 			cfg.NodeID,
+			models.ReleaseChannel(cfg.Channel),
 			workerCount,
 			stores,
 			services,
@@ -778,26 +788,36 @@ func main() {
 		uploadReaper := storage.NewUploadReaper(uploadStore, cfg.UploadMaxAge, cfg.SessionReaperInterval, logger)
 		go uploadReaper.Run(ctx)
 
-		scheduler := cluster.NewScheduler(
-			cluster.NewSchedulerLock(pool),
-			jobStore,
-			orgStore,
-			integrationStore,
-			pmPlanStore,
-			repoStore,
-			logger,
-		)
-		scheduler.SetPMDocStore(pmDocumentStore)
-		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
-		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
-		scheduler.SetSessionStore(sessionStore)
-		scheduler.SetDomainRecheck(
-			db.NewOrganizationDomainStore(pool),
-			domains.NewVerifier(),
-			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
-		)
-		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
-		go scheduler.Start(ctx, 10*time.Minute)
+		// Scheduler candidacy is stable-only: leader election is a single
+		// advisory lock shared by every worker-capable node, so a canary
+		// candidate could win it and enqueue system-wide cron work from
+		// unreleased code. Stable (pinned) code owns global enqueue; channel
+		// routing decides which pool executes each enqueued job. See
+		// docs/design/future/118-canary-stable-release-channels.md.
+		if cfg.Channel == string(models.ReleaseChannelStable) {
+			scheduler := cluster.NewScheduler(
+				cluster.NewSchedulerLock(pool),
+				jobStore,
+				orgStore,
+				integrationStore,
+				pmPlanStore,
+				repoStore,
+				logger,
+			)
+			scheduler.SetPMDocStore(pmDocumentStore)
+			scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+			scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
+			scheduler.SetSessionStore(sessionStore)
+			scheduler.SetDomainRecheck(
+				db.NewOrganizationDomainStore(pool),
+				domains.NewVerifier(),
+				db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+			)
+			scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
+			go scheduler.Start(ctx, 10*time.Minute)
+		} else {
+			logger.Info().Msg("periodic scheduler disabled: this node is not on the stable release channel")
+		}
 	}
 
 	srv := &http.Server{
@@ -959,6 +979,7 @@ func startProcessWorkers(
 	pool db.DBTX,
 	logger zerolog.Logger,
 	nodeID string,
+	channel models.ReleaseChannel,
 	workerCount int,
 	stores *worker.Stores,
 	services *worker.Services,
@@ -974,7 +995,7 @@ func startProcessWorkers(
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
-		w := worker.New(pool, logger, nodeID)
+		w := worker.New(pool, logger, nodeID, channel)
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}

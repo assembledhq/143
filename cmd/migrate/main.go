@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -28,7 +29,7 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: migrate [up|down]")
+		fmt.Println("Usage: migrate [up|down|verify]")
 		os.Exit(1)
 	}
 
@@ -47,10 +48,40 @@ func main() {
 
 	m.Log = migrateLogger{verbose: os.Getenv("LOG_LEVEL") == "debug"}
 
+	migrationDir := migrationDirFromSource(migrationSource)
+
 	switch os.Args[1] {
 	case "up":
+		// Destructive-migration gate: pending destructive migrations may not
+		// run until the deployed stable release satisfies their annotated
+		// floor. Enforced only when the deploy pipeline provides
+		// STABLE_MAX_MIGRATION; a no-op for local dev and CI.
+		dbVersion, dirty, verr := m.Version()
+		if verr != nil && verr != migrate.ErrNilVersion {
+			logMigrationError("up", m, verr)
+			os.Exit(1)
+		}
+		if dirty {
+			logMigrationError("up", m, migrate.ErrDirty{Version: int(dbVersion)}) // #nosec G115 -- schema versions are far below int max
+			os.Exit(1)
+		}
+		if err := runDestructiveGate(migrationDir, uint64(dbVersion)); err != nil {
+			fmt.Fprintf(os.Stderr, "Destructive migration gate refused the run: %v\n", err)
+			os.Exit(1)
+		}
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("up", m, err)
+			os.Exit(1)
+		}
+		// Persist the floors of every applied destructive migration so stable
+		// preflights can enforce them without this checkout's files.
+		appliedThrough, _, verr := m.Version()
+		if verr != nil && verr != migrate.ErrNilVersion {
+			fmt.Fprintf(os.Stderr, "Failed to read applied version for floor recording: %v\n", verr)
+			os.Exit(1)
+		}
+		if err := recordFloorsAfterUp(context.Background(), dbURL, migrationDir, uint64(appliedThrough)); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to record destructive-compatibility floors: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("Migrations applied successfully.")
@@ -60,6 +91,15 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("Migrations rolled back successfully.")
+	case "verify":
+		// Stable-plane preflight: the schema (owned by the canary pipeline)
+		// must already be at least as new as this checkout expects, and this
+		// checkout must satisfy every recorded destructive floor. Never
+		// migrates.
+		if err := runVerify(context.Background(), dbURL, migrationDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Schema verify FAILED: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
