@@ -180,8 +180,9 @@ describe('SessionDetailPage PR creation', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Create PR/ })).toHaveAttribute('data-size', 'xs');
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'More publish actions' })).toHaveAttribute('data-size', 'icon-xs');
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'More publish actions' }));

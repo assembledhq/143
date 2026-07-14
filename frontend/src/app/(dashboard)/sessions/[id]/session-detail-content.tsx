@@ -6493,7 +6493,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="text-xs gap-1.5" title="View PR (p v)">
+                <Button asChild variant="outline" size="xs" className="gap-1.5" title="View PR (p v)">
                   <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -6503,7 +6503,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ) : showPRAction && !prErrorNotice ? (
               <>
                 {branchURL ? (
-                  <Button asChild variant="outline" size="sm" className="text-xs gap-1.5" title="View branch">
+                  <Button asChild variant="outline" size="xs" className="gap-1.5" title="View branch">
                     <a href={branchURL} target="_blank" rel="noopener noreferrer">
                       <GitBranch className="h-3 w-3" />
                       View branch
@@ -6511,10 +6511,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 ) : null}
                 <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                  <ButtonGroup size="sm">
+                  <ButtonGroup size="xs">
                     <Button
                       variant="outline"
-                      size="sm"
+                      size="xs"
                       className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
@@ -6532,7 +6532,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon-sm"
+                          size="icon-xs"
                           className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
