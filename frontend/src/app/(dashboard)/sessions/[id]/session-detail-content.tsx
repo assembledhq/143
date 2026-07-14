@@ -1693,7 +1693,7 @@ function SessionComposer({
             isUploading={isUploading}
             onRemove={onRemoveAttachment}
             size="md"
-            className="px-3 pb-2"
+            className="px-3 pt-2 pb-2"
           />
 
           {showImageInput && (
