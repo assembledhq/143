@@ -35,6 +35,11 @@ services:
       PREVIEW_GATEWAY_PORT: "9090"
       ENV: production
       MODE: api
+      CHANNEL: stable
+      # CANARY_ORIGIN adds the canary frontend to the preview gateway's
+      # app-origin allow-list (the gateway runs on this stable api) and is
+      # required before a canary frontend can bootstrap previews.
+      CANARY_ORIGIN: ${CANARY_ORIGIN:-}
       BASE_URL: ${BASE_URL:-https://143.dev}
       FRONTEND_URL: ${FRONTEND_URL:-https://143.dev}
       PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:-https://{id}.preview.143.dev}
@@ -86,6 +91,79 @@ services:
         limits:
           memory: 2G
           cpus: "2.0"
+
+  # ---------------------------------------------------------------------------
+  # Canary plane: the same services at latest main, serving canary.<domain>.
+  # Same compose project as the stable plane on purpose — Caddy's `dynamic a`
+  # DNS resolution only sees containers on this project network, so a second
+  # compose project would be unroutable. Each plane's deploy interpolates only
+  # its own tag variable (IMAGE_TAG vs CANARY_IMAGE_TAG) and runs a
+  # service-scoped `up --no-deps`, so one plane's rollout never recreates the
+  # other's containers. See docs/design/118-canary-stable-release-channels.md.
+  # ---------------------------------------------------------------------------
+  api-canary:
+    image: ghcr.io/assembledhq/143-server:${CANARY_IMAGE_TAG:-latest}
+    environment:
+      DATABASE_URL: postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable
+      DATABASE_MAX_CONNS: ${CANARY_API_DATABASE_MAX_CONNS:-10}
+      DATABASE_MAX_CONN_IDLE_TIME: ${API_DATABASE_MAX_CONN_IDLE_TIME:-5m}
+      PORT: "8080"
+      # The *.preview.<domain> gateway is owned by the stable api (Caddy's
+      # preview vhost resolves the `api` container name). Disabled here so
+      # gateway ownership is unambiguous.
+      PREVIEW_GATEWAY_PORT: "0"
+      ENV: production
+      MODE: api
+      CHANNEL: canary
+      CANARY_ORIGIN: ${CANARY_ORIGIN:-https://canary.143.dev}
+      # The canary plane's own origin: OAuth redirect URIs and frontend URLs
+      # derive from these, so logins on canary.<domain> round-trip correctly.
+      # The GitHub/Slack apps must list the canary callback URLs too.
+      BASE_URL: ${CANARY_ORIGIN:-https://canary.143.dev}
+      FRONTEND_URL: ${CANARY_ORIGIN:-https://canary.143.dev}
+      PREVIEW_ORIGIN_TEMPLATE: ${PREVIEW_ORIGIN_TEMPLATE:-https://{id}.preview.143.dev}
+      NODE_ID: ${CANARY_NODE_ID:-}
+    env_file:
+      - .env
+    volumes:
+      - .env.production.enc:/app/.env.production.enc:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+    stop_grace_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  frontend-canary:
+    image: ghcr.io/assembledhq/143-frontend:${CANARY_IMAGE_TAG:-latest}
+    environment:
+      API_PROXY_TARGET: http://api-canary:8080
+      HOSTNAME: "0.0.0.0"
+      NODE_ENV: production
+    depends_on:
+      - api-canary
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))\""
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
 
 volumes:
   caddy_data:

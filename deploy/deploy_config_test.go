@@ -890,7 +890,7 @@ func TestMaintenanceWorkerSupportServiceRecreateRetriesSandboxDNSAddressConflict
 	require.Contains(t, clearFn, `Label "com.docker.compose.project"`, "worker maintenance cleanup should distinguish compose deploy-control helpers from user sandbox containers")
 	require.Contains(t, clearFn, `docker rm -f`, "worker maintenance cleanup should force-remove deploy-control helpers that are racing the pinned DNS IP")
 	require.Contains(t, deployText, "recreate_worker_other_services", "maintenance worker deploy should use the retrying support-service recreate path")
-	require.Contains(t, deployText, `recreate_other_services "api frontend caddy"`, "generic recreate helper should remain available for non-worker paths")
+	require.Contains(t, deployText, `recreate_other_services "api frontend caddy api-canary frontend-canary"`, "generic recreate helper should remain available for non-worker paths and must skip canary-owned services")
 	require.NotContains(t, deployText, `echo "Updating supporting services for ${DEPLOY_MODE:-maintenance} worker deploy..."
       recreate_other_services "$HEALTH_SERVICE"`, "maintenance worker deploy should not use the generic no-retry recreate path")
 }
@@ -2272,7 +2272,7 @@ func TestDeployPrunesDockerArtifactsAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, `IMAGE_TAG='$IMAGE_TAG'`, "detached worker rollovers should bake IMAGE_TAG so the prune helper can protect the sandbox image")
 	require.Contains(t, deployText, `prune_docker_deploy_artifacts worker`, "detached worker rollovers should prune only after the new worker is healthy")
 	require.Contains(t, deployText, `flock -xo /tmp/143-deploy-worker.lock`, "detached worker rollovers should not let background drain watchers inherit the deploy lock")
-	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
+	require.Contains(t, deployText, `prune_docker_deploy_artifacts "$ROLE_KIND"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")
 }
 

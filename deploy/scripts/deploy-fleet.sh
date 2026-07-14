@@ -27,7 +27,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 valid_role() {
   case "$1" in
-    app|worker|db|logging|redis|all) return 0 ;;
+    app|app-canary|worker|worker-canary|db|logging|redis|all) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -106,6 +106,7 @@ else
   LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"
 fi
 APP_TARGETS=()
+APP_CANARY_TARGETS=()
 POST_APP_HOSTS=()
 POST_APP_GROUP_FILES=()
 TARGET_COUNT=0
@@ -119,6 +120,14 @@ for entry in "${ENTRIES[@]}"; do
   fi
   if ! should_deploy_role "$ROLE"; then
     echo "Skipping $ROLE@$IP (not in requested roles: $REQUESTED_ROLES)."
+    continue
+  fi
+  # app-canary deploys before app: the canary plane owns migrations, so a
+  # same-run stable app deploy (APP_SCHEMA_MODE=verify) must find the schema
+  # already applied. Both are part of the pre-worker barrier.
+  if [ "$ROLE" = "app-canary" ]; then
+    APP_CANARY_TARGETS+=("$ROLE:$IP")
+    TARGET_COUNT=$((TARGET_COUNT + 1))
     continue
   fi
   if [ "$ROLE" = "app" ]; then
@@ -149,6 +158,13 @@ if [ "$TARGET_COUNT" -eq 0 ]; then
 fi
 if should_deploy_role app && [ "${#APP_TARGETS[@]}" -eq 0 ]; then
   echo "ERROR: The app role was requested, but no app host exists in FLEET_HOSTS; refusing to deploy post-app nodes without the migration barrier." >&2
+  exit 1
+fi
+# Unlike the app guard above, `all` tolerates a fleet with no canary hosts —
+# single-plane fleets are the norm until the canary plane is provisioned.
+# Only an explicit app-canary request hard-fails on a missing host.
+if [ "$REQUESTED_ROLES" != "all" ] && should_deploy_role app-canary && [ "${#APP_CANARY_TARGETS[@]}" -eq 0 ]; then
+  echo "ERROR: The app-canary role was requested, but no app-canary host exists in FLEET_HOSTS; refusing to deploy without the canary migration barrier." >&2
   exit 1
 fi
 
@@ -226,6 +242,18 @@ deploy_group() {
 export -f deploy_one
 export -f deploy_group
 export SCRIPT_DIR SSH_KEY TAG LOG_DIR
+
+if [ "${#APP_CANARY_TARGETS[@]}" -gt 0 ]; then
+  echo "Deploying ${#APP_CANARY_TARGETS[@]} canary app node(s) serially first (canary owns migrations; logs: $LOG_DIR)."
+  for target in "${APP_CANARY_TARGETS[@]}"; do
+    if ! deploy_one "$target"; then
+      dump_failed_logs
+      echo "FAILED: canary app deployment or database migrations failed; nothing else was deployed." >&2
+      exit 1
+    fi
+  done
+  echo "Canary app barrier passed; database migrations and canary health checks succeeded."
+fi
 
 if [ "${#APP_TARGETS[@]}" -gt 0 ]; then
   echo "Deploying ${#APP_TARGETS[@]} app node(s) serially before the worker fleet (logs: $LOG_DIR)."
