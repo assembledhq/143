@@ -141,6 +141,19 @@ func BootstrapActivity(issueIdentifier string) AgentMilestoneActivity {
 	}
 }
 
+// ConnectAccountIdemKey is the at-most-once slot for the team-session
+// connect-account prompt. Exported so callers can check whether the prompt
+// has already been emitted for a session before minting a fresh claim token.
+const ConnectAccountIdemKey = "identity:connect"
+
+func ConnectAccountActivity(claimURL string) AgentMilestoneActivity {
+	return AgentMilestoneActivity{
+		Type:    models.LinearAgentActivityResponse,
+		Body:    fmt.Sprintf("This work is running as a team session because your Linear account is not connected to a 143 user. Connect account for personal attribution, credentials, and approvals: %s", claimURL),
+		IdemKey: ConnectAccountIdemKey,
+	}
+}
+
 // UnmappedRepoActivity is what the dispatcher emits when the repo resolver
 // can't pick a repo for an inbound AgentSession. It explains the gap so the
 // admin (who is typically the Linear-side reader) knows exactly what to

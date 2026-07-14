@@ -165,7 +165,7 @@ describe('TeamSettingsPage', () => {
     expect(membersQueries.getAllByText('Actions', { selector: 'div' })).toHaveLength(1);
     expect(screen.getAllByTestId('team-member-row')[0]).toHaveClass(
       'grid-cols-[minmax(0,1fr)_auto]',
-      'md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]',
+      'md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_110px_110px_110px_90px]',
     );
   });
 

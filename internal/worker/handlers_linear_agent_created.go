@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/externalidentity"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -196,6 +198,10 @@ func handleLinearAgentCreated(
 	if err := createAndAttachLinearAgentSession(ctx, deps.Stores, orgID, row.ID, session); err != nil {
 		return err
 	}
+	persistLinearExternalAttribution(ctx, deps.Stores, session, row, payload, fetched, logger)
+	if session.TriggeredByUserID == nil {
+		emitLinearIdentityClaim(ctx, deps, client, activities, session, row, payload, fetched, logger)
+	}
 
 	// 8. Persist the AgentSessionID on the provider-state row so
 	// HandleMilestone's fan-out can find it. Idempotent (Merge).
@@ -220,6 +226,97 @@ func handleLinearAgentCreated(
 		Str("repo_resolution", repoResult.Source).
 		Msg("linear_agent_event: session created")
 	return nil
+}
+
+func emitLinearIdentityClaim(ctx context.Context, deps LinearAgentEventHandlerDeps, client linear.Client, activities *db.LinearAgentActivityLogStore, session *models.Session, row *db.LinearAgentSession, payload linearAgentEventPayload, fetched *linear.FetchedIssue, logger zerolog.Logger) {
+	if deps.Stores == nil || deps.Stores.ExternalUserLinks == nil || deps.Linear == nil || session == nil || row == nil {
+		return
+	}
+	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
+	if creatorID == "" {
+		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
+	}
+	if creatorID == "" && fetched != nil {
+		creatorID = strings.TrimSpace(fetched.CreatorID)
+	}
+	workspaceID := linearAttributionWorkspaceID(fetched)
+	if creatorID == "" || workspaceID == "" {
+		return
+	}
+	// The handler is replayable. emitOnce dedups the Linear post, but minting a
+	// claim token before that check would leave an orphan claim row on every
+	// replay. Skip when the connect-account prompt was already delivered for
+	// this session; a failed prior emit discards its reservation, so a genuinely
+	// undelivered prompt still gets a fresh claim and a retry.
+	if activities != nil {
+		if existing, listErr := activities.ListForAgentSession(ctx, session.OrgID, row.ID); listErr != nil {
+			logger.Warn().Err(listErr).Msg("failed to check existing Linear account claim; proceeding")
+		} else {
+			for _, entry := range existing {
+				if entry.IdemKey == linear.ConnectAccountIdemKey {
+					return
+				}
+			}
+		}
+	}
+	sourceContext, err := json.Marshal(map[string]string{"surface": "linear", "agent_session_id": row.LinearAgentSessionID, "session_id": session.ID.String()})
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to marshal Linear identity claim context")
+		return
+	}
+	resolver := externalidentity.NewResolver(deps.Stores.ExternalUserLinks, deps.Stores.ExternalSuggestions, deps.Stores.ExternalUserLinks, deps.Stores.Users, externalidentity.Options{})
+	_, rawToken, err := resolver.CreateSelfLinkClaim(ctx, session.OrgID, externalidentity.ExternalActorInput{Provider: models.ExternalIdentityProviderLinear, ProviderWorkspaceID: workspaceID, ProviderUserID: creatorID}, sourceContext)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to create Linear external identity claim")
+		return
+	}
+	activity := linear.ConnectAccountActivity(deps.Linear.ExternalIdentityClaimURL(rawToken))
+	if err := emitOnce(ctx, client, activities, session.OrgID, row.ID, row.LinearAgentSessionID, activity, logger); err != nil {
+		logger.Warn().Err(err).Msg("failed to emit Linear account claim")
+	}
+}
+
+func persistLinearExternalAttribution(ctx context.Context, stores *Stores, session *models.Session, row *db.LinearAgentSession, payload linearAgentEventPayload, fetched *linear.FetchedIssue, logger zerolog.Logger) {
+	if stores == nil || stores.SessionAttributions == nil || session == nil {
+		return
+	}
+	creatorID := strings.TrimSpace(payload.LinearCreatorUserID)
+	if creatorID == "" && row != nil {
+		creatorID = strings.TrimSpace(row.LinearCreatorUserID)
+	}
+	if creatorID == "" && fetched != nil {
+		creatorID = strings.TrimSpace(fetched.CreatorID)
+	}
+	metadata := map[string]any{
+		"linear_workspace_id":    linearAttributionWorkspaceID(fetched),
+		"linear_creator_user_id": creatorID,
+		"team_session":           session.TriggeredByUserID == nil,
+	}
+	if session.TriggeredByUserID != nil {
+		metadata["mapped_user_id"] = session.TriggeredByUserID.String()
+	}
+	if stores.ExternalUserLinks != nil && creatorID != "" {
+		link, err := stores.ExternalUserLinks.GetActiveByExternal(ctx, session.OrgID, models.ExternalIdentityProviderLinear, linearAttributionWorkspaceID(fetched), creatorID)
+		if err == nil {
+			metadata["external_user_link_id"] = link.ID.String()
+			metadata["attribution_source"] = link.Source
+			metadata["attribution_confidence"] = link.Confidence
+			if link.ExternalDisplayName != nil {
+				metadata["external_display_name"] = *link.ExternalDisplayName
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			logger.Warn().Err(err).Msg("failed to snapshot Linear external identity attribution")
+		}
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to marshal Linear session attribution")
+		return
+	}
+	attribution := &models.SessionAttribution{OrgID: session.OrgID, SessionID: session.ID, Source: models.SessionAttributionSourceLinear, SourceMetadata: raw}
+	if err := stores.SessionAttributions.Create(ctx, attribution); err != nil {
+		logger.Warn().Err(err).Msg("failed to persist Linear session attribution")
+	}
 }
 
 func registerLinearAgentCreatedDeadLetter(

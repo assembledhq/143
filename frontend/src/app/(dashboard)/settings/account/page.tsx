@@ -32,6 +32,7 @@ import { OpenCodeCustomModelField } from "@/components/opencode-custom-model-fie
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
+import { ExternalIdentitiesCard } from "@/components/settings/external-identities-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -584,6 +585,8 @@ export default function AccountPage() {
         </Card>
 
         <CLISessionsCard />
+
+        <ExternalIdentitiesCard />
 
         <Card>
           <CardHeader>

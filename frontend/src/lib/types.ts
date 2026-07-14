@@ -49,6 +49,49 @@ export interface User {
   created_at: string;
 }
 
+export type ExternalIdentityProvider = "slack" | "linear";
+export type ExternalUserLinkSource = "self_linked" | "admin_linked" | "email_match" | "directory";
+
+export interface ExternalUserLink {
+  id: string;
+  org_id: string;
+  provider: ExternalIdentityProvider;
+  provider_workspace_id: string;
+  provider_user_id: string;
+  user_id: string;
+  source: ExternalUserLinkSource;
+  status: "active" | "revoked";
+  confidence: number;
+  external_email?: string;
+  external_handle?: string;
+  external_display_name?: string;
+  linked_by_user_id?: string;
+  created_at: string;
+  revoked_at?: string;
+}
+
+export interface ExternalUserLinkSuggestion {
+  id: string;
+  org_id: string;
+  provider: ExternalIdentityProvider;
+  provider_workspace_id: string;
+  provider_user_id: string;
+  suggested_user_id: string;
+  reason: string;
+  confidence: number;
+  external_email?: string;
+  external_handle?: string;
+  external_display_name?: string;
+  last_seen_at: string;
+}
+
+export interface ExternalUserObservation {
+  id: string; org_id: string; provider: ExternalIdentityProvider;
+  provider_workspace_id: string; provider_user_id: string;
+  external_email?: string; external_handle?: string; external_display_name?: string;
+  last_seen_at: string;
+}
+
 export interface UserSettings {
   coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<

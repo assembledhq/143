@@ -1959,7 +1959,7 @@ func TestSlackSessionAttributionMetadataIsSanitized(t *testing.T) {
 		SlackUserID:           "U123",
 		MappedUserID:          &mappedUserID,
 		TeamSession:           false,
-	})
+	}, nil)
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got), "metadata should be valid JSON")
