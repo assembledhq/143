@@ -1452,10 +1452,12 @@ export interface PRReadinessRun {
   id: string;
   org_id: string;
   session_id: string;
+  changeset_id?: string;
   repository_id?: string;
   status: PRReadinessRunStatus;
   evaluated_workspace_revision: number;
   evaluated_snapshot_key?: string;
+  evaluated_head_sha?: string;
   summary?: string;
   review_packet?: unknown;
   triggered_by_user_id?: string;
@@ -1612,7 +1614,10 @@ export interface ForkResult {
 export interface SessionDetail extends Session {
   threads: SessionThread[];
   changesets: ChangesetSummary[];
+  changeset_stack_state?: ChangesetStackState;
 }
+
+export type ChangesetStackState = "one-pr" | "draft-stack" | "published" | "coherent" | "needs-restack" | "restacking" | "blocked" | "external-update-detected" | "partially-merged" | "merged";
 
 export type ChangesetStatus =
   | "planned"
@@ -1641,6 +1646,10 @@ export interface ChangesetSummary {
   head_sha?: string;
   worktree_path?: string;
   materialization_error?: string;
+  has_unpushed_changes?: boolean;
+  restack_delta_kind?: "clean_replay" | "mechanical_fallout" | "semantic_change";
+  restack_delta_summary?: string;
+  restack_confirmation_required?: boolean;
   pull_request?: PullRequest;
   created_at: string;
   updated_at: string;

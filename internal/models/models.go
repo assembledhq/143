@@ -464,9 +464,10 @@ type SessionTitleState struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	RepositoryFullName *string            `json:"repository_full_name,omitempty"`
-	Threads            []SessionThread    `json:"threads"`
-	Changesets         []ChangesetSummary `json:"changesets"`
+	RepositoryFullName  *string             `json:"repository_full_name,omitempty"`
+	Threads             []SessionThread     `json:"threads"`
+	Changesets          []ChangesetSummary  `json:"changesets"`
+	ChangesetStackState ChangesetStackState `json:"changeset_stack_state"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -1086,6 +1087,8 @@ const (
 	JobTypeRunCodeReview                 = "run_code_review"
 	JobTypeMaterializeChangeset          = "materialize_changeset"
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
+	JobTypeRestackChangesets             = "restack_changesets"
+	JobTypePublishChangesetStack         = "publish_changeset_stack"
 )
 
 // Job represents an async work queue item.

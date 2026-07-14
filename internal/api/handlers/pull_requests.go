@@ -273,6 +273,8 @@ func (h *PullRequestHandler) Merge(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "Pull request checks are still running", err)
 		case errors.Is(err, ghservice.ErrPullRequestNotMergeable):
 			writeError(w, r, http.StatusConflict, "PR_NOT_MERGEABLE", "Pull request is not in a mergeable state", err)
+		case errors.Is(err, ghservice.ErrStackParentUnmerged):
+			writeError(w, r, http.StatusConflict, "STACK_PARENT_UNMERGED", "Merge the parent pull request first, or explicitly fold this pull request into its parent", err)
 		case errors.Is(err, ghservice.ErrNoMergeMethodAllowed):
 			writeError(w, r, http.StatusConflict, "NO_MERGE_METHOD_ALLOWED", "Repository does not allow any merge method", err)
 		case errors.Is(err, ghservice.ErrGitHubUserAuthRequired):

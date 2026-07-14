@@ -895,6 +895,7 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	detail.Changesets = changesets
+	detail.ChangesetStackState = models.DeriveChangesetStackState(changesets)
 	if h.repoStore != nil && run.RepositoryID != nil {
 		repo, err := h.repoStore.GetByID(r.Context(), orgID, *run.RepositoryID)
 		if err != nil {
@@ -1197,6 +1198,148 @@ func (h *SessionHandler) MaterializeChangeset(w http.ResponseWriter, r *http.Req
 	}
 	emitChangesetAudit(h, r, models.AuditActionSessionSplitMaterialized, sessionID, map[string]any{"changeset_id": changesetID, "job_id": jobID})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+}
+
+func (h *SessionHandler) PublishChangeset(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	changesetID := chi.URLParam(r, "changeset_id")
+	query := r.URL.Query()
+	query.Set("changeset_id", changesetID)
+	r.URL.RawQuery = query.Encode()
+	h.CreatePR(w, r)
+}
+
+func (h *SessionHandler) PublishChangesetStack(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	changesets, err := h.changesetStore.ListFullBySession(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CHANGESETS_FAILED", "failed to load pull requests", err)
+		return
+	}
+	active := 0
+	for _, changeset := range changesets {
+		if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
+			continue
+		}
+		active++
+		if changeset.WorktreePath == nil || changeset.WorkingBranch == nil {
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "every pull request must be materialized before publishing the stack")
+			return
+		}
+	}
+	if active == 0 {
+		writeError(w, r, http.StatusConflict, "EMPTY_STACK", "the session has no publishable pull requests")
+		return
+	}
+	var req struct {
+		Draft      *bool  `json:"draft"`
+		AuthorMode string `json:"author_mode"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
+			return
+		}
+	}
+	dedupeKey := "publish_changeset_stack:" + sessionID.String()
+	payload := map[string]any{"org_id": orgID.String(), "session_id": sessionID.String(), "author_mode": req.AuthorMode}
+	if req.Draft != nil {
+		payload["draft"] = *req.Draft
+	}
+	jobID, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", models.JobTypePublishChangesetStack, payload, 5, &dedupeKey, models.SessionWorkerTarget(&session))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to queue stack publishing", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+}
+
+func (h *SessionHandler) RestackChangesetDescendants(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	session, err := h.runStore.GetByID(r.Context(), orgID, sessionID)
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
+		return
+	}
+	if _, err := h.changesetStore.GetByID(r.Context(), orgID, sessionID, changesetID); err != nil {
+		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request not found")
+		return
+	}
+	dedupeKey := "restack_changesets:" + changesetID.String()
+	jobID, err := h.jobStore.EnqueueWithTarget(r.Context(), orgID, "agent", models.JobTypeRestackChangesets, map[string]string{
+		"org_id": orgID.String(), "session_id": sessionID.String(), "from_changeset_id": changesetID.String(),
+	}, 5, &dedupeKey, models.SessionWorkerTarget(&session))
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to queue stack restack", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "queued", "job_id": jobID})
+}
+
+func (h *SessionHandler) ImportChangesetRemote(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid changeset ID")
+		return
+	}
+	var req struct {
+		HeadSHA string `json:"head_sha"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(req.HeadSHA) {
+		writeError(w, r, http.StatusBadRequest, "INVALID_HEAD_SHA", "a 40-character remote head SHA is required")
+		return
+	}
+	if err := h.changesetStore.ImportRemoteHead(r.Context(), orgID, sessionID, changesetID, req.HeadSHA); err != nil {
+		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "imported"})
+}
+
+func (h *SessionHandler) ConfirmChangesetRestack(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	changesetID, err := uuid.Parse(chi.URLParam(r, "changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target")
+		return
+	}
+	if err := h.changesetStore.ConfirmRestackDelta(r.Context(), orgID, sessionID, changesetID); err != nil {
+		writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_UNAVAILABLE", "this pull request has no restack delta awaiting confirmation")
+		return
+	}
+	emitChangesetAudit(h, r, models.AuditActionSessionSplitUpdated, sessionID, map[string]any{"operation": "restack_delta_confirmed", "changeset_id": changesetID})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "confirmed"})
 }
 
 func (h *SessionHandler) VerifyChangesetSplit(w http.ResponseWriter, r *http.Request) {
@@ -3018,12 +3161,16 @@ func (h *SessionHandler) requireBuilderReviewForCurrentSnapshot(w http.ResponseW
 	return false
 }
 
-func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session) bool {
+func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, changeset *models.SessionChangeset) bool {
 	role := middleware.ActiveRoleFromContext(r.Context())
 	if role != string(models.RoleBuilder) {
 		return true
 	}
 	if h.readinessStore == nil {
+		if changeset != nil && changeset.WorktreePath != nil {
+			writeError(w, r, http.StatusConflict, "READINESS_REQUIRED_BEFORE_PR", "Changeset readiness is not configured")
+			return false
+		}
 		return h.requireBuilderReviewForCurrentSnapshot(w, r, orgID, session.ID, stringPtrValue(session.SnapshotKey))
 	}
 	resolved, err := h.readinessStore.ResolvePolicy(r.Context(), orgID, session.RepositoryID)
@@ -3034,7 +3181,12 @@ func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *
 	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
 		return true
 	}
-	run, err := h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
+	var run *models.PRReadinessRun
+	if changeset != nil {
+		run, err = h.readinessStore.GetLatestByChangeset(r.Context(), orgID, session.ID, changeset.ID)
+	} else {
+		run, err = h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusConflict, "READINESS_REQUIRED_BEFORE_PR", "Builders must run readiness checks before creating a PR")
@@ -3047,7 +3199,11 @@ func (h *SessionHandler) requirePRReadinessForBuilder(w http.ResponseWriter, r *
 		writeError(w, r, http.StatusConflict, "READINESS_RUNNING", "PR readiness checks are still running")
 		return false
 	}
-	if run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey) {
+	stale := run.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(run.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey)
+	if changeset != nil && changeset.WorktreePath != nil {
+		stale = stringPtrValue(run.EvaluatedHeadSHA) != stringPtrValue(changeset.HeadSHA)
+	}
+	if stale {
 		writeError(w, r, http.StatusConflict, "READINESS_STALE", "Readiness is stale after the latest file changes; re-run readiness checks")
 		return false
 	}
@@ -3092,8 +3248,12 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if !targetChangeset.IsPrimary {
+	if targetChangeset.WorktreePath == nil && !targetChangeset.IsPrimary {
 		writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request branch must be materialized before it can be created")
+		return
+	}
+	if targetChangeset.RestackConfirmationRequired {
+		writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_REQUIRED", "review and confirm the restack delta before publishing this pull request")
 		return
 	}
 
@@ -3101,7 +3261,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
 		return
 	}
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+	if targetChangeset.WorktreePath == nil && (session.SnapshotKey == nil || *session.SnapshotKey == "") {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
@@ -3109,10 +3269,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-primary changesets are rejected above with CHANGESET_NOT_MATERIALIZED,
-	// so from here the target is always the primary changeset and only the
-	// legacy session-scoped creation guards apply.
-	switch session.PRCreationState {
+	state := targetChangeset.PRCreationState
+	if targetChangeset.IsPrimary {
+		state = session.PRCreationState
+	}
+	switch state {
 	case models.PRCreationStateQueued, models.PRCreationStatePushing:
 		writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
 		return
@@ -3122,7 +3283,12 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check whether a PR already exists for this session.
-	_, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
+	var prErr error
+	if targetChangeset.IsPrimary {
+		_, prErr = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
+	} else {
+		_, prErr = h.pullRequestStore.GetByChangesetID(r.Context(), orgID, sessionID, targetChangeset.ID)
+	}
 	if prErr == nil {
 		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
 		return
@@ -3169,11 +3335,11 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if h.maybeAutoRunPRReadinessOnCreatePR(w, r, orgID, session) {
+	if h.maybeAutoRunPRReadinessOnCreatePR(w, r, orgID, session, &targetChangeset) {
 		return
 	}
 
-	if !h.requirePRReadinessForBuilder(w, r, orgID, session) {
+	if !h.requirePRReadinessForBuilder(w, r, orgID, session, &targetChangeset) {
 		return
 	}
 
@@ -3259,7 +3425,7 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
-func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session) bool {
+func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter, r *http.Request, orgID uuid.UUID, session models.Session, changeset *models.SessionChangeset) bool {
 	if h.readinessStore == nil || h.readinessRunner == nil {
 		return false
 	}
@@ -3271,17 +3437,24 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 	if !resolved.Config.AutoRun.OnCreatePR {
 		return false
 	}
-	latest, err := h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
+	var latest *models.PRReadinessRun
+	if changeset != nil {
+		latest, err = h.readinessStore.GetLatestByChangeset(r.Context(), orgID, session.ID, changeset.ID)
+	} else {
+		latest, err = h.readinessStore.GetLatestBySession(r.Context(), orgID, session.ID)
+	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_LOAD_FAILED", "failed to load PR readiness", err)
 		return true
 	}
+	stale := latest != nil && (latest.EvaluatedWorkspaceRevision != session.WorkspaceRevision || stringPtrValue(latest.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey))
+	if changeset != nil && changeset.WorktreePath != nil && latest != nil {
+		stale = stringPtrValue(latest.EvaluatedHeadSHA) != stringPtrValue(changeset.HeadSHA)
+	}
 	needsRun := errors.Is(err, pgx.ErrNoRows) ||
 		latest == nil ||
 		latest.Status == models.PRReadinessRunStatusQueued ||
-		latest.Status == models.PRReadinessRunStatusRunning ||
-		latest.EvaluatedWorkspaceRevision != session.WorkspaceRevision ||
-		stringPtrValue(latest.EvaluatedSnapshotKey) != stringPtrValue(session.SnapshotKey)
+		latest.Status == models.PRReadinessRunStatusRunning || stale
 	if !needsRun {
 		return false
 	}
@@ -3293,6 +3466,8 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 		OrgID:             orgID,
 		Session:           session,
 		TriggeredByUserID: userID,
+		ChangesetID:       optionalChangesetID(changeset),
+		ChangesetHeadSHA:  optionalChangesetHeadSHA(changeset),
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "READINESS_ENQUEUE_FAILED", "failed to enqueue PR readiness checks", err)
@@ -3300,6 +3475,21 @@ func (h *SessionHandler) maybeAutoRunPRReadinessOnCreatePR(w http.ResponseWriter
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "readiness_queued", "readiness_run_id": run.ID})
 	return true
+}
+
+func optionalChangesetID(changeset *models.SessionChangeset) *uuid.UUID {
+	if changeset == nil {
+		return nil
+	}
+	id := changeset.ID
+	return &id
+}
+
+func optionalChangesetHeadSHA(changeset *models.SessionChangeset) *string {
+	if changeset == nil {
+		return nil
+	}
+	return changeset.HeadSHA
 }
 
 // CreateBranch handles POST /sessions/{id}/branch — enqueues a job that
@@ -3438,8 +3628,17 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
 	}
+	targetChangeset, err := h.requestedChangeset(r.Context(), orgID, sessionID, r.URL.Query().Get("changeset_id"))
+	if err != nil {
+		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+		return
+	}
+	if targetChangeset.RestackConfirmationRequired {
+		writeError(w, r, http.StatusConflict, "RESTACK_CONFIRMATION_REQUIRED", "review and confirm the restack delta before pushing this pull request")
+		return
+	}
 
-	if session.PRPushState == models.PRPushStateFailed &&
+	if targetChangeset.IsPrimary && session.PRPushState == models.PRPushStateFailed &&
 		session.PRPushErrorCode == models.PRPushErrorCodeBranchDiverged {
 		writeError(w, r, http.StatusConflict, "PR_BRANCH_DIVERGED", ghservice.PushBranchDivergedPRMessage)
 		return
@@ -3449,7 +3648,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		writeError(w, r, http.StatusGone, "SNAPSHOT_EXPIRED", ghservice.SnapshotExpiredPRMessage)
 		return
 	}
-	if session.SnapshotKey == nil || *session.SnapshotKey == "" {
+	if targetChangeset.WorktreePath == nil && (session.SnapshotKey == nil || *session.SnapshotKey == "") {
 		writeError(w, r, http.StatusConflict, "SNAPSHOT_NOT_CAPTURED", ghservice.SnapshotNotCapturedPRMessage)
 		return
 	}
@@ -3457,13 +3656,21 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	switch session.PRPushState {
-	case models.PRPushStateQueued, models.PRPushStatePushing:
-		writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
-		return
+	if targetChangeset.IsPrimary {
+		switch session.PRPushState {
+		case models.PRPushStateQueued, models.PRPushStatePushing:
+			writeError(w, r, http.StatusConflict, "PR_PUSH_IN_FLIGHT", "a push to this PR is already in progress")
+			return
+		}
 	}
 
-	pr, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
+	var pr models.PullRequest
+	var prErr error
+	if targetChangeset.IsPrimary {
+		pr, prErr = h.pullRequestStore.GetPrimaryBySessionID(r.Context(), orgID, sessionID)
+	} else {
+		pr, prErr = h.pullRequestStore.GetByChangesetID(r.Context(), orgID, sessionID, targetChangeset.ID)
+	}
 	if prErr != nil {
 		if errors.Is(prErr, pgx.ErrNoRows) {
 			writeError(w, r, http.StatusNotFound, "NO_PR", "this session has no pull request to push to; create one first")
@@ -3502,7 +3709,7 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if !h.requirePRReadinessForBuilder(w, r, orgID, session) {
+	if !h.requirePRReadinessForBuilder(w, r, orgID, session, &targetChangeset) {
 		return
 	}
 
@@ -3527,10 +3734,13 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
 	}
+	if targetChangeset.WorktreePath != nil {
+		payload["changeset_id"] = targetChangeset.ID.String()
+	}
 	if authorMode != prAuthorModeAuto {
 		payload["author_mode"] = string(authorMode)
 	}
-	dedupeKey := fmt.Sprintf("push_pr:%s", sessionID)
+	dedupeKey := fmt.Sprintf("push_pr:%s", targetChangeset.ID)
 	// Atomically transition pr_push_state from any non-in-flight state to
 	// 'queued'. The in-memory precheck above rejects the obvious case where
 	// the column is already queued/pushing, but two concurrent requests can
@@ -3545,6 +3755,9 @@ func (h *SessionHandler) PushChangesToPR(w http.ResponseWriter, r *http.Request)
 		payload,
 		dedupeKey,
 		func(ctx context.Context, sessions *db.SessionStore, _ *db.SessionChangesetStore) (bool, error) {
+			if !targetChangeset.IsPrimary {
+				return true, nil
+			}
 			return sessions.TryMarkPRPushQueued(ctx, orgID, sessionID)
 		},
 	)
@@ -3881,6 +4094,7 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var body struct {
 		Message                 string                         `json:"message"`
+		ChangesetID             string                         `json:"changeset_id"`
 		Images                  []string                       `json:"images"`
 		References              []models.SessionInputReference `json:"references"`
 		Commands                []models.SessionInputCommand   `json:"commands"`
@@ -3940,6 +4154,23 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		return
+	}
+	var targetChangesetID *uuid.UUID
+	if strings.TrimSpace(body.ChangesetID) != "" {
+		target, targetErr := h.requestedChangeset(r.Context(), orgID, sessionID, body.ChangesetID)
+		if targetErr != nil {
+			if errors.Is(targetErr, errInvalidChangesetID) {
+				writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target")
+			} else {
+				writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+			}
+			return
+		}
+		if target.WorktreePath == nil || strings.TrimSpace(*target.WorktreePath) == "" {
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request must be materialized before the agent can edit it")
+			return
+		}
+		targetChangesetID = &target.ID
 	}
 
 	for _, command := range body.Commands {
@@ -4146,6 +4377,10 @@ func (h *SessionHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]string{
 		"session_id": sessionID.String(),
 		"org_id":     orgID.String(),
+	}
+	if targetChangesetID != nil {
+		payload["changeset_id"] = targetChangesetID.String()
+		payload["changeset_lease_holder_id"] = uuid.NewString()
 	}
 	if humanInputRequestID != nil {
 		payload["human_input_request_id"] = humanInputRequestID.String()
