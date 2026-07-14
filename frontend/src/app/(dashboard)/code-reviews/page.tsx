@@ -46,6 +46,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
@@ -1095,29 +1096,23 @@ function OutcomeControl({
   ];
 
   return (
-    <div className="grid gap-2 rounded-md border border-border p-2 md:grid-cols-3">
-      {options.map((option) => {
-        const active = option.value === selected;
-        return (
-          <Button
-            key={option.value}
-            type="button"
-            variant={active ? "secondary" : "ghost"}
-            className="h-auto justify-start whitespace-normal px-3 py-3 text-left"
-            disabled={disabled}
-            aria-pressed={active}
-            onClick={() => {
-              if (!active) onChange(option.value);
-            }}
-          >
-            <span className="flex min-w-0 flex-col gap-1">
-              <span className="text-sm font-medium">{option.title}</span>
-              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
-            </span>
-          </Button>
-        );
-      })}
-    </div>
+    <RadioGroup
+      value={selected}
+      disabled={disabled}
+      aria-label="Outcome"
+      className="grid gap-3 md:grid-cols-3"
+      onValueChange={(value) => onChange(value as "disabled" | "comment" | "approve")}
+    >
+      {options.map((option) => (
+        <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
+          <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-sm font-medium text-foreground">{option.title}</span>
+            <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
+          </span>
+        </Label>
+      ))}
+    </RadioGroup>
   );
 }
 
