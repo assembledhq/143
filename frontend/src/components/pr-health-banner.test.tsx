@@ -357,6 +357,11 @@ describe("PRHealthBanner", () => {
     expect(moreActions).toHaveAttribute("data-size", "icon-sm");
     expect(moreActions).toHaveClass("size-10", "sm:size-7", "rounded-l-none");
     expect(moreActions).not.toHaveClass("h-7", "w-7");
+    expect(moreActions.closest("[data-slot='button-group']")).toHaveClass(
+      "h-10",
+      "sm:h-7",
+      "[&_[data-slot=button]]:!h-full",
+    );
 
     await userEvent.setup().click(moreActions);
     const menuItem = await screen.findByRole("menuitem", { name: "Merge when ready" });

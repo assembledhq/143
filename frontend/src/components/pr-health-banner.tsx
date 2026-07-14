@@ -7,6 +7,7 @@ import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { Card, CardContent } from "@/components/ui/card";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -266,7 +267,7 @@ export function PRHealthBanner({
                 )}
                 <div className="flex flex-wrap gap-2">
                   {canShowMergeButton && (
-                    <div className="inline-flex">
+                    <ButtonGroup size="sm">
                       <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
                         <Button
                           size="sm"
@@ -314,11 +315,11 @@ export function PRHealthBanner({
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
-                    </div>
+                    </ButtonGroup>
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="sm">
                         <Button
                           size="sm"
                           variant="outline"
@@ -356,12 +357,12 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="sm">
                         <Button
                           size="sm"
                           variant="outline"
@@ -399,7 +400,7 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowReviewAction && reviewAction && (
