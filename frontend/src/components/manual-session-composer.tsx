@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUp,
@@ -301,7 +301,6 @@ export function ManualSessionComposer({
   const composerCardRef = useRef<HTMLDivElement>(null);
   const draftSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDraftRef = useRef<Parameters<typeof saveDraft>[0] | null>(null);
-  const resizeFrameRef = useRef<number | null>(null);
   // Synchronous guard: React Query's isPending flips on the next render, so
   // rapid Enter presses can all pass the isPending check in the same tick.
   const submittingRef = useRef(false);
@@ -486,9 +485,6 @@ export function ManualSessionComposer({
   useEffect(() => {
     return () => {
       flushDraftSave();
-      if (resizeFrameRef.current !== null) {
-        cancelAnimationFrame(resizeFrameRef.current);
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -783,29 +779,22 @@ export function ManualSessionComposer({
     createManualSessionMutation.mutate();
   }
 
-  function resizeMessageInput() {
-    if (resizeFrameRef.current !== null) {
-      cancelAnimationFrame(resizeFrameRef.current);
+  const resizeMessageInput = useCallback((input?: HTMLTextAreaElement) => {
+    const element = input ?? messageInputRef.current;
+    if (!element) {
+      return;
     }
 
-    resizeFrameRef.current = requestAnimationFrame(() => {
-      resizeFrameRef.current = null;
-      const element = messageInputRef.current;
-      if (!element) {
-        return;
-      }
+    const maxHeight = 240;
+    element.style.height = "auto";
+    const nextHeight = Math.min(element.scrollHeight, maxHeight);
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, []);
 
-      const maxHeight = 240;
-      element.style.height = "auto";
-      const nextHeight = Math.min(element.scrollHeight, maxHeight);
-      element.style.height = `${nextHeight}px`;
-      element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
-    });
-  }
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     resizeMessageInput();
-  }, [message]);
+  }, [message, resizeMessageInput]);
 
   useEffect(() => {
     if (!messageInputRef.current || document.activeElement !== messageInputRef.current) {
@@ -1236,6 +1225,7 @@ export function ManualSessionComposer({
                 autoFocus={autoFocus}
                 onChange={(event) => {
                   updateMessage(event.target.value, event.target.selectionStart ?? event.target.value.length);
+                  resizeMessageInput(event.currentTarget);
                 }}
                 onPaste={handlePaste}
                 onBlur={flushDraftSave}
@@ -1355,7 +1345,7 @@ export function ManualSessionComposer({
                 isUploading={isUploading}
                 onRemove={removeAttachment}
                 size="md"
-                className="pb-3"
+                className="pt-2 pb-3"
               />
 
               {showImageInput && (
