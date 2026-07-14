@@ -171,7 +171,7 @@ Choose verification by blast radius:
 
 ## Related Docs
 
-- [future/117-visual-system-and-product-polish.md](future/117-visual-system-and-product-polish.md)
+- [implemented/117-visual-system-and-product-polish.md](implemented/117-visual-system-and-product-polish.md)
 - [implemented/45-global-command-palette.md](implemented/45-global-command-palette.md)
 - [implemented/55-toast-notifications.md](implemented/55-toast-notifications.md)
 - [implemented/73-session-keyboard-navigation.md](implemented/73-session-keyboard-navigation.md)
