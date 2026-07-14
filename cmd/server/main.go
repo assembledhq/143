@@ -528,6 +528,13 @@ func main() {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
+					if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+						concreteOrchestrator.SetSuccessfulTurnVerifier(preview.NewSuccessfulTurnVerifier(
+							previewManager,
+							previewStore,
+							db.NewPreviewVerificationRunStore(pool),
+						))
+					}
 					var prewarmDependencyCache preview.PreviewPathCache
 					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
 						prewarmDependencyCache = pathCache

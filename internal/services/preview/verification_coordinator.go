@@ -37,6 +37,11 @@ type VerificationRequest struct {
 	Config            models.PreviewVerificationConfig
 	Observer          VerificationObserver
 	Fixer             VerificationFixer
+	// SkipReason records an orchestration-level reason that prevents preview
+	// verification before a repository policy can be evaluated (for example,
+	// when the session has no configured preview). It must never be represented
+	// as a successful run.
+	SkipReason string
 }
 
 type VerificationCoordinator struct{ runs VerificationRunWriter }
@@ -47,6 +52,9 @@ func NewVerificationCoordinator(runs VerificationRunWriter) *VerificationCoordin
 
 func (c *VerificationCoordinator) Run(ctx context.Context, request VerificationRequest) (models.PreviewVerificationRun, error) {
 	decision := PlanVerification(request.Diff, request.Config)
+	if request.SkipReason != "" {
+		decision = VerificationDecision{SkipReason: request.SkipReason}
+	}
 	plan := decision.Plan
 	if plan == nil {
 		// A nil slice marshals to JSON null, which violates the plan jsonb array
