@@ -288,9 +288,9 @@ export function PRHealthBanner({
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
-                              size="icon"
+                              size="icon-sm"
                               variant="default"
-                              className="h-7 w-7 rounded-l-none"
+                              className="rounded-l-none"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"
@@ -338,9 +338,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-sm"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More resolve conflicts actions"}
                                 aria-label="More resolve conflicts actions"
@@ -381,9 +381,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-sm"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More fix tests actions"}
                                 aria-label="More fix tests actions"

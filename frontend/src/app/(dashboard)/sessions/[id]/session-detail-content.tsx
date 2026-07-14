@@ -6465,7 +6465,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
@@ -6482,8 +6482,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon"
-                          className="h-7 w-7 rounded-l-none"
+                          size="icon-sm"
+                          className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
                           title="More publish actions"
