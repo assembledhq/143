@@ -261,7 +261,7 @@ function SidebarBody({
               aria-current={isActive ? "page" : undefined}
               className={cn(
                 "relative flex items-center gap-2.5 rounded-md px-2.5 font-medium transition-all duration-[175ms] active:bg-sidebar-accent",
-                collapsed && "justify-center px-0",
+                collapsed && "justify-center gap-0 px-0",
                 navItemClasses,
                 isActive
                   ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
@@ -306,7 +306,7 @@ function SidebarBody({
                 title={collapsed ? user.name : undefined}
                 className={cn(
                   "w-full justify-start gap-2 rounded-md px-2.5 font-medium transition-all duration-150 text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
-                  collapsed && "justify-center px-0",
+                  collapsed && "justify-center gap-0 px-0",
                   isMobile ? "h-11 text-sm" : "h-8 text-xs"
                 )}
               >

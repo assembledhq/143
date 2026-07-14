@@ -25,6 +25,14 @@ import {
   CollapsibleTrigger,
   CollapsibleContent,
 } from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 interface SettingsItem {
   label: string;
@@ -144,8 +152,71 @@ export function SidebarSettingsSection({
     localStorage.setItem(STORAGE_KEY, String(isOpen));
   }, [isOpen]);
 
+  const visibleGroups = settingsGroups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) => {
+        if (item.adminOnly && userRole !== "admin") return false;
+        if (item.hideForRoles?.includes(userRole ?? "")) return false;
+        return true;
+      }),
+    }))
+    .filter((group) => group.items.length > 0);
+
+  if (collapsed) {
+    return (
+      <DropdownMenu>
+        <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-sidebar-border/70" />
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            title="Settings"
+            aria-label="Settings"
+            variant="ghost"
+            className={cn(
+              "relative flex h-auto w-full items-center justify-center rounded-md px-0 py-[7px] font-medium transition-colors duration-[175ms] type-dense",
+              onSettingsPage
+                ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
+                : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground",
+            )}
+          >
+            <Settings className="h-4 w-4 shrink-0" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          side="right"
+          align="start"
+          sideOffset={8}
+          className="w-56 max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))]"
+        >
+          {visibleGroups.map((group, groupIndex) => (
+            <div key={group.label ?? groupIndex}>
+              {groupIndex > 0 && <DropdownMenuSeparator />}
+              {group.label && (
+                <DropdownMenuLabel className="text-xs uppercase tracking-wider text-muted-foreground">
+                  {group.label}
+                </DropdownMenuLabel>
+              )}
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <DropdownMenuItem key={item.href} asChild>
+                    <Link href={item.href} onClick={onNavigate} className={cn(isItemActive(pathname, item.href) && "bg-accent text-accent-foreground")}>
+                      <Icon className="h-4 w-4" />
+                      {item.label}
+                    </Link>
+                  </DropdownMenuItem>
+                );
+              })}
+            </div>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    );
+  }
+
   return (
-    <Collapsible open={!collapsed && isOpen} onOpenChange={setIsOpen}>
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       <div data-testid="sidebar-settings-divider" className="mx-0 my-1 border-t border-sidebar-border/70" />
       <CollapsibleTrigger asChild>
         <Button
@@ -155,20 +226,18 @@ export function SidebarSettingsSection({
           className={cn(
             "relative flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-all duration-[175ms]",
             isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] type-dense",
-            collapsed && "justify-center px-0",
             onSettingsPage
               ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
               : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-foreground"
           )}
         >
           <Settings className="h-4 w-4 shrink-0" />
-          <span className={cn("flex-1 overflow-hidden whitespace-nowrap text-left transition-[max-width,opacity] duration-150", collapsed ? "max-w-0 opacity-0" : "max-w-48 opacity-100")}>Settings</span>
+          <span className="flex-1 overflow-hidden whitespace-nowrap text-left">Settings</span>
           <ChevronRight
             className={cn(
               "shrink-0 opacity-50 transition-transform duration-200",
               isMobile ? "h-4 w-4" : "h-3.5 w-3.5",
               isOpen && "rotate-90",
-              collapsed && "hidden",
             )}
           />
         </Button>
@@ -179,14 +248,7 @@ export function SidebarSettingsSection({
       )}>
         <div className="min-h-0">
           <div className="mt-0.5 space-y-0.5">
-            {settingsGroups.map((group, groupIndex) => {
-              const visibleItems = group.items.filter((item) => {
-                if (item.adminOnly && userRole !== "admin") return false;
-                if (item.hideForRoles?.includes(userRole ?? "")) return false;
-                return true;
-              });
-              if (visibleItems.length === 0) return null;
-
+            {visibleGroups.map((group, groupIndex) => {
               return (
                 <div key={groupIndex}>
                   {group.label && (
@@ -199,7 +261,7 @@ export function SidebarSettingsSection({
                       {group.label}
                     </div>
                   )}
-                  {visibleItems.map((item) => {
+                  {group.items.map((item) => {
                     const active = isItemActive(pathname, item.href);
                     const Icon = item.icon;
                     return (
