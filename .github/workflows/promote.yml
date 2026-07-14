@@ -1,0 +1,321 @@
+# Promote a soaked main SHA to the stable plane and cut a versioned release.
+# See docs/design/118-canary-stable-release-channels.md.
+#
+# Routine promotion: run with a SHA (or leave default) and bump=minor.
+# Hotfix line:       run with the hotfix SHA and bump=patch.
+# Rollback:          run with an EXISTING release tag as ref — the workflow
+#                    redeploys that release, re-marks it "latest", and moves
+#                    the stable branch back; no new version is minted.
+#
+# Tag-after-verify is deliberate: the tag + GitHub Release are only cut after
+# the fleet deploy verifies green, so the version ledger only ever contains
+# releases that actually reached customers.
+name: Promote Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "main SHA to promote, or an existing release tag (vX.Y.Z) to roll back to"
+        required: true
+      bump:
+        description: "Version bump for this promotion"
+        type: choice
+        default: minor
+        options: [minor, patch, major]
+      override_soak:
+        description: "Skip the soak-age check (requires reason)"
+        type: boolean
+        default: false
+      reason:
+        description: "Why this promotion is expedited (required with override_soak)"
+        required: false
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+
+concurrency:
+  # Same lock as deploy.yml: promotions queue behind in-flight canary deploys
+  # (and vice versa) instead of racing them on the fleet.
+  group: deploy-fleet
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'assembledhq/143'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # annotated tag, release, stable branch
+      packages: write # version-tag the GHCR images by reference
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # resolve arbitrary SHAs, tags, and commit ages
+
+      - name: Resolve ref and promotion mode
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$INPUT_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Rollback / re-promotion of an existing release.
+            if ! gh api "repos/$REPO/releases/tags/$INPUT_REF" --jq .tag_name >/dev/null; then
+              echo "ERROR: $INPUT_REF looks like a version tag but has no release." >&2
+              exit 1
+            fi
+            sha="$(git rev-list -n 1 "$INPUT_REF")"
+            echo "mode=rollback" >> "$GITHUB_OUTPUT"
+            echo "version=$INPUT_REF" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+            echo "Re-promoting existing release $INPUT_REF ($sha); no new version will be minted."
+            exit 0
+          fi
+          sha="$(git rev-parse "$INPUT_REF")"
+          echo "mode=promote" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Verify CI passed on the promoted SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          conclusion="$(gh api "repos/$REPO/commits/$SHA/check-runs?check_name=All%20Checks%20Pass" \
+            --jq '.check_runs[0].conclusion // empty')"
+          if [ "$conclusion" != "success" ]; then
+            echo "ERROR: 'All Checks Pass' is '$conclusion' (want success) on $SHA." >&2
+            exit 1
+          fi
+          echo "CI is green on $SHA."
+
+      - name: Enforce soak policy
+        if: steps.resolve.outputs.mode == 'promote'
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          OVERRIDE: ${{ inputs.override_soak }}
+          REASON: ${{ inputs.reason }}
+          SOAK_DAYS: ${{ vars.PROMOTE_SOAK_DAYS || '3' }}
+        run: |
+          set -euo pipefail
+          if [ "$OVERRIDE" = "true" ]; then
+            if [ -z "$REASON" ]; then
+              echo "ERROR: override_soak requires a reason." >&2
+              exit 1
+            fi
+            echo "Soak check overridden: $REASON"
+            exit 0
+          fi
+          commit_ts="$(git log -1 --format=%ct "$SHA")"
+          min_age=$(( SOAK_DAYS * 86400 ))
+          age=$(( $(date +%s) - commit_ts ))
+          if [ "$age" -lt "$min_age" ]; then
+            echo "ERROR: $SHA is $(( age / 3600 ))h old; the soak policy requires ${SOAK_DAYS}d on canary." >&2
+            echo "Re-run with override_soak=true and a reason to expedite." >&2
+            exit 1
+          fi
+          echo "Soak OK: commit is $(( age / 86400 ))d old (policy: ${SOAK_DAYS}d)."
+
+      - name: Compute next version
+        id: version
+        if: steps.resolve.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || echo "")"
+          if [ -z "$current" ]; then
+            next="v1.0.0" # first promotion seeds the ledger
+          else
+            IFS='.' read -r major minor patch <<< "${current#v}"
+            case "$BUMP" in
+              major) next="v$((major + 1)).0.0" ;;
+              minor) next="v${major}.$((minor + 1)).0" ;;
+              patch) next="v${major}.${minor}.$((patch + 1))" ;;
+              *) echo "ERROR: unknown bump '$BUMP'" >&2; exit 1 ;;
+            esac
+          fi
+          echo "Promoting ${current:-<none>} -> $next"
+          echo "version=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Verify images exist for the SHA
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for image in 143-server 143-sandbox 143-frontend; do
+            docker buildx imagetools inspect "ghcr.io/assembledhq/$image:$SHA" > /dev/null
+            echo "ghcr.io/assembledhq/$image:$SHA OK"
+          done
+
+      # Deploy the checkout of the promoted SHA, not workflow-trigger HEAD:
+      # deploy.sh syncs compose files and scripts from the working tree, and
+      # those must match the code being deployed.
+      - name: Check out the promoted SHA
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+
+      - name: Check out private secrets repo
+        uses: actions/checkout@v6
+        with:
+          repository: assembledhq/143-infra
+          ssh-key: ${{ secrets.INFRA_REPO_DEPLOY_KEY }}
+          path: .infra
+
+      - name: Install sops and age
+        run: |
+          curl -fsSL https://github.com/getsops/sops/releases/download/v3.9.4/sops-v3.9.4.linux.amd64 -o /usr/local/bin/sops
+          chmod +x /usr/local/bin/sops
+          curl -fsSL https://dl.filippo.io/age/latest?for=linux/amd64 | tar xz -C /usr/local/bin --strip-components=1
+
+      - name: Write SSH key and age key
+        run: |
+          mkdir -p ~/.ssh ~/.config/sops/age
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy-key
+          chmod 600 ~/.ssh/deploy-key
+          echo "${{ secrets.SOPS_AGE_KEY }}" > ~/.config/sops/age/keys.txt
+          chmod 600 ~/.config/sops/age/keys.txt
+
+      - name: Decrypt FLEET_HOSTS
+        run: |
+          set -euo pipefail
+          fleet_hosts="$(SOPS_AGE_KEY_FILE=~/.config/sops/age/keys.txt \
+            sops --decrypt --input-type dotenv --output-type dotenv .infra/.env.production.enc \
+            | grep '^FLEET_HOSTS=' | cut -d= -f2-)"
+          if [ -z "$fleet_hosts" ]; then
+            echo "ERROR: FLEET_HOSTS not present in .infra/.env.production.enc"
+            exit 1
+          fi
+          echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
+
+      - name: Deploy stable plane
+        env:
+          WORKER_DEPLOY_DETACH: "1"
+          WORKER_BLUE_GREEN_PORT_START: "8080"
+          WORKER_BLUE_GREEN_PORT_END: "8087"
+          DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
+          SECRETS_DIR: ${{ github.workspace }}/.infra
+          # The stable plane never migrates: verify asserts the schema (owned
+          # by the canary pipeline) is new enough and that this ref satisfies
+          # every recorded destructive floor.
+          APP_SCHEMA_MODE: verify
+          DEPLOY_REASON: "stable promotion ${{ steps.version.outputs.version || steps.resolve.outputs.version }}"
+          DEPLOY_REQUESTED_BY: "promote.yml (${{ github.actor }})"
+        run: |
+          chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
+          ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ steps.resolve.outputs.sha }}" app,worker
+
+      - name: Upload per-host deploy logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: promote-fleet-logs
+          path: /tmp/deploy-fleet-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify worker rollover
+        env:
+          DEPLOY_SHA: ${{ steps.resolve.outputs.sha }}
+          VERIFY_TIMEOUT_SECONDS: "360"
+          POLL_INTERVAL_SECONDS: "10"
+        run: |
+          set -euo pipefail
+          WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep '^worker:' | cut -d: -f2 || true)"
+          if [ -z "$WORKERS" ]; then
+            echo "no stable worker hosts in fleet — nothing to verify"
+            exit 0
+          fi
+          short_sha="${DEPLOY_SHA:0:7}"
+          status_path="/var/log/143/deploy-worker-${short_sha}.status"
+          ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i ~/.ssh/deploy-key)
+          overall_rc=0
+          for host in $WORKERS; do
+            deadline=$(( $(date +%s) + VERIFY_TIMEOUT_SECONDS ))
+            while :; do
+              status="$(ssh "${ssh_opts[@]}" deploy@"$host" "cat '$status_path' 2>/dev/null || true")"
+              case "$status" in
+                ok) echo "✓ worker $host: rollover succeeded"; break ;;
+                fail*)
+                  echo "✗ worker $host: rollover FAILED: $status"
+                  overall_rc=1
+                  break
+                  ;;
+                *)
+                  if [ "$(date +%s)" -ge "$deadline" ]; then
+                    echo "✗ worker $host: rollover did not finish after ${VERIFY_TIMEOUT_SECONDS}s"
+                    overall_rc=1
+                    break
+                  fi
+                  sleep "$POLL_INTERVAL_SECONDS"
+                  ;;
+              esac
+            done
+          done
+          exit $overall_rc
+
+      # --- Everything below only runs after the fleet verified green. ---
+
+      - name: Cut release (tag + GitHub Release + image tags)
+        if: steps.resolve.outputs.mode == 'promote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Annotated tag (not lightweight): carries tagger/date/message and
+          # makes `git describe` useful. Protected by the v* tag ruleset.
+          git tag -a "$VERSION" "$SHA" -m "Stable release $VERSION (promoted from $SHA)"
+          git push origin "refs/tags/$VERSION"
+
+          # Version-tag the images by reference — no rebuild; byte-identical
+          # to the :sha images that soaked on canary.
+          for image in 143-server 143-sandbox 143-frontend; do
+            docker buildx imagetools create \
+              -t "ghcr.io/assembledhq/$image:$VERSION" \
+              "ghcr.io/assembledhq/$image:$SHA"
+          done
+
+          # The release marked "latest" is the authoritative stable pointer
+          # read by the canary destructive-migration gate and the
+          # cross-version CI job. generate-notes groups merged PRs per
+          # .github/release.yml.
+          gh release create "$VERSION" \
+            --target "$SHA" \
+            --title "$VERSION" \
+            --generate-notes \
+            --latest
+          echo "### Promoted $VERSION ($SHA)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release: $(gh release view "$VERSION" --json url --jq .url)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Re-mark rolled-back release as latest
+        if: steps.resolve.outputs.mode == 'rollback'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release edit "$VERSION" --latest
+          echo "### Rolled stable back to $VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fast-forward stable branch
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # The git-native mirror of the release pointer. --force because a
+          # rollback legitimately moves it backwards; the branch is owned by
+          # this workflow.
+          git push --force origin "$SHA:refs/heads/stable"
