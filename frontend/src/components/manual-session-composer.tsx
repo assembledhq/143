@@ -1345,7 +1345,7 @@ export function ManualSessionComposer({
                 isUploading={isUploading}
                 onRemove={removeAttachment}
                 size="md"
-                className="pt-2 pb-3"
+                className="pt-3 pb-1"
               />
 
               {showImageInput && (
