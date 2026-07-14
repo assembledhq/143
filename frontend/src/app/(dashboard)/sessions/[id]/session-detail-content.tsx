@@ -91,6 +91,8 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { ContextHeader } from "@/components/context-header";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -141,7 +143,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSplitStatus, ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -202,6 +204,16 @@ import {
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
+
+function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus | null): StatusTone {
+  if (status === "failed") return "destructive";
+  if (status === "awaiting_input") return "warning";
+  if (status === "needs_human_guidance") return "attention";
+  if (status === "pr_created" && prStatus === "closed") return "neutral";
+  if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
+  if (status === "running" || status === "idle") return "primary";
+  return "neutral";
+}
 
 // Defer the diff viewer until the user actually opens review mode. Saves
 // review-specific code from the initial session-detail bundle for the common
@@ -1527,22 +1539,25 @@ function SessionComposer({
       />
 
       <div
-        className="border-t border-border p-3 bg-background shrink-0"
+        className="shrink-0 border-t border-border bg-background/95 p-3"
         ref={composerCardRef}
         data-testid="session-composer-shell"
       >
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
-              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
-              <button
+            <div className="flex items-center gap-1.5 rounded-full border border-warning/20 bg-warning/8 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-warning" />
+              <span className="text-xs font-medium text-warning">Plan mode</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
                 onClick={() => onPlanModeChange(false)}
-                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                className="ml-0.5 h-4 w-4 rounded-full text-warning/65 hover:bg-warning/10 hover:text-warning"
                 title="Exit plan mode"
               >
                 &times;
-              </button>
+              </Button>
             </div>
             <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
           </div>
@@ -1553,8 +1568,8 @@ function SessionComposer({
           data-testid="session-composer-input-surface"
           {...fileDropzone.dropzoneProps}
           className={cn(
-            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
-            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            "rounded-xl border bg-surface-raised shadow-[0_10px_30px_rgb(36_34_28_/_8%)] transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15",
+            planMode ? "border-warning/25" : "border-border-strong",
             fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
           )}
         >
@@ -3383,6 +3398,99 @@ export function PullRequestList({
   );
 }
 
+export function ChangesetSplitPlanner({ sessionID, changesets }: { sessionID: string; changesets: ChangesetSummary[] }) {
+  const queryClient = useQueryClient();
+  const splitKey = ["session", sessionID, "changeset-split"] as const;
+  const splitQuery = useQuery({
+    queryKey: splitKey,
+    queryFn: () => api.sessions.getChangesetSplitStatus(sessionID),
+    enabled: true,
+    retry: false,
+  });
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: splitKey });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(sessionID) });
+  };
+  const action = useMutation({
+    mutationFn: async (run: () => Promise<unknown>) => run(),
+    onSuccess: refresh,
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Split action failed"),
+  });
+  if (splitQuery.isError) {
+    return (
+      <Card className="border-border/60">
+        <CardContent className="flex items-center justify-between gap-3 p-4">
+          <div><p className="text-sm font-medium">Need smaller pull requests?</p><p className="text-xs text-muted-foreground">Freeze the current diff and split it into reviewable branches.</p></div>
+          <Button size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.initializeChangesetSplit(sessionID))}>Split into PRs</Button>
+        </CardContent>
+      </Card>
+    );
+  }
+  const status: ChangesetSplitStatus | undefined = splitQuery.data?.data;
+  if (!status) return null;
+  if (status.status === "accepted") {
+    return <Card className="border-border/60"><CardContent className="p-4"><p className="text-sm font-medium">Split accepted</p><p className="text-xs text-muted-foreground">The original session diff is archived and the pull request branches are now the session rollup.</p></CardContent></Card>;
+  }
+  const candidates = changesets.filter((changeset) => !changeset.is_primary);
+  const ownerByPath = new Map(status.assignments.flatMap((assignment) => assignment.paths.map((path) => [path, assignment.changeset_id] as const)));
+  const omittedPaths = new Set(status.omissions.map((omission) => omission.path));
+  const assign = async (path: string, nextOwner: string) => {
+    const previous = ownerByPath.get(path);
+    if (previous && previous !== nextOwner) {
+      const paths = status.assignments.find((assignment) => assignment.changeset_id === previous)?.paths.filter((item) => item !== path) ?? [];
+      await api.sessions.replaceChangesetSplitPaths(sessionID, previous, paths);
+    }
+    if (nextOwner === "__omit") {
+      await api.sessions.replaceChangesetSplitOmissions(sessionID, [
+        ...status.omissions.filter((omission) => omission.path !== path).map(({ path: omittedPath, reason }) => ({ path: omittedPath, reason })),
+        { path, reason: "Explicitly omitted while accepting the split" },
+      ]);
+      return;
+    }
+    if (omittedPaths.has(path)) {
+      await api.sessions.replaceChangesetSplitOmissions(sessionID, status.omissions.filter((omission) => omission.path !== path).map(({ path: omittedPath, reason }) => ({ path: omittedPath, reason })));
+    }
+    const paths = status.assignments.find((assignment) => assignment.changeset_id === nextOwner)?.paths ?? [];
+    await api.sessions.replaceChangesetSplitPaths(sessionID, nextOwner, [...paths, path]);
+  };
+  return (
+    <Card className="border-border/60" data-testid="changeset-split-planner">
+      <CardHeader className="p-4 pb-2"><CardTitle className="flex items-center justify-between text-sm"><span>Split progress</span><Badge variant={status.complete ? "default" : "secondary"}>{status.verification === "verified" ? "Verified" : "Planning"}</Badge></CardTitle></CardHeader>
+      <CardContent className="space-y-3 p-4 pt-1">
+        <p className="text-xs text-muted-foreground">{status.source_paths.length - status.unassigned_paths.length} of {status.source_paths.length} files accounted for</p>
+        <div className="max-h-64 space-y-1 overflow-y-auto">
+          {status.source_paths.map((path) => (
+            <div key={path} className="flex items-center gap-2 rounded-md border border-border p-2">
+              <span className="min-w-0 flex-1 truncate text-xs" title={path}>{path}</span>
+              <Select value={ownerByPath.get(path) ?? (omittedPaths.has(path) ? "__omit" : "unassigned")} onValueChange={(value) => value !== "unassigned" && action.mutate(() => assign(path, value))}>
+                <SelectTrigger className="h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectItem value="unassigned">Unassigned</SelectItem><SelectItem value="__omit">Omit with confirmation</SelectItem>{candidates.map((changeset) => <SelectItem key={changeset.id} value={changeset.id}>{changeset.title}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          ))}
+        </div>
+        {(status.duplicates.length > 0 || status.conflicts.length > 0 || status.unexpected_paths.length > 0) && <ErrorNotice title={`${status.duplicates.length} duplicate, ${status.conflicts.length} conflicting, and ${status.unexpected_paths.length} unexpected files require attention.`} />}
+        <div className="space-y-1">
+          {candidates.map((changeset, index) => (
+            <div key={changeset.id} className="flex items-center gap-2 text-xs">
+              <span className="min-w-0 flex-1 truncate">PR {index + 1}: {changeset.title}</span>
+              {index > 0 && !changeset.worktree_path && !candidates[index - 1].worktree_path && <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.foldChangeset(sessionID, changeset.id, candidates[index - 1].id))}>Fold up</Button>}
+              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={index === 0 || action.isPending} aria-label={`Move ${changeset.title} up`} onClick={() => action.mutate(() => { const ids = candidates.map((item) => item.id); [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]]; return api.sessions.reorderChangesets(sessionID, ids); })}><ArrowUp className="h-3.5 w-3.5" /></Button>
+              <Button size="icon" variant="ghost" className="h-7 w-7" disabled={index === candidates.length - 1 || action.isPending} aria-label={`Move ${changeset.title} down`} onClick={() => action.mutate(() => { const ids = candidates.map((item) => item.id); [ids[index], ids[index + 1]] = [ids[index + 1], ids[index]]; return api.sessions.reorderChangesets(sessionID, ids); })}><ArrowDown className="h-3.5 w-3.5" /></Button>
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.createChangeset(sessionID, { title: `Pull request ${candidates.length + 1}` }))}><Plus className="h-3.5 w-3.5" />Add PR</Button>
+          {candidates.filter((changeset) => !changeset.worktree_path).map((changeset) => <Button key={changeset.id} size="sm" variant="outline" disabled={action.isPending} onClick={() => action.mutate(() => api.sessions.materializeChangeset(sessionID, changeset.id))}>Materialize {changeset.title}</Button>)}
+          <Button size="sm" variant="outline" disabled={action.isPending || candidates.some((changeset) => !changeset.worktree_path)} onClick={() => action.mutate(() => api.sessions.verifyChangesetSplit(sessionID))}>Verify split</Button>
+          <Button size="sm" disabled={action.isPending || !status.complete} onClick={() => action.mutate(() => api.sessions.acceptChangesetSplit(sessionID))}>Accept split</Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 function getDefaultReviewAgentType(sessionAgentType?: string): string {
   return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
 }
@@ -3693,7 +3801,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   // changeset_id would route the backend to GetByChangesetID, which cannot
   // match legacy PR rows whose changeset_id is still NULL. Only non-primary
   // slots, whose PRs always carry a changeset_id, are looked up by changeset.
-  const selectedChangesetPRParam = selectedIsPrimary ? undefined : selectedChangeset?.id;
+  const selectedBranchChangesetID = selectedIsPrimary ? undefined : selectedChangeset?.id;
   const changesetSessionIDRef = useRef(id);
   useEffect(() => {
     const syncSelectionFromURL = () => setSelectedChangesetID(new URL(window.location.href).searchParams.get("changeset"));
@@ -3707,14 +3815,14 @@ export function SessionDetailContent({ id }: { id: string }) {
     void setChangesetParam(null);
   }, [id, setChangesetParam]);
   useEffect(() => {
-    if (selectedIsPrimary || centerMode !== "review") return;
+    if (selectedIsPrimary || selectedChangeset?.worktree_path || centerMode !== "review") return;
     exitReview();
     setDetailTab("changes");
     setShowDetailPanel(true);
     if (isMobileReviewViewport) {
       setMobileDetailOpen(true);
     }
-  }, [centerMode, exitReview, isMobileReviewViewport, selectedIsPrimary]);
+  }, [centerMode, exitReview, isMobileReviewViewport, selectedChangeset?.worktree_path, selectedIsPrimary]);
   // Tab title from whatever payload is available — the provisional row's
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
@@ -3746,12 +3854,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     error: diffError,
     refetch: refetchDiff,
   } = useQuery({
-    queryKey: queryKeys.sessions.diff(id),
+    queryKey: queryKeys.sessions.diff(id, selectedBranchChangesetID),
     queryFn: () => {
       if (!diffRevisionKey) {
         fetchedDiffBeforeRevisionRef.current = true;
       }
-      return api.sessions.getDiff(id);
+      return api.sessions.getDiff(id, selectedBranchChangesetID);
     },
     enabled: shouldLoadDiff,
     staleTime: Infinity,
@@ -4190,8 +4298,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   // transition within milliseconds, and the SSE polling fallback re-reads the
   // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
-    queryKey: queryKeys.sessions.pr(id, selectedChangesetPRParam),
-    queryFn: () => api.sessions.getPR(id, selectedChangesetPRParam),
+    queryKey: queryKeys.sessions.pr(id, selectedBranchChangesetID),
+    queryFn: () => api.sessions.getPR(id, selectedBranchChangesetID),
     enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
@@ -4583,18 +4691,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!session,
   });
   const { data: readinessData } = useQuery({
-    queryKey: queryKeys.sessions.readiness(id),
-    queryFn: () => api.sessions.getReadiness(id),
-    enabled: !!session && selectedIsPrimary,
+    queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id),
+    queryFn: () => api.sessions.getReadiness(id, selectedChangeset?.id),
+    enabled: !!session && (selectedIsPrimary || !!selectedChangeset?.worktree_path),
     refetchInterval: (query) => {
       const status = query.state.data?.data.latest?.status;
       return status === "queued" || status === "running" ? pollMs(3000) : false;
     },
   });
   const runReadinessMutation = useMutation({
-    mutationFn: () => api.sessions.runReadiness(id),
+    mutationFn: () => api.sessions.runReadiness(id, selectedChangeset?.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id) });
       toast.success("Readiness checks queued");
     },
     onError: (err) => {
@@ -4805,7 +4913,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness?.status === "running" ||
     runReadinessMutation.isPending;
   const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessCheckDisabled = readinessRunning || isRunning || !selectedIsPrimary;
+  const readinessCheckDisabled = readinessRunning || isRunning || (!selectedIsPrimary && !selectedChangeset?.worktree_path);
 
   // Readiness findings, grouped with role-aware enforcement so the merged
   // Review card can surface blockers, bypasses, and the review packet inline.
@@ -6439,7 +6547,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
       <TabsContent value="changes" className="flex-1 min-h-0">
         <ChangesTab
-          filteredFiles={selectedIsPrimary ? visibleFilteredFiles : []}
+          filteredFiles={visibleFilteredFiles}
           activeFileIndex={activeFileIndex}
           onFileSelect={setActiveFileIndex}
           onOpenReview={openReview}
@@ -6473,6 +6581,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               void setChangesetParam(changesetID);
             }}
           />
+          <ChangesetSplitPlanner sessionID={id} changesets={changesets} />
           {hasMultipleChangesets && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">
@@ -6496,7 +6605,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 {!selectedChangeset.is_primary && (
                   <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
-                    Changes, preview, readiness, review, and push become available after branch materialization.
+                    {selectedChangeset.worktree_path ? "Changes and readiness target this pull request worktree. Publishing and targeted editing arrive in the next phase." : "Changes, preview, readiness, review, and push become available after branch materialization."}
                   </p>
                 )}
               </CardContent>
@@ -6797,16 +6906,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
-            <div
+            <ContextHeader
               data-testid="session-main-header"
-              className={cn(
-                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
-                SESSION_HEADER_HEIGHT_CLASSNAME,
-              )}
-            >
+              className={cn("hidden shrink-0 md:block", SESSION_HEADER_HEIGHT_CLASSNAME)}
+              title={
               <div
                 data-testid="session-header-summary"
-                className="min-w-0 flex-1 overflow-hidden flex items-center gap-2"
+                className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden"
               >
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
@@ -6845,7 +6951,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 ) : (
                   <>
-                    <h1 className="text-sm font-medium text-foreground truncate">
+                    <h1 className="truncate font-display text-base font-semibold tracking-[-0.025em] text-foreground">
                       {sessionTitle(session)}
                     </h1>
                     <Button
@@ -6862,9 +6968,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </Button>
                   </>
                 )}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-                  {status.label}
-                </span>
+                <StatusLabel
+                  label={status.label}
+                  tone={sessionStatusTone(session.status, prStatus)}
+                  active={session.status === "running"}
+                  className="shrink-0"
+                />
                 {diffStats && (
                   <DiffStatsBadge
                     added={diffStats.added}
@@ -6875,6 +6984,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
+              }
+              actions={
               <div className="flex shrink-0 items-center gap-2" data-testid="session-header-actions">
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
@@ -6890,7 +7001,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 </DisabledTooltip>
               </div>
-            </div>
+              }
+            />
           </>
         ) : null}
 

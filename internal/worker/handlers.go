@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -489,6 +490,8 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("run_pr_readiness", newRunPRReadinessHandler(stores, services, logger))
+		w.Register(models.JobTypeMaterializeChangeset, newMaterializeChangesetHandler(stores, services, logger))
+		w.Register(models.JobTypeVerifyChangesetSplit, newVerifyChangesetSplitHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
@@ -855,6 +858,108 @@ type orchestratorService interface {
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
+	MaterializeChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, patch string) (agent.ChangesetMaterializationResult, error)
+	CaptureChangesetDiff(ctx context.Context, session *models.Session, changeset models.SessionChangeset) (agent.ChangesetDiffResult, error)
+}
+
+func newMaterializeChangesetHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID       string `json:"org_id"`
+			SessionID   string `json:"session_id"`
+			ChangesetID string `json:"changeset_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal materialize_changeset payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset session ID: %w", err)
+		}
+		changesetID, err := uuid.Parse(input.ChangesetID)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load materialization session: %w", err)
+		}
+		changeset, err := stores.SessionChangesets.BeginMaterialization(ctx, orgID, sessionID, changesetID)
+		if err != nil {
+			return fmt.Errorf("claim changeset materialization: %w", err)
+		}
+		patch, err := stores.SessionChangesets.GetAssignedPatch(ctx, orgID, sessionID, changesetID)
+		if err != nil {
+			// The row was already claimed as 'materializing' above; reset it so the
+			// changeset (and the session's single materialization slot) is not wedged
+			// permanently once the job dead-letters — BeginMaterialization can only
+			// re-claim a 'planned' row.
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to reset changeset materialization after patch load failure")
+			}
+			return err
+		}
+		result, err := services.Orchestrator.MaterializeChangeset(ctx, &session, changeset, patch)
+		if err != nil {
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to persist changeset materialization failure")
+			}
+			return err
+		}
+		if err := stores.SessionChangesets.CompleteMaterialization(ctx, orgID, sessionID, changesetID, result.WorkingBranch, result.WorktreePath, result.BaseHeadSHA, result.HeadSHA, result.Diff); err != nil {
+			return fmt.Errorf("persist changeset materialization: %w", err)
+		}
+		return nil
+	}
+}
+
+func newVerifyChangesetSplitHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID     string `json:"org_id"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal verify_changeset_split payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse verify split session ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load verify split session: %w", err)
+		}
+		summaries, err := stores.SessionChangesets.ListBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		for _, summary := range summaries {
+			if summary.IsPrimary || summary.WorktreePath == nil {
+				continue
+			}
+			changeset, err := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, summary.ID)
+			if err != nil {
+				return err
+			}
+			captured, err := services.Orchestrator.CaptureChangesetDiff(ctx, &session, changeset)
+			if err != nil {
+				return err
+			}
+			if err := stores.SessionChangesets.RecordMaterializedDiff(ctx, orgID, sessionID, changeset.ID, captured.HeadSHA, captured.Diff); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 // llmClient is the interface for LLM completion calls used by eval graders.
@@ -9437,15 +9542,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 
-		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
+		// Conservatively check for an explicit title pivot every ten turns.
+		// Non-fatal — title maintenance must not fail the agent run.
 		if services.TitleService != nil {
 			var completedThreadID *uuid.UUID
 			if hasThread {
 				threadIDLocal := threadID
 				completedThreadID = &threadIDLocal
 			}
-			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
-				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
+			if titleErr := services.TitleService.MaybeUpdateTitleForPivot(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
+				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to evaluate session title pivot")
 			}
 		}
 		autoRepairAfterContinue := true
@@ -10593,27 +10699,43 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("load readiness session: %w", err)
 		}
-		if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
-			return err
-		} else if loop != nil {
-			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+		changeset := models.SessionChangeset{ID: run.ChangesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true}
+		if stores.SessionChangesets != nil && run.ChangesetID != uuid.Nil {
+			changeset, err = stores.SessionChangesets.GetByID(ctx, orgID, sessionID, run.ChangesetID)
+			if err != nil {
+				return fmt.Errorf("load readiness changeset: %w", err)
 			}
-			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+		}
+		if run.EvaluatedHeadSHA != nil && (changeset.HeadSHA == nil || *run.EvaluatedHeadSHA != *changeset.HeadSHA) {
+			return stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, "Readiness became stale after pull request changes")
+		}
+		if changeset.IsPrimary {
+			if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
+				return err
+			} else if loop != nil {
+				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+				}
+				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			}
 		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
 			return err
 		}
 
-		latestLoop, reviewReady, err := ensureReadinessReviewLoop(ctx, stores, services, session, stringValue(run.EvaluatedSnapshotKey))
-		if err != nil {
-			return err
-		}
-		if !reviewReady {
-			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+		var latestLoop *models.SessionReviewLoop
+		if changeset.IsPrimary {
+			var reviewReady bool
+			latestLoop, reviewReady, err = ensureReadinessReviewLoop(ctx, stores, services, session, stringValue(run.EvaluatedSnapshotKey))
+			if err != nil {
+				return err
 			}
-			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			if !reviewReady {
+				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+				}
+				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			}
 		}
 
 		logs := []models.SessionLog{}
@@ -10625,7 +10747,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			}
 		}
 		changedFiles := []string{}
-		if stores.ThreadFileEvents != nil {
+		if !changeset.IsPrimary && changeset.MaterializedDiff != nil {
+			changedFiles = changedPathsFromPatch(*changeset.MaterializedDiff)
+		} else if stores.ThreadFileEvents != nil {
 			events, err := stores.ThreadFileEvents.ListBySession(ctx, orgID, sessionID, nil)
 			if err != nil {
 				return fmt.Errorf("load readiness changed files: %w", err)
@@ -10698,6 +10822,7 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			result.Checks[i].OrgID = orgID
 			result.Checks[i].RunID = readinessID
 			result.Checks[i].SessionID = sessionID
+			result.Checks[i].ChangesetID = run.ChangesetID
 		}
 		if err := stores.PRReadiness.CompleteRunWithChecks(ctx, orgID, readinessID, completed, result.Checks); err != nil {
 			return err
@@ -10708,6 +10833,24 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		return nil
 	}
+}
+
+func changedPathsFromPatch(diff string) []string {
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(diff, "\n") {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		if marker := strings.LastIndex(line, " b/"); marker >= 0 {
+			seen[strings.TrimSpace(line[marker+3:])] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 type customReadinessLLMResponse struct {

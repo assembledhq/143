@@ -64,8 +64,8 @@ function CopyButton({ value, label }: { value: string; label: string }) {
     <Button
       type="button"
       variant="ghost"
-      size="sm"
-      className="h-6 w-6 p-0 shrink-0"
+      size="icon"
+      className="size-11 shrink-0 sm:size-6"
       aria-label={`Copy ${label}`}
       onClick={() => {
         void copyText(value).then((ok) => {
@@ -206,7 +206,7 @@ export function VerifiedDomainsSection() {
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="h-7 self-start text-xs"
+                  className="min-h-11 self-start text-xs sm:min-h-0"
                   onClick={() => api.integrations.loginGitHub()}
                 >
                   <Github className="mr-1.5 h-3 w-3" />
@@ -279,7 +279,7 @@ export function VerifiedDomainsSection() {
               aria-label="Domain to verify"
             />
             <Button
-              className="h-9"
+              className="h-11 w-full sm:h-9 sm:w-auto"
               onClick={handleAdd}
               disabled={addMutation.isPending || !newDomain.trim()}
             >
@@ -297,7 +297,7 @@ export function VerifiedDomainsSection() {
             <div className="divide-y divide-border">
               {domains.map((d) => (
                 <div key={d.id} className="space-y-3 px-4 py-3">
-                  <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
                     <span className="truncate text-xs font-medium">{d.domain}</span>
                     {d.status === "verified" ? (
@@ -305,11 +305,12 @@ export function VerifiedDomainsSection() {
                     ) : (
                       <Badge variant="outline">Pending verification</Badge>
                     )}
-                    <div className="flex-1" />
+                    <div className="hidden flex-1 sm:block" />
                     {d.status === "pending" && (
                       <Button
                         size="sm"
                         variant="outline"
+                        className="min-h-11 sm:min-h-0"
                         disabled={verifyMutation.isPending && verifyMutation.variables === d.id}
                         onClick={() => verifyMutation.mutate(d.id)}
                       >
@@ -321,7 +322,7 @@ export function VerifiedDomainsSection() {
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                      className="size-11 p-0 text-destructive hover:text-destructive sm:size-7"
                       aria-label={`Remove ${d.domain}`}
                       disabled={removeMutation.isPending}
                       onClick={() => setRemoving(d)}
@@ -336,11 +337,11 @@ export function VerifiedDomainsSection() {
                         Add this TXT record to your DNS, then click Verify. DNS changes can
                         take a few minutes to propagate.
                       </p>
-                      <div className="grid gap-1.5 sm:grid-cols-[60px_1fr_auto] sm:items-center">
-                        <span className="text-muted-foreground">Name</span>
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 sm:grid-cols-[60px_1fr_auto]">
+                        <span className="col-span-2 text-muted-foreground sm:col-span-1">Name</span>
                         <code className="truncate font-mono text-xs">{d.dns_record_name}</code>
                         <CopyButton value={d.dns_record_name} label="record name" />
-                        <span className="text-muted-foreground">Value</span>
+                        <span className="col-span-2 text-muted-foreground sm:col-span-1">Value</span>
                         <code className="truncate font-mono text-xs">{d.dns_record_value}</code>
                         <CopyButton value={d.dns_record_value} label="record value" />
                       </div>

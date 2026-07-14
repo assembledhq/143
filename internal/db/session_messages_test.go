@@ -149,6 +149,40 @@ func TestSessionMessageStore_ListBySession_QueryError(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestSessionMessageStore_ListTitleContext(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	store := NewSessionMessageStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	now := time.Now()
+	columns := []string{"id", "session_id", "org_id", "thread_id", "user_id", "turn_number", "role", "content", "attachments", "references", "commands", "token_usage", "source", "created_at"}
+
+	mock.ExpectQuery("FROM session_messages WHERE org_id = .+ role = 'user' AND source = '' AND .+ ORDER BY turn_number ASC").
+		WithArgs(orgID, sessionID, threadID).
+		WillReturnRows(pgxmock.NewRows(columns).
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 0, "user", "Original task", nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("FROM session_messages WHERE org_id = .+ role = 'user' AND source = '' AND .+ turn_number > .+ ORDER BY turn_number DESC").
+		WithArgs(orgID, sessionID, threadID, 10, 2).
+		WillReturnRows(pgxmock.NewRows(columns).
+			AddRow(int64(3), sessionID, orgID, &threadID, nil, 12, "user", "Newest instruction", nil, nil, nil, nil, "", now).
+			AddRow(int64(2), sessionID, orgID, &threadID, nil, 11, "user", "Older instruction", nil, nil, nil, nil, "", now))
+
+	actual, err := store.ListTitleContext(context.Background(), orgID, sessionID, &threadID, 10, 2)
+	require.NoError(t, err, "bounded title context query should succeed")
+	expected := []models.SessionMessage{
+		{ID: 1, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, Role: models.MessageRoleUser, Content: "Original task", CreatedAt: now},
+		{ID: 2, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 11, Role: models.MessageRoleUser, Content: "Older instruction", CreatedAt: now},
+		{ID: 3, SessionID: sessionID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 12, Role: models.MessageRoleUser, Content: "Newest instruction", CreatedAt: now},
+	}
+	require.Equal(t, expected, actual, "title context should include the original request and bounded recent instructions in chronological order")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestSessionMessageStore_Delete(t *testing.T) {
 	t.Parallel()
 

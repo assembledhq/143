@@ -64,6 +64,12 @@ func TestPRAutoRepairMetrics_Record(t *testing.T) {
 	RecordPRAutoRepairRegret(ctx, "org-1", "acme/repo", "fix_tests", "thread_revert")
 }
 
+func TestSessionTitleMetrics_Record(t *testing.T) {
+	t.Parallel()
+
+	RecordSessionTitleDecision(context.Background(), "generated", "pivoted")
+}
+
 func TestNewMemoryMetrics(t *testing.T) {
 	t.Parallel()
 

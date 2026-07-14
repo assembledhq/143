@@ -14,6 +14,88 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
+func TestNormalizeSplitPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		paths    []string
+		expected []string
+	}{
+		{name: "sorts and deduplicates", paths: []string{"z.go", " a.go ", "z.go"}, expected: []string{"a.go", "z.go"}},
+		{name: "rejects paths outside workspace", paths: []string{"/etc/passwd", "../secret", "a/../secret", "ok/file.go"}, expected: []string{"ok/file.go"}},
+		{name: "drops empty paths", paths: []string{"", "  "}, expected: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, normalizeSplitPaths(tt.paths), "normalization should return safe stable repository paths")
+		})
+	}
+}
+
+func TestSplitDiffPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		diff     string
+		expected []string
+	}{
+		{
+			name: "extracts modified added deleted and renamed destination paths",
+			diff: "diff --git a/a.go b/a.go\n--- a/a.go\n+++ b/a.go\n" +
+				"diff --git a/old.go b/new.go\nsimilarity index 100%\nrename from old.go\nrename to new.go\n" +
+				"diff --git a/a.go b/a.go\n",
+			expected: []string{"a.go", "new.go"},
+		},
+		{name: "extracts quoted paths", diff: "diff --git \"a/docs/file name.md\" \"b/docs/file name.md\"\n--- \"a/docs/file name.md\"\n+++ \"b/docs/file name.md\"\n", expected: []string{"docs/file name.md"}},
+		{name: "ignores malformed headers", diff: "--- a/a.go\n+++ b/a.go\ndiff --git malformed\n", expected: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, splitDiffPaths(tt.diff), "diff parsing should return each source destination path once")
+		})
+	}
+}
+
+func TestSessionChangesetStoreGetSplitStatusRequiresMaterializedDiffs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		materialized *string
+		expected     models.ChangesetSplitVerification
+		complete     bool
+	}{
+		{name: "planned assignment is not complete", materialized: nil, expected: models.ChangesetSplitVerificationPlanned, complete: false},
+		{name: "matching materialized patch is verified", materialized: stringPtr("diff --git a/api.go b/api.go\n+code\n"), expected: models.ChangesetSplitVerificationVerified, complete: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create database mock")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, snapshotID, changesetID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			patch := "diff --git a/api.go b/api.go\n+code\n"
+			mock.ExpectQuery("SELECT p.status, p.source_diff_snapshot_id, d.diff").WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"status", "source_diff_snapshot_id", "diff"}).AddRow("draft", snapshotID, patch))
+			mock.ExpectQuery("SELECT c.id, p.path, c.materialized_diff").WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "path", "materialized_diff"}).AddRow(changesetID, "api.go", tt.materialized))
+			mock.ExpectQuery("SELECT path, reason, confirmed_by_user_id, created_at").WithArgs(orgID, sessionID).
+				WillReturnRows(pgxmock.NewRows([]string{"path", "reason", "confirmed_by_user_id", "created_at"}))
+			status, err := NewSessionChangesetStore(mock).GetSplitStatus(context.Background(), orgID, sessionID)
+			require.NoError(t, err, "split status should be derived from the frozen source and materialized diffs")
+			require.Equal(t, tt.expected, status.Verification, "verification state should reflect whether branch diffs were captured")
+			require.Equal(t, tt.complete, status.Complete, "completion should require a matching materialized branch diff")
+			require.NoError(t, mock.ExpectationsWereMet(), "all split status queries should remain tenant scoped")
+		})
+	}
+}
+
 func TestSessionChangesetStoreGetPrimaryScopesByOrgAndSession(t *testing.T) {
 	t.Parallel()
 	mock, err := pgxmock.NewPool()
@@ -29,10 +111,10 @@ func TestSessionChangesetStoreGetPrimaryScopesByOrgAndSession(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
 			"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
-			"head_sha", "expected_remote_head_sha", "base_head_sha", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+			"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
 		}).AddRow(
 			changesetID, orgID, sessionID, true, 0, "Primary", "", models.ChangesetStatusPlanned,
-			"main", "main", nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+			"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
 		))
 
 	changeset, err := NewSessionChangesetStore(mock).GetPrimary(context.Background(), orgID, sessionID)
@@ -120,8 +202,8 @@ func TestSessionChangesetStoreListBySessionScopesAndOrders(t *testing.T) {
 		WithArgs(orgID, sessionID).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "is_primary", "order_index", "title", "summary", "status", "target_branch",
-			"base_branch", "working_branch", "stacked_on_changeset_id", "head_sha", "created_at", "updated_at",
-		}).AddRow(changesetID, true, 0, "Foundation", "Base work", "planned", "main", "main", nil, nil, nil, now, now))
+			"base_branch", "working_branch", "stacked_on_changeset_id", "head_sha", "worktree_path", "materialization_error", "created_at", "updated_at",
+		}).AddRow(changesetID, true, 0, "Foundation", "Base work", "planned", "main", "main", nil, nil, nil, nil, nil, now, now))
 
 	actual, err := NewSessionChangesetStore(mock).ListBySession(context.Background(), orgID, sessionID)
 	require.NoError(t, err, "listing changesets should succeed")
@@ -164,10 +246,10 @@ func TestSessionChangesetStoreCreateRetriesConcurrentOrderConflict(t *testing.T)
 	mock.ExpectQuery(query).WithArgs(args...).WillReturnRows(pgxmock.NewRows([]string{
 		"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
 		"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
-		"head_sha", "expected_remote_head_sha", "base_head_sha", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+		"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
 	}).AddRow(
 		changesetID, orgID, sessionID, false, 1, "API", "Endpoints", models.ChangesetStatusPlanned,
-		"main", "main", nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+		"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
 	))
 
 	actual, err := NewSessionChangesetStore(mock).Create(context.Background(), orgID, sessionID, "API", "Endpoints", nil)

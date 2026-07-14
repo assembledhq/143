@@ -163,7 +163,7 @@ function LoginPageContent() {
       {/* Brand atmosphere: a soft gradient bloom behind the card. */}
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute -top-44 left-1/2 h-[420px] w-[640px] max-w-[100vw] -translate-x-1/2 rounded-full bg-[image:var(--gradient-primary)] opacity-[0.14] blur-[110px]"
+        className="pointer-events-none absolute -top-44 left-1/2 h-[420px] w-[640px] max-w-[100vw] -translate-x-1/2 rounded-full bg-primary opacity-[0.08] blur-[120px]"
       />
       <div className="relative mb-7 flex flex-col items-center gap-4">
         <Image

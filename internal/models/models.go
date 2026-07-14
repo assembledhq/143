@@ -430,6 +430,36 @@ type Session struct {
 	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
 }
 
+// SessionTitleSource identifies who owns the current session title. Manual
+// titles are sticky and must not be replaced by background title generation.
+type SessionTitleSource string
+
+const (
+	SessionTitleSourceLegacy    SessionTitleSource = "legacy"
+	SessionTitleSourceGenerated SessionTitleSource = "generated"
+	SessionTitleSourceIssue     SessionTitleSource = "issue"
+	SessionTitleSourceManual    SessionTitleSource = "manual"
+)
+
+func (s SessionTitleSource) Validate() error {
+	switch s {
+	case SessionTitleSourceLegacy, SessionTitleSourceGenerated, SessionTitleSourceIssue, SessionTitleSourceManual:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionTitleSource: %q", s)
+	}
+}
+
+// SessionTitleState is the minimal state needed by background title updates.
+type SessionTitleState struct {
+	Title              *string            `db:"title"`
+	TitleSource        SessionTitleSource `db:"title_source"`
+	TitleIntent        *string            `db:"title_intent"`
+	TitlePivotedAtTurn *int               `db:"title_pivoted_at_turn"`
+	TitleGeneratedAt   *time.Time         `db:"title_generated_at"`
+	CurrentTurn        int                `db:"current_turn"`
+}
+
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
@@ -1053,6 +1083,8 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypeMaterializeChangeset          = "materialize_changeset"
+	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 )
 
 // Job represents an async work queue item.

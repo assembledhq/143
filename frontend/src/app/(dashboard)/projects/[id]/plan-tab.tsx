@@ -347,7 +347,7 @@ export function DesignsSection({
                   onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
                 />
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100">
-                  <a href={attachment.file_url} target="_blank" rel="noopener noreferrer" className="p-2 rounded-full bg-white/90 text-gray-800 hover:bg-white">
+                  <a href={attachment.file_url} target="_blank" rel="noopener noreferrer" className="rounded-full bg-black/65 p-2 text-white backdrop-blur-sm transition-colors hover:bg-black/80">
                     <ExternalLink className="h-4 w-4" />
                   </a>
                 </div>

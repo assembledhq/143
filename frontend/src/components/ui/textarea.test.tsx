@@ -10,7 +10,7 @@ describe("Textarea", () => {
 
     const textarea = screen.getByRole("textbox", { name: "Notes" });
     expect(textarea).toHaveClass("max-sm:text-base");
-    expect(textarea).toHaveClass("text-xs");
+    expect(textarea).toHaveClass("type-dense");
     expect(textarea).not.toHaveClass("text-base");
   });
 });

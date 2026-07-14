@@ -35,7 +35,7 @@ export const queryKeys = {
     threadRecoverableInbox: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "recoverable-inbox"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
     reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
-    readiness: (id: string) => ["session", id, "readiness"] as const,
+    readiness: (id: string, changesetId?: string | null) => ["session", id, "readiness", changesetId ?? null] as const,
   },
   repositories: {
     all: ["repositories"] as const,
