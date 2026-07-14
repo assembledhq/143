@@ -736,6 +736,31 @@ func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.
 	return metadata, nil
 }
 
+func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET status = 'cancelled',
+		    failure_reason = @failure_reason,
+		    completed_at = COALESCE(completed_at, now())
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id":         orgID,
+		"session_id":     sessionID,
+		"failure_reason": reason,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("cancel code review: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
 type CodeReviewListFilters struct {
 	RepositoryID *uuid.UUID
 	Decision     *models.CodeReviewDecision
