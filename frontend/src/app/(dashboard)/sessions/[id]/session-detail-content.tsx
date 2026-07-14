@@ -1644,8 +1644,8 @@ function SessionComposer({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="!size-5 rounded-full"
+                    size="icon-compact"
+                    className="rounded-full"
                     aria-label={`Remove ${reference.display}`}
                     onClick={() => removeReference(reference)}
                   >
@@ -1670,8 +1670,8 @@ function SessionComposer({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon"
-                      className="!size-5 rounded-full"
+                      size="icon-compact"
+                      className="rounded-full"
                       aria-label={`Remove ${command.token}`}
                       onClick={() => removeCommand(command)}
                     >
