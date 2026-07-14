@@ -81,39 +81,49 @@ func (c *VerificationCoordinator) Run(ctx context.Context, request VerificationR
 	if request.Observer == nil {
 		return c.completeFailure(ctx, request.OrgID, run, 1, nil, "preview observer is unavailable")
 	}
+	if request.Config.TimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(request.Config.TimeoutSeconds)*time.Second)
+		defer cancel()
+	}
 
-	var lastSteps []models.PreviewVerificationStep
+	allSteps := make([]models.PreviewVerificationStep, 0, len(decision.Plan)*maxAttempts)
 	var lastFailure string
 	lastAttempt := 1
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		lastAttempt = attempt
-		steps, failure, humanRequired := executeVerificationPlan(ctx, request.Observer, decision.Plan, request.Config.FailOnConsoleError)
-		lastSteps, lastFailure = steps, failure
+		steps, failure, humanRequired := executeVerificationPlan(ctx, request.Observer, decision.Plan, request.Config.FailOnConsoleError, attempt)
+		allSteps = append(allSteps, steps...)
+		lastFailure = failure
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			lastFailure = fmt.Sprintf("preview verification timed out after %d seconds", request.Config.TimeoutSeconds)
+			break
+		}
 		if humanRequired {
-			return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusHumanInterventionRequired, attempt, steps, failure)
+			return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusHumanInterventionRequired, attempt, allSteps, failure)
 		}
 		if failure == "" {
-			return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusPassed, attempt, steps, "")
+			return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusPassed, attempt, allSteps, "")
 		}
 		if attempt == maxAttempts || request.Fixer == nil {
 			break
 		}
 		if fixErr := request.Fixer.FixVerificationFailure(ctx, attempt, failure); fixErr != nil {
 			if errors.Is(fixErr, ErrVerificationHumanIntervention) {
-				return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusHumanInterventionRequired, attempt, steps, fixErr.Error())
+				return c.complete(ctx, request.OrgID, run, models.PreviewVerificationStatusHumanInterventionRequired, attempt, allSteps, fixErr.Error())
 			}
 			lastFailure = fmt.Sprintf("%s; fix attempt failed: %v", failure, fixErr)
 			break
 		}
 	}
-	return c.completeFailure(ctx, request.OrgID, run, lastAttempt, lastSteps, lastFailure)
+	return c.completeFailure(ctx, request.OrgID, run, lastAttempt, allSteps, lastFailure)
 }
 
-func executeVerificationPlan(ctx context.Context, observer VerificationObserver, plan []models.PreviewVerificationPlanStep, failOnConsole bool) ([]models.PreviewVerificationStep, string, bool) {
+func executeVerificationPlan(ctx context.Context, observer VerificationObserver, plan []models.PreviewVerificationPlanStep, failOnConsole bool, attempt int) ([]models.PreviewVerificationStep, string, bool) {
 	steps := make([]models.PreviewVerificationStep, 0, len(plan))
 	for index, planned := range plan {
 		observation, err := observer.Observe(ctx, planned.Path, planned.Viewport)
-		step := models.PreviewVerificationStep{Index: index, Path: planned.Path, Viewport: planned.Viewport, Outcome: "passed"}
+		step := models.PreviewVerificationStep{Index: index, Attempt: attempt, Path: planned.Path, Viewport: planned.Viewport, Outcome: "passed"}
 		if err != nil {
 			step.Outcome, step.Error = "failed", err.Error()
 			steps = append(steps, step)

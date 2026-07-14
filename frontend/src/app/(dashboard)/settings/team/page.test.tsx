@@ -216,8 +216,8 @@ describe('TeamSettingsPage', () => {
     const cancelButton = await screen.findByRole('button', { name: 'Cancel' });
     const sendInviteButton = screen.getByRole('button', { name: 'Send invite' });
 
-    expect(cancelButton).toHaveClass('h-11', 'sm:h-8');
-    expect(sendInviteButton).toHaveClass('h-11', 'sm:h-8');
+    expect(cancelButton).toHaveClass('h-10', 'sm:h-8');
+    expect(sendInviteButton).toHaveClass('h-10', 'sm:h-8');
   });
 
   it('renders pending invitations', async () => {

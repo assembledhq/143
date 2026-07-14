@@ -3344,6 +3344,11 @@ const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 const REVIEW_AGENT_KEYS = ["codex", "claude_code", "amp", "pi"] as const;
+export const CHANGESET_SPLIT_MIN_ADDITIONS = 750;
+
+export function shouldOfferChangesetSplit(additions?: number): boolean {
+  return additions !== undefined && additions >= CHANGESET_SPLIT_MIN_ADDITIONS;
+}
 
 export function PullRequestList({
   changesets,
@@ -3399,7 +3404,15 @@ export function PullRequestList({
   );
 }
 
-export function ChangesetSplitPlanner({ sessionID, changesets }: { sessionID: string; changesets: ChangesetSummary[] }) {
+export function ChangesetSplitPlanner({
+  sessionID,
+  changesets,
+  additions,
+}: {
+  sessionID: string;
+  changesets: ChangesetSummary[];
+  additions?: number;
+}) {
   const queryClient = useQueryClient();
   const splitKey = ["session", sessionID, "changeset-split"] as const;
   const splitQuery = useQuery({
@@ -3418,6 +3431,7 @@ export function ChangesetSplitPlanner({ sessionID, changesets }: { sessionID: st
     onError: (error) => toast.error(error instanceof Error ? error.message : "Split action failed"),
   });
   if (splitQuery.isError) {
+    if (!shouldOfferChangesetSplit(additions)) return null;
     return (
       <Card className="border-border/60">
         <CardContent className="flex items-center justify-between gap-3 p-4">
@@ -6495,7 +6509,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
@@ -6512,8 +6526,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon"
-                          className="h-7 w-7 rounded-l-none"
+                          size="icon-sm"
+                          className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
                           title="More publish actions"
@@ -6626,7 +6640,11 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <ChangesetSplitPlanner sessionID={id} changesets={changesets} />
+          <ChangesetSplitPlanner
+            sessionID={id}
+            changesets={changesets}
+            additions={session.diff_stats?.added}
+          />
           {hasMultipleChangesets && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
               <CardContent className="space-y-1 p-4">

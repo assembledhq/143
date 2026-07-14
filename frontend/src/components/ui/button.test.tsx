@@ -9,7 +9,7 @@ describe('Button', () => {
     );
 
     const button = screen.getByRole('button', { name: 'Compact' });
-    expect(button).toHaveClass('h-11', 'sm:h-8');
+    expect(button).toHaveClass('h-10', 'px-2.5', 'sm:h-8');
   });
 
   it('shows a spinner and disables the button when loading', () => {
