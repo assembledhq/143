@@ -3348,6 +3348,14 @@ func (s *orchestratorServiceStub) CaptureChangesetDiff(context.Context, *models.
 	return agent.ChangesetDiffResult{}, nil
 }
 
+func (s *orchestratorServiceStub) CheckpointChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetDiffResult, error) {
+	return agent.ChangesetDiffResult{}, nil
+}
+
+func (s *orchestratorServiceStub) RestackChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetRestackResult, error) {
+	return agent.ChangesetRestackResult{}, nil
+}
+
 type fakeSessionExecutorDispatcher struct {
 	calls    int
 	jobType  string

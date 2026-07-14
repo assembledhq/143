@@ -3370,6 +3370,7 @@ export function PullRequestList({
                 <span className="block truncate text-xs text-muted-foreground">
                   {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
                 </span>
+                {changeset.has_unpushed_changes && <span className="block text-xs text-amber-600">Unpushed changes</span>}
               </span>
               <span className="flex shrink-0 items-center gap-1">
                 {pr?.ci_status && <Badge variant="outline" className="h-5 px-1 text-xs">CI {pr.ci_status}</Badge>}
@@ -3779,7 +3780,28 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const stackTopChangeset = changesets.filter((changeset) => changeset.status !== "abandoned").at(-1);
   const hasMultipleChangesets = changesets.length > 1;
+  const changesetLifecycleMutation = useMutation({
+    mutationFn: (action: () => Promise<unknown>) => action(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
+  });
+  const changesetPreviewMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => {
+      if (!session?.repository_id || !target.working_branch) throw new Error("Pull request branch is unavailable");
+      return api.previews.create({
+        repository_id: session.repository_id,
+        branch: target.working_branch,
+        commit_sha: target.head_sha,
+        source: { type: "session", external_id: target.id },
+      });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Preview could not be started"),
+  });
   const selectedIsPrimary = selectedChangeset?.is_primary !== false;
   selectedIsPrimaryRef.current = selectedIsPrimary;
   // The primary changeset keeps the legacy null-tolerant PR lookup: sending a
@@ -4225,6 +4247,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     activeThreadId?: string;
 	    body: {
 	      message: string;
+	      changesetId?: string;
 	      clientMessageID?: string;
 	      images?: string[];
       references?: SessionInputReference[];
@@ -4245,6 +4268,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       commands: SessionInputCommand[];
       planMode: boolean;
       selectedModel: string;
+      changesetId?: string;
     };
   };
 
@@ -4706,10 +4730,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       : true
   );
   const latestReadiness = readinessData?.data.latest;
-  const latestReadinessStale = !!latestReadiness && (
-    latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
-    (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? "")
-  );
+  const latestReadinessStale = !!latestReadiness && (selectedChangeset?.worktree_path
+    ? (latestReadiness.evaluated_head_sha ?? "") !== (selectedChangeset.head_sha ?? "")
+    : latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
+      (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? ""));
   const latestBypassedKeys = new Set((latestReadiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
   const hasUnbypassedReadinessBlocker = (latestReadiness?.checks ?? []).some((check) => {
     const key = check.check_key || check.check_type;
@@ -4720,8 +4744,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness.status !== "queued" &&
     latestReadiness.status !== "running" &&
     latestReadiness.status !== "failed" &&
-    latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
-    (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
+    !latestReadinessStale &&
     !hasUnbypassedReadinessBlocker;
   const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
   const readinessAutoRunOnCreatePR = readinessPolicyResponse?.data.config.auto_run?.on_create_pr === true;
@@ -5067,7 +5090,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
-      api.sessions.pushChangesToPR(id, options),
+      api.sessions.pushChangesToPR(id, { ...options, changesetId: selectedChangeset?.id }),
     onMutate: () => {
       setLocalPushActionError(null);
       setLocalPushState("submitting");
@@ -5337,6 +5360,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerAttachments, setComposerAttachments] = useState<string[]>([]);
   const [composerReferences, setComposerReferences] = useState<SessionInputReference[]>([]);
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
+  const [composerChangesetID, setComposerChangesetID] = useState<string | null>(null);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
   const [addThreadOpen, setAddThreadOpen] = useState(false);
@@ -5362,6 +5386,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     setComposerAttachments([]);
     setComposerReferences([]);
     setComposerCommands([]);
+    setComposerChangesetID(null);
     setComposerIsUploading(false);
     setComposerUploadError(null);
     setAddThreadOpen(false);
@@ -5527,6 +5552,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerReferences([]);
       setComposerCommands([]);
       setComposerPlanMode(false);
+      setComposerChangesetID(null);
       if (centerMode === "review") {
         exitReview();
       }
@@ -5612,6 +5638,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerCommands(context.composerSnapshot.commands);
       setComposerPlanMode(context.composerSnapshot.planMode);
       setComposerSelectedModel(context.composerSnapshot.selectedModel);
+      setComposerChangesetID(context.composerSnapshot.changesetId ?? null);
     },
   });
 
@@ -5638,6 +5665,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       activeThreadId: activeThread?.id,
       body: {
         message: userFacingMessage,
+        changesetId: composerChangesetID ?? undefined,
         clientMessageID,
         images: composerAttachments.length > 0 ? composerAttachments : undefined,
         references: composerReferences.length > 0 ? composerReferences : undefined,
@@ -5668,6 +5696,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands,
         planMode: composerPlanMode,
         selectedModel: composerSelectedModel,
+        changesetId: composerChangesetID ?? undefined,
       },
     });
   }, [
@@ -5675,6 +5704,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     attachedReviewComments,
     composerAttachments,
     composerCommands,
+	composerChangesetID,
     composerMessage,
     composerPlanMode,
     composerReferences,
@@ -6304,8 +6334,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const pushAction = derivePushChangesActionState({
     canShipPR,
     hasOpenPR: hasPR && prStatus === "open",
-    hasUnpushedChanges: selectedIsPrimary && !!session.has_unpushed_changes,
-    hasSnapshot,
+    hasUnpushedChanges: selectedChangeset?.worktree_path ? !!selectedChangeset.has_unpushed_changes : !!session.has_unpushed_changes,
+    hasSnapshot: selectedChangeset?.worktree_path ? true : hasSnapshot,
     isRunning,
     builderReviewAllowsPR,
     snapshotUnavailable,
@@ -6566,6 +6596,21 @@ export function SessionDetailContent({ id }: { id: string }) {
               void setChangesetParam(changesetID);
             }}
           />
+          {hasMultipleChangesets && (
+            <Card className="border-border/60" data-testid="stack-health">
+              <CardContent className="flex items-center justify-between gap-3 p-4">
+                <div>
+                  <div className="text-sm font-medium">Stack health</div>
+                  <p className="text-xs text-muted-foreground">{(session.changeset_stack_state ?? "coherent").replaceAll("-", " ")}</p>
+                </div>
+                {selectedChangeset && changesets.some((item) => item.status === "needs_restack") && (
+                  <Button size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.restackChangesetDescendants(id, selectedChangeset.id))}>
+                    Restack descendants
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
           <ChangesetSplitPlanner sessionID={id} changesets={changesets} />
           {hasMultipleChangesets && selectedChangeset && (
             <Card className="border-border/60" data-testid="selected-pull-request-panel">
@@ -6580,17 +6625,52 @@ export function SessionDetailContent({ id }: { id: string }) {
                   {selectedChangeset.pull_request?.ci_status && <><dt className="text-muted-foreground">CI</dt><dd>{selectedChangeset.pull_request.ci_status}</dd></>}
                   {selectedChangeset.pull_request?.review_status && <><dt className="text-muted-foreground">Review</dt><dd>{selectedChangeset.pull_request.review_status.replaceAll("_", " ")}</dd></>}
                 </dl>
-                {!selectedChangeset.pull_request && !selectedChangeset.is_primary && (
-                  <DisabledTooltip disabled content="Create PR becomes available after branch materialization">
-                    <Button type="button" size="sm" disabled className="mt-2">
+                {selectedChangeset.restack_delta_kind ? (
+                  <Card className="bg-muted/40">
+                    <CardContent className="p-3 text-xs">
+                    <p className="font-medium text-foreground">
+                      Restack delta: {selectedChangeset.restack_delta_kind.replaceAll("_", " ")}
+                    </p>
+                    {selectedChangeset.restack_delta_summary ? (
+                      <p className="mt-1 text-muted-foreground">{selectedChangeset.restack_delta_summary}</p>
+                    ) : null}
+                    {selectedChangeset.restack_confirmation_required ? (
+                      <Button className="mt-2" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.confirmChangesetRestack(id, selectedChangeset.id))}>
+                        Confirm restack delta
+                      </Button>
+                    ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
+                <div className="flex flex-wrap gap-2 pt-2">
+                {!selectedChangeset.pull_request && (
+                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
+                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
                       <GitPullRequest className="h-3.5 w-3.5" />
                       Create PR
                     </Button>
                   </DisabledTooltip>
                 )}
-                {!selectedChangeset.is_primary && (
+                <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
+                  setComposerChangesetID(selectedChangeset.id);
+                  if (selectedChangeset.status === "restack_conflict") {
+                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
+                  } else if (selectedChangeset.status === "external_update_detected") {
+                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
+                  }
+                  focusComposerFromKeyboard();
+                }}>
+                  {selectedChangeset.status === "restack_conflict"
+                    ? "Resolve with agent"
+                    : selectedChangeset.status === "external_update_detected"
+                      ? "Reconcile with agent"
+                      : "Ask agent"}
+                </Button>
+                {hasMultipleChangesets && <Button type="button" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending || changesets.some((item) => item.status !== "abandoned" && !item.worktree_path)} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangesetStack(id))}>Publish stack</Button>}
+                </div>
+                {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
                   <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
-                    {selectedChangeset.worktree_path ? "Changes and readiness target this pull request worktree. Publishing and targeted editing arrive in the next phase." : "Changes, preview, readiness, review, and push become available after branch materialization."}
+                    Changes, preview, readiness, review, publishing, and agent editing become available after branch materialization.
                   </p>
                 )}
               </CardContent>
@@ -6847,20 +6927,44 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-        {selectedIsPrimary ? (
+        {selectedIsPrimary && !selectedChangeset?.worktree_path ? (
           <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
             <PreviewPanel
               sessionId={id}
               previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
             />
           </ErrorBoundary>
-        ) : (
+        ) : selectedChangeset ? (
           <Card className="border-border/60">
-            <CardContent className="p-4 text-sm text-muted-foreground">
-              Preview for this pull request will be available after its branch is materialized.
+            <CardContent className="space-y-3 p-4 text-sm">
+              {!selectedChangeset.worktree_path ? (
+                <p className="text-sm text-muted-foreground">Preview for this pull request will be available after its branch is materialized.</p>
+              ) : (
+                <>
+              <div>
+                <div className="font-medium">Preview {selectedChangeset.title}</div>
+                <p className="text-xs text-muted-foreground">Runs from {selectedChangeset.working_branch ?? "the selected pull request branch"}. A stacked branch includes its ancestors.</p>
+              </div>
+              {changesetPreviewMutation.data?.data.preview_url || changesetPreviewMutation.data?.data.stable_url ? (
+                <Button asChild size="sm"><a href={changesetPreviewMutation.data.data.preview_url ?? changesetPreviewMutation.data.data.stable_url} target="_blank" rel="noreferrer">Open preview</a></Button>
+              ) : (
+                <DisabledTooltip disabled={!!selectedChangeset.working_branch && !selectedChangeset.has_unpushed_changes} content={selectedChangeset.has_unpushed_changes ? "Push this pull request before previewing its branch" : "Materialize and publish this branch before previewing it"}>
+                  <Button size="sm" disabled={!selectedChangeset.working_branch || !!selectedChangeset.has_unpushed_changes || changesetPreviewMutation.isPending} onClick={() => changesetPreviewMutation.mutate(selectedChangeset)}>
+                    {changesetPreviewMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    Preview pull request
+                  </Button>
+                </DisabledTooltip>
+              )}
+              {stackTopChangeset && stackTopChangeset.id !== selectedChangeset.id && stackTopChangeset.working_branch && !stackTopChangeset.has_unpushed_changes ? (
+                <Button size="sm" variant="outline" disabled={changesetPreviewMutation.isPending} onClick={() => changesetPreviewMutation.mutate(stackTopChangeset)}>
+                  Preview stack top
+                </Button>
+              ) : null}
+                </>
+              )}
             </CardContent>
           </Card>
-        )}
+        ) : null}
       </TabsContent>
     </Tabs>
   );
@@ -7116,6 +7220,15 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             )}
             {renderRecoverableInboxNotice()}
+            {composerChangesetID && (() => {
+              const target = changesets.find((item) => item.id === composerChangesetID);
+              return target ? (
+                <div className="mb-2 flex items-center justify-between rounded-md border border-border bg-muted/40 px-3 py-2 text-xs" data-testid="composer-changeset-target">
+                  <span>Editing PR: {target.title}</span>
+                  <Button type="button" size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setComposerChangesetID(null)}>Clear</Button>
+                </div>
+              ) : null;
+            })()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}

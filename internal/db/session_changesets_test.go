@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,10 +112,11 @@ func TestSessionChangesetStoreGetPrimaryScopesByOrgAndSession(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
 			"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
-			"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+			"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff",
+			"restack_delta_kind", "restack_delta_summary", "restack_confirmation_required", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
 		}).AddRow(
 			changesetID, orgID, sessionID, true, 0, "Primary", "", models.ChangesetStatusPlanned,
-			"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+			"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now,
 		))
 
 	changeset, err := NewSessionChangesetStore(mock).GetPrimary(context.Background(), orgID, sessionID)
@@ -246,14 +248,79 @@ func TestSessionChangesetStoreCreateRetriesConcurrentOrderConflict(t *testing.T)
 	mock.ExpectQuery(query).WithArgs(args...).WillReturnRows(pgxmock.NewRows([]string{
 		"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
 		"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id",
-		"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+		"head_sha", "expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff",
+		"restack_delta_kind", "restack_delta_summary", "restack_confirmation_required", "pr_creation_state", "pr_creation_error", "created_at", "updated_at",
 	}).AddRow(
 		changesetID, orgID, sessionID, false, 1, "API", "Endpoints", models.ChangesetStatusPlanned,
-		"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, models.PRCreationStateIdle, nil, now, now,
+		"main", "main", nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, false, models.PRCreationStateIdle, nil, now, now,
 	))
 
 	actual, err := NewSessionChangesetStore(mock).Create(context.Background(), orgID, sessionID, "API", "Endpoints", nil)
 	require.NoError(t, err, "concurrent order allocation should retry")
 	require.Equal(t, changesetID, actual.ID, "retry should return the created changeset")
 	require.NoError(t, mock.ExpectationsWereMet(), "create should retry only the order uniqueness conflict")
+}
+
+func TestSessionChangesetStoreAcquireLease(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		returnRow bool
+		expectErr error
+	}{
+		{name: "acquires materialized worktree", returnRow: true},
+		{name: "reports active holder", expectErr: ErrChangesetLeaseHeld},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			defer mock.Close()
+
+			orgID, sessionID, changesetID, holderID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			ttl := 2 * time.Minute
+			rows := pgxmock.NewRows([]string{"changeset_id", "org_id", "session_id", "holder_id", "holder_type", "holder_label", "acquired_at", "heartbeat_at", "expires_at"})
+			now := time.Now().UTC()
+			if tt.returnRow {
+				rows.AddRow(changesetID, orgID, sessionID, holderID, models.ChangesetLeaseTypeAgentTurn, "Tab 2", now, now, now.Add(ttl))
+			}
+			mock.ExpectQuery(`INSERT INTO session_changeset_leases`).WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).WillReturnRows(rows)
+
+			lease, err := NewSessionChangesetStore(mock).AcquireLease(context.Background(), orgID, sessionID, changesetID, holderID, models.ChangesetLeaseTypeAgentTurn, "Tab 2", ttl, true)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr, "lease contention should return the typed error")
+			} else {
+				require.NoError(t, err, "free worktree should be leased")
+				require.Equal(t, holderID, lease.HolderID, "lease should belong to the requesting holder")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "lease query should remain tenant scoped")
+		})
+	}
+}
+
+func TestSessionChangesetStoreRecordLocalHeadMarksDescendantsStale(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	mock.ExpectBegin()
+	mock.ExpectExec(`UPDATE session_changesets SET head_sha`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(`WITH RECURSIVE descendants`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectCommit()
+
+	err = NewSessionChangesetStore(mock).RecordLocalHead(context.Background(), uuid.New(), uuid.New(), uuid.New(), strings.Repeat("a", 40), "diff")
+	require.NoError(t, err, "recording a lower pull request head should invalidate all descendants atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "head recording should update the target and recursive descendants in one transaction")
 }

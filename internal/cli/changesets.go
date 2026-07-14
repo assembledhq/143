@@ -7,18 +7,22 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 )
 
 func runChangesets(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "Usage: 143-tools changesets <list|current|status|split-status|diff|create|materialize|verify>")
+		fmt.Fprintln(stderr, "Usage: 143-tools changesets <list|current|status|split-status|diff|create|materialize|verify|publish|publish-stack|restack|import-remote>")
 		return 1
 	}
 	sessionID := os.Getenv("143_SESSION_ID")
 	changesetID := ""
 	title := ""
+	stackedOn := ""
+	headSHA := ""
 	for i := 1; i < len(args); i++ {
 		switch args[i] {
 		case "--session-id":
@@ -35,6 +39,16 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			i++
 			if i < len(args) {
 				title = args[i]
+			}
+		case "--stacked-on", "--from":
+			i++
+			if i < len(args) {
+				stackedOn = args[i]
+			}
+		case "--head-sha":
+			i++
+			if i < len(args) {
+				headSHA = args[i]
 			}
 		}
 	}
@@ -82,7 +96,11 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error: --title is required")
 			return 1
 		}
-		method, path, body = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets", map[string]string{"title": title}
+		request := map[string]string{"title": title}
+		if stackedOn != "" {
+			request["stacked_on_changeset_id"] = stackedOn
+		}
+		method, path, body = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets", request
 	case "materialize":
 		if changesetID == "" {
 			fmt.Fprintln(stderr, "error: --changeset is required")
@@ -91,6 +109,47 @@ func runChangesets(args []string, stdout, stderr io.Writer) int {
 		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/materialize"
 	case "verify":
 		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/verify"
+	case "publish":
+		if changesetID == "" {
+			fmt.Fprintln(stderr, "error: --changeset is required")
+			return 1
+		}
+		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/publish"
+	case "publish-stack":
+		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/publish-stack"
+	case "restack":
+		if stackedOn == "" {
+			fmt.Fprintln(stderr, "error: --from is required")
+			return 1
+		}
+		method, path = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+stackedOn+"/restack-descendants"
+	case "import-remote":
+		if changesetID == "" {
+			fmt.Fprintln(stderr, "error: --changeset is required")
+			return 1
+		}
+		if headSHA == "" {
+			branchOutput, branchErr := exec.CommandContext(ctx, "git", "branch", "--show-current").Output()
+			if branchErr != nil || strings.TrimSpace(string(branchOutput)) == "" {
+				fmt.Fprintln(stderr, "error: cannot determine the current changeset branch; pass --head-sha explicitly")
+				return 1
+			}
+			branch := strings.TrimSpace(string(branchOutput))
+			remoteOutput, remoteErr := exec.CommandContext(ctx, "git", "ls-remote", "origin", "refs/heads/"+branch).Output()
+			if remoteErr != nil {
+				fmt.Fprintf(stderr, "error: inspect remote changeset branch: %s\n", remoteErr)
+				return 1
+			}
+			fields := strings.Fields(string(remoteOutput))
+			if len(fields) > 0 {
+				headSHA = strings.TrimSpace(fields[0])
+			}
+		}
+		if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(headSHA) {
+			fmt.Fprintln(stderr, "error: remote changeset branch has no valid SHA")
+			return 1
+		}
+		method, path, body = http.MethodPost, prefix+"/sessions/"+sessionID+"/changesets/"+changesetID+"/import-remote", map[string]string{"head_sha": headSHA}
 	default:
 		fmt.Fprintf(stderr, "error: unknown changesets action %q\n", args[0])
 		return 1

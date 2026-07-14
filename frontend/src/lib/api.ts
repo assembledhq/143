@@ -572,6 +572,14 @@ export const api = {
       put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-omissions`, { omissions }),
     materializeChangeset: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/materialize`),
+    publishChangeset: (sessionId: string, changesetId: string) =>
+      post<{ status: string; job_id?: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/publish`),
+    publishChangesetStack: (sessionId: string) =>
+      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/publish-stack`),
+    restackChangesetDescendants: (sessionId: string, changesetId: string) =>
+      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
+    confirmChangesetRestack: (sessionId: string, changesetId: string) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/confirm-restack`),
     verifyChangesetSplit: (sessionId: string) =>
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/verify`),
     acceptChangesetSplit: (sessionId: string) =>
@@ -602,8 +610,8 @@ export const api = {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
       } : undefined),
-    pushChangesToPR: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string }) =>
-      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr/push`, options ? {
+    pushChangesToPR: (sessionId: string, options?: { authorMode?: 'auto' | 'user' | 'app'; resumeToken?: string; changesetId?: string }) =>
+      post<{ status: string }>(`/api/v1/sessions/${sessionId}/pr/push${options?.changesetId ? `?changeset_id=${encodeURIComponent(options.changesetId)}` : ''}`, options ? {
         ...(options.authorMode ? { author_mode: options.authorMode } : {}),
         ...(options.resumeToken ? { resume_token: options.resumeToken } : {}),
       } : undefined),
@@ -625,11 +633,12 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').Session>>('/api/v1/sessions/manual', body),
     getMessages: (sessionId: string) =>
       get<import('./types').ListResponse<import('./types').SessionMessage>>(`/api/v1/sessions/${sessionId}/messages`),
-    sendMessage: (sessionId: string, body: { message: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string; resolveReviewCommentIDs?: string[] }) =>
+    sendMessage: (sessionId: string, body: { message: string; changesetId?: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; model?: string; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SessionMessage>>(
         `/api/v1/sessions/${sessionId}/messages`,
         {
           message: body.message,
+          changeset_id: body.changesetId || undefined,
           images: body.images,
           references: body.references && body.references.length > 0 ? body.references : undefined,
           commands: body.commands && body.commands.length > 0 ? body.commands : undefined,
@@ -661,11 +670,12 @@ export const api = {
       patch<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}`, body),
     archiveThread: (sessionId: string, threadId: string) =>
       post<import('./types').SingleResponse<import('./types').SessionThread>>(`/api/v1/sessions/${sessionId}/threads/${threadId}/archive`, {}),
-    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; clientMessageID?: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
+    sendThreadMessage: (sessionId: string, threadId: string, body: { message: string; changesetId?: string; clientMessageID?: string; images?: string[]; references?: import('./types').SessionInputReference[]; commands?: import('./types').SessionInputCommand[]; planMode?: boolean; resolveReviewCommentIDs?: string[] }) =>
       post<import('./types').SingleResponse<import('./types').SendThreadMessageResponse>>(
         `/api/v1/sessions/${sessionId}/threads/${threadId}/messages`,
         {
           message: body.message,
+          changeset_id: body.changesetId || undefined,
           client_message_id: body.clientMessageID || undefined,
           images: body.images,
           references: body.references && body.references.length > 0 ? body.references : undefined,

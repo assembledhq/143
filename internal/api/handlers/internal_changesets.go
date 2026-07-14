@@ -62,3 +62,23 @@ func (h *InternalChangesetHandler) Verify(w http.ResponseWriter, r *http.Request
 func (h *InternalChangesetHandler) Diff(w http.ResponseWriter, r *http.Request) {
 	h.wrap(h.delegate.GetDiff)(w, r)
 }
+func (h *InternalChangesetHandler) Publish(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.wrap(h.delegate.PublishChangeset)(w, r)
+}
+func (h *InternalChangesetHandler) PublishStack(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.wrap(h.delegate.PublishChangesetStack)(w, r)
+}
+func (h *InternalChangesetHandler) Restack(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.wrap(h.delegate.RestackChangesetDescendants)(w, r)
+}
+func (h *InternalChangesetHandler) ImportRemote(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.wrap(h.delegate.ImportChangesetRemote)(w, r)
+}
+func (h *InternalChangesetHandler) ConfirmRestack(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	h.wrap(h.delegate.ConfirmChangesetRestack)(w, r)
+}

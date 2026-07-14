@@ -43,6 +43,9 @@ func (s *PRService) QueueMergeWhenReady(ctx context.Context, orgID, pullRequestI
 	if pr.Status != models.PullRequestStatusOpen {
 		return nil, fmt.Errorf("%w: pull request status is %q", ErrPullRequestMergeWhenReadyNotQueueable, pr.Status)
 	}
+	if err := s.ensureStackParentMerged(ctx, pr); err != nil {
+		return nil, err
+	}
 	if pr.MergeWhenReadyState == models.PullRequestMergeWhenReadyStateMerging {
 		return nil, ErrPullRequestMergeWhenReadyInProgress
 	}
@@ -103,6 +106,9 @@ func (s *PRService) ProcessMergeWhenReady(ctx context.Context, orgID, pullReques
 	}
 	if pr.Status != models.PullRequestStatusOpen {
 		return s.pullRequests.MarkMergeWhenReadyFailed(ctx, orgID, pullRequestID, "Pull request is no longer open.")
+	}
+	if err := s.ensureStackParentMerged(ctx, pr); err != nil {
+		return s.pullRequests.MarkMergeWhenReadyFailed(ctx, orgID, pullRequestID, err.Error())
 	}
 
 	if err := s.SyncPullRequestState(ctx, orgID, pullRequestID); err != nil && !errors.Is(err, ErrPullRequestMergeabilityPending) {
