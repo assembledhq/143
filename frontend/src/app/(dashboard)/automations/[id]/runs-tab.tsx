@@ -17,11 +17,16 @@ import { cn, formatDateTime, formatTimeAgo } from "@/lib/utils";
 
 import { QuietRunRow, RunCard } from "./run-card";
 import { groupRuns, type RunGroup } from "./run-grouping";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 const PAGE_SIZE = 25;
-const POLL_MS = 10_000;
 
 export function RunsTab({ automationId }: { automationId: string }) {
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   // Pages are stored as a list of result pages so the polling refetch only
   // replaces page 0 (latest runs) and any pages loaded via "Load more"
   // persist across refetches. Using setState inside `select` would reset
@@ -43,10 +48,12 @@ export function RunsTab({ automationId }: { automationId: string }) {
   // or re-navigate to the tab.
   const isPaginated = extraPages.length > 0;
 
+  const runsKey = ["automation-runs", automationId] as const;
+  useLiveQueryRegistration({ queryKey: runsKey, families: ["automation.runs"], resourceId: automationId, priority: "critical", visible: documentVisible });
   const { data, isLoading } = useQuery({
-    queryKey: ["automation-runs", automationId],
-    queryFn: () => api.automations.listRuns(automationId, { limit: PAGE_SIZE }),
-    refetchInterval: isPaginated ? false : POLL_MS,
+    queryKey: runsKey,
+    queryFn: ({ signal }) => api.automations.listRuns(automationId, { limit: PAGE_SIZE }, { signal }),
+    refetchInterval: isPaginated ? false : liveRefreshInterval(runsKey, "active-detail", liveHealth, documentVisible),
   });
 
   const firstPageCursor = data?.meta?.next_cursor || undefined;

@@ -78,6 +78,18 @@ func (s *RepositoryStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filter
 	return pgx.CollectRows(rows, pgx.RowToStructByName[models.Repository])
 }
 
+func (s *RepositoryStore) ListIDsForLiveAuthorization(ctx context.Context, orgID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := s.db.Query(ctx, `SELECT id FROM repositories WHERE org_id = @org_id`, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("query repository authorization snapshot: %w", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, fmt.Errorf("scan repository authorization snapshot: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *RepositoryStore) GetByID(ctx context.Context, orgID, repoID uuid.UUID) (models.Repository, error) {
 	query := `
 		SELECT id, org_id, integration_id, github_id, full_name, default_branch, private, language, description, clone_url, installation_id, status, last_synced_at, context_quality, settings, created_at, updated_at

@@ -9,7 +9,10 @@ import { PreviewDetailSurface } from "@/components/preview/preview-detail-surfac
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
-import { pollMs } from "@/lib/poll-intervals";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { ACTIVE_PREVIEW_STATUSES, type PreviewStatus } from "@/lib/preview-types";
 import {
   PREVIEW_BOOTSTRAP_COMPLETE_EVENT,
@@ -33,6 +36,8 @@ export default function PreviewLandingPage({
 }
 
 export function PreviewLandingContent({ id }: { id: string }) {
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -44,14 +49,16 @@ export function PreviewLandingContent({ id }: { id: string }) {
   const launchStartAttemptedRef = useRef<string | null>(null);
   const [bootstrapError, setBootstrapError] = useState<string | null>(null);
 
+  const previewKey = ["branch-preview", id] as const;
+  useLiveQueryRegistration({ queryKey: previewKey, families: ["preview.detail"], resourceId: id, priority: "critical", visible: documentVisible });
   const previewQuery = useQuery<SingleResponse<BranchPreviewResponse>>({
-    queryKey: ["branch-preview", id],
-    queryFn: () => api.previews.get(id),
+    queryKey: previewKey,
+    queryFn: ({ signal }) => api.previews.get(id, { signal }),
     refetchInterval: (query) => {
       const status = query.state.data?.data.status;
-      if (status === "starting") return pollMs(3000);
+      if (status === "starting") return liveRefreshInterval(previewKey, "active-detail", liveHealth, documentVisible);
       if (status === "ready" || status === "partially_ready" || status === "unhealthy") {
-        return pollMs(15000);
+        return liveRefreshInterval(previewKey, "active-detail", liveHealth, documentVisible);
       }
       return false;
     },
@@ -61,6 +68,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
     mutationFn: (previewId: string) => api.previews.stop(previewId),
     onSuccess: (response) => {
       queryClient.setQueryData(["branch-preview", id], response);
+      void queryClient.invalidateQueries({ queryKey: previewKey, exact: true });
     },
   });
   const restartPreview = useMutation({
@@ -68,6 +76,7 @@ export function PreviewLandingContent({ id }: { id: string }) {
       latest ? api.previews.startLatest(previewId) : api.previews.restart(previewId),
     onSuccess: (response) => {
       queryClient.setQueryData(["branch-preview", id], response);
+      void queryClient.invalidateQueries({ queryKey: previewKey, exact: true });
     },
   });
   const bootstrapPreview = useMutation({

@@ -250,7 +250,7 @@ const sessionSelectColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionPRPushErrorCodeColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
-	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at, live_version`
 
 const (
 	sessionDiffMaxChars        = 2 * 1024 * 1024
@@ -287,7 +287,7 @@ const sessionListColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionPRPushErrorCodeColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
-	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at, live_version`
 
 // sessionAPIDetailColumns is used by the session-detail HTTP endpoint. It keeps
 // the same metadata as a full session fetch, but leaves the large diff payloads
@@ -310,7 +310,7 @@ const sessionAPIDetailColumns = `id,
 	target_branch, working_branch, base_commit_sha, repository_id, diff_stats, NULL::jsonb AS diff_history, input_manifest, archived_at, archived_by_user_id, ` + sessionAutomationRunIDColumn + `, ` + sessionPRCreationStateColumn + `, ` + sessionPRCreationErrorColumn + `, ` + sessionPRPushStateColumn + `, ` + sessionPRPushErrorColumn + `, ` + sessionPRPushErrorCodeColumn + `, ` + sessionBranchCreationStateColumn + `, ` + sessionBranchCreationErrorColumn + `, ` + sessionBranchURLColumn + `, diff_collected_at, latest_diff_snapshot_id, workspace_revision, workspace_revision_updated_at,
 	` + hasUnpushedChangesColumn + `,
 	` + sessionLinearPrivateColumn + `, ` + sessionLinearStateSyncDisabledColumn + `, ` + sessionLinearIdentifierHintColumn + `, ` + sessionLinearPrepareStateColumn + `,
-	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at`
+	deleted_at, ` + sessionCapabilitySnapshotColumn + `, ` + sessionGitIdentitySourceColumn + `, ` + sessionGitIdentityUserIDColumn + `, created_at, live_version`
 
 // maxDiffHistoryEntries caps the number of entries kept in diff_history.
 // Older entries beyond this limit are pruned when a new entry is appended.
@@ -487,7 +487,7 @@ func (s *SessionStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filters S
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -567,7 +567,7 @@ func (s *SessionStore) GetByID(ctx context.Context, orgID, runID uuid.UUID) (mod
 	if err != nil {
 		return models.Session{}, fmt.Errorf("query session: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, err
 	}
@@ -651,7 +651,7 @@ func (s *SessionStore) GetAPIDetailByID(ctx context.Context, orgID, runID uuid.U
 	if err != nil {
 		return models.Session{}, fmt.Errorf("query session API detail: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, err
 	}
@@ -818,7 +818,7 @@ func (s *SessionStore) CreateForIncident(ctx context.Context, orgID, issueID uui
 	if err != nil {
 		return false, models.Session{}, fmt.Errorf("check existing incident sessions: %w", err)
 	}
-	found, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	found, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return false, models.Session{}, fmt.Errorf("scan existing incident sessions: %w", err)
 	}
@@ -1195,7 +1195,7 @@ func (s *SessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.U
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return err
 	}
@@ -1328,7 +1328,7 @@ func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, de
 	if err != nil {
 		return nil, fmt.Errorf("query runtime-control stalled sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, fmt.Errorf("collect runtime-control stalled sessions: %w", err)
 	}
@@ -1542,7 +1542,7 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return err
 	}
@@ -1568,7 +1568,7 @@ func (s *SessionStore) SetRepositoryContext(ctx context.Context, orgID, sessionI
 	if err != nil {
 		return models.Session{}, fmt.Errorf("set session repository context: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, fmt.Errorf("collect session repository context: %w", err)
 	}
@@ -1592,7 +1592,7 @@ func (s *SessionStore) UpdateInputManifest(ctx context.Context, orgID, sessionID
 	if err != nil {
 		return models.Session{}, fmt.Errorf("update session input manifest: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, fmt.Errorf("collect session input manifest update: %w", err)
 	}
@@ -1715,7 +1715,7 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return err
 	}
@@ -1776,7 +1776,7 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 	if err != nil {
 		return nil, fmt.Errorf("list terminal sessions before: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -1811,7 +1811,7 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim idle session: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, err
 	}
@@ -1844,7 +1844,7 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 	if err != nil {
 		return models.Session{}, fmt.Errorf("claim terminal session for resume: %w", err)
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return models.Session{}, err
 	}
@@ -2086,7 +2086,7 @@ func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID
 	if err != nil {
 		return nil, fmt.Errorf("query sessions by issue: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -2115,7 +2115,7 @@ func (s *SessionStore) ListRecentByOrg(ctx context.Context, orgID uuid.UUID, sta
 	if err != nil {
 		return nil, fmt.Errorf("query sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -2142,7 +2142,7 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 	if err != nil {
 		return nil, fmt.Errorf("query sessions by ids: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -2553,7 +2553,7 @@ func (s *SessionStore) MarkRunningWithSandboxState(ctx context.Context, orgID, s
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return err
 	}
@@ -2616,7 +2616,7 @@ func (s *SessionStore) UpdatePRCreationState(ctx context.Context, orgID, session
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		// Pre-existing semantics: matching zero rows (e.g. the row is
 		// already in the terminal `succeeded` state) is a no-op, not an
@@ -2665,7 +2665,7 @@ func (s *SessionStore) TryMarkPRCreationQueued(ctx context.Context, orgID, sessi
 	if err != nil {
 		return false, err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -2723,7 +2723,7 @@ func (s *SessionStore) TryMarkPRPushQueued(ctx context.Context, orgID, sessionID
 	if err != nil {
 		return false, err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -2811,7 +2811,7 @@ func (s *SessionStore) UpdatePRPushStateWithCode(ctx context.Context, orgID, ses
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -2854,7 +2854,7 @@ func (s *SessionStore) TryMarkBranchCreationQueued(ctx context.Context, orgID, s
 	if err != nil {
 		return false, err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -2911,7 +2911,7 @@ func (s *SessionStore) UpdateBranchCreationState(ctx context.Context, orgID, ses
 	if err != nil {
 		return err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -3063,7 +3063,7 @@ func (s *SessionStore) FailInFlightPublishActions(ctx context.Context, orgID, se
 	if err != nil {
 		return false, err
 	}
-	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -3593,7 +3593,7 @@ func (s *SessionStore) ListOrphanedContainers(ctx context.Context, afterID uuid.
 	if err != nil {
 		return nil, fmt.Errorf("list orphaned containers: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -3702,7 +3702,7 @@ func (s *SessionStore) ListStalePendingSessions(ctx context.Context, activityBef
 	if err != nil {
 		return nil, fmt.Errorf("query stale pending sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -3745,7 +3745,7 @@ func (s *SessionStore) ListStaleRunningSessions(ctx context.Context, startedBefo
 	if err != nil {
 		return nil, fmt.Errorf("query stale running sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -3775,7 +3775,7 @@ func (s *SessionStore) ListStaleIdleSessions(ctx context.Context, olderThan time
 	if err != nil {
 		return nil, fmt.Errorf("query stale idle sessions: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}
@@ -3806,7 +3806,7 @@ func (s *SessionStore) ListExpiredSnapshots(ctx context.Context, olderThan time.
 	if err != nil {
 		return nil, fmt.Errorf("query expired snapshots: %w", err)
 	}
-	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.Session])
+	sessions, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.Session])
 	if err != nil {
 		return nil, err
 	}

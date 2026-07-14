@@ -124,44 +124,19 @@ func (b *logRingBuffer) snapshot() []StreamedLog {
 	return out
 }
 
-type logFanout struct {
+type sessionResourceFanout struct {
 	sessionID uuid.UUID
-	streamKey string
 	client    *Client
 	logger    zerolog.Logger
-
-	ctx     context.Context
-	cancel  context.CancelFunc
-	onExit  func()
-	mu      sync.Mutex
-	clients map[*logSubscriber]struct{}
-	ring    *logRingBuffer
-}
-
-type statusFanout struct {
-	sessionID uuid.UUID
-	streamKey string
-	client    *Client
-	logger    zerolog.Logger
-
-	ctx     context.Context
-	cancel  context.CancelFunc
-	onExit  func()
-	mu      sync.Mutex
-	clients map[*statusSubscriber]struct{}
-}
-
-type eventFanout struct {
-	sessionID uuid.UUID
-	streamKey string
-	client    *Client
-	logger    zerolog.Logger
-
-	ctx     context.Context
-	cancel  context.CancelFunc
-	onExit  func()
-	mu      sync.Mutex
-	clients map[*eventSubscriber]struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	onExit    func()
+	mu        sync.Mutex
+	logs      map[*logSubscriber]struct{}
+	statuses  map[*statusSubscriber]struct{}
+	events    map[*eventSubscriber]struct{}
+	ring      *logRingBuffer
+	stopping  bool
 }
 
 type LogSubscription struct {
@@ -238,14 +213,8 @@ type SessionStreams struct {
 	logger  zerolog.Logger
 	metrics *Metrics
 
-	logMu      sync.Mutex
-	logFanouts map[uuid.UUID]*logFanout
-
-	statusMu      sync.Mutex
-	statusFanouts map[uuid.UUID]*statusFanout
-
-	eventMu      sync.Mutex
-	eventFanouts map[uuid.UUID]*eventFanout
+	resourceMu      sync.Mutex
+	resourceFanouts map[uuid.UUID]*sessionResourceFanout
 }
 
 func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) *SessionStreams {
@@ -253,12 +222,10 @@ func NewSessionStreams(client *Client, logger zerolog.Logger, metrics *Metrics) 
 		return nil
 	}
 	return &SessionStreams{
-		client:        client,
-		logger:        logger,
-		metrics:       metrics,
-		logFanouts:    make(map[uuid.UUID]*logFanout),
-		statusFanouts: make(map[uuid.UUID]*statusFanout),
-		eventFanouts:  make(map[uuid.UUID]*eventFanout),
+		client:          client,
+		logger:          logger,
+		metrics:         metrics,
+		resourceFanouts: make(map[uuid.UUID]*sessionResourceFanout),
 	}
 }
 
@@ -397,9 +364,9 @@ func (s *SessionStreams) ReplayBufferedLogs(sessionID uuid.UUID, lastStreamID st
 	if s == nil {
 		return nil, false
 	}
-	s.logMu.Lock()
-	f := s.logFanouts[sessionID]
-	s.logMu.Unlock()
+	s.resourceMu.Lock()
+	f := s.resourceFanouts[sessionID]
+	s.resourceMu.Unlock()
 	if f == nil {
 		return nil, false
 	}
@@ -442,19 +409,15 @@ func (s *SessionStreams) SubscribeLogs(sessionID uuid.UUID) (*LogSubscription, e
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureLogFanout(sessionID)
 	sub := &logSubscriber{ch: make(chan StreamedLog, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.clients[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.logs[sub] = struct{}{} })
 
 	return &LogSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeLogClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -463,19 +426,15 @@ func (s *SessionStreams) SubscribeStatus(sessionID uuid.UUID) (*StatusSubscripti
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureStatusFanout(sessionID)
 	sub := &statusSubscriber{ch: make(chan models.Session, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.clients[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.statuses[sub] = struct{}{} })
 
 	return &StatusSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeStatusClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -484,19 +443,15 @@ func (s *SessionStreams) SubscribeEvents(sessionID uuid.UUID) (*EventSubscriptio
 	if s == nil || s.client == nil {
 		return nil, errors.New("redis unavailable")
 	}
-	f := s.ensureEventFanout(sessionID)
 	sub := &eventSubscriber{ch: make(chan models.SessionStreamEvent, perClientBufferSize)}
 	sub.reason.Store("")
-
-	f.mu.Lock()
-	f.clients[sub] = struct{}{}
-	f.mu.Unlock()
+	f := s.attachResourceSubscriber(sessionID, func(f *sessionResourceFanout) { f.events[sub] = struct{}{} })
 
 	return &EventSubscription{
 		C:      sub.ch,
 		client: sub,
 		closeFn: func() {
-			f.removeClient(sub, "client_closed")
+			f.removeEventClient(sub, "client_closed")
 		},
 	}, nil
 }
@@ -545,334 +500,224 @@ func (s *SessionStreams) runCleanupBatch(ctx context.Context, lister SessionTerm
 	return len(sessions), nil
 }
 
-func (s *SessionStreams) ensureLogFanout(sessionID uuid.UUID) *logFanout {
-	s.logMu.Lock()
-	defer s.logMu.Unlock()
-	if f := s.logFanouts[sessionID]; f != nil {
-		return f
+func (s *SessionStreams) ensureResourceFanout(sessionID uuid.UUID) *sessionResourceFanout {
+	s.resourceMu.Lock()
+	defer s.resourceMu.Unlock()
+	if fanout := s.resourceFanouts[sessionID]; fanout != nil {
+		return fanout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	f := &logFanout{
-		sessionID: sessionID,
-		streamKey: logStreamKey(sessionID),
-		client:    s.client,
-		logger:    s.logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		clients:   make(map[*logSubscriber]struct{}),
-		ring:      newLogRingBuffer(logRingBufferSize),
-		onExit: func() {
-			s.logMu.Lock()
-			delete(s.logFanouts, sessionID)
-			s.logMu.Unlock()
-		},
+	fanout := &sessionResourceFanout{
+		sessionID: sessionID, client: s.client, logger: s.logger, ctx: ctx, cancel: cancel,
+		logs: make(map[*logSubscriber]struct{}), statuses: make(map[*statusSubscriber]struct{}),
+		events: make(map[*eventSubscriber]struct{}), ring: newLogRingBuffer(logRingBufferSize),
 	}
-	s.logFanouts[sessionID] = f
-	go f.run()
-	return f
-}
-
-func (s *SessionStreams) ensureStatusFanout(sessionID uuid.UUID) *statusFanout {
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
-	if f := s.statusFanouts[sessionID]; f != nil {
-		return f
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	f := &statusFanout{
-		sessionID: sessionID,
-		streamKey: statusStreamKey(sessionID),
-		client:    s.client,
-		logger:    s.logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		clients:   make(map[*statusSubscriber]struct{}),
-		onExit: func() {
-			s.statusMu.Lock()
-			delete(s.statusFanouts, sessionID)
-			s.statusMu.Unlock()
-		},
-	}
-	s.statusFanouts[sessionID] = f
-	go f.run()
-	return f
-}
-
-func (s *SessionStreams) ensureEventFanout(sessionID uuid.UUID) *eventFanout {
-	s.eventMu.Lock()
-	defer s.eventMu.Unlock()
-	if f := s.eventFanouts[sessionID]; f != nil {
-		return f
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	f := &eventFanout{
-		sessionID: sessionID,
-		streamKey: eventStreamKey(sessionID),
-		client:    s.client,
-		logger:    s.logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		clients:   make(map[*eventSubscriber]struct{}),
-		onExit: func() {
-			s.eventMu.Lock()
-			delete(s.eventFanouts, sessionID)
-			s.eventMu.Unlock()
-		},
-	}
-	s.eventFanouts[sessionID] = f
-	go f.run()
-	return f
-}
-
-func (f *logFanout) run() {
-	defer f.onExit()
-	lastID := "$"
-	for {
-		select {
-		case <-f.ctx.Done():
-			f.closeAll("retry")
-			return
-		default:
+	fanout.onExit = func() {
+		s.metrics.RecordSessionReader(context.Background(), "combined", -1)
+		s.resourceMu.Lock()
+		if s.resourceFanouts[sessionID] == fanout {
+			delete(s.resourceFanouts, sessionID)
 		}
+		s.resourceMu.Unlock()
+	}
+	s.resourceFanouts[sessionID] = fanout
+	s.metrics.RecordSessionReader(context.Background(), "combined", 1)
+	go fanout.run()
+	return fanout
+}
 
-		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{
-			Streams: []string{f.streamKey, lastID},
-			Block:   30 * time.Second,
-			Count:   100,
-		}).Result()
+func (s *SessionStreams) attachResourceSubscriber(sessionID uuid.UUID, attach func(*sessionResourceFanout)) *sessionResourceFanout {
+	for {
+		fanout := s.ensureResourceFanout(sessionID)
+		fanout.mu.Lock()
+		if !fanout.stopping {
+			attach(fanout)
+			fanout.mu.Unlock()
+			return fanout
+		}
+		fanout.mu.Unlock()
+
+		// Replace only the dying instance we observed. Its onExit callback also
+		// compares pointers, so it cannot delete the replacement.
+		replaced := false
+		s.resourceMu.Lock()
+		if s.resourceFanouts[sessionID] == fanout {
+			delete(s.resourceFanouts, sessionID)
+			replaced = true
+		}
+		s.resourceMu.Unlock()
+		if replaced {
+			fanout.cancel()
+		}
+	}
+}
+
+func (f *sessionResourceFanout) emptyLocked() bool {
+	return len(f.logs) == 0 && len(f.statuses) == 0 && len(f.events) == 0
+}
+
+func (f *sessionResourceFanout) run() {
+	defer f.onExit()
+	keys := []string{logStreamKey(f.sessionID), statusStreamKey(f.sessionID), eventStreamKey(f.sessionID)}
+	ids := []string{"$", "$", "$"}
+	for {
+		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{Streams: append(append([]string{}, keys...), ids...), Block: 30 * time.Second, Count: 100}).Result()
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				f.closeAll("retry")
-				return
-			}
 			if errors.Is(err, redis.Nil) {
 				continue
 			}
-			f.client.breaker.ForceOpen()
-			f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("Redis log fan-out reader failed")
+			if !errors.Is(err, context.Canceled) {
+				f.client.breaker.ForceOpen()
+				f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("combined session resource reader failed")
+			}
 			f.closeAll("retry")
 			return
 		}
-
 		for _, stream := range streams {
-			for _, msg := range stream.Messages {
-				lastID = msg.ID
-				log, decodeErr := decodeLogEntry(msg)
-				if decodeErr != nil {
-					f.logger.Warn().Err(decodeErr).Str("session_id", f.sessionID.String()).Str("stream_id", msg.ID).Msg("failed to decode Redis log stream entry")
-					continue
-				}
-				entry := StreamedLog{StreamID: msg.ID, Log: log}
-				f.mu.Lock()
-				f.ring.add(entry)
-				for sub := range f.clients {
-					select {
-					case sub.ch <- entry:
-					default:
-						f.closeClientLocked(sub, "slow_consumer")
-					}
-				}
-				empty := len(f.clients) == 0
-				f.mu.Unlock()
-				if empty {
-					f.cancel()
-					return
+			streamIndex := 0
+			for index, key := range keys {
+				if stream.Stream == key {
+					streamIndex = index
+					break
 				}
 			}
+			for _, message := range stream.Messages {
+				ids[streamIndex] = message.ID
+				switch streamIndex {
+				case 0:
+					f.deliverLog(message)
+				case 1:
+					f.deliverStatus(message)
+				case 2:
+					f.deliverEvent(message)
+				}
+			}
+		}
+		f.mu.Lock()
+		empty := f.emptyLocked()
+		if empty {
+			f.stopping = true
+		}
+		f.mu.Unlock()
+		if empty {
+			return
 		}
 	}
 }
 
-func (f *statusFanout) run() {
-	defer f.onExit()
-	lastID := "$"
-	for {
+func (f *sessionResourceFanout) deliverLog(message redis.XMessage) {
+	log, err := decodeLogEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session log")
+		return
+	}
+	entry := StreamedLog{StreamID: message.ID, Log: log}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ring.add(entry)
+	for subscriber := range f.logs {
 		select {
-		case <-f.ctx.Done():
-			f.closeAll("retry")
-			return
+		case subscriber.ch <- entry:
 		default:
-		}
-
-		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{
-			Streams: []string{f.streamKey, lastID},
-			Block:   30 * time.Second,
-			Count:   32,
-		}).Result()
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				f.closeAll("retry")
-				return
-			}
-			if errors.Is(err, redis.Nil) {
-				continue
-			}
-			f.client.breaker.ForceOpen()
-			f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("Redis status fan-out reader failed")
-			f.closeAll("retry")
-			return
-		}
-
-		for _, stream := range streams {
-			for _, msg := range stream.Messages {
-				lastID = msg.ID
-				session, decodeErr := decodeStatusEntry(msg)
-				if decodeErr != nil {
-					f.logger.Warn().Err(decodeErr).Str("session_id", f.sessionID.String()).Str("stream_id", msg.ID).Msg("failed to decode Redis status stream entry")
-					continue
-				}
-				f.mu.Lock()
-				for sub := range f.clients {
-					select {
-					case sub.ch <- session:
-					default:
-						f.closeClientLocked(sub, "slow_consumer")
-					}
-				}
-				empty := len(f.clients) == 0
-				f.mu.Unlock()
-				if empty {
-					f.cancel()
-					return
-				}
-			}
+			f.closeLogLocked(subscriber, "slow_consumer")
 		}
 	}
 }
 
-func (f *eventFanout) run() {
-	defer f.onExit()
-	lastID := "$"
-	for {
+func (f *sessionResourceFanout) deliverStatus(message redis.XMessage) {
+	session, err := decodeStatusEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session status")
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.statuses {
 		select {
-		case <-f.ctx.Done():
-			f.closeAll("retry")
-			return
+		case subscriber.ch <- session:
 		default:
-		}
-
-		streams, err := f.client.raw().XRead(f.ctx, &redis.XReadArgs{
-			Streams: []string{f.streamKey, lastID},
-			Block:   30 * time.Second,
-			Count:   64,
-		}).Result()
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				f.closeAll("retry")
-				return
-			}
-			if errors.Is(err, redis.Nil) {
-				continue
-			}
-			f.client.breaker.ForceOpen()
-			f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("Redis event fan-out reader failed")
-			f.closeAll("retry")
-			return
-		}
-
-		for _, stream := range streams {
-			for _, msg := range stream.Messages {
-				lastID = msg.ID
-				event, decodeErr := decodeEventEntry(msg)
-				if decodeErr != nil {
-					f.logger.Warn().Err(decodeErr).Str("session_id", f.sessionID.String()).Str("stream_id", msg.ID).Msg("failed to decode Redis event stream entry")
-					continue
-				}
-				f.mu.Lock()
-				for sub := range f.clients {
-					select {
-					case sub.ch <- event:
-					default:
-						f.closeClientLocked(sub, "slow_consumer")
-					}
-				}
-				empty := len(f.clients) == 0
-				f.mu.Unlock()
-				if empty {
-					f.cancel()
-					return
-				}
-			}
+			f.closeStatusLocked(subscriber, "slow_consumer")
 		}
 	}
 }
 
-func (f *logFanout) closeAll(reason string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for sub := range f.clients {
-		f.closeClientLocked(sub, reason)
-	}
-}
-
-func (f *statusFanout) closeAll(reason string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for sub := range f.clients {
-		f.closeClientLocked(sub, reason)
-	}
-}
-
-func (f *eventFanout) closeAll(reason string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for sub := range f.clients {
-		f.closeClientLocked(sub, reason)
-	}
-}
-
-func (f *logFanout) removeClient(sub *logSubscriber, reason string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.clients[sub]; !ok {
+func (f *sessionResourceFanout) deliverEvent(message redis.XMessage) {
+	event, err := decodeEventEntry(message)
+	if err != nil {
+		f.logger.Warn().Err(err).Str("session_id", f.sessionID.String()).Msg("failed to decode combined session event")
 		return
 	}
-	f.closeClientLocked(sub, reason)
-	if len(f.clients) == 0 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.events {
+		select {
+		case subscriber.ch <- event:
+		default:
+			f.closeEventLocked(subscriber, "slow_consumer")
+		}
+	}
+}
+
+func (f *sessionResourceFanout) closeLogLocked(subscriber *logSubscriber, reason string) {
+	delete(f.logs, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeStatusLocked(subscriber *statusSubscriber, reason string) {
+	delete(f.statuses, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeEventLocked(subscriber *eventSubscriber, reason string) {
+	delete(f.events, subscriber)
+	subscriber.reason.Store(reason)
+	close(subscriber.ch)
+}
+func (f *sessionResourceFanout) closeAll(reason string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for subscriber := range f.logs {
+		f.closeLogLocked(subscriber, reason)
+	}
+	for subscriber := range f.statuses {
+		f.closeStatusLocked(subscriber, reason)
+	}
+	for subscriber := range f.events {
+		f.closeEventLocked(subscriber, reason)
+	}
+}
+func (f *sessionResourceFanout) removeLogClient(subscriber *logSubscriber, reason string) {
+	f.mu.Lock()
+	if _, ok := f.logs[subscriber]; ok {
+		f.closeLogLocked(subscriber, reason)
+	}
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
 		f.cancel()
 	}
 }
-
-func (f *statusFanout) removeClient(sub *statusSubscriber, reason string) {
+func (f *sessionResourceFanout) removeStatusClient(subscriber *statusSubscriber, reason string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.clients[sub]; !ok {
-		return
+	if _, ok := f.statuses[subscriber]; ok {
+		f.closeStatusLocked(subscriber, reason)
 	}
-	f.closeClientLocked(sub, reason)
-	if len(f.clients) == 0 {
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
 		f.cancel()
 	}
 }
-
-func (f *eventFanout) removeClient(sub *eventSubscriber, reason string) {
+func (f *sessionResourceFanout) removeEventClient(subscriber *eventSubscriber, reason string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.clients[sub]; !ok {
-		return
+	if _, ok := f.events[subscriber]; ok {
+		f.closeEventLocked(subscriber, reason)
 	}
-	f.closeClientLocked(sub, reason)
-	if len(f.clients) == 0 {
+	empty := f.emptyLocked()
+	f.mu.Unlock()
+	if empty {
 		f.cancel()
 	}
-}
-
-func (f *logFanout) closeClientLocked(sub *logSubscriber, reason string) {
-	delete(f.clients, sub)
-	sub.reason.Store(reason)
-	close(sub.ch)
-}
-
-func (f *statusFanout) closeClientLocked(sub *statusSubscriber, reason string) {
-	delete(f.clients, sub)
-	sub.reason.Store(reason)
-	close(sub.ch)
-}
-
-func (f *eventFanout) closeClientLocked(sub *eventSubscriber, reason string) {
-	delete(f.clients, sub)
-	sub.reason.Store(reason)
-	close(sub.ch)
 }
 
 func decodeLogEntry(entry redis.XMessage) (models.SessionLog, error) {

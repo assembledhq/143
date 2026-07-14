@@ -43,6 +43,10 @@ import {
   filterToStatusParam as baseFilterToStatusParam,
 } from "@/lib/session-status-groups";
 import { getCountForTab, renderCount } from "@/lib/session-counts";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 const filterTabs = [
   { value: "all", label: "All" },
@@ -168,6 +172,8 @@ function buildColumns(members: User[]): ColumnDef<Session>[] {
 // ---------------------------------------------------------------------------
 
 export function SessionsPageContent() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const router = useRouter();
   const queryClient = useQueryClient();
 
@@ -248,22 +254,28 @@ export function SessionsPageContent() {
     [repo, scopedUserIDs, statusParam],
   );
 
+  const liveListKey = [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam] as const;
+  const liveCountsKey = queryKeys.sessions.counts(repo, serializedPeopleParam);
+  const livePollMs = liveRefreshInterval(liveListKey, "list", liveHealth, documentVisible);
+  useLiveQueryRegistration({ queryKey: liveListKey, families: ["session.list"], priority: "critical", visible: documentVisible && !showDecisions });
+  useLiveQueryRegistration({ queryKey: liveCountsKey, families: ["session.counts"], priority: "secondary", visible: documentVisible && !showDecisions });
+
   const { data: listData, isLoading, error } = useQuery({
-    queryKey: [...queryKeys.sessions.list(repo), "filtered", currentFilter, serializedPeopleParam],
-    queryFn: () => api.sessions.list(listParams),
-    refetchInterval: isPaginated || showDecisions || isTableHovered ? false : 10000,
+    queryKey: liveListKey,
+    queryFn: ({ signal }) => api.sessions.list(listParams, { signal }),
+    refetchInterval: isPaginated || showDecisions || isTableHovered ? false : livePollMs,
     enabled: !showDecisions && isResolved,
   });
 
   // Tab badge counts.
   const { data: countsData } = useQuery({
-    queryKey: queryKeys.sessions.counts(repo, serializedPeopleParam),
-    queryFn: () =>
+    queryKey: liveCountsKey,
+    queryFn: ({ signal }) =>
       api.sessions.counts({
         repository_id: repo ?? undefined,
         triggered_by_user_ids: scopedUserIDs,
-      }),
-    refetchInterval: showDecisions ? false : 10000,
+      }, { signal }),
+    refetchInterval: showDecisions ? false : livePollMs,
     enabled: !showDecisions && isResolved,
   });
 

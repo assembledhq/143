@@ -219,7 +219,7 @@ func automationColumnsForGoalImprovementServiceTest() []string {
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at", "live_version",
 	}
 }
 
@@ -240,7 +240,7 @@ func addAutomationRowForGoalImprovementServiceTest(rows *pgxmock.Rows, a models.
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		nil, githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
-		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
+		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt, a.LiveVersion,
 	)
 }
 

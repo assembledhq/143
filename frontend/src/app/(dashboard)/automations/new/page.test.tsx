@@ -421,6 +421,7 @@ describe("NewAutomationPage", () => {
     });
     const existingAutomation: Automation = {
       id: "automation-existing",
+      live_version: 1,
       org_id: "org-1",
       repository_id: "repo-1",
       name: "Existing automation",

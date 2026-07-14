@@ -18,6 +18,10 @@ import type {
   AutomationRunStats,
   AutomationRunStatsBucket,
 } from "@/lib/types";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 interface AutomationStatsCardProps {
   automationId: string;
@@ -147,6 +151,8 @@ function ChartTooltip({ active, payload, label }: TooltipContentProps) {
 }
 
 export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) {
+	const liveHealth = useLiveHealth();
+	const documentVisible = useDocumentVisible();
   // Use a stable bucket-start-of-day window so the query key doesn't change
   // every render (which would thrash the cache). Recomputing on mount is
   // fine — the window is forward-looking from "today in UTC".
@@ -162,10 +168,12 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
     return { since: sinceDay.toISOString(), until: untilDay.toISOString() };
   }, []);
 
+  const statsKey = ["automation-stats", automationId, since, until] as const;
+  useLiveQueryRegistration({ queryKey: statsKey, families: ["automation.stats"], resourceId: automationId, priority: "secondary", visible: documentVisible });
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["automation-stats", automationId, since, until],
-    queryFn: () => api.automations.stats(automationId, { since, until }),
-    refetchInterval: 60_000,
+    queryKey: statsKey,
+    queryFn: ({ signal }) => api.automations.stats(automationId, { since, until }, { signal }),
+    refetchInterval: liveRefreshInterval(statsKey, "list", liveHealth, documentVisible),
   });
 
   const stats: AutomationRunStats | undefined = data?.data;

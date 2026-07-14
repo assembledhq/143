@@ -1,6 +1,11 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { queryKeys } from "./query-keys";
-import type { Automation, ListResponse } from "./types";
+import type { Automation, ListResponse, SingleResponse } from "./types";
+
+export interface AutomationEnabledSnapshot {
+  list?: ListResponse<Automation>;
+  detail?: SingleResponse<Automation>;
+}
 
 function isAutomationListResponse(value: unknown): value is ListResponse<Automation> {
   return (
@@ -70,4 +75,47 @@ export function removeAutomationFromListCaches(
       queryClient.setQueryData(key, { ...current, data: nextData });
     }
   }
+}
+
+/**
+ * Applies the honest local intent for pause/resume without manufacturing a
+ * server revision. The returned snapshot is scoped to one automation and can
+ * be restored verbatim if the mutation fails.
+ */
+export function optimisticallySetAutomationEnabled(
+  queryClient: QueryClient,
+  automationID: string,
+  enabled: boolean,
+): AutomationEnabledSnapshot {
+  const listKey = queryKeys.automations.all;
+  const detailKey = queryKeys.automations.detail(automationID);
+  const snapshot: AutomationEnabledSnapshot = {
+    list: queryClient.getQueryData<ListResponse<Automation>>(listKey),
+    detail: queryClient.getQueryData<SingleResponse<Automation>>(detailKey),
+  };
+  if (snapshot.list) {
+    queryClient.setQueryData<ListResponse<Automation>>(listKey, {
+      ...snapshot.list,
+      data: snapshot.list.data.map((automation) =>
+        automation.id === automationID ? { ...automation, enabled } : automation,
+      ),
+    });
+  }
+  if (snapshot.detail?.data.id === automationID) {
+    queryClient.setQueryData<SingleResponse<Automation>>(detailKey, {
+      ...snapshot.detail,
+      data: { ...snapshot.detail.data, enabled },
+    });
+  }
+  return snapshot;
+}
+
+export function restoreAutomationEnabledSnapshot(
+  queryClient: QueryClient,
+  automationID: string,
+  snapshot: AutomationEnabledSnapshot | undefined,
+): void {
+  if (!snapshot) return;
+  if (snapshot.list) queryClient.setQueryData(queryKeys.automations.all, snapshot.list);
+  if (snapshot.detail) queryClient.setQueryData(queryKeys.automations.detail(automationID), snapshot.detail);
 }

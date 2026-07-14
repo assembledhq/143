@@ -104,7 +104,7 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
 	source_workspace_revision, source_workspace_revision_updated_at,
 	runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source,
-	unavailable_reason, preview_holding_container`
+	unavailable_reason, preview_holding_container, live_version`
 
 const previewRuntimeColumns = `id, org_id, preview_instance_id, runtime_epoch, worker_node_id,
 	endpoint_url, preview_handle, primary_port, status, lease_expires_at,

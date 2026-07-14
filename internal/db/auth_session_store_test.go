@@ -35,7 +35,7 @@ var sessionColumns = []string{
 	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at",
 	"has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at", "live_version",
 }
 
 func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
@@ -113,6 +113,7 @@ func newSessionRow(id, issueID, orgID uuid.UUID, now time.Time) []interface{} {
 		nil,            // git_identity_source
 		nil,            // git_identity_user_id
 		now,            // created_at
+		int64(1),       // live_version
 	}
 }
 

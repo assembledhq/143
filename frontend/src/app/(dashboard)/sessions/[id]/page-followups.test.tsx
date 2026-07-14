@@ -167,7 +167,7 @@ describe('SessionDetailPage follow-up messages', () => {
     });
   });
 
-  it('does not double-render a follow-up when the timeline poll sees the real message before POST resolves', async () => {
+  it('does not fast-poll or double-render an optimistic follow-up before POST resolves', async () => {
     const idleSession: Session = {
       ...mockSessions[0],
       status: 'idle',
@@ -227,10 +227,7 @@ describe('SessionDetailPage follow-up messages', () => {
 
     expect(await screen.findByText('Show once')).toBeInTheDocument();
 
-    await waitFor(() => {
-      expect(timelineFetchCount).toBeGreaterThanOrEqual(2);
-    }, { timeout: 4500 });
-
+    expect(timelineFetchCount).toBe(1);
     expect(screen.getAllByText('Show once')).toHaveLength(1);
 
     releaseResponse();

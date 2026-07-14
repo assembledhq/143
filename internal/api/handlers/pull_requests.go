@@ -125,7 +125,7 @@ func (h *PullRequestHandler) StreamUpdates(w http.ResponseWriter, r *http.Reques
 				logger.Warn().Err(err).Msg("failed to write pull request stream heartbeat")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case event, ok := <-sub.C:
 			if !ok {
 				logger.Warn().Str("reason", sub.CloseReason()).Msg("pull request update subscription closed")
@@ -135,7 +135,7 @@ func (h *PullRequestHandler) StreamUpdates(w http.ResponseWriter, r *http.Reques
 				logger.Warn().Err(err).Str("pull_request_id", event.PullRequestID.String()).Msg("failed to write pull request update event")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		}
 	}
 }

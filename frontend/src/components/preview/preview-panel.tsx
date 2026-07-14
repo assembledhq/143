@@ -46,7 +46,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn, formatTimeAgo } from "@/lib/utils";
 import { api } from "@/lib/api";
-import { pollMs } from "@/lib/poll-intervals";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import {
   PREVIEW_ERROR_CODES,
   type PreviewStatus,
@@ -54,6 +57,7 @@ import {
   type PreviewService,
   type PreviewFreshnessState,
   type PreviewRestartReason,
+  type PreviewLog,
   type PreviewVerificationRun,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
@@ -480,6 +484,10 @@ export function PreviewPanel({
   previewOriginTemplate,
 }: PreviewPanelProps) {
   const queryClient = useQueryClient();
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
+  const previewStatusKey = ["preview-status", sessionId] as const;
+  const livePreviewPollMs = liveRefreshInterval(previewStatusKey, "active-detail", liveHealth, documentVisible);
   const startupPhaseRailRef = useRef<HTMLDivElement | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [showFullStartupLogs, setShowFullStartupLogs] = useState(false);
@@ -514,23 +522,23 @@ export function PreviewPanel({
     [],
   );
 
-  // Poll preview status every 3s when active
+  useLiveQueryRegistration({ queryKey: previewStatusKey, families: ["preview.detail"], priority: "critical", visible: documentVisible });
   const {
     data: previewStatus,
     isLoading: statusLoading,
     error: statusError,
     refetch: refetchStatus,
   } = useQuery({
-    queryKey: ["preview-status", sessionId],
-    queryFn: () =>
-      api.sessions.preview.get(sessionId).catch((err) => {
+    queryKey: previewStatusKey,
+    queryFn: ({ signal }) =>
+      api.sessions.preview.get(sessionId, { signal }).catch((err) => {
         // Treat NO_ACTIVE_PREVIEW as a clean "no preview" state, not an error.
         if (err?.code === "NO_ACTIVE_PREVIEW") return null;
         throw err;
       }),
     refetchInterval: (query) => {
       if (query.state.data?.prewarm?.state === "warming") {
-        return pollMs(12000);
+        return livePreviewPollMs;
       }
       const st = query.state.data?.instance?.status;
       if (
@@ -542,7 +550,7 @@ export function PreviewPanel({
       ) {
         return false;
       }
-      return pollMs(3000);
+      return livePreviewPollMs;
     },
     retry: (failureCount, error) => {
       // Don't retry NO_ACTIVE_PREVIEW — it's a normal state, not a transient failure.
@@ -554,12 +562,13 @@ export function PreviewPanel({
 
   const instance = previewStatus?.instance;
 
+  const previewVerificationsKey = ["preview-verifications", sessionId] as const;
   const { data: verificationRuns = [] } = useQuery({
-    queryKey: ["preview-verifications", sessionId],
+    queryKey: previewVerificationsKey,
     queryFn: () => api.sessions.preview.verifications(sessionId),
     refetchInterval: (query) =>
       query.state.data?.some((run) => run.status === "running")
-        ? pollMs(3000)
+        ? liveRefreshInterval(previewVerificationsKey, "converging", liveHealth, documentVisible)
         : false,
   });
   const prewarm = previewStatus?.prewarm;
@@ -597,20 +606,36 @@ export function PreviewPanel({
   const previewLogsTail = showPreviewRuntimeLogs && isPreparing;
   const shouldLoadPreviewLogs =
     status === "failed" || status === "unavailable" || previewLogsTail;
-  const previewLogsQuery = useQuery({
-    queryKey: [
+  const previewLogsKey = [
       "preview-logs",
       sessionId,
       instance?.id,
       previewLogsTail ? "tail" : "default",
-    ],
-    queryFn: () =>
-      previewLogsTail
-        ? api.sessions.preview.logs(sessionId, { tail: true })
-        : api.sessions.preview.logs(sessionId),
+    ] as const;
+  useLiveQueryRegistration({ queryKey: previewLogsKey, families: ["preview.detail"], resourceId: instance?.id, priority: "secondary", visible: documentVisible && shouldLoadPreviewLogs });
+  const previewLogsQuery = useQuery<PreviewLog[]>({
+    queryKey: previewLogsKey,
+    queryFn: ({ signal }) => {
+      const current = queryClient.getQueryData<PreviewLog[]>(previewLogsKey);
+      const afterId = previewLogsTail ? current?.at(-1)?.id : undefined;
+      return api.sessions.preview.logs(sessionId, { tail: previewLogsTail && !afterId, afterId, signal });
+    },
     enabled: Boolean(instance) && shouldLoadPreviewLogs,
-    refetchInterval: previewLogsTail ? pollMs(2000) : false,
+    // Status events wake this query immediately. While the startup log panel is
+    // actively visible, the central detail policy remains a sparse gap-recovery
+    // backstop so log appends between phase transitions cannot stall forever.
+    refetchInterval: previewLogsTail
+      ? liveRefreshInterval(previewLogsKey, "active-detail", liveHealth, documentVisible)
+      : false,
     retry: 1,
+    structuralSharing: (oldData: unknown, newData: unknown): PreviewLog[] => {
+      const oldLogs = Array.isArray(oldData) ? oldData as PreviewLog[] : undefined;
+      const newLogs = Array.isArray(newData) ? newData as PreviewLog[] : [];
+      if (!previewLogsTail || !oldLogs) return newLogs;
+      const merged = new Map(oldLogs.map((entry) => [entry.id, entry]));
+      for (const entry of newLogs) merged.set(entry.id, entry);
+      return [...merged.values()];
+    },
   });
   const startupErrorLogs = useMemo(() => {
     const persisted = previewLogsQuery.data

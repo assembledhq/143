@@ -1,5 +1,6 @@
 import { getActiveOrgId, ORG_MEMBERSHIP_REVOKED_EVENT } from './active-org';
 import { normalizeAPIResponse } from './api-normalize';
+import { registerClientMutation } from './live-events';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
 
@@ -58,6 +59,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const method = options?.method?.toUpperCase() || 'GET';
   if (method !== 'GET' && method !== 'HEAD') {
     headers['X-CSRF-Token'] = getCSRFToken();
+    if (!headers['X-Client-Mutation-ID']) {
+      const mutationID = crypto.randomUUID();
+      headers['X-Client-Mutation-ID'] = mutationID;
+      registerClientMutation(mutationID);
+    }
   }
 
   // Only attach the active-org header on org-scoped routes. Auth endpoints
@@ -148,6 +154,9 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
   const headers: Record<string, string> = {
     'X-CSRF-Token': getCSRFToken(),
   };
+  const mutationID = crypto.randomUUID();
+  headers['X-Client-Mutation-ID'] = mutationID;
+  registerClientMutation(mutationID);
   const activeOrgId = getActiveOrgId();
   if (activeOrgId) {
     headers['X-Active-Org-ID'] = activeOrgId;
@@ -179,6 +188,10 @@ async function uploadFile(file: File): Promise<{ url: string; file_name: string;
 }
 
 export const api = {
+  liveEvents: {
+    telemetry: (samples: Array<{ name: string; [key: string]: string | number | boolean }>) =>
+      post<void>('/api/v1/events/telemetry', { samples }),
+  },
   uploads: {
     upload: uploadFile,
   },
@@ -278,7 +291,7 @@ export const api = {
       risk?: "acceptable" | "needs_review";
       search?: string;
       limit?: number;
-    }) => {
+    }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
@@ -287,7 +300,7 @@ export const api = {
       if (params?.search) searchParams.set('search', params.search);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`, options);
     },
     templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
     evidence: (sessionId: string) =>
@@ -314,7 +327,7 @@ export const api = {
       }),
   },
   pullRequests: {
-    getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
+    getHealth: (id: string, options?: RequestInit) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`, options),
     fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
     resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
@@ -323,7 +336,7 @@ export const api = {
   },
   previews: {
     current: {
-      list: (params?: { repository_id?: string; scope?: 'running' | 'resumable' | 'attention' | 'recent'; pinned?: boolean; q?: string; limit?: number; cursor?: string }) => {
+      list: (params?: { repository_id?: string; scope?: 'running' | 'resumable' | 'attention' | 'recent'; pinned?: boolean; q?: string; limit?: number; cursor?: string }, options?: RequestInit) => {
         const searchParams = new URLSearchParams();
         if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
         if (params?.scope) searchParams.set('scope', params.scope);
@@ -332,7 +345,7 @@ export const api = {
         if (params?.limit) searchParams.set('limit', String(params.limit));
         if (params?.cursor) searchParams.set('cursor', params.cursor);
         const query = searchParams.toString();
-        return get<import('./types').ListResponse<import('./types').PreviewCurrentResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews/current${query ? `?${query}` : ''}`);
+        return get<import('./types').ListResponse<import('./types').PreviewCurrentResponse> & { meta: import('./types').PreviewListMeta }>(`/api/v1/previews/current${query ? `?${query}` : ''}`, options);
       },
       get: (id: string) =>
         get<import('./types').SingleResponse<import('./types').PreviewCurrentResponse>>(`/api/v1/previews/current/${id}`),
@@ -373,13 +386,13 @@ export const api = {
     },
     resolveLink: (type: 'target' | 'pull_request', slug: string) =>
       get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/links/${type}/${slug}`),
-    get: (id: string) =>
-      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`),
-    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }) => {
+    get: (id: string, options?: RequestInit) =>
+      get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}`, options),
+    getPullRequest: (owner: string, repo: string, number: string | number, params?: { intent?: 'open' | 'status' | 'diagnose' }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.intent) searchParams.set('intent', params.intent);
       const qs = searchParams.toString();
-      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/github/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pull/${number}${qs ? `?${qs}` : ''}`, options);
     },
     restart: (id: string, body?: { start_latest?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').BranchPreviewResponse>>(`/api/v1/previews/${id}/restart`, body ?? {}),
@@ -519,7 +532,7 @@ export const api = {
       del(`/api/v1/pm/documents/${docId}`),
   },
   sessions: {
-    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[]; search?: string; include_archived?: boolean; only_archived?: boolean }) => {
+    list: (params?: { status?: string; cursor?: string; limit?: number; repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[]; search?: string; include_archived?: boolean; only_archived?: boolean }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.status) searchParams.set('status', params.status);
       if (params?.cursor) searchParams.set('cursor', params.cursor);
@@ -531,18 +544,18 @@ export const api = {
       if (params?.only_archived) searchParams.set('only_archived', 'true');
       else if (params?.include_archived) searchParams.set('include_archived', 'true');
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').SessionListItem>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').SessionListItem>>(`/api/v1/sessions${qs ? `?${qs}` : ''}`, options);
     },
-    counts: (params?: { repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[] }) => {
+    counts: (params?: { repository_id?: string; triggered_by_user_id?: string; triggered_by_user_ids?: string[] }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.triggered_by_user_ids?.length) searchParams.set('triggered_by_user_ids', params.triggered_by_user_ids.join(','));
       if (params?.triggered_by_user_id) searchParams.set('triggered_by_user_id', params.triggered_by_user_id);
       const qs = searchParams.toString();
-      return get<import('./types').SingleResponse<import('./types').SessionCounts>>(`/api/v1/sessions/counts${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SingleResponse<import('./types').SessionCounts>>(`/api/v1/sessions/counts${qs ? `?${qs}` : ''}`, options);
     },
     recordView: (sessionId: string) => post<{ status: string }>(`/api/v1/sessions/${sessionId}/view`, {}),
-    get: (id: string) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`),
+    get: (id: string, options?: RequestInit) => get<import('./types').SingleResponse<import('./types').SessionDetail>>(`/api/v1/sessions/${id}`, options),
     getDiff: (id: string, changesetId?: string) => get<import('./types').SingleResponse<import('./types').SessionDiff>>(
       `/api/v1/sessions/${id}/diff${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`,
       { cache: 'no-store' },
@@ -757,8 +770,8 @@ export const api = {
       );
     },
     preview: {
-      get: (sessionId: string) =>
-        get<import('./types').SingleResponse<import('./preview-types').PreviewStatusResponse>>(`/api/v1/sessions/${sessionId}/preview`)
+      get: (sessionId: string, options?: RequestInit) =>
+        get<import('./types').SingleResponse<import('./preview-types').PreviewStatusResponse>>(`/api/v1/sessions/${sessionId}/preview`, options)
           .then(r => r.data),
       start: (sessionId: string, config?: Record<string, unknown>) =>
         post<import('./types').SingleResponse<import('./preview-types').PreviewInstance>>(`/api/v1/sessions/${sessionId}/preview`, config ? { config } : undefined)
@@ -776,11 +789,12 @@ export const api = {
       services: (sessionId: string) =>
         get<import('./types').ListResponse<import('./preview-types').PreviewService>>(`/api/v1/sessions/${sessionId}/preview/services`)
           .then(r => r.data ?? []),
-      logs: (sessionId: string, opts?: { tail?: boolean }) => {
+      logs: (sessionId: string, opts?: { tail?: boolean; afterId?: string; signal?: AbortSignal }) => {
         const searchParams = new URLSearchParams();
         if (opts?.tail) searchParams.set('tail', 'true');
+        if (opts?.afterId) searchParams.set('after_id', opts.afterId);
         const qs = searchParams.toString();
-        return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`)
+        return get<import('./types').ListResponse<import('./preview-types').PreviewLog>>(`/api/v1/sessions/${sessionId}/preview/logs${qs ? `?${qs}` : ''}`, { signal: opts?.signal })
           .then(r => r.data ?? []);
       },
       console: (sessionId: string, opts?: { signal?: AbortSignal; timeoutMs?: number }) =>
@@ -1265,17 +1279,17 @@ export const api = {
       post<{ data: import('./types').GeneratedProject }>('/api/v1/projects/ai/generate', body),
   },
   automations: {
-    list: (params?: { enabled?: boolean; cursor?: string; limit?: number; search?: string }) => {
+    list: (params?: { enabled?: boolean; cursor?: string; limit?: number; search?: string }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.enabled !== undefined) searchParams.set('enabled', String(params.enabled));
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       if (params?.search) searchParams.set('search', params.search);
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').Automation>>(`/api/v1/automations${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').Automation>>(`/api/v1/automations${qs ? `?${qs}` : ''}`, options);
     },
-    get: (id: string) =>
-      get<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`),
+    get: (id: string, options?: RequestInit) =>
+      get<import('./types').SingleResponse<import('./types').Automation>>(`/api/v1/automations/${id}`, options),
     create: (body: Record<string, unknown>) =>
       post<import('./types').SingleResponse<import('./types').Automation>>('/api/v1/automations', body),
     update: (id: string, body: Record<string, unknown>) =>
@@ -1308,12 +1322,12 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/run`),
     bulk: (body: { action: 'pause' | 'resume' | 'delete'; automation_ids?: string[] }) =>
       post<import('./types').AutomationBulkResponse>('/api/v1/automations/bulk', body),
-    listRuns: (id: string, params?: { cursor?: string; limit?: number }) => {
+    listRuns: (id: string, params?: { cursor?: string; limit?: number }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.cursor) searchParams.set('cursor', params.cursor);
       if (params?.limit) searchParams.set('limit', String(params.limit));
       const qs = searchParams.toString();
-      return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`);
+      return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`, options);
     },
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
@@ -1328,12 +1342,12 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(triggers),
       }),
-    stats: (id: string, params?: { since?: string; until?: string }) => {
+    stats: (id: string, params?: { since?: string; until?: string }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.since) searchParams.set('since', params.since);
       if (params?.until) searchParams.set('until', params.until);
       const qs = searchParams.toString();
-      return get<import('./types').SingleResponse<import('./types').AutomationRunStats>>(`/api/v1/automations/${id}/stats${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SingleResponse<import('./types').AutomationRunStats>>(`/api/v1/automations/${id}/stats${qs ? `?${qs}` : ''}`, options);
     },
   },
   auditLogs: {
@@ -1428,16 +1442,16 @@ export const api = {
       baseline_config: { model: string; config_ref?: string };
       candidate_configs: Array<{ model: string; config_ref?: string }>;
     }) => post<import('./types').SingleResponse<import('./types').EvalBatch>>('/api/v1/evals/compare', body),
-    getBatch: (id: string) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`),
+    getBatch: (id: string, options?: RequestInit) => get<import('./types').SingleResponse<import('./types').EvalBatchDetail>>(`/api/v1/evals/batch/${id}`, options),
     // Bootstrap
     bootstrap: (body: { repo_id: string }) =>
       post<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>('/api/v1/evals/bootstrap', body),
-    getBootstrapCandidates: (params?: { repo_id?: string; bootstrap_run_id?: string }) => {
+    getBootstrapCandidates: (params?: { repo_id?: string; bootstrap_run_id?: string }, options?: RequestInit) => {
       const searchParams = new URLSearchParams();
       if (params?.repo_id) searchParams.set('repo_id', params.repo_id);
       if (params?.bootstrap_run_id) searchParams.set('bootstrap_run_id', params.bootstrap_run_id);
       const qs = searchParams.toString();
-      return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`);
+      return get<import('./types').SingleResponse<import('./types').EvalBootstrapRun>>(`/api/v1/evals/bootstrap/candidates${qs ? `?${qs}` : ''}`, options);
     },
     acceptBootstrapCandidates: (body: { bootstrap_run_id: string; candidate_indices?: number[]; candidate_ids?: string[] }) =>
       post<import('./types').ListResponse<import('./types').EvalTask>>('/api/v1/evals/bootstrap/accept', body),

@@ -5794,7 +5794,7 @@ func TestOpenPRHandler_StartsAutomationPrePRReviewBeforePushing(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
-			models.AutomationRunStatusCompleted, nil, nil, nil, now, now,
+			models.AutomationRunStatusCompleted, nil, nil, nil, now, now, int64(1),
 		))
 	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -5846,7 +5846,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
-			models.AutomationRunStatusCompleted, nil, nil, nil, now, now,
+			models.AutomationRunStatusCompleted, nil, nil, nil, now, now, int64(1),
 		))
 	mock.ExpectQuery(`SELECT .+ FROM session_review_loops`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -7115,7 +7115,7 @@ func workerPreviewInstanceColumns() []string {
 		"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 		"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 		"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at",
-		"runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+		"runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 	}
 }
 
@@ -7126,7 +7126,7 @@ func newWorkerPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, 
 		"digest", "", now, now.Add(time.Hour), nil,
 		"/", 512, 500, 10240, json.RawMessage(`{}`), json.RawMessage(`{}`),
 		"ready", nil, "", now, now, nil, nil,
-		nil, nil, nil, nil, "", "", false,
+		nil, nil, nil, nil, "", "", false, int64(1),
 	}
 }
 
@@ -7474,7 +7474,7 @@ func automationRunRowColumns() []string {
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
 		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider", "provider_event_id", "trigger_context",
 		"goal_snapshot", "config_snapshot",
-		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
+		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at", "live_version",
 	}
 }
 
@@ -7488,7 +7488,7 @@ func automationRowColumns() []string {
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at", "live_version",
 	}
 }
 
@@ -7564,7 +7564,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"previous_run_at":"2026-06-26T09:30:00Z"}`),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	// 2. Fetch the automation.
@@ -7577,7 +7577,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	// 3. Atomically claim pending → running BEFORE creating the session, so
@@ -7654,7 +7654,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByProviderEvent,
 			nil, nil, &triggerID, &provider, &providerEventID, triggerContext, "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -7665,7 +7665,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -7728,7 +7728,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	// 2. Automation lookup succeeds.
@@ -7741,7 +7741,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	// 3. The conditional transition finds the row already non-pending (the
@@ -7785,7 +7785,7 @@ func TestAutomationRunHandler_SkipsWhenRunNotPending(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusRunning, nil, nil, nil, now, now,
+			models.AutomationRunStatusRunning, nil, nil, nil, now, now, int64(1),
 		))
 
 	handler := newAutomationRunHandler(stores, nil, zerolog.Nop())
@@ -7819,7 +7819,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationDeleted(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	// Automation lookup returns no rows (soft-deleted).
@@ -7865,7 +7865,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
 			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	// Automation exists but enabled=false.
@@ -7878,7 +7878,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, false, nil, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	// Run gets marked skipped via the conditional pending → skipped transition.
@@ -7921,7 +7921,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
@@ -7933,7 +7933,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -7994,7 +7994,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
@@ -8006,7 +8006,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &clickerID, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -8073,7 +8073,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", configSnapshot,
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
@@ -8085,7 +8085,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).
@@ -8144,7 +8144,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
 			runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 			&clickerID, nil, nil, nil, nil, []byte("{}"), "goal", []byte("{}"),
-			models.AutomationRunStatusPending, nil, nil, nil, now, now,
+			models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 		))
 
 	mock.ExpectQuery(`SELECT .+ FROM automations WHERE id = @id`).
@@ -8156,7 +8156,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
-			50, []byte("{}"), now, now, nil,
+			50, []byte("{}"), now, now, nil, int64(1),
 		))
 
 	mock.ExpectExec(`UPDATE automation_runs SET status = @to_status.+WHERE id = @id AND org_id = @org_id AND status = @from_status`).

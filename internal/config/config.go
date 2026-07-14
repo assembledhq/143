@@ -336,13 +336,15 @@ type Config struct {
 	SandboxGCHardMax  time.Duration `env:"SANDBOX_GC_HARD_MAX" envDefault:"24h"`
 
 	// Redis (optional)
-	RedisTopology   string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
-	RedisURL        string `env:"REDIS_URL"`
-	RedisPrivateIP  string `env:"REDIS_PRIVATE_IP"`
-	RedisAddrs      string `env:"REDIS_ADDRS"`
-	RedisMasterName string `env:"REDIS_MASTER_NAME"`
-	RedisPassword   string `env:"REDIS_PASSWORD"`
-	RedisPoolSize   int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
+	RedisTopology      string `env:"REDIS_TOPOLOGY" envDefault:"standalone"`
+	RedisURL           string `env:"REDIS_URL"`
+	RedisPrivateIP     string `env:"REDIS_PRIVATE_IP"`
+	RedisAddrs         string `env:"REDIS_ADDRS"`
+	RedisMasterName    string `env:"REDIS_MASTER_NAME"`
+	RedisPassword      string `env:"REDIS_PASSWORD"`
+	RedisPoolSize      int    `env:"REDIS_POOL_SIZE" envDefault:"0"`
+	LiveEventsEnabled  bool   `env:"LIVE_EVENTS_ENABLED" envDefault:"true"`
+	LiveEventBusShards int    `env:"LIVE_EVENT_BUS_SHARDS" envDefault:"32"`
 }
 
 // ResolvePreviewDependencyCacheLocalDir normalizes the optional worker-local
@@ -401,6 +403,9 @@ func Load() *Config {
 	}
 	if cfg.DatabaseMaxConnIdleTime < 0 {
 		cfg.DatabaseMaxConnIdleTime = 0
+	}
+	if cfg.LiveEventBusShards <= 0 {
+		cfg.LiveEventBusShards = 32
 	}
 	cfg.PreviewRPCSecrets = normalizePreviewRPCSecrets(cfg.PreviewRPCSecrets, cfg.SessionSecret)
 

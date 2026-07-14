@@ -28,6 +28,7 @@ const (
 	userContextKey            contextKey = "user"
 	orgIDContextKey           contextKey = "org_id"
 	activeRoleContextKey      contextKey = "active_role"
+	authSessionContextKey     contextKey = "auth_session"
 	previewAPITokenContextKey contextKey = "preview_api_token"
 
 	// SessionCookieName is the cookie holding the opaque session token.
@@ -82,6 +83,11 @@ func OrgIDFromContext(ctx context.Context) uuid.UUID {
 	return id
 }
 
+func AuthSessionFromContext(ctx context.Context) *models.AuthSession {
+	session, _ := ctx.Value(authSessionContextKey).(*models.AuthSession)
+	return session
+}
+
 // ActiveRoleFromContext returns the role of the current user in the active
 // org. Empty if no membership resolved (zero-membership user). Handlers
 // gating behavior on role MUST prefer this over User.Role, because the
@@ -103,6 +109,10 @@ func WithUser(ctx context.Context, u *models.User) context.Context {
 
 func WithOrgID(ctx context.Context, id uuid.UUID) context.Context {
 	return context.WithValue(ctx, orgIDContextKey, id)
+}
+
+func WithAuthSession(ctx context.Context, session *models.AuthSession) context.Context {
+	return context.WithValue(ctx, authSessionContextKey, session)
 }
 
 // WithActiveRole stores the resolved active-org role on the request context.
@@ -270,6 +280,7 @@ func handleToken(w http.ResponseWriter, r *http.Request, next http.Handler, stor
 	}
 
 	ctx := WithUser(r.Context(), &user)
+	ctx = WithAuthSession(ctx, &session)
 	ctx = WithOrgID(ctx, activeOrgID)
 	ctx = WithActiveRole(ctx, activeRole)
 	if recorder, ok := w.(resolvedIdentityRecorder); ok {

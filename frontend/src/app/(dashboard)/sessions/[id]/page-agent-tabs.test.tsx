@@ -940,7 +940,7 @@ describe('SessionDetailPage agent tabs and threads', () => {
     });
   });
 
-  it('polls active session detail so missed status events self-heal', async () => {
+  it('does not fast-poll active session detail while live updates are healthy', async () => {
     const sessionId = 'session-active-detail-polling';
     const thread: SessionThread = {
       id: 'thread-main',
@@ -999,11 +999,10 @@ describe('SessionDetailPage agent tabs and threads', () => {
     expect(await screen.findByText('Start work')).toBeInTheDocument();
     expect(servedStatuses[0]).toBe('running');
 
-    await waitFor(() => {
-      expect(sessionFetchCount).toBeGreaterThanOrEqual(2);
-    }, { timeout: 5000 });
-    expect(servedStatuses).toContain('completed');
-    expect(screen.queryByText('Agent is working...')).not.toBeInTheDocument();
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+    expect(sessionFetchCount).toBe(1);
+    expect(servedStatuses).toEqual(['running']);
+    expect(screen.getByText('Agent is working...')).toBeInTheDocument();
   }, 10000);
 
   it('clears stale running thread UI when a cancelled session status omits thread detail', async () => {

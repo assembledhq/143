@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -27,10 +28,11 @@ type Config struct {
 }
 
 type Client struct {
-	rdb     redis.UniversalClient
-	breaker *CircuitBreaker
-	logger  zerolog.Logger
-	metrics *Metrics
+	rdb                   redis.UniversalClient
+	breaker               *CircuitBreaker
+	logger                zerolog.Logger
+	metrics               *Metrics
+	liveReplayBudgetBytes atomic.Int64
 }
 
 func New(cfg Config, logger zerolog.Logger, metrics *Metrics) *Client {

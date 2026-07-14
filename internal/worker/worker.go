@@ -14,6 +14,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/requestctx"
 )
 
 type JobHandler func(ctx context.Context, jobType string, payload json.RawMessage) error
@@ -213,6 +214,7 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	handlerCtx := withJobOrgID(ctx, job.OrgID)
+	handlerCtx = requestctx.WithMutationIDFromPayload(handlerCtx, job.Payload)
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	handlerCtx = jobctx.WithJobID(handlerCtx, job.ID)
 	handlerCtx = jobctx.WithLockToken(handlerCtx, *job.LockToken)

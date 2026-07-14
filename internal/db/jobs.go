@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/requestctx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -561,6 +562,16 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	payloadJSON, err := json.Marshal(opts.Payload)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	if mutationID := requestctx.MutationID(ctx); mutationID != uuid.Nil {
+		var object map[string]any
+		if json.Unmarshal(payloadJSON, &object) == nil && object != nil {
+			object["client_mutation_id"] = mutationID.String()
+			payloadJSON, err = json.Marshal(object)
+			if err != nil {
+				return uuid.Nil, fmt.Errorf("marshal job causation: %w", err)
+			}
+		}
 	}
 
 	var id uuid.UUID

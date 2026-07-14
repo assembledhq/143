@@ -5,6 +5,7 @@ import { formatAutomationSchedule } from "./schedule-time";
 function automation(overrides: Partial<Automation>): Automation {
   return {
     id: "auto-1",
+    live_version: 1,
     org_id: "org-1",
     name: "Automation",
     goal: "Do work",

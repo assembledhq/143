@@ -57,7 +57,8 @@ type PreviewInstance struct {
 	// PreviewHoldingContainer marks this preview as a holder of the session's
 	// sandbox container. It pairs with Session.TurnHoldingContainer as the
 	// durable refcount that keeps the container alive between turns.
-	PreviewHoldingContainer bool `db:"preview_holding_container" json:"preview_holding_container"`
+	PreviewHoldingContainer bool  `db:"preview_holding_container" json:"preview_holding_container"`
+	LiveVersion             int64 `db:"live_version" json:"live_version"`
 }
 
 // PreviewResourceSample is one persisted runtime resource sample for a preview

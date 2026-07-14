@@ -106,7 +106,7 @@ func (h *CodeReviewHandler) StreamUpdates(w http.ResponseWriter, r *http.Request
 				logger.Warn().Err(err).Msg("failed to write code review stream heartbeat")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case event, ok := <-sub.C:
 			if !ok {
 				logger.Warn().Str("reason", sub.CloseReason()).Msg("code review update subscription closed")
@@ -120,7 +120,7 @@ func (h *CodeReviewHandler) StreamUpdates(w http.ResponseWriter, r *http.Request
 				logEvent.Msg("failed to write code review update event")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		}
 	}
 }

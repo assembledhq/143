@@ -110,7 +110,7 @@ var branchPreviewInstanceTestCols = []string{
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
 	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 }
 
 var branchPreviewRuntimeTestCols = []string{
@@ -867,7 +867,7 @@ func TestBranchPreviewHandler_StopRejectsPreviewTokenWithoutStopScope(t *testing
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// GetPreviewTarget — target belonging to repoID
@@ -932,7 +932,7 @@ func TestBranchPreviewHandler_RestartRejectsPreviewTokenWithoutCreateScope(t *te
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// resolveTargetRepoAndActive: GetPreviewTarget
@@ -1005,7 +1005,7 @@ func TestBranchPreviewHandler_StartLatestRejectsPreviewTokenWithoutCreateScope(t
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// resolveTargetRepoAndActive: GetPreviewTarget
@@ -1100,7 +1100,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 			"sha256:old", head, now, now.Add(30*time.Minute), &now,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "failed", nil, "build failed", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 	mock.ExpectQuery("SELECT .+ FROM preview_targets WHERE").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1146,7 +1146,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 			"sha256:reservation", head, now, now.Add(30*time.Minute), nil,
 			"/", 1024, 500, 10*1024, nil, nil, int64(0), (*time.Time)(nil), "", "reserved", nil, "", now, now, nil, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 	mock.ExpectQuery("INSERT INTO preview_runtimes").
 		WithArgs(branchPreviewAnyArgs(9)...).
@@ -1200,7 +1200,7 @@ func TestBranchPreviewHandler_MintBootstrapTokenRejectsPreviewTokenForDifferentR
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// GetPreviewTarget — target with RepositoryID=repoB
@@ -1466,7 +1466,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// 7. AttachPreviewTarget (UPDATE preview_instances SET preview_target_id) — returns attached instance
@@ -1478,7 +1478,7 @@ func TestBranchPreviewHandler_CreateReusesSessionPreviewWhenCommitSHAsMatch(t *t
 			"", head, now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	handler := NewBranchPreviewHandler(
@@ -2546,7 +2546,7 @@ func TestBranchPreviewHandler_StopFailsClosedOnPreviewTargetDBError(t *testing.T
 			"", "", now, now, nil,
 			"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 			(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-			false,
+			false, int64(1),
 		))
 
 	// GetPreviewTarget returns a non-ErrNoRows DB error.
@@ -2663,7 +2663,7 @@ func sessionPreviewInstanceRow(previewID, sessionID, orgID, userID uuid.UUID, st
 		"", 0, 0, 10240, nil, nil, int64(0), (*time.Time)(nil), "", "", nil, "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
-		false,
+		false, int64(1),
 	}
 }
 

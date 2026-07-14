@@ -19,6 +19,7 @@ type Metrics struct {
 	FallbackTotal    otelmetric.Int64Counter
 	CleanupBatchSize otelmetric.Int64Histogram
 	LogEntryBytes    otelmetric.Int64Histogram
+	SessionReaders   otelmetric.Int64UpDownCounter
 }
 
 func NewMetrics() (*Metrics, error) {
@@ -58,6 +59,10 @@ func newMetrics(meter otelmetric.Meter) (*Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
+	readers, err := meter.Int64UpDownCounter("session.stream.active_readers", otelmetric.WithDescription("Active blocking Redis readers for session resource streams"))
+	if err != nil {
+		return nil, err
+	}
 
 	return &Metrics{
 		CommandsTotal:    commands,
@@ -65,7 +70,15 @@ func newMetrics(meter otelmetric.Meter) (*Metrics, error) {
 		FallbackTotal:    fallbacks,
 		CleanupBatchSize: cleanup,
 		LogEntryBytes:    entryBytes,
+		SessionReaders:   readers,
 	}, nil
+}
+
+func (m *Metrics) RecordSessionReader(ctx context.Context, kind string, delta int64) {
+	if m == nil {
+		return
+	}
+	m.SessionReaders.Add(ctx, delta, otelmetric.WithAttributes(attribute.String("stream_kind", kind)))
 }
 
 func (m *Metrics) RecordCommand(ctx context.Context, command string, durationSeconds float64) {

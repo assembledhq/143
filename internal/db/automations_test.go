@@ -23,7 +23,7 @@ func automationColumnSlice() []string {
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
-		"priority", "external_metadata", "created_at", "updated_at", "deleted_at",
+		"priority", "external_metadata", "created_at", "updated_at", "deleted_at", "live_version",
 	}
 }
 
@@ -44,7 +44,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		automationGitHubEventsToStrings(a.GitHubEventTriggers), githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
-		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt,
+		a.Priority, metadata, a.CreatedAt, a.UpdatedAt, a.DeletedAt, a.LiveVersion,
 	)
 }
 
@@ -589,7 +589,7 @@ func automationRunColumnSlice() []string {
 		"id", "automation_id", "org_id", "triggered_at", "triggered_by",
 		"triggered_by_user_id", "scheduled_time", "trigger_id", "provider", "provider_event_id",
 		"trigger_context", "goal_snapshot", "config_snapshot",
-		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at",
+		"status", "capability_snapshot", "completed_at", "result_summary", "created_at", "updated_at", "live_version",
 	}
 }
 
@@ -672,7 +672,7 @@ func TestAutomationRunStore_GetByID(t *testing.T) {
 			pgxmock.NewRows(automationRunColumnSlice()).AddRow(
 				runID, automationID, orgID, now, models.AutomationTriggeredByManual,
 				nil, nil, nil, nil, nil, []byte(`{}`), "goal", []byte(`{}`),
-				models.AutomationRunStatusPending, nil, nil, nil, now, now,
+				models.AutomationRunStatusPending, nil, nil, nil, now, now, int64(1),
 			),
 		)
 

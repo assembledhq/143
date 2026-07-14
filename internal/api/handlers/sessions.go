@@ -2318,7 +2318,7 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to SSE stream")
 		return
 	}
-	sw.Flush()
+	flushSSE(sw, logger.Warn())
 
 	// Per-connection randomized intervals — see the comment block above
 	// sseFallbackPollMin for why this isn't a fixed 1s anymore.
@@ -2338,14 +2338,14 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 			if err := sw.WriteHeartbeat(); err != nil {
 				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write shutdown heartbeat to SSE polling stream")
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 			return
 		case <-heartbeat.C:
 			if err := sw.WriteHeartbeat(); err != nil {
 				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write heartbeat to SSE polling stream")
 				return
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case <-ticker.C:
 			run, err := h.runStore.GetByID(ctx, orgID, run.ID)
 			if err != nil {
@@ -2376,14 +2376,14 @@ func (h *SessionHandler) streamLogsViaPolling(ctx context.Context, sw *sse.Write
 				}
 			}
 
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 
 			if isTerminalStatus(run.Status) {
 				if err := sw.WriteEvent(sse.EventDone, h.sessionStatusPayload(ctx, orgID, run)); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write done event to SSE stream")
 					return
 				}
-				sw.Flush()
+				flushSSE(sw, logger.Warn())
 				return
 			}
 		}
@@ -2431,7 +2431,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 		logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write initial status event to Redis-backed SSE stream")
 		return false
 	}
-	sw.Flush()
+	flushSSE(sw, logger.Warn())
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -2444,14 +2444,14 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 			if err := sw.WriteHeartbeat(); err != nil {
 				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write shutdown heartbeat to Redis-backed SSE stream")
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 			return true
 		case <-heartbeat.C:
 			if err := sw.WriteHeartbeat(); err != nil {
 				logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write heartbeat to Redis-backed SSE stream")
 				return true
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case logEntry, ok := <-logSub.C:
 			if !ok {
 				closeReason := logSub.CloseReason()
@@ -2459,7 +2459,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
 					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis log subscription closed")
 				}
-				sw.Flush()
+				flushSSE(sw, logger.Warn())
 				return true
 			}
 			if seen, skip := shouldSkipRedisLog(ctx, logEntry.StreamID, lastDeliveredStreamID, run.ID); skip {
@@ -2473,7 +2473,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				return true
 			}
 			lastDeliveredStreamID = logEntry.StreamID
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		case updated, ok := <-statusSub.C:
 			if !ok {
 				closeReason := statusSub.CloseReason()
@@ -2481,7 +2481,7 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
 					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis status subscription closed")
 				}
-				sw.Flush()
+				flushSSE(sw, logger.Warn())
 				return true
 			}
 			statusPayload := h.sessionStatusPayload(ctx, orgID, updated)
@@ -2489,13 +2489,13 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis status event to SSE stream")
 				return true
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 			if isTerminalStatus(updated.Status) {
 				if err := sw.WriteEvent(sse.EventDone, statusPayload); err != nil {
 					logger.Error().Err(err).Str("session_id", run.ID.String()).Msg("failed to write Redis done event to SSE stream")
 					return true
 				}
-				sw.Flush()
+				flushSSE(sw, logger.Warn())
 				return true
 			}
 		case event, ok := <-eventSub.C:
@@ -2505,14 +2505,14 @@ func (h *SessionHandler) streamLogsViaRedis(ctx context.Context, sw *sse.Writer,
 				if err := sw.WriteEvent(sse.EventType("error"), map[string]string{"error": "retry", "reason": closeReason}); err != nil {
 					logger.Warn().Err(err).Str("session_id", run.ID.String()).Msg("failed to write retry event after Redis event subscription closed")
 				}
-				sw.Flush()
+				flushSSE(sw, logger.Warn())
 				return true
 			}
 			if err := writeSessionStreamSSEEvent(sw, event); err != nil {
 				logger.Error().Err(err).Str("session_id", run.ID.String()).Str("event_type", string(event.Type)).Msg("failed to write Redis session event to SSE stream")
 				return true
 			}
-			sw.Flush()
+			flushSSE(sw, logger.Warn())
 		}
 	}
 }

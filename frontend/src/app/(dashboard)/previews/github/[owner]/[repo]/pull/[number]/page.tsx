@@ -11,7 +11,10 @@ import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { BranchPreviewResponse, SingleResponse } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
-import { pollMs } from "@/lib/poll-intervals";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
 const RESTART_LATEST_LABEL = "Start latest preview";
@@ -35,6 +38,8 @@ export function PullRequestPreviewContent({
   number: string;
 }) {
   const queryClient = useQueryClient();
+  const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const searchParams = useSearchParams();
   const { user } = useAuth();
   const canMutate = user ? user.role !== "viewer" : false;
@@ -45,14 +50,15 @@ export function PullRequestPreviewContent({
   const autoLaunchKeyRef = useRef<string | null>(null);
   const autoActionKeyRef = useRef<string | null>(null);
   const { launchPreview, isOpening, error: launchError, bootstrapFrame } = usePreviewLauncher();
+  useLiveQueryRegistration({ queryKey, families: ["preview.detail"], priority: "critical", visible: documentVisible });
   const previewQuery = useQuery<SingleResponse<BranchPreviewResponse>>({
     queryKey,
-    queryFn: () => api.previews.getPullRequest(owner, repo, number, { intent }),
+    queryFn: ({ signal }) => api.previews.getPullRequest(owner, repo, number, { intent }, { signal }),
     refetchInterval: (query) => {
       const preview = query.state.data?.data;
       const status = preview?.status;
       const action = preview?.launch?.action;
-      return status === "starting" || action === "wait" ? pollMs(3000) : false;
+      return status === "starting" || action === "wait" ? liveRefreshInterval(queryKey, "converging", liveHealth, documentVisible) : false;
     },
   });
   const startLatest = useMutation({

@@ -13,6 +13,7 @@ import (
 
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/requestctx"
 	"github.com/assembledhq/143/internal/services/agent"
 )
 
@@ -137,6 +138,7 @@ func (r *SessionExecutorRuntime) Run(ctx context.Context, executorID uuid.UUID) 
 	handlerCtx := withJobOrgID(ctx, job.OrgID)
 	handlerCtx = jobctx.WithDeadLetterHooks(handlerCtx)
 	handlerCtx = jobctx.WithJobID(handlerCtx, job.ID)
+	handlerCtx = requestctx.WithMutationIDFromPayload(handlerCtx, job.Payload)
 	handlerCtx = jobctx.WithLockToken(handlerCtx, executor.LockToken)
 	handlerCtx = jobctx.WithOwnerKind(handlerCtx, string(models.JobOwnerKindSessionExecutor))
 	handlerCtx = jobctx.WithJobCreatedAt(handlerCtx, job.CreatedAt)

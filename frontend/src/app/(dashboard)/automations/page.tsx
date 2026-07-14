@@ -6,7 +6,9 @@ import { ArrowRight, Pause, Play, MoreHorizontal, Plus, Search, Trash2 } from "l
 import Link from "next/link";
 import { api } from "@/lib/api";
 import {
+  optimisticallySetAutomationEnabled,
   removeAutomationFromListCaches,
+  restoreAutomationEnabledSnapshot,
   upsertAutomationInListCaches,
 } from "@/lib/automation-list-cache";
 import { queryKeys } from "@/lib/query-keys";
@@ -33,6 +35,10 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
 import { EmptyState } from "@/components/empty-state";
 import { InteractiveCard } from "@/components/interactive-card";
 import { ResourceRow } from "@/components/resource-row";
@@ -400,6 +406,16 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 
   const pauseMutation = useMutation({
     mutationFn: () => api.automations.pause(automation.id),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.detail(automation.id), exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automation.id, false);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automation.id, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
@@ -409,6 +425,16 @@ function AutomationActions({ automation, canManage }: { automation: Automation; 
 
   const resumeMutation = useMutation({
     mutationFn: () => api.automations.resume(automation.id),
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.all, exact: true }),
+        queryClient.cancelQueries({ queryKey: queryKeys.automations.detail(automation.id), exact: true }),
+      ]);
+      return optimisticallySetAutomationEnabled(queryClient, automation.id, true);
+    },
+    onError: (_error, _variables, snapshot) => {
+      restoreAutomationEnabledSnapshot(queryClient, automation.id, snapshot);
+    },
     onSuccess: (res) => {
       upsertAutomationInListCaches(queryClient, res.data);
       queryClient.setQueryData(queryKeys.automations.detail(res.data.id), res);
@@ -542,12 +568,16 @@ function AutomationMobileRow({ automation, canManage }: { automation: Automation
 }
 
 export default function AutomationsPage() {
+	const liveHealth = useLiveHealth();
+  const documentVisible = useDocumentVisible();
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
+  const liveAutomationKey = queryKeys.automations.all;
+  useLiveQueryRegistration({ queryKey: liveAutomationKey, families: ["automation.list"], priority: "critical", visible: documentVisible });
   const { data, isLoading } = useQuery({
-    queryKey: queryKeys.automations.all,
-    queryFn: () => api.automations.list(),
-    refetchInterval: 10000,
+    queryKey: liveAutomationKey,
+    queryFn: ({ signal }) => api.automations.list(undefined, { signal }),
+    refetchInterval: liveRefreshInterval(liveAutomationKey, "list", liveHealth, documentVisible),
   });
 
   const automations = useMemo(() => data?.data ?? [], [data?.data]);

@@ -39,13 +39,15 @@ import {
   SheetDescription,
 } from "@/components/ui/sheet";
 import { FlaskConical, Plus, Loader2, GitPullRequest, AlertTriangle, Layers, CheckCircle2, XCircle, Eye, RotateCw, ShieldCheck, Database } from "lucide-react";
-import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, EvalBootstrapCandidate, EvalBootstrapCandidateStatus, EvalDataset, EvalReleaseGate, ListResponse, Repository, SessionLog, SingleResponse } from "@/lib/types";
+import type { EvalTask, EvalBatch, EvalTaskSource, EvalBootstrapRun, EvalBootstrapStatus, EvalBootstrapCandidate, EvalBootstrapCandidateStatus, EvalDataset, EvalReleaseGate, ListResponse, Repository, SessionLog } from "@/lib/types";
 import { evalComplexityConfig, evalSourceConfig } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
-import { addSSEListener, SSE_EVENT, buildEvalBootstrapStreamURL, buildSessionLogsStreamURL } from "@/lib/sse";
-import { shouldSubscribeToEvalBootstrapStream } from "@/lib/eval-streams";
-import { useResourceSSE } from "@/lib/use-resource-sse";
+import { addSSEListener, SSE_EVENT, buildSessionLogsStreamURL, resourceSSEReconnectDelay } from "@/lib/sse";
 import { getActiveOrgId } from "@/lib/active-org";
+import { useLiveHealth } from "@/components/live-event-provider";
+import { liveRefreshInterval } from "@/lib/live-refresh-policy";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
+import { useLiveQueryRegistration } from "@/hooks/use-live-query-registration";
 
 type SourceFilter = "all" | EvalTaskSource | "archived";
 
@@ -74,6 +76,8 @@ function isBootstrapActive(status: EvalBootstrapStatus): boolean {
 }
 
 export default function EvalsSettingsPage() {
+  const documentVisible = useDocumentVisible();
+  const liveHealth = useLiveHealth();
   const queryClient = useQueryClient();
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [activeBootstrapRunId, setActiveBootstrapRunId] = useState<string | null>(null);
@@ -126,44 +130,16 @@ export default function EvalsSettingsPage() {
     return latest && isBootstrapActive(latest.status) ? latest.id : null;
   })();
   const effectiveBootstrapRunId = activeBootstrapRunId ?? latestActiveId;
-  const cachedBootstrap = queryClient.getQueryData<SingleResponse<EvalBootstrapRun>>(
-    queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? ""),
-  )?.data;
-
-  // SSE-driven bootstrap status with a polling backstop. The SSE wakes the
-  // page on every state transition so the user sees progress within ms; the
-  // backstop only fires when SSE itself is unavailable (Redis down) or has
-  // briefly disconnected, in which case we fall back to the original 3s
-  // cadence so the UI still updates while Redis is recovering.
-  const bootstrapSSEURL = useMemo(() => {
-    if (
-      !effectiveBootstrapRunId ||
-      !shouldSubscribeToEvalBootstrapStream(cachedBootstrap?.status)
-    ) {
-      return null;
-    }
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-    return buildEvalBootstrapStreamURL(apiBase, effectiveBootstrapRunId, getActiveOrgId());
-  }, [effectiveBootstrapRunId, cachedBootstrap?.status]);
-  const onBootstrapEvent = useCallback(() => {
-    if (!effectiveBootstrapRunId) return;
-    queryClient.invalidateQueries({ queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId) });
-  }, [queryClient, effectiveBootstrapRunId]);
-  const { healthy: bootstrapStreamHealthy } = useResourceSSE({
-    url: bootstrapSSEURL,
-    event: SSE_EVENT.EVAL_BOOTSTRAP_UPDATED,
-    onEvent: onBootstrapEvent,
-  });
-
+  const activeBootstrapKey = queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? "");
+  useLiveQueryRegistration({ queryKey: activeBootstrapKey, families: ["eval.detail"], resourceId: effectiveBootstrapRunId ?? undefined, priority: "critical", visible: documentVisible && !!effectiveBootstrapRunId });
   const { data: activeBootstrapResponse } = useQuery({
-    queryKey: queryKeys.evals.bootstrapRun(effectiveBootstrapRunId ?? ""),
-    queryFn: () => api.evals.getBootstrapCandidates({ bootstrap_run_id: effectiveBootstrapRunId! }),
+    queryKey: activeBootstrapKey,
+    queryFn: ({ signal }) => api.evals.getBootstrapCandidates({ bootstrap_run_id: effectiveBootstrapRunId! }, { signal }),
     enabled: !!effectiveBootstrapRunId,
     refetchInterval: (query) => {
       const status = query.state.data?.data?.status;
       if (!status || !isBootstrapActive(status)) return false;
-      // 30s backstop while SSE is healthy; 3s when SSE is down.
-      return bootstrapStreamHealthy ? 30_000 : 3_000;
+      return liveRefreshInterval(activeBootstrapKey, "active-detail", liveHealth, documentVisible);
     },
   });
   const activeBootstrap = activeBootstrapResponse?.data;
@@ -578,7 +554,6 @@ function BootstrapDetailSheet({
     });
   }, []);
 
-  const MAX_SSE_RECONNECT_ATTEMPTS = 3;
 
   useEffect(() => {
     const sessionId = bootstrap.session_id;
@@ -593,7 +568,9 @@ function BootstrapDetailSheet({
       if (!cancelled && response?.data) {
         mergeLogs(response.data);
       }
-    }).catch(() => {});
+    }).catch((error) => {
+      console.error("Failed to load eval bootstrap session logs.", error);
+    });
 
     // Only open SSE for active sessions.
     if (!isActive) {
@@ -603,12 +580,13 @@ function BootstrapDetailSheet({
     let eventSource: EventSource | null = null;
     let reconnectAttempts = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastEventId = "";
 
     const connect = () => {
       if (cancelled) return;
 
       eventSource = new EventSource(
-        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId()),
+        buildSessionLogsStreamURL(apiBase, sessionId, getActiveOrgId(), lastEventId),
         { withCredentials: true }
       );
 
@@ -616,9 +594,12 @@ function BootstrapDetailSheet({
         reconnectAttempts = 0;
       };
 
-      addSSEListener(eventSource, SSE_EVENT.LOG, (log) => {
-        mergeLogs([log]);
-      });
+      addSSEListener(
+        eventSource,
+        SSE_EVENT.LOG,
+        (log) => { mergeLogs([log]); },
+        (cursor) => { lastEventId = cursor; },
+      );
 
       addSSEListener(eventSource, SSE_EVENT.DONE, () => {
         eventSource?.close();
@@ -627,11 +608,8 @@ function BootstrapDetailSheet({
       eventSource.onerror = () => {
         eventSource?.close();
         if (cancelled) return;
-        reconnectAttempts++;
-        if (reconnectAttempts <= MAX_SSE_RECONNECT_ATTEMPTS) {
-          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 15000);
-          reconnectTimer = setTimeout(connect, delay);
-        }
+        const delay = resourceSSEReconnectDelay(reconnectAttempts++);
+        reconnectTimer = setTimeout(connect, delay);
       };
     };
 

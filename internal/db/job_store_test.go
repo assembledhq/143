@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/requestctx"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -121,6 +122,24 @@ func TestJobStore_Enqueue(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
+}
+
+func TestJobStore_EnqueuePropagatesClientMutationID(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should initialize")
+	defer mock.Close()
+	orgID, mutationID, jobID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(
+		orgID, "default", "process_issue",
+		[]byte(`{"client_mutation_id":"`+mutationID.String()+`","issue_id":"issue-1"}`),
+		1, (*string)(nil),
+	).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
+	ctx := requestctx.WithMutationID(context.Background(), mutationID)
+	actual, err := NewJobStore(mock).Enqueue(ctx, orgID, "default", "process_issue", map[string]string{"issue_id": "issue-1"}, 1, nil)
+	require.NoError(t, err, "enqueue should preserve mutation causation")
+	require.Equal(t, jobID, actual, "enqueue should return the inserted job id")
+	require.NoError(t, mock.ExpectationsWereMet(), "job payload should include the client mutation id")
 }
 
 func TestJobStoreQueueChangesetPRCreationIsAtomic(t *testing.T) {

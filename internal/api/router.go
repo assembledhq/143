@@ -41,6 +41,7 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
+	"github.com/assembledhq/143/internal/services/liveevents"
 	"github.com/assembledhq/143/internal/services/ownerloss"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
@@ -80,6 +81,31 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	authSessionStore := db.NewAuthSessionStore(pool)
 	membershipStore := db.NewOrganizationMembershipStore(pool)
 	repoStore := db.NewRepositoryStore(pool)
+	if cfg.LiveEventsEnabled && cfg.Env == "production" && redisClient != nil {
+		if err := redisClient.ValidateLiveReplayMemory(context.Background()); err != nil {
+			return nil, nil, nil, nil, nil, fmt.Errorf("enable live event replay: %w", err)
+		}
+	}
+	var liveEventManager *liveevents.Manager
+	if cfg.LiveEventsEnabled {
+		liveEventManager = liveevents.NewManager(redisClient, cfg.LiveEventBusShards, logger)
+	}
+	if liveEventManager != nil && shutdownCh != nil {
+		go func() { <-shutdownCh; liveEventManager.Drain() }()
+	}
+	if liveEventManager != nil && redisClient != nil {
+		liveEventManager.Start(contextFromShutdown(shutdownCh))
+	}
+	if liveEventManager != nil && pool != nil {
+		liveEventStore := db.NewLiveEventStore(pool)
+		liveContext := contextFromShutdown(shutdownCh)
+		liveEventPublisher := liveevents.NewPublisher(liveEventStore, redisClient, uuid.NewString(), cfg.LiveEventBusShards, logger)
+		liveEventPublisher.SetPublishResultRecorder(liveEventManager.RecordPublishResult)
+		go liveEventPublisher.Start(liveContext)
+		go liveEventPublisher.StartPostgresListener(liveContext, pool)
+		liveEventManager.StartHealthMonitor(liveContext, liveEventStore)
+	}
+	liveEventHandler := handlers.NewLiveEventHandler(redisClient, liveEventManager, membershipStore, repoStore, logger)
 	integrationStore := db.NewIntegrationStore(pool)
 	githubInstallationStore := db.NewGitHubInstallationStore(pool)
 	issueStore := db.NewIssueStore(pool)
@@ -994,10 +1020,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	apiRoutes := chi.NewRouter()
+	apiRoutes.Use(middleware.MutationContext)
 	apiRoutes.Use(middleware.MaxBodySizeForPaths(middleware.DefaultMaxBodyBytes, map[string]int64{
 		uploadAPIPath: uploadMaxRequestBodyBytes,
 	})) // 1MB default request body limit; uploads allow a 10MB file plus multipart overhead.
-	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
+	apiRoutes.Use(middleware.RateLimitExcept(middleware.DefaultRateLimitConfig(), map[string]struct{}{"/api/v1/events/stream": {}}))
 
 	apiRoutes.Group(func(r chi.Router) {
 		// CLI distribution routes (no auth — fetched by `curl | sh` and the
@@ -1226,8 +1253,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.RequireRole("admin", "builder", "member", "viewer"))
 
 				r.Get("/api/v1/version", healthHandler.Version)
+				r.With(middleware.RateLimit(middleware.RateLimitConfig{OrgRequestsPerSecond: 200, IPRequestsPerSecond: 50})).Get("/api/v1/events/stream", liveEventHandler.Stream)
+				r.Post("/api/v1/events/telemetry", liveEventHandler.Telemetry)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
-				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
 				r.Get("/api/v1/code-reviews/templates", codeReviewHandler.Templates)
 				r.Get("/api/v1/code-reviews/{id}/evidence", codeReviewHandler.Evidence)
 				r.Get("/api/v1/code-review-policies", codeReviewHandler.GetPolicy)
@@ -1318,7 +1346,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/previews/{preview_id}/services", previewHandler.GetServices)
 				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)
-				r.Get("/api/v1/pull-requests/stream", pullRequestHandler.StreamUpdates)
 				r.Get("/api/v1/pull-requests/{id}/health", pullRequestHandler.GetHealth)
 				r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
 				r.Get(uploadFilesRoutePattern, uploadHandler.ServeUpload)
@@ -1563,9 +1590,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/runs/{runId}", evalHandler.GetRun)
 				r.Get("/api/v1/evals/batch", evalHandler.ListBatches)
 				r.Get("/api/v1/evals/batch/{batchId}", evalHandler.GetBatch)
-				r.Get("/api/v1/evals/batch/{batchId}/stream", evalHandler.StreamBatchUpdates)
 				r.Get("/api/v1/evals/bootstrap/candidates", evalHandler.GetBootstrapCandidates)
-				r.Get("/api/v1/evals/bootstrap/{runId}/stream", evalHandler.StreamBootstrapUpdates)
 				r.Get("/api/v1/evals/datasets", evalHandler.ListDatasets)
 				r.Get("/api/v1/evals/release-gates", evalHandler.ListReleaseGates)
 

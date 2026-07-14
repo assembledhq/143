@@ -93,6 +93,7 @@ function makePreviewStatus(
   return {
     instance: {
       id: "prev-1",
+      live_version: 1,
       session_id: "sess-1",
       org_id: "org-1",
       user_id: "user-1",
@@ -476,7 +477,7 @@ describe("PreviewPanel component", () => {
       "[server] listening on :8080",
     );
     expect(screen.getByRole("button", { name: "Hide preview logs" })).toBeInTheDocument();
-    expect(mockLogs).toHaveBeenCalledWith("sess-1", { tail: true });
+    expect(mockLogs).toHaveBeenCalledWith("sess-1", expect.objectContaining({ tail: true, signal: expect.any(AbortSignal) }));
 
     await user.click(screen.getByRole("button", { name: "Copy preview logs" }));
 
@@ -934,7 +935,7 @@ describe("PreviewPanel component", () => {
     expect(startupLogRegion).toHaveClass("overflow-y-auto");
     expect(startupLogRegion).not.toHaveClass("overflow-hidden");
     expect(screen.getByRole("button", { name: "Show startup summary" })).toBeInTheDocument();
-    expect(mockLogs).toHaveBeenCalledWith("sess-1");
+    expect(mockLogs).toHaveBeenCalledWith("sess-1", expect.objectContaining({ tail: false, signal: expect.any(AbortSignal) }));
 
     await user.click(screen.getByRole("button", { name: "Copy error log" }));
 

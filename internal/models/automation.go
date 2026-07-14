@@ -56,6 +56,7 @@ type Automation struct {
 	CreatedAt           time.Time                `db:"created_at"      json:"created_at"`
 	UpdatedAt           time.Time                `db:"updated_at"      json:"updated_at"`
 	DeletedAt           *time.Time               `db:"deleted_at"      json:"-"`
+	LiveVersion         int64                    `db:"live_version"    json:"live_version"`
 }
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
@@ -79,6 +80,7 @@ type AutomationRun struct {
 	ResultSummary      *string                       `db:"result_summary"        json:"result_summary,omitempty"`
 	CreatedAt          time.Time                     `db:"created_at"            json:"created_at"`
 	UpdatedAt          time.Time                     `db:"updated_at"            json:"updated_at"`
+	LiveVersion        int64                         `db:"live_version"          json:"live_version"`
 
 	// Session is a compact view of the session this run spawned, populated
 	// only by list/detail endpoints that join sessions (currently

@@ -631,7 +631,7 @@ var previewInstanceTestCols = []string{
 	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
 	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
 	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
-	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
+	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container", "live_version",
 }
 
 var handlerSessionPreviewPrewarmRunTestCols = []string{
@@ -676,7 +676,7 @@ func newReservedPreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now ti
 		"sha256:000", "", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, json.RawMessage("{}"), json.RawMessage("{}"), int64(0), (*time.Time)(nil), "", "reserved", strPtr("req-1"), "", now, now, nil, nil, nil, nil, nil, nil, "",
 		"",
-		false,
+		false, int64(1),
 	}
 }
 
@@ -944,7 +944,7 @@ func newActivePreviewRow(previewID, sessionID, orgID, userID uuid.UUID, now time
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
 		"/", 512, 500, 10240, recycleConfig, recycleSandbox, int64(0), (*time.Time)(nil), "", "ready", strPtr("req-1"), "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "", "",
-		false,
+		false, int64(1),
 	}
 }
 
@@ -1254,7 +1254,7 @@ var sessionRowColumns = []string{
 	"archived_at", "archived_by_user_id", "automation_run_id",
 	"pr_creation_state", "pr_creation_error", "pr_push_state", "pr_push_error", "pr_push_error_code", "branch_creation_state", "branch_creation_error", "branch_url", "diff_collected_at", "latest_diff_snapshot_id", "workspace_revision", "workspace_revision_updated_at", "has_unpushed_changes",
 	"linear_private", "linear_state_sync_disabled", "linear_identifier_hint", "linear_prepare_state",
-	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at",
+	"deleted_at", "capability_snapshot", "git_identity_source", "git_identity_user_id", "created_at", "live_version",
 }
 
 func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *string, sandboxState string) []interface{} {
@@ -1273,6 +1273,7 @@ func previewSessionRow(id, orgID uuid.UUID, containerID *string, snapshotKey *st
 		"container_id":                   containerID,
 		"turn_holding_container":         false,
 		"token_usage":                    json.RawMessage(`{}`),
+		"live_version":                   int64(1),
 		"failure_next_steps":             []string{},
 		"failure_retry_advised":          false,
 		"revision_context":               json.RawMessage(`{}`),
