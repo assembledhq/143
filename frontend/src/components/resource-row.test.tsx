@@ -27,4 +27,21 @@ describe("ResourceRow", () => {
     expect(screen.getByTestId("row")).toHaveClass("bg-accent/55");
     expect(screen.getByTestId("row")).toHaveAttribute("data-selected", "true");
   });
+
+  it("keeps a compact side action in the primary mobile row", () => {
+    render(
+      <ResourceRow
+        title="Automation"
+        actions={<button type="button">More options</button>}
+        actionLayout="side"
+        data-testid="row"
+      />,
+    );
+
+    expect(screen.getByTestId("row")).not.toHaveClass("flex-wrap");
+    expect(screen.getByRole("button", { name: "More options" }).parentElement).not.toHaveClass(
+      "w-full",
+      "ml-7",
+    );
+  });
 });

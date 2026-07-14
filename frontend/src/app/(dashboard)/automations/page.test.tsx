@@ -179,6 +179,14 @@ describe("AutomationsPage", () => {
     });
     expect(menuButtons.length).toBeGreaterThan(0);
     expect(menuButtons[0]).toHaveClass("shrink-0");
+    const mobileMenuButton = menuButtons.find((button) =>
+      button.closest('[data-slot="resource-row"]'),
+    );
+    expect(mobileMenuButton).toBeTruthy();
+    expect(mobileMenuButton?.closest('[data-slot="resource-row-actions"]')).not.toHaveClass(
+      "w-full",
+      "ml-7",
+    );
 
     // Computed via the same helper so the assertion is independent of the host
     // timezone (the fixture's next_run_at is a UTC instant).
