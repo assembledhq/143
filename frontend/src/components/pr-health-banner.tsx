@@ -265,10 +265,7 @@ export function PRHealthBanner({
                     )}
                   </div>
                 )}
-                <div
-                  data-testid="pr-health-actions"
-                  className="flex flex-wrap items-stretch gap-2 [&>[data-slot=button-group]]:h-10 [&>[data-slot=button]]:h-10 [&>span]:h-10 sm:[&>[data-slot=button-group]]:h-7 sm:[&>[data-slot=button]]:h-7 sm:[&>span]:h-7 [&>span>[data-slot=button]]:h-full"
-                >
+                <div className="flex flex-wrap items-stretch gap-2">
                   {canShowMergeButton && (
                     <ButtonGroup size="sm">
                       <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>

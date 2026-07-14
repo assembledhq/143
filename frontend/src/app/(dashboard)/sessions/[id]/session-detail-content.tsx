@@ -6488,7 +6488,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
+                <Button asChild variant="outline" size="sm" className="text-xs gap-1.5" title="View PR (p v)">
                   <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -6498,7 +6498,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ) : showPRAction && !prErrorNotice ? (
               <>
                 {branchURL ? (
-                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View branch">
+                  <Button asChild variant="outline" size="sm" className="text-xs gap-1.5" title="View branch">
                     <a href={branchURL} target="_blank" rel="noopener noreferrer">
                       <GitBranch className="h-3 w-3" />
                       View branch
