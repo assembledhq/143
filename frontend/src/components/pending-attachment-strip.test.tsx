@@ -51,7 +51,10 @@ describe("PendingAttachmentStrip", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Remove screenshot.png" }));
+    const removeButton = screen.getByRole("button", { name: "Remove screenshot.png" });
+    expect(removeButton).toHaveClass("top-0", "right-0");
+
+    await user.click(removeButton);
 
     expect(onRemove).toHaveBeenCalledWith("/api/v1/uploads/files/org-1/2026-04/screenshot.png");
   });
