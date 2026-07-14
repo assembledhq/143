@@ -33,7 +33,7 @@ type channelCacheEntry struct {
 // RequireCanaryChannelForHost guards the canary hostname: authenticated
 // requests whose active org is not on the canary release channel are refused,
 // so the canary plane (running latest main) only ever serves dogfood orgs.
-// See docs/design/future/118-canary-stable-release-channels.md.
+// See docs/design/118-canary-stable-release-channels.md.
 //
 // Scope and non-goals:
 //   - Only requests whose Host matches canaryHost are guarded; the stable

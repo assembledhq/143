@@ -1,0 +1,94 @@
+# Cross-version schema compatibility: run the promoted stable release's
+# DB-backed tests against a database migrated to latest main. This directly
+# exercises the failure mode the shared-database release-channel design must
+# prevent — pinned stable code meeting a schema that canary has migrated
+# ahead (docs/design/118-canary-stable-release-channels.md).
+#
+# Not a required PR check (it tests main-vs-release, not the PR); a red run
+# on main means the release-window compatibility contract was broken and the
+# offending migration should be reverted or annotated before it reaches the
+# canary deploy gate.
+name: Cross-Version Schema Compatibility
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  cross-version:
+    if: >-
+      github.repository == 'assembledhq/143' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success'))
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: onefortythree
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: onefortythree
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+      TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
+    steps:
+      - name: Resolve promoted stable release
+        id: stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [ -z "$tag" ]; then
+            echo "No stable release promoted yet; nothing to cross-check."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Cross-checking against stable release $tag."
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out latest main (schema owner)
+        if: steps.stable.outputs.tag != ''
+        uses: actions/checkout@v6
+
+      - name: Check out the stable release
+        if: steps.stable.outputs.tag != ''
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.stable.outputs.tag }}
+          path: stable-ref
+
+      - uses: actions/setup-go@v6
+        if: steps.stable.outputs.tag != ''
+        with:
+          go-version-file: go.mod
+
+      - name: Wait for Postgres
+        if: steps.stable.outputs.tag != ''
+        run: go run ./cmd/wait-postgres
+
+      - name: Migrate to latest main schema
+        if: steps.stable.outputs.tag != ''
+        run: go run cmd/migrate/main.go up
+
+      - name: Run the stable release's store tests against the newer schema
+        if: steps.stable.outputs.tag != ''
+        working-directory: stable-ref
+        # -skip Migration: the release's own migration-behavior tests drive
+        # golang-migrate against its older migration set and are not
+        # meaningful against a database that is already ahead of it.
+        run: |
+          go mod download
+          go test ./internal/db/... -count=1 -timeout=300s -skip 'Migration'

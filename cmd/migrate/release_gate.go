@@ -2,7 +2,7 @@ package main
 
 // Release-channel schema gates. The canary deploy pipeline owns migrations;
 // the stable plane never migrates. Three pieces implement the compatibility
-// contract from docs/design/future/118-canary-stable-release-channels.md:
+// contract from docs/design/118-canary-stable-release-channels.md:
 //
 //  1. `migrate up` refuses to apply a pending destructive migration until the
 //     currently deployed stable release is new enough (its migration set must

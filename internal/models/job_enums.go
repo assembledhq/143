@@ -26,7 +26,7 @@ func (s JobStatus) Validate() error {
 // dogfood orgs) and the stable plane (pinned releases, customer orgs). Orgs
 // carry a release_channel; jobs are stamped with it at enqueue; workers claim
 // only jobs matching their configured channel. See
-// docs/design/future/118-canary-stable-release-channels.md.
+// docs/design/118-canary-stable-release-channels.md.
 type ReleaseChannel string
 
 const (

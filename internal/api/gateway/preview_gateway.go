@@ -146,7 +146,7 @@ type GatewayConfig struct {
 	// frontend in a canary/stable split. The gateway runs stable code, so
 	// this must be configured on the stable plane before a canary frontend
 	// can open previews. See
-	// docs/design/future/118-canary-stable-release-channels.md.
+	// docs/design/118-canary-stable-release-channels.md.
 	AdditionalAppOrigins []string
 	CookieSecret         []byte // HMAC key for signing preview session cookies
 	PreviewTokenSecret    string

@@ -1,6 +1,6 @@
 -- Release channels split execution into a canary plane (latest main, dogfood
 -- orgs) and a stable plane (pinned releases, customer orgs) over one shared
--- database. See docs/design/future/118-canary-stable-release-channels.md.
+-- database. See docs/design/118-canary-stable-release-channels.md.
 
 -- Which plane serves and executes work for this org. Flips are operator
 -- actions and should happen while the org has no active session executors or

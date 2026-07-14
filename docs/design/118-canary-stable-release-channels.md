@@ -1,8 +1,50 @@
 # Design: Canary and Stable Release Channels
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-14
+> **Status:** Partially Implemented | **Last reviewed:** 2026-07-14
 
-> **Related docs:** [overall.md](../overall.md), [10-infrastructure.md](../10-infrastructure.md), [91-non-disruptive-worker-blue-green-deploys.md](91-non-disruptive-worker-blue-green-deploys.md), [100-slack-webhook-ingress-durability.md](../implemented/100-slack-webhook-ingress-durability.md), [01-database-schema.md](../implemented/01-database-schema.md)
+> **Related docs:** [overall.md](overall.md), [10-infrastructure.md](10-infrastructure.md), [91-non-disruptive-worker-blue-green-deploys.md](future/91-non-disruptive-worker-blue-green-deploys.md), [100-slack-webhook-ingress-durability.md](implemented/100-slack-webhook-ingress-durability.md), [01-database-schema.md](implemented/01-database-schema.md)
+
+## Implementation Status
+
+The code paths are implemented and default-off (everything defaults to the
+`stable` channel; single-plane fleets behave exactly as before). Operator
+runbook: [docs/self-hosting/release-channels.md](../self-hosting/release-channels.md).
+
+### Implemented
+
+- Migration 000245: `organizations.release_channel`, `jobs.channel`,
+  `nodes.channel`, the channel-leading claim index, `schema_compat_floors`.
+- Channel stamping at the jobs INSERT chokepoint; channel predicate in
+  `ClaimNextRunnable` (no cross-channel fallback); `CHANNEL` config
+  validated at startup; per-line `channel` log field; node registration.
+- Scheduler candidacy gated to the stable channel.
+- Canary host guard (`CANARY_ORIGIN` + `ORG_NOT_ON_CANARY`) and the preview
+  gateway app-origin allow-list (bootstrap postMessage + frame-ancestors).
+- Canary plane infra: `api-canary`/`frontend-canary` services in
+  `docker-compose.app.yml`, Caddy `canary.{$DOMAIN}` vhost, `app-canary` /
+  `worker-canary` deploy roles, canary-first fleet barrier,
+  `APP_SCHEMA_MODE=verify` stable preflight.
+- `cmd/migrate`: destructive gate (`STABLE_MAX_MIGRATION`), floor recording,
+  `verify` subcommand.
+- `promote.yml` (version computation, soak policy, tag-after-verify release
+  cutting, GHCR retags, `stable` branch, rollback via existing tag),
+  `deploy.yml` `DEPLOY_ROLES` phasing + stable-floor resolution,
+  `.github/release.yml`, cross-version compatibility workflow,
+  destructive-migration lint in `cmd/lint-schema`.
+
+### Outstanding
+
+- Operational rollout itself (DNS, OAuth callback registration, canary
+  hosts in `FLEET_HOSTS`, org flips, first promotion) — see the runbook.
+- Per-channel Grafana dashboard splits and alert routing (canary → Slack
+  warning, stable keeps paging) — logs and queue samples already carry the
+  channel dimension.
+- The `v*` tag repository ruleset (GitHub settings, not code).
+- Decide Redis sharing (per-channel logical DB vs version-tolerant keys)
+  before Phase 2 flips an org.
+- Optional polish from the design: `RELEASE_VERSION` surfaced in the UI
+  footer, one-time-token SSO handoff between hosts, canary-scoped
+  scheduler.
 
 Split 143.dev into two release channels running against **one shared Postgres**:
 

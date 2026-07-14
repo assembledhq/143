@@ -48,7 +48,7 @@ type Config struct {
 	// Workers claim only jobs stamped with their channel, and the periodic
 	// scheduler runs only on stable-channel worker processes. Invalid values
 	// fail startup — a typo must never silently join the wrong pool. See
-	// docs/design/future/118-canary-stable-release-channels.md.
+	// docs/design/118-canary-stable-release-channels.md.
 	Channel string `env:"CHANNEL" envDefault:"stable"`
 	// CanaryOrigin is the full origin of the canary plane (e.g.
 	// "https://canary.143.dev"). When set it (a) adds the canary origin to

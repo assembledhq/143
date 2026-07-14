@@ -793,7 +793,7 @@ func main() {
 		// candidate could win it and enqueue system-wide cron work from
 		// unreleased code. Stable (pinned) code owns global enqueue; channel
 		// routing decides which pool executes each enqueued job. See
-		// docs/design/future/118-canary-stable-release-channels.md.
+		// docs/design/118-canary-stable-release-channels.md.
 		if cfg.Channel == string(models.ReleaseChannelStable) {
 			scheduler := cluster.NewScheduler(
 				cluster.NewSchedulerLock(pool),
