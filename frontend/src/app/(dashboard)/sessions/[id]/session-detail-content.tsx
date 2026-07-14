@@ -6445,6 +6445,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     setDraftTitle(currentTitle);
     setMobileRenameOpen(true);
   };
+  const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
+  const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6493,7 +6495,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="xs" className="gap-1.5" title="View PR (p v)">
+                <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View PR (p v)">
                   <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -6503,7 +6505,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ) : showPRAction && !prErrorNotice ? (
               <>
                 {branchURL ? (
-                  <Button asChild variant="outline" size="xs" className="gap-1.5" title="View branch">
+                  <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View branch">
                     <a href={branchURL} target="_blank" rel="noopener noreferrer">
                       <GitBranch className="h-3 w-3" />
                       View branch
@@ -6511,10 +6513,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 ) : null}
                 <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                  <ButtonGroup size="xs">
+                  <ButtonGroup size={detailActionSize}>
                     <Button
                       variant="outline"
-                      size="xs"
+                      size={detailActionSize}
                       className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
@@ -6532,7 +6534,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon-xs"
+                          size={detailActionIconSize}
                           className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
