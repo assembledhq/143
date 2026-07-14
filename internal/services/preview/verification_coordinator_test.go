@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -62,6 +63,12 @@ func (f *fakeVerificationFixer) FixVerificationFailure(_ context.Context, _ int,
 	return nil
 }
 
+type contextVerificationObserver struct{}
+
+func (contextVerificationObserver) Observe(ctx context.Context, _ string, _ models.ViewportSpec) (*models.PreviewObservation, error) {
+	return nil, ctx.Err()
+}
+
 func TestVerificationCoordinatorRun(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -74,9 +81,10 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 		expectedStatus  models.PreviewVerificationStatus
 		expectedFixes   int
 		expectedAttempt int
+		expectedSteps   int
 	}{
-		{name: "passes and records screenshot", auto: true, observations: []*models.PreviewObservation{{Ready: true, Screenshot: &models.ScreenshotResult{Artifact: &models.PreviewArtifact{ID: "shot-1"}}}}, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusPassed, expectedAttempt: 1},
-		{name: "fixes console failure and retries", auto: true, observations: []*models.PreviewObservation{{Ready: true, Console: []models.ConsoleMessage{{Level: "error"}}}, {Ready: true}}, maxAttempts: 2, expectedStatus: models.PreviewVerificationStatusPassed, expectedFixes: 1, expectedAttempt: 2},
+		{name: "passes and records screenshot", auto: true, observations: []*models.PreviewObservation{{Ready: true, Screenshot: &models.ScreenshotResult{Artifact: &models.PreviewArtifact{ID: "shot-1"}}}}, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusPassed, expectedAttempt: 1, expectedSteps: 1},
+		{name: "fixes console failure and retains both attempts", auto: true, observations: []*models.PreviewObservation{{Ready: true, Console: []models.ConsoleMessage{{Level: "error"}}}, {Ready: true}}, maxAttempts: 2, expectedStatus: models.PreviewVerificationStatusPassed, expectedFixes: 1, expectedAttempt: 2, expectedSteps: 2},
 		{name: "records disabled skip", auto: false, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusSkipped},
 		{name: "reports the real attempt when no fixer is wired", auto: true, observations: []*models.PreviewObservation{{Ready: false}}, maxAttempts: 3, withoutFixer: true, expectedStatus: models.PreviewVerificationStatusFailed, expectedAttempt: 1},
 		{name: "fails when the observer is unavailable", auto: true, maxAttempts: 3, withoutObserver: true, expectedStatus: models.PreviewVerificationStatusFailed, expectedAttempt: 1},
@@ -106,6 +114,36 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 			if tt.expectedAttempt > 0 && tt.expectedStatus != models.PreviewVerificationStatusSkipped {
 				require.Equal(t, tt.expectedAttempt, actual.Attempt, "coordinator should record the attempt where the run resolved")
 			}
+			if tt.expectedSteps > 0 {
+				var steps []models.PreviewVerificationStep
+				require.NoError(t, json.Unmarshal(actual.Steps, &steps), "completed evidence steps should be valid JSON")
+				require.Len(t, steps, tt.expectedSteps, "completed evidence should retain every attempted check")
+				for index, step := range steps {
+					require.Equal(t, index+1, step.Attempt, "each retained check should identify its verification attempt")
+				}
+			}
 		})
 	}
+}
+
+func TestVerificationCoordinatorRun_StopsAtTotalTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	runs := &fakeVerificationRuns{}
+	fixer := &fakeVerificationFixer{}
+	request := VerificationRequest{
+		OrgID: uuid.New(), SessionID: uuid.New(), WorkspaceRevision: 4,
+		Diff: "+++ b/frontend/src/page.tsx", Observer: contextVerificationObserver{}, Fixer: fixer,
+		Config: models.PreviewVerificationConfig{Auto: true, MaxAttempts: 3, TimeoutSeconds: 300, SmokePaths: []string{"/"}},
+	}
+
+	actual, err := NewVerificationCoordinator(runs).Run(ctx, request)
+
+	require.NoError(t, err, "coordinator should persist a timed-out verification outcome")
+	require.Equal(t, models.PreviewVerificationStatusFailed, actual.Status, "a total-budget timeout should fail verification")
+	require.Equal(t, 1, actual.Attempt, "a timed-out verification should not consume further attempts")
+	require.Equal(t, 0, fixer.calls, "a timed-out verification should not start a fix outside its budget")
+	require.Equal(t, "preview verification timed out after 300 seconds", actual.FailureReason, "timeout evidence should state the configured total budget")
 }
