@@ -14,6 +14,7 @@ import {
   Plus,
   PowerOff,
   Settings2,
+  SlidersHorizontal,
   Trash2,
   Users,
 } from "lucide-react";
@@ -167,31 +168,55 @@ function ReviewActions({
   onToggleEvidence: () => void;
 }) {
   return (
-    <div className="flex flex-wrap justify-end gap-2 [&_a]:min-h-11 [&_button]:min-h-11 md:[&_a]:min-h-0 md:[&_button]:min-h-0">
-      <Button
-        variant={selected ? "secondary" : "ghost"}
-        size="sm"
-        onClick={onToggleEvidence}
-      >
-        <FileSearch className="h-4 w-4" />
-        Evidence
-      </Button>
-      <Button variant="ghost" size="sm" asChild>
-        <Link href={`/sessions/${review.session_id}`}>Session</Link>
-      </Button>
-      <Button className="size-11 md:size-7" variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
-        <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
-          <ExternalLink className="h-4 w-4" />
-        </Link>
-      </Button>
-      {review.github_review_url ? (
-        <Button className="size-11 md:size-7" variant="ghost" size="icon-sm" asChild aria-label="Open final review">
-          <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-            <ClipboardCheck className="h-4 w-4" />
+    <TooltipProvider>
+      <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
+        <Button
+          variant={selected ? "secondary" : "ghost"}
+          size="sm"
+          className="min-h-11 justify-center md:min-h-0"
+          onClick={onToggleEvidence}
+        >
+          <FileSearch className="h-4 w-4" />
+          Evidence
+        </Button>
+        <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
+          <Link href={`/sessions/${review.session_id}`}>
+            <ExternalLink className="h-4 w-4 md:hidden" />
+            Session
           </Link>
         </Button>
-      ) : null}
-    </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              className={`min-h-11 justify-center md:size-7 md:min-h-0 ${review.github_review_url ? "" : "col-span-2 md:col-span-1"}`}
+              variant="ghost"
+              size="sm"
+              asChild
+              aria-label="Open pull request"
+            >
+              <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                <span className="md:sr-only">Pull request</span>
+              </Link>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
+        </Tooltip>
+        {review.github_review_url ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button className="min-h-11 justify-center md:size-7 md:min-h-0" variant="ghost" size="sm" asChild aria-label="Open final review">
+                <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+                  <ClipboardCheck className="h-4 w-4" />
+                  <span className="md:sr-only">Final review</span>
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="hidden md:block">Open final review</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -241,6 +266,7 @@ export default function CodeReviewsPage() {
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
@@ -477,47 +503,6 @@ export default function CodeReviewsPage() {
           description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
         />
 
-        <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">
-          <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
-            <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
-            {repositories.map((repo) => (
-              <SelectItem key={repo.id} value={repo.id}>
-                {repo.full_name}
-              </SelectItem>
-            ))}
-          </FilterSelect>
-          <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
-            <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
-            <SelectItem value="approved">Approved</SelectItem>
-            <SelectItem value="comment_only">Comment only</SelectItem>
-            <SelectItem value="needs_human_review">Needs human</SelectItem>
-            <SelectItem value="blocked">Blocked</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
-            <SelectItem value={ALL_RISKS}>All risk</SelectItem>
-            <SelectItem value="acceptable">Acceptable</SelectItem>
-            <SelectItem value="needs_review">Needs review</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
-            <SelectItem value="queued">Queued</SelectItem>
-            <SelectItem value="running">Running</SelectItem>
-            <SelectItem value="completed">Completed</SelectItem>
-            <SelectItem value="failed">Failed</SelectItem>
-            <SelectItem value="stale">Stale</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
-          </FilterSelect>
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs text-muted-foreground">Search</Label>
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="PR, repo, or title"
-              aria-label="Search code reviews"
-            />
-          </div>
-        </div>
-
         <Tabs defaultValue="reviews" className="space-y-4">
           <TabsList>
             <TabsTrigger value="reviews">
@@ -531,6 +516,64 @@ export default function CodeReviewsPage() {
           </TabsList>
 
           <TabsContent value="reviews" className="space-y-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full justify-between md:hidden"
+              aria-expanded={mobileFiltersOpen}
+              aria-controls="code-review-filters"
+              onClick={() => setMobileFiltersOpen((open) => !open)}
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="h-4 w-4" />
+                Filter reviews
+              </span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${mobileFiltersOpen ? "rotate-180" : ""}`} />
+            </Button>
+            <div
+              id="code-review-filters"
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
+            >
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+              <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
+                <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
+                <SelectItem value="approved">Approved</SelectItem>
+                <SelectItem value="comment_only">Comment only</SelectItem>
+                <SelectItem value="needs_human_review">Needs human</SelectItem>
+                <SelectItem value="blocked">Blocked</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+                <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+                <SelectItem value="acceptable">Acceptable</SelectItem>
+                <SelectItem value="needs_review">Needs review</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
+                <SelectItem value="queued">Queued</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="stale">Stale</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
+              </FilterSelect>
+              <div className="flex flex-col gap-2">
+                <Label className="text-xs text-muted-foreground">Search</Label>
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="PR, repo, or title"
+                  aria-label="Search code reviews"
+                />
+              </div>
+            </div>
             <SectionGroup
               title="Review activity"
               description="Pull requests reviewed by the team policy and their current outcome."
@@ -641,6 +684,7 @@ export default function CodeReviewsPage() {
                           }
                         />
                       )}
+                      className="[&_[data-slot=resource-row-actions]]:ml-0"
                     />
                   );
                 })}
@@ -661,6 +705,16 @@ export default function CodeReviewsPage() {
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
+            <div className="max-w-sm">
+              <FilterSelect label="Policy repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+            </div>
             <Card>
               <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
