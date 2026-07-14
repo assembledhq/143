@@ -353,15 +353,15 @@ describe("PRHealthBanner", () => {
       />,
     );
 
+    const mergeAction = screen.getByRole("button", { name: "Merge" });
     const moreActions = screen.getByRole("button", { name: "More merge actions" });
+    const actionGroup = moreActions.closest("[data-slot='button-group']");
+    expect(actionGroup).toHaveAttribute("data-size", "sm");
+    expect(mergeAction).toHaveAttribute("data-size", "sm");
+    expect(mergeAction).toHaveClass("h-10", "sm:h-7");
     expect(moreActions).toHaveAttribute("data-size", "icon-sm");
     expect(moreActions).toHaveClass("size-10", "sm:size-7", "rounded-l-none");
     expect(moreActions).not.toHaveClass("h-7", "w-7");
-    expect(moreActions.closest("[data-slot='button-group']")).toHaveClass(
-      "h-10",
-      "sm:h-7",
-      "[&_[data-slot=button]]:!h-full",
-    );
 
     await userEvent.setup().click(moreActions);
     const menuItem = await screen.findByRole("menuitem", { name: "Merge when ready" });
