@@ -396,3 +396,48 @@ export interface VisualEdit {
   before_screenshot?: string;
   after_screenshot?: string;
 }
+export type PreviewVerificationStatus =
+  | "running"
+  | "passed"
+  | "failed"
+  | "skipped"
+  | "human_intervention_required";
+
+export interface PreviewVerificationArtifact {
+  id: string;
+  kind: string;
+  content_type: string;
+  url: string;
+  bytes: number;
+  created_at: string;
+}
+
+export interface PreviewVerificationRun {
+  id: string;
+  session_id: string;
+  preview_instance_id?: string;
+  workspace_revision: number;
+  config_digest: string;
+  trigger: "automatic" | "requested";
+  status: PreviewVerificationStatus;
+  attempt: number;
+  max_attempts: number;
+  plan: Array<{ path: string; viewport: { width: number; height: number } }>;
+  steps: Array<{
+    index: number;
+    attempt?: number;
+    path: string;
+    viewport: { width: number; height: number };
+    outcome: string;
+    error?: string;
+    artifact?: PreviewVerificationArtifact;
+    console_error_count: number;
+  }>;
+  artifacts: PreviewVerificationArtifact[];
+  console_error_count: number;
+  summary: string;
+  failure_reason?: string;
+  skip_reason?: string;
+  started_at: string;
+  completed_at?: string;
+}

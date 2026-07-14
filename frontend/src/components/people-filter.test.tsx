@@ -26,7 +26,7 @@ describe("PeopleFilter", () => {
 
     const trigger = screen.getByRole("button", { name: /mine/i });
     expect(trigger).toHaveAttribute("data-size", "default");
-    expect(trigger).toHaveClass("type-dense", "font-medium", "h-11", "sm:h-8");
+    expect(trigger).toHaveClass("type-dense", "font-medium", "h-10", "sm:h-8");
   });
 
   it("summarizes selected people in the trigger without rendering user badges", () => {

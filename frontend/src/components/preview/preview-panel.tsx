@@ -58,6 +58,7 @@ import {
   type PreviewFreshnessState,
   type PreviewRestartReason,
   type PreviewLog,
+  type PreviewVerificationRun,
 } from "@/lib/preview-types";
 import { ConsoleBadge } from "./console-badge";
 import { ErrorBoundary } from "@/components/error-boundary";
@@ -560,6 +561,16 @@ export function PreviewPanel({
   });
 
   const instance = previewStatus?.instance;
+
+  const previewVerificationsKey = ["preview-verifications", sessionId] as const;
+  const { data: verificationRuns = [] } = useQuery({
+    queryKey: previewVerificationsKey,
+    queryFn: () => api.sessions.preview.verifications(sessionId),
+    refetchInterval: (query) =>
+      query.state.data?.some((run) => run.status === "running")
+        ? liveRefreshInterval(previewVerificationsKey, "converging", liveHealth, documentVisible)
+        : false,
+  });
   const prewarm = previewStatus?.prewarm;
   const rawServices = previewStatus?.services;
   const rawInfrastructure = previewStatus?.infrastructure;
@@ -905,6 +916,9 @@ export function PreviewPanel({
 
   return (
     <div className="flex flex-col gap-3">
+      {verificationRuns[0] && (
+        <VerificationEvidence run={verificationRuns[0]} />
+      )}
       {/* Command header */}
       {showTopControls && (
         <div className="flex flex-col gap-2">
@@ -1388,5 +1402,46 @@ export function PreviewPanel({
           </div>
         )}
     </div>
+  );
+}
+
+function VerificationEvidence({ run }: { run: PreviewVerificationRun }) {
+  const status = run.status.replaceAll("_", " ");
+  const statusClass =
+    run.status === "passed"
+      ? "bg-success/10 text-success border-success/20"
+      : run.status === "failed"
+        ? "bg-destructive/10 text-destructive border-destructive/20"
+        : run.status === "human_intervention_required"
+          ? "bg-attention/10 text-attention border-attention/20"
+          : run.status === "running"
+            ? "bg-primary/10 text-primary border-primary/20"
+            : "bg-muted text-muted-foreground border-border";
+
+  return (
+    <Card data-testid="preview-verification-evidence">
+      <CardContent className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-foreground">
+            Preview verification
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {run.summary || run.failure_reason || run.skip_reason ||
+              `${run.plan.length} checks planned for workspace revision ${run.workspace_revision}.`}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Badge variant="outline" className={statusClass}>
+            {status.charAt(0).toUpperCase() + status.slice(1)}
+          </Badge>
+          <span className="text-xs tabular-nums text-muted-foreground">
+            Attempt {run.attempt}/{run.max_attempts}
+            {run.console_error_count > 0
+              ? ` · ${run.console_error_count} console errors`
+              : ""}
+          </span>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

@@ -3,7 +3,12 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ChangesetSummary } from '@/lib/types';
-import { ChangesetSplitPlanner, PullRequestList } from './session-detail-content';
+import {
+  CHANGESET_SPLIT_MIN_ADDITIONS,
+  ChangesetSplitPlanner,
+  PullRequestList,
+  shouldOfferChangesetSplit,
+} from './session-detail-content';
 
 function changeset(overrides: Partial<ChangesetSummary> = {}): ChangesetSummary {
   return {
@@ -62,6 +67,15 @@ describe('PullRequestList', () => {
 });
 
 describe('ChangesetSplitPlanner', () => {
+  it.each([
+    { additions: undefined, expected: false },
+    { additions: CHANGESET_SPLIT_MIN_ADDITIONS - 1, expected: false },
+    { additions: CHANGESET_SPLIT_MIN_ADDITIONS, expected: true },
+    { additions: CHANGESET_SPLIT_MIN_ADDITIONS + 1, expected: true },
+  ])('offers splitting for $additions additions: $expected', ({ additions, expected }) => {
+    expect(shouldOfferChangesetSplit(additions)).toBe(expected);
+  });
+
   it('shows verified split progress and enables acceptance only when complete', () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     queryClient.setQueryData(['session', 'session-1', 'changeset-split'], {
