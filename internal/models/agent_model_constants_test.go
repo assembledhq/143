@@ -40,11 +40,8 @@ func TestCodexModelConstants(t *testing.T) {
 	require.Equal(t,
 		[]string{
 			CodexModelGPT56Sol,
-			CodexModelGPT56SolFast,
 			CodexModelGPT56Terra,
-			CodexModelGPT56TerraFast,
 			CodexModelGPT56Luna,
-			CodexModelGPT56LunaFast,
 			CodexModelGPT55,
 			CodexModelGPT55Fast,
 			CodexModelGPT54,
@@ -146,9 +143,6 @@ func TestCodexRuntimeModel(t *testing.T) {
 		expected     string
 		priorityTier bool
 	}{
-		{name: "gpt 5.6 sol fast maps to gpt 5.6 sol priority", model: CodexModelGPT56SolFast, expected: CodexModelGPT56Sol, priorityTier: true},
-		{name: "gpt 5.6 terra fast maps to gpt 5.6 terra priority", model: CodexModelGPT56TerraFast, expected: CodexModelGPT56Terra, priorityTier: true},
-		{name: "gpt 5.6 luna fast maps to gpt 5.6 luna priority", model: CodexModelGPT56LunaFast, expected: CodexModelGPT56Luna, priorityTier: true},
 		{name: "gpt 5.5 fast maps to gpt 5.5 priority", model: CodexModelGPT55Fast, expected: CodexModelGPT55, priorityTier: true},
 		{name: "gpt 5.4 fast maps to gpt 5.4 priority", model: CodexModelGPT54Fast, expected: CodexModelGPT54, priorityTier: true},
 		{name: "regular gpt 5.6 sol stays unchanged", model: CodexModelGPT56Sol, expected: CodexModelGPT56Sol},
@@ -302,7 +296,7 @@ func TestAgentTypeForModel(t *testing.T) {
 	}{
 		{"", ""},
 		{CodexModelGPT56Sol, AgentTypeCodex},
-		{CodexModelGPT56LunaFast, AgentTypeCodex},
+		{CodexModelGPT56Luna, AgentTypeCodex},
 		{CodexModelGPT54, AgentTypeCodex},
 		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},
 		{AmpModeSmart, AgentTypeAmp},

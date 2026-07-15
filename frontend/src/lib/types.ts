@@ -3417,6 +3417,7 @@ export type AutomationRunStatus =
   | "failed"
   | "skipped";
 export type AutomationIdentityScope = "org" | "personal";
+export type AutomationPublishPolicy = "pull_request" | "none";
 export type AutomationGitHubEvent =
   | "github.pull_request.opened"
   | "github.pull_request.updated"
@@ -3545,6 +3546,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  publish_policy: AutomationPublishPolicy;
   pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;

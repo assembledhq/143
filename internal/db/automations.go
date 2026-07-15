@@ -25,7 +25,7 @@ func NewAutomationStore(db TxStarter) *AutomationStore {
 const automationColumns = `id, org_id, repository_id, name, goal, scope,
 	icon_type, icon_value,
 	agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-	identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+	identity_scope, publish_policy, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 	github_event_triggers, github_event_filters,
 	next_run_at, last_run_at, enabled, created_by, paused_by, paused_at,
 	priority, external_metadata, created_at, updated_at, deleted_at`
@@ -45,7 +45,7 @@ func scanAutomation(row pgx.Row) (models.Automation, error) {
 		&a.ID, &a.OrgID, &a.RepositoryID, &a.Name, &a.Goal, &a.Scope,
 		&a.IconType, &a.IconValue,
 		&a.AgentType, &a.ModelOverride, &a.ReasoningEffort, &a.ExecutionMode, &a.MaxConcurrent, &a.BaseBranch,
-		&a.IdentityScope, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
+		&a.IdentityScope, &a.PublishPolicy, &a.PrePRReviewLoops, &a.ScheduleType, &a.IntervalValue, &a.IntervalUnit, &a.IntervalRunAt, &a.CronExpression, &a.Timezone,
 		&githubEventTriggers, &a.GitHubEventFilters,
 		&a.NextRunAt, &a.LastRunAt, &a.Enabled, &a.CreatedBy, &a.PausedBy, &a.PausedAt,
 		&a.Priority, &a.ExternalMetadata, &a.CreatedAt, &a.UpdatedAt, &a.DeletedAt,
@@ -96,14 +96,14 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 			org_id, repository_id, name, goal, scope,
 			icon_type, icon_value,
 			agent_type, model_override, reasoning_effort, execution_mode, max_concurrent, base_branch,
-			identity_scope, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
+			identity_scope, publish_policy, pre_pr_review_loops, schedule_type, interval_value, interval_unit, interval_run_at, cron_expression, timezone,
 			github_event_triggers, github_event_filters,
 			next_run_at, enabled, created_by, priority, external_metadata
 		) VALUES (
 			@org_id, @repository_id, @name, @goal, @scope,
 			@icon_type, @icon_value,
 			@agent_type, @model_override, @reasoning_effort, @execution_mode, @max_concurrent, @base_branch,
-			@identity_scope, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
+			@identity_scope, @publish_policy, @pre_pr_review_loops, @schedule_type, @interval_value, @interval_unit, @interval_run_at, @cron_expression, @timezone,
 			@github_event_triggers, @github_event_filters,
 			@next_run_at, @enabled, @created_by, @priority, @external_metadata
 		) RETURNING id, created_at, updated_at`
@@ -131,6 +131,7 @@ func (s *AutomationStore) Create(ctx context.Context, a *models.Automation) erro
 		"max_concurrent":        a.MaxConcurrent,
 		"base_branch":           a.BaseBranch,
 		"identity_scope":        a.IdentityScope.OrDefault(),
+		"publish_policy":        a.PublishPolicy.OrDefault(),
 		"pre_pr_review_loops":   a.PrePRReviewLoops,
 		"schedule_type":         a.ScheduleType,
 		"interval_value":        a.IntervalValue,
@@ -257,6 +258,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 			agent_type = @agent_type, model_override = @model_override, reasoning_effort = @reasoning_effort,
 			execution_mode = @execution_mode, max_concurrent = @max_concurrent,
 			base_branch = @base_branch, identity_scope = @identity_scope,
+			publish_policy = @publish_policy,
 			pre_pr_review_loops = @pre_pr_review_loops,
 			schedule_type = @schedule_type, interval_value = @interval_value,
 			interval_unit = @interval_unit, interval_run_at = @interval_run_at, cron_expression = @cron_expression,
@@ -290,6 +292,7 @@ func (s *AutomationStore) Update(ctx context.Context, a *models.Automation) erro
 		"max_concurrent":        a.MaxConcurrent,
 		"base_branch":           a.BaseBranch,
 		"identity_scope":        a.IdentityScope.OrDefault(),
+		"publish_policy":        a.PublishPolicy.OrDefault(),
 		"pre_pr_review_loops":   a.PrePRReviewLoops,
 		"schedule_type":         a.ScheduleType,
 		"interval_value":        a.IntervalValue,

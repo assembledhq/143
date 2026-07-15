@@ -16,6 +16,7 @@ import (
 type fakeAutomationRunStore struct {
 	calls        []fakeTransitionCall
 	err          error
+	getErr       error
 	transitioned bool // what TransitionStatusIf returns for the bool result
 	run          models.AutomationRun
 }
@@ -42,10 +43,52 @@ func (f *fakeAutomationRunStore) TransitionStatusIf(_ context.Context, orgID, ru
 }
 
 func (f *fakeAutomationRunStore) GetByRunID(_ context.Context, orgID, runID uuid.UUID) (models.AutomationRun, error) {
+	if f.getErr != nil {
+		return models.AutomationRun{}, f.getErr
+	}
 	if f.run.OrgID != orgID || f.run.ID != runID {
 		return models.AutomationRun{}, errors.New("unexpected automation run lookup")
 	}
 	return f.run, nil
+}
+
+func TestAutomationHooks_AutomaticPublishPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		snapshot []byte
+		expected models.AutomationPublishPolicy
+	}{
+		{name: "pull request", snapshot: []byte(`{"publish_policy":"pull_request"}`), expected: models.AutomationPublishPolicyPullRequest},
+		{name: "none", snapshot: []byte(`{"publish_policy":"none"}`), expected: models.AutomationPublishPolicyNone},
+		{name: "legacy snapshot", snapshot: []byte(`{}`), expected: models.AutomationPublishPolicyPullRequest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			runID := uuid.New()
+			orgID := uuid.New()
+			store := &fakeAutomationRunStore{run: models.AutomationRun{ID: runID, OrgID: orgID, ConfigSnapshot: tt.snapshot}}
+			h := NewAutomationHooks(store, zerolog.Nop())
+
+			actual, err := h.AutomaticPublishPolicy(context.Background(), orgID, runID)
+			require.NoError(t, err, "publish policy should resolve from the automation run snapshot")
+			require.Equal(t, tt.expected, actual, "resolved publish policy should match the captured snapshot")
+		})
+	}
+}
+
+func TestAutomationHooks_AutomaticPublishPolicy_LookupError(t *testing.T) {
+	t.Parallel()
+
+	sentinel := errors.New("db down")
+	h := NewAutomationHooks(&fakeAutomationRunStore{getErr: sentinel}, zerolog.Nop())
+
+	_, err := h.AutomaticPublishPolicy(context.Background(), uuid.New(), uuid.New())
+	require.ErrorIs(t, err, sentinel, "automation run lookup errors should be preserved")
 }
 
 func TestAutomationHooks_OnSessionComplete_NoAutomationRunID_NoOp(t *testing.T) {

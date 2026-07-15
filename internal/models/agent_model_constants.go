@@ -70,11 +70,8 @@ var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable5, ClaudeCodeModelO
 
 const (
 	CodexModelGPT56Sol        = "gpt-5.6-sol"
-	CodexModelGPT56SolFast    = "gpt-5.6-sol-fast"
 	CodexModelGPT56Terra      = "gpt-5.6-terra"
-	CodexModelGPT56TerraFast  = "gpt-5.6-terra-fast"
 	CodexModelGPT56Luna       = "gpt-5.6-luna"
-	CodexModelGPT56LunaFast   = "gpt-5.6-luna-fast"
 	CodexModelGPT55           = "gpt-5.5"
 	CodexModelGPT55Fast       = "gpt-5.5-fast"
 	CodexModelGPT54           = "gpt-5.4"
@@ -90,11 +87,8 @@ const DefaultCodexModel = CodexModelGPT56Sol
 
 var AvailableCodexModels = []string{
 	CodexModelGPT56Sol,
-	CodexModelGPT56SolFast,
 	CodexModelGPT56Terra,
-	CodexModelGPT56TerraFast,
 	CodexModelGPT56Luna,
-	CodexModelGPT56LunaFast,
 	CodexModelGPT55,
 	CodexModelGPT55Fast,
 	CodexModelGPT54,
@@ -194,12 +188,6 @@ type CodexRuntimeSpec struct {
 // model ID Codex CLI accepts plus a priority-service-tier flag.
 func CodexRuntimeModel(model string) CodexRuntimeSpec {
 	switch model {
-	case CodexModelGPT56SolFast:
-		return CodexRuntimeSpec{Model: CodexModelGPT56Sol, PriorityTier: true}
-	case CodexModelGPT56TerraFast:
-		return CodexRuntimeSpec{Model: CodexModelGPT56Terra, PriorityTier: true}
-	case CodexModelGPT56LunaFast:
-		return CodexRuntimeSpec{Model: CodexModelGPT56Luna, PriorityTier: true}
 	case CodexModelGPT55Fast:
 		return CodexRuntimeSpec{Model: CodexModelGPT55, PriorityTier: true}
 	case CodexModelGPT54Fast:

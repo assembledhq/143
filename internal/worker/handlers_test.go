@@ -317,14 +317,14 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 		},
 		{
 			name:      "event list matches event",
-			raw:       json.RawMessage(`{"events":["session.failed"]}`),
-			eventKind: "session.failed",
+			raw:       json.RawMessage(`{"events":["human_input.requested"]}`),
+			eventKind: "human_input.requested",
 			expected:  true,
 		},
 		{
 			name:      "wildcard matches event",
 			raw:       json.RawMessage(`{"events":["*"]}`),
-			eventKind: "session.failed",
+			eventKind: "human_input.requested",
 			expected:  true,
 		},
 		{
@@ -385,6 +385,12 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			name:      "explicit readiness attention does not match",
 			raw:       json.RawMessage(`{"events":["pr.readiness_attention"]}`),
 			eventKind: "pr.readiness_attention",
+			expected:  false,
+		},
+		{
+			name:      "explicit session failure does not match",
+			raw:       json.RawMessage(`{"events":["session.failed"]}`),
+			eventKind: "session.failed",
 			expected:  false,
 		},
 		{
@@ -450,7 +456,9 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		{name: "quiet excludes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
 		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
-		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: true},
+		{name: "quiet excludes session failed", preset: &quiet, eventKind: string(models.SlackNotificationSessionFailed), expected: false},
+		{name: "verbose excludes session failed", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: false},
+		{name: "verbose includes automation completed", preset: &verbose, eventKind: string(models.SlackNotificationAutomationCompleted), expected: true},
 		{name: "verbose excludes preview ready", preset: &verbose, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
 		{name: "verbose excludes preview failed", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 	}
@@ -470,6 +478,9 @@ func TestSlackNotificationEventDisabled(t *testing.T) {
 
 	disabled := []string{
 		string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationSessionFailed),
+		string(models.SlackNotificationAutomationFailed),
+		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationPROpened),
 		string(models.SlackNotificationPreviewReady),
 		string(models.SlackNotificationPreviewFailed),
@@ -482,15 +493,21 @@ func TestSlackNotificationEventDisabled(t *testing.T) {
 	}
 
 	enabled := []string{
-		string(models.SlackNotificationSessionFailed),
 		string(models.SlackNotificationAutomationCompleted),
-		string(models.SlackNotificationAutomationFailed),
-		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationHumanInputRequested),
 	}
 	for _, eventKind := range enabled {
 		require.False(t, slackNotificationEventDisabled(eventKind), "%s should still be deliverable", eventKind)
 	}
+}
+
+func TestSlackSendNotificationHandlerDropsDisabledEvents(t *testing.T) {
+	t.Parallel()
+
+	handler := newSlackSendNotificationHandler(nil, nil, zerolog.Nop())
+	err := handler(context.Background(), "slack_send_notification", json.RawMessage(`{"kind":"session.failed"}`))
+
+	require.NoError(t, err, "disabled notifications should be dropped before delivery dependencies are required")
 }
 
 func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) {
@@ -3393,6 +3410,10 @@ func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *mode
 	}
 	r.calls = append(r.calls, call)
 	return r.err
+}
+
+func (r *sessionCompleteRecorder) AutomaticPublishPolicy(context.Context, uuid.UUID, uuid.UUID) (models.AutomationPublishPolicy, error) {
+	return models.AutomationPublishPolicyPullRequest, nil
 }
 
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
@@ -7484,7 +7505,7 @@ func automationRowColumns() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope", "pre_pr_review_loops",
+		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
@@ -7573,7 +7594,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7661,7 +7682,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &automationRepoID, "incident", "fix incident", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7737,7 +7758,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7874,7 +7895,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, false, nil, nil, nil,
@@ -7929,7 +7950,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -8002,7 +8023,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &clickerID, nil, nil,
@@ -8081,7 +8102,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -8152,7 +8173,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,

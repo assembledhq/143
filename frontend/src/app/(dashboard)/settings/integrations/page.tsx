@@ -89,11 +89,8 @@ const SLACK_ACTIONS: Array<{ value: SlackChannelAction; label: string }> = [
   { value: "human_input", label: "Human input" },
 ];
 const SLACK_NOTIFICATION_EVENTS = [
-  { value: "session.failed", label: "Session failed" },
   { value: "human_input.requested", label: "Human input requested" },
   { value: "automation.run.completed", label: "Automation completed" },
-  { value: "automation.run.failed", label: "Automation failed" },
-  { value: "automation.run.failure_streak", label: "Automation failure streak" },
 ] as const;
 
 // Coalesce multi-toggle bursts: the later selection wins. Hoisted so every
@@ -120,15 +117,15 @@ function slackVisibilityLabel(value?: SlackResponseVisibility): string {
 
 function slackPresetLabel(value?: SlackNotificationPreset): string {
   switch (value) {
-    case "quiet":
-      return "Quiet";
     case "verbose":
       return "Verbose";
     case "custom":
       return "Custom";
     case "balanced":
-    default:
       return "Balanced";
+    case "quiet":
+    default:
+      return "Quiet";
   }
 }
 
@@ -479,7 +476,7 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
   const selectedNotificationEvents = slackNotificationEvents(settings);
   const selectedNotificationAutomations = slackNotificationAutomations(settings);
   const selectedNotificationSlackUsers = slackNotificationSlackUsers(settings);
-  const showCustomNotificationControls = (settings?.notification_preset ?? "balanced") === "custom";
+  const showCustomNotificationControls = (settings?.notification_preset ?? "quiet") === "custom";
 
   const patch = (body: SlackBotSettingsUpdate) => updateSettings.mutate(body);
   const toggleAction = (action: SlackChannelAction) => {
@@ -627,7 +624,7 @@ function SlackBotDefaults({ repositories }: { repositories: Repository[] }) {
               <div className="grid gap-2">
                 <Label>Notifications</Label>
                 <Select
-                  value={settings?.notification_preset ?? "balanced"}
+                  value={settings?.notification_preset ?? "quiet"}
                   onValueChange={(value) => patch({ notification_preset: value as SlackNotificationPreset })}
                   disabled={updateSettings.isPending}
                 >
@@ -842,7 +839,7 @@ function SlackChannelPicker() {
                   </SelectContent>
                 </Select>
                 <Select
-                  value={channel.effective_settings?.notification_preset ?? "balanced"}
+                  value={channel.effective_settings?.notification_preset ?? "quiet"}
                   disabled={updateChannelSettings.isPending}
                   onValueChange={(value) =>
                     updateChannelSettings.mutate({ channel, body: { notification_preset: value as SlackNotificationPreset } })
