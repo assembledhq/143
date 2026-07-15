@@ -224,7 +224,7 @@ export function SidebarSettingsSection({
           title={collapsed ? "Settings" : undefined}
           variant="ghost"
           className={cn(
-            "relative flex h-auto w-full items-center rounded-md px-2.5 font-medium transition-all duration-[175ms]",
+            "relative flex h-auto w-full items-center rounded-md px-2.5 has-[>svg]:px-2.5 font-medium transition-all duration-[175ms]",
             isMobile ? "gap-2.5 py-3 text-sm" : "gap-2.5 py-[7px] type-dense",
             onSettingsPage
               ? "bg-accent/65 text-foreground before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
