@@ -65,6 +65,19 @@ func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *
 	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
 }
 
+func TestCapabilityFilteredToolSourceAllowsAutomationOutcomeReporting(t *testing.T) {
+	t.Parallel()
+
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{
+		{Name: "automation_run_report_outcome"},
+		{Name: "pr_create"},
+	}}, ToolCapabilityPolicy{})
+
+	require.Equal(t, []Tool{{Name: "automation_run_report_outcome"}}, source.ListTools(), "the run-scoped outcome reporter should remain available without a user-managed capability")
+	result := source.CallTool(context.Background(), "automation_run_report_outcome", json.RawMessage(`{}`))
+	require.False(t, result.IsError, "the scoped outcome reporter should remain callable after capability filtering")
+}
+
 func TestCapabilityFilteredToolSourceAllowsSessionPreviewTools(t *testing.T) {
 	t.Parallel()
 	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}}, ToolCapabilityPolicy{})

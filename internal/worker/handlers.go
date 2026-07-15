@@ -2377,6 +2377,11 @@ func automationRunRepositoryID(run models.AutomationRun, automation models.Autom
 func automationRunPromptSeed(run models.AutomationRun) (string, error) {
 	var snapshot struct {
 		PreviousRunAt *string `json:"previous_run_at"`
+		GitHub        struct {
+			Repository        string `json:"repository"`
+			PullRequestNumber int    `json:"pull_request_number"`
+			PullRequestURL    string `json:"pull_request_url"`
+		} `json:"github"`
 	}
 	if len(run.ConfigSnapshot) > 0 {
 		if err := json.Unmarshal(run.ConfigSnapshot, &snapshot); err != nil {
@@ -2392,6 +2397,20 @@ func automationRunPromptSeed(run models.AutomationRun) (string, error) {
 	context := fmt.Sprintf("Automation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
 		run.TriggeredAt.UTC().Format(time.RFC3339), previousRunAt)
 	goal := strings.TrimSpace(run.GoalSnapshot)
+	if run.TriggeredBy == models.AutomationTriggeredByGitHub &&
+		strings.TrimSpace(snapshot.GitHub.Repository) != "" &&
+		snapshot.GitHub.PullRequestNumber > 0 &&
+		strings.TrimSpace(snapshot.GitHub.PullRequestURL) != "" {
+		reportingContract := prompts.AutomationOutcomeReportingPrompt(prompts.AutomationOutcomeReportingPromptData{
+			Repository: strings.TrimSpace(snapshot.GitHub.Repository), PullRequestNumber: snapshot.GitHub.PullRequestNumber,
+			PullRequestURL: strings.TrimSpace(snapshot.GitHub.PullRequestURL),
+		})
+		if goal == "" {
+			goal = reportingContract
+		} else {
+			goal += "\n\n" + reportingContract
+		}
+	}
 	if goal == "" {
 		return context, nil
 	}

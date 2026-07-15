@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,20 +43,21 @@ const (
 )
 
 type AutomationHandler struct {
-	automationStore       *db.AutomationStore
-	automationRunStore    *db.AutomationRunStore
-	repoStore             automationRepoLookup
-	orgStore              automationOrgLookup
-	codingCredentialStore automationCodingCredentialLookup
-	jobStore              *db.JobStore
-	capabilityStore       *db.AgentCapabilityPolicyStore
-	capabilityService     *agentcapabilities.Service
-	goalImprovement       *automationservice.GoalImprovementService
-	eventTriggerStore     automationEventTriggerStore
-	canceller             SessionCanceller
-	audit                 *db.AuditEmitter
-	pool                  db.TxStarter // needed for transactional RunNow
-	logger                zerolog.Logger
+	automationStore        *db.AutomationStore
+	automationRunStore     *db.AutomationRunStore
+	automationOutcomeStore *db.AutomationOutcomeStore
+	repoStore              automationRepoLookup
+	orgStore               automationOrgLookup
+	codingCredentialStore  automationCodingCredentialLookup
+	jobStore               *db.JobStore
+	capabilityStore        *db.AgentCapabilityPolicyStore
+	capabilityService      *agentcapabilities.Service
+	goalImprovement        *automationservice.GoalImprovementService
+	eventTriggerStore      automationEventTriggerStore
+	canceller              SessionCanceller
+	audit                  *db.AuditEmitter
+	pool                   db.TxStarter // needed for transactional RunNow
+	logger                 zerolog.Logger
 }
 
 // automationRepoLookup is the slice of *db.RepositoryStore needed to verify
@@ -96,6 +98,10 @@ func (h *AutomationHandler) SetCapabilityDependencies(store *db.AgentCapabilityP
 
 func (h *AutomationHandler) SetGoalImprovementService(service *automationservice.GoalImprovementService) {
 	h.goalImprovement = service
+}
+
+func (h *AutomationHandler) SetOutcomeStore(store *db.AutomationOutcomeStore) {
+	h.automationOutcomeStore = store
 }
 
 func (h *AutomationHandler) SetEventTriggerStore(store automationEventTriggerStore) {
@@ -2205,6 +2211,84 @@ func (h *AutomationHandler) ListRuns(w http.ResponseWriter, r *http.Request) {
 		Data: runs,
 		Meta: models.PaginationMeta{NextCursor: nextCursor},
 	})
+}
+
+// ListDecisions returns the latest execution for each distinct GitHub PR
+// revision. The outcome is optional because in-flight, failed, and legacy runs
+// may not have reported one; callers must not infer "passed" from completion.
+func (h *AutomationHandler) ListDecisions(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
+		return
+	}
+	if h.automationOutcomeStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "DECISIONS_NOT_AVAILABLE", "automation decisions are not configured")
+		return
+	}
+	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+	decision, outcomeNotReported, err := db.ParseAutomationDecisionFilter(r.URL.Query().Get("outcome"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_OUTCOME", err.Error(), err)
+		return
+	}
+	prNumber := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("pr")); raw != "" {
+		prNumber, err = strconv.Atoi(raw)
+		if err != nil || prNumber <= 0 {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PR", "pr must be a positive integer")
+			return
+		}
+	}
+	filters := db.AutomationDecisionFilters{
+		Limit:              clampListLimit(queryInt(r, "limit", automationListDefaultLimit), automationListDefaultLimit, automationListMaxLimit),
+		Cursor:             r.URL.Query().Get("cursor"),
+		Decision:           decision,
+		OutcomeNotReported: outcomeNotReported,
+		PullRequestNumber:  prNumber,
+	}
+	decisions, err := h.automationOutcomeStore.ListDecisions(r.Context(), orgID, automationID, filters)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "LIST_DECISIONS_FAILED", "failed to list automation decisions", err)
+		return
+	}
+	if decisions == nil {
+		decisions = []models.AutomationDecision{}
+	}
+	var nextCursor string
+	if len(decisions) == filters.Limit && len(decisions) > 0 {
+		nextCursor = decisions[len(decisions)-1].RunID.String()
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.AutomationDecision]{
+		Data: decisions, Meta: models.PaginationMeta{NextCursor: nextCursor},
+	})
+}
+
+func (h *AutomationHandler) DecisionStats(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
+		return
+	}
+	if h.automationOutcomeStore == nil {
+		writeError(w, r, http.StatusNotImplemented, "DECISIONS_NOT_AVAILABLE", "automation decisions are not configured")
+		return
+	}
+	if _, err := h.automationStore.GetByID(r.Context(), orgID, automationID); err != nil {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found")
+		return
+	}
+	stats, err := h.automationOutcomeStore.GetDecisionStats(r.Context(), orgID, automationID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "DECISION_STATS_FAILED", "failed to get automation decision stats", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.AutomationDecisionStats]{Data: stats})
 }
 
 // Stats returns per-day run aggregates for an automation.

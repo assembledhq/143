@@ -402,6 +402,16 @@ func AutomationGoalDeepImprovementPrompt(data AutomationGoalDeepImprovementPromp
 	return render("automation_goal_deep_improvement.template", data)
 }
 
+type AutomationOutcomeReportingPromptData struct {
+	Repository        string
+	PullRequestNumber int
+	PullRequestURL    string
+}
+
+func AutomationOutcomeReportingPrompt(data AutomationOutcomeReportingPromptData) string {
+	return render("automation_outcome_reporting.template", data)
+}
+
 // ─── Slack ────────────────────────────────────────────────────────────────────
 
 // SlackSummarizerPrompt returns the system prompt for Slack thread analysis.

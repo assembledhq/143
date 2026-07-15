@@ -33,6 +33,7 @@ const (
 	NamespaceTabs                      CLINamespace = "session-tabs"
 	NamespaceEval                      CLINamespace = "eval"
 	NamespaceAutomationGoalImprovement CLINamespace = "automation-goal-improvement"
+	NamespaceAutomationRun             CLINamespace = "automation-run"
 	NamespaceCapability                CLINamespace = "capability"
 	NamespaceSessionHistory            CLINamespace = "session-history"
 	NamespacePreview                   CLINamespace = "preview"
@@ -53,6 +54,7 @@ const (
 	ActionAdd      CLIAction = "add"
 	ActionComplete CLIAction = "complete"
 	ActionRequest  CLIAction = "request"
+	ActionReport   CLIAction = "report"
 	ActionSearch   CLIAction = "search"
 )
 
@@ -230,6 +232,8 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceEval, ActionAdd, true
 	case name == "automation_goal_improvement_complete":
 		return NamespaceAutomationGoalImprovement, ActionComplete, true
+	case name == "automation_run_report_outcome":
+		return NamespaceAutomationRun, ActionReport, true
 	case name == "capability_list":
 		return NamespaceCapability, ActionList, true
 	case name == "capability_request":
