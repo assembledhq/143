@@ -12,7 +12,7 @@ describe("SidebarSettingsSection", () => {
     expect(screen.getByTestId("sidebar-settings-divider")).toHaveClass("border-t");
 
     const trigger = screen.getByRole("button", { name: /Settings/ });
-    expect(trigger).toHaveClass("gap-2.5", "py-[7px]", "type-dense");
+    expect(trigger).toHaveClass("gap-2.5", "px-2.5", "has-[>svg]:px-2.5", "py-[7px]", "type-dense");
     expect(trigger).not.toHaveClass("gap-2", "py-1.5");
 
     const settingsIcon = trigger.querySelector("svg");
