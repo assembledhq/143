@@ -1,15 +1,7 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
+import { isListResponse } from "./list-response";
 import { queryKeys } from "./query-keys";
 import type { ListResponse, Session, SessionDetail, SessionListItem } from "./types";
-
-function isSessionListResponse(value: unknown): value is ListResponse<SessionListItem> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "data" in value &&
-    Array.isArray((value as { data?: unknown }).data)
-  );
-}
 
 function isArchivedListKey(key: QueryKey): boolean {
   return key[0] === "sessions" && key[2] === "filtered" && key[3] === "archived";
@@ -38,7 +30,7 @@ export function applySessionDetailToSessionListCaches(queryClient: QueryClient, 
   });
 
   for (const [key, current] of cachedLists) {
-    if (!isSessionListResponse(current)) {
+    if (!isListResponse<SessionListItem>(current)) {
       continue;
     }
 
@@ -70,7 +62,7 @@ export function applyCreatedSessionToSessionListCaches(queryClient: QueryClient,
   });
 
   for (const [key, current] of cachedLists) {
-    if (!isSessionListResponse(current) || isArchivedListKey(key)) {
+    if (!isListResponse<SessionListItem>(current) || isArchivedListKey(key)) {
       continue;
     }
 
