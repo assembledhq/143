@@ -51,7 +51,10 @@ WITH legacy AS (
             WHEN ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
             THEN (ar.config_snapshot #>> '{github,pull_request_number}')::integer
         END AS pull_request_number,
-        ar.config_snapshot #>> '{github,pull_request_url}' AS pull_request_url,
+        COALESCE(
+            NULLIF(ar.config_snapshot #>> '{github,pull_request_url}', ''),
+            'https://github.com/' || (ar.config_snapshot #>> '{github,repository}') || '/pull/' || (ar.config_snapshot #>> '{github,pull_request_number}')
+        ) AS pull_request_url,
         NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', '') AS pull_request_title,
         NULLIF(ar.config_snapshot #>> '{github,head_sha}', '') AS head_sha,
         CASE lower((regexp_match(st.result_summary, '^#[0-9]+:[[:space:]]*([[:alpha:]_-]+)'))[1])
@@ -76,7 +79,6 @@ WITH legacy AS (
     WHERE ar.triggered_by = 'github'
       AND ar.config_snapshot #>> '{github,repository}' <> ''
       AND ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
-      AND ar.config_snapshot #>> '{github,pull_request_url}' <> ''
       AND st.result_summary ~* '^#[0-9]+:[[:space:]]*(pass|reject|advise|skipped)[[:space:]]+(—|-)'
     ORDER BY ar.id, st.completed_at DESC NULLS LAST, st.created_at DESC
 )

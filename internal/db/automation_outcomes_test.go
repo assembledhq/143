@@ -49,7 +49,7 @@ func TestAutomationOutcomeStoreListDecisions(t *testing.T) {
 		&actionID, &orgID, &outcomeID, stringPointer("github"), stringPointer(string(models.AutomationExternalActionGitHubReviewChangesRequested)), stringPointer("456"),
 		stringPointer("https://github.com/assembledhq/143/pull/123#pullrequestreview-456"), stringPointer(string(models.AutomationExternalActionVerificationReported)), &now,
 	)
-	mock.ExpectQuery(`WITH raw_targeted AS`).
+	mock.ExpectQuery(`WITH raw_targeted AS[\s\S]*COALESCE\([\s\S]*https://github.com/`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "automation_id": automationID}).
 		WillReturnRows(rows)
 
@@ -82,6 +82,7 @@ func TestAutomationOutcomeStoreListDecisions(t *testing.T) {
 			},
 		},
 	}}, decisions, "ListDecisions should preserve target, lifecycle, outcome, and external action as separate fields")
+	require.Contains(t, automationDecisionTargetCTEs, "'https://github.com/'", "decision targets should reconstruct canonical URLs for historical snapshots")
 	require.NoError(t, mock.ExpectationsWereMet(), "ListDecisions should keep every query org scoped")
 }
 

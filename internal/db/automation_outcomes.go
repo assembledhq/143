@@ -194,7 +194,10 @@ const automationDecisionTargetCTEs = `WITH raw_targeted AS (
 			WHEN ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
 			THEN (ar.config_snapshot #>> '{github,pull_request_number}')::integer
 		END AS pull_request_number,
-		ar.config_snapshot #>> '{github,pull_request_url}' AS pull_request_url,
+		COALESCE(
+			NULLIF(ar.config_snapshot #>> '{github,pull_request_url}', ''),
+			'https://github.com/' || (ar.config_snapshot #>> '{github,repository}') || '/pull/' || (ar.config_snapshot #>> '{github,pull_request_number}')
+		) AS pull_request_url,
 		NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', '') AS pull_request_title,
 		NULLIF(ar.config_snapshot #>> '{github,head_sha}', '') AS head_sha
 	FROM automation_runs ar
@@ -210,7 +213,6 @@ const automationDecisionTargetCTEs = `WITH raw_targeted AS (
 	  AND ar.triggered_by = 'github'
 	  AND ar.config_snapshot #>> '{github,repository}' <> ''
 	  AND ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
-	  AND ar.config_snapshot #>> '{github,pull_request_url}' <> ''
 ), ranked AS (
 	SELECT raw_targeted.*,
 		count(*) OVER (
