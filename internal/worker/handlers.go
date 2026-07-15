@@ -687,6 +687,10 @@ type codeReviewSubmitter interface {
 	SubmitReview(ctx context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error)
 }
 
+type codingAgentAvailability interface {
+	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
+}
+
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	Orchestrator    orchestratorService
@@ -710,6 +714,7 @@ type Services struct {
 	PagerDutySync   pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
 	PagerDutyWrites pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
 	CodeReviews     codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
+	CodingAgents    codingAgentAvailability       // nil-safe: code review falls back to the configured roster when nil
 	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.

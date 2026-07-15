@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -621,6 +622,207 @@ func TestCodeReviewReviewerAgentModel(t *testing.T) {
 	empty.AgentRoster.ReviewerModels = nil
 	require.Equal(t, models.DefaultCodexModel, *codeReviewReviewerAgentModel(empty, 0, models.AgentTypeCodex),
 		"missing reviewer_models should fall back to the per-agent default")
+}
+
+type codeReviewAgentAvailabilityStub struct {
+	available      map[models.AgentType]bool
+	availableModel map[models.AgentType]map[string]bool
+	err            error
+}
+
+func (s codeReviewAgentAvailabilityStub) IsAgentAvailable(_ context.Context, _ uuid.UUID, _ *uuid.UUID, agentType models.AgentType, model string) (bool, error) {
+	if s.err != nil {
+		return false, s.err
+	}
+	if modelsForAgent, ok := s.availableModel[agentType]; ok {
+		return modelsForAgent[model], nil
+	}
+	return s.available[agentType], nil
+}
+
+func TestResolveCodeReviewReviewerAvailability(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	tests := []struct {
+		name      string
+		services  *Services
+		expected  []codeReviewReviewerSelection
+		expectErr bool
+	}{
+		{
+			name: "uses only Codex when Claude Code is not authenticated",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeCodex: true,
+			}}},
+			expected: []codeReviewReviewerSelection{
+				{Index: 0, AgentType: models.AgentTypeCodex, Available: true},
+				{Index: 1, AgentType: models.AgentTypeClaudeCode, Available: false},
+			},
+		},
+		{
+			name: "uses only Claude Code when Codex is not authenticated",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeClaudeCode: true,
+			}}},
+			expected: []codeReviewReviewerSelection{
+				{Index: 0, AgentType: models.AgentTypeCodex, Available: false},
+				{Index: 1, AgentType: models.AgentTypeClaudeCode, Available: true},
+			},
+		},
+		{
+			name: "keeps both authenticated reviewers",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeCodex:      true,
+				models.AgentTypeClaudeCode: true,
+			}}},
+			expected: []codeReviewReviewerSelection{
+				{Index: 0, AgentType: models.AgentTypeCodex, Available: true},
+				{Index: 1, AgentType: models.AgentTypeClaudeCode, Available: true},
+			},
+		},
+		{
+			name: "preserves the configured roster without an availability service",
+			expected: []codeReviewReviewerSelection{
+				{Index: 0, AgentType: models.AgentTypeCodex, Available: true},
+				{Index: 1, AgentType: models.AgentTypeClaudeCode, Available: true},
+			},
+		},
+		{
+			name:      "propagates availability lookup errors",
+			services:  &Services{CodingAgents: codeReviewAgentAvailabilityStub{err: errors.New("resolver failed")}},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := resolveCodeReviewReviewerAvailability(context.Background(), tt.services, uuid.New(), cfg)
+			if tt.expectErr {
+				require.Error(t, err, "availability resolution should propagate lookup failures")
+				return
+			}
+			require.NoError(t, err, "availability resolution should succeed")
+			require.Equal(t, tt.expected, actual, "availability resolution should mark only authenticated reviewers runnable")
+		})
+	}
+}
+
+func TestResolveCodeReviewOrchestratorAvailability(t *testing.T) {
+	t.Parallel()
+
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	tests := []struct {
+		name      string
+		services  *Services
+		expected  codeReviewOrchestratorSelection
+		expectErr bool
+	}{
+		{
+			name: "uses configured orchestrator when authenticated",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeOpenCode: true,
+				models.AgentTypeCodex:    true,
+			}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeOpenCode,
+				AgentModel: stringPtr(models.OpenCodeModelGPT55),
+				Available:  true,
+			},
+		},
+		{
+			name: "falls back to Codex when it is the only authenticated agent",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeCodex: true,
+			}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeCodex,
+				AgentModel: stringPtr(models.DefaultCodexModel),
+				Available:  true,
+			},
+		},
+		{
+			name: "falls back to Codex when the configured OpenCode model has no runnable credential route",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{
+				available: map[models.AgentType]bool{
+					models.AgentTypeCodex: true,
+				},
+				availableModel: map[models.AgentType]map[string]bool{
+					models.AgentTypeOpenCode: {
+						models.OpenCodeModelGPT55: false,
+					},
+				},
+			}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeCodex,
+				AgentModel: stringPtr(models.DefaultCodexModel),
+				Available:  true,
+			},
+		},
+		{
+			name: "falls back to Claude Code when it is the only authenticated agent",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{
+				models.AgentTypeClaudeCode: true,
+			}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeClaudeCode,
+				AgentModel: stringPtr(models.DefaultClaudeCodeModel),
+				Available:  true,
+			},
+		},
+		{
+			name:     "does not select an unauthenticated agent",
+			services: &Services{CodingAgents: codeReviewAgentAvailabilityStub{available: map[models.AgentType]bool{}}},
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeOpenCode,
+				AgentModel: stringPtr(models.OpenCodeModelGPT55),
+				Available:  false,
+			},
+		},
+		{
+			name: "preserves the configured orchestrator without an availability service",
+			expected: codeReviewOrchestratorSelection{
+				AgentType:  models.AgentTypeOpenCode,
+				AgentModel: stringPtr(models.OpenCodeModelGPT55),
+				Available:  true,
+			},
+		},
+		{
+			name:      "propagates availability lookup errors",
+			services:  &Services{CodingAgents: codeReviewAgentAvailabilityStub{err: errors.New("resolver failed")}},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := resolveCodeReviewOrchestratorAvailability(context.Background(), tt.services, uuid.New(), cfg)
+			if tt.expectErr {
+				require.Error(t, err, "orchestrator availability resolution should propagate lookup failures")
+				return
+			}
+			require.NoError(t, err, "orchestrator availability resolution should succeed")
+			require.Equal(t, tt.expected, actual, "orchestrator availability resolution should select only an authenticated coding agent")
+		})
+	}
+}
+
+func TestUnavailableCodeReviewReviewerResult(t *testing.T) {
+	t.Parallel()
+
+	job := runCodeReviewPayload{OrgID: uuid.New(), SessionID: uuid.New()}
+	result := unavailableCodeReviewReviewerResult(job, 1, models.AgentTypeClaudeCode, stringPtr(models.DefaultClaudeCodeModel))
+	state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+
+	require.Equal(t, models.CodeReviewAgentResultStatusFailed, result.Status, "unavailable reviewers should be terminal without starting a thread")
+	require.True(t, ok, "unavailable reviewer state should be valid structured JSON")
+	require.True(t, state.Unavailable, "unavailable reviewer state should explain why no thread was started")
+	require.Empty(t, state.ThreadID, "unavailable reviewers should not have a thread id")
+	require.Equal(t, []string{"claude_code unavailable"}, codeReviewAgentSummaries([]models.CodeReviewAgentResult{*result}, nil), "review summary should distinguish unavailable auth from a runtime failure")
 }
 
 func TestCodeReviewOrchestratorAgentModel(t *testing.T) {

@@ -1747,6 +1747,7 @@ func buildServices(
 		LLM:               llmClient,
 		GitHub:            ghSvc,
 		CodeReviews:       codereviewsvc.NewGitHubSubmitter(ghSvc),
+		CodingAgents:      agentEnv,
 		GitHubOrgRoster:   ghSvc,
 		Snapshots:         snapshotStore,
 		TitleService:      titleService,
