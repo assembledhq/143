@@ -569,7 +569,7 @@ func TestFailCodeReviewWithoutReviewerOutputFailsMetadata(t *testing.T) {
 	policyID := uuid.New()
 	metadataID := uuid.New()
 	now := time.Now().UTC()
-	reason := "no code review reviewer produced usable output: codex failed, claude_code failed"
+	reason := "no code review reviewer produced usable output: Codex failed, Claude Code failed"
 	decision := models.CodeReviewDecisionBlocked
 	acceptable := false
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
@@ -1105,7 +1105,7 @@ func TestUnavailableCodeReviewReviewerResult(t *testing.T) {
 	require.True(t, ok, "unavailable reviewer state should be valid structured JSON")
 	require.True(t, state.Unavailable, "unavailable reviewer state should explain why no thread was started")
 	require.Empty(t, state.ThreadID, "unavailable reviewers should not have a thread id")
-	require.Equal(t, []string{"claude_code unavailable"}, codeReviewAgentSummaries([]models.CodeReviewAgentResult{*result}, nil), "review summary should distinguish unavailable auth from a runtime failure")
+	require.Equal(t, []string{"Claude Code unavailable"}, codeReviewAgentSummaries([]models.CodeReviewAgentResult{*result}, nil), "review summary should distinguish unavailable auth from a runtime failure")
 }
 
 func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
@@ -1207,7 +1207,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				ChangedFilesAvailable: true,
 			},
 			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "Review session: https://143.dev/sessions/" + sessionID.String(),
+			bodyContains: "[View the full review](https://143.dev/sessions/" + sessionID.String() + ")",
 		},
 		{
 			name: "uses queued GitHub author login for eligible author policy",
@@ -1304,7 +1304,42 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "Review agents: codex clean, claude_code failed",
+			bodyContains: "Reviewer evidence: Codex found no blocking issues; Claude Code failed",
+		},
+		{
+			name: "explains the failed PR description requirement",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+				DescriptionEvaluation: codeReviewDescriptionEvaluation{
+					Passed:               false,
+					RequirementSummaries: []string{"Understandable description: failed (explain why this change is needed)"},
+				},
+			},
+			expected:     models.CodeReviewDecisionNeedsHumanReview,
+			reason:       "PR description policy did not pass",
+			bodyContains: "Understandable description (explain why this change is needed)",
 		},
 		{
 			name: "withholds approval when completed read-only reviewer has no usable output",
@@ -1343,7 +1378,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionNeedsHumanReview,
 			reason:       "reviewer quorum 1 is below policy requirement 2",
-			bodyContains: "codex produced no usable review output",
+			bodyContains: "Codex produced no usable review output",
 		},
 		{
 			name: "withholds approval for fork pull requests when policy disallows forks",
@@ -1540,7 +1575,41 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected: models.CodeReviewDecisionApproved,
+			expected:     models.CodeReviewDecisionApproved,
+			bodyContains: "reviewer quorum was waived for this low-risk change",
+		},
+		{
+			name: "reports satisfied reviewer quorum for a low-risk change with complete reviews",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "All Checks Pass", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "docs/review-guide.md", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected:     models.CodeReviewDecisionApproved,
+			bodyContains: "2 usable reviewer reports met the required quorum of 2",
 		},
 		{
 			name: "still requires human review for a docs change above the low-risk lane ceiling",
@@ -1586,7 +1655,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			require.Equal(t, tt.expected, decision.Decision, "live code review outcome should choose the expected decision")
 			if tt.reason != "" {
 				require.Contains(t, decision.RiskReasons, tt.reason, "non-approval should preserve the expected risk reason")
-				require.Contains(t, body, tt.reason, "final review body should explain the non-approval reason")
+				require.Contains(t, body, "Why:", "final review body should explain the non-approval reason")
 			}
 			if tt.bodyContains != "" {
 				require.Contains(t, body, tt.bodyContains, "final review body should include expected evidence")

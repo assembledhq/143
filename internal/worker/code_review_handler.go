@@ -1895,6 +1895,7 @@ type liveCodeReviewOutcomeInput struct {
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
 	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
+	reviewerQuorumWaived := reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
@@ -1926,7 +1927,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles) {
+	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !reviewerQuorumWaived {
 		risk.Acceptable = false
 		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, policy.AgentRoster.RequireReviewerQuorum))
 	}
@@ -1936,13 +1937,18 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Acceptable:                decision.Acceptable,
 		RiskReasons:               decision.RiskReasons,
 		SessionURL:                input.SessionURL,
-		PolicyVersion:             input.Job.PolicyVersion,
-		HeadSHA:                   input.Job.HeadSHA,
-		Summary:                   codeReviewOutcomeSummary(decision, input.OrchestratorSynthesis),
 		DescriptionPassed:         &descriptionPassed,
+		DescriptionIssues:         codeReviewFailedDescriptionRequirements(input.DescriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
 		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasons, input.ChangedFiles),
+		ChangeStatsAvailable:      input.ChangedFilesAvailable,
+		FilesChanged:              len(input.ChangedFiles),
+		LinesChanged:              codeReviewLinesChanged(input.ChangedFiles),
+		ChecksRequired:            policy.RiskPolicy.RequirePassingChecks || len(policy.RiskPolicy.RequiredChecks) > 0,
+		ReviewerQuorum:            reviewerQuorum,
+		RequiredReviewerQuorum:    policy.AgentRoster.RequireReviewerQuorum,
+		ReviewerQuorumWaived:      reviewerQuorumWaived,
 	})
 	return decision, body
 }
@@ -2837,16 +2843,6 @@ func codeReviewFindingDedupeKey(path string, startLine, endLine int, summary str
 	return fmt.Sprintf("%s:%d:%d:%s", path, startLine, endLine, strings.ToLower(strings.TrimSpace(summary)))
 }
 
-func codeReviewOutcomeSummary(decision models.CodeReviewDecisionEvaluation, synthesis codeReviewOrchestratorSynthesis) string {
-	if summary := strings.TrimSpace(synthesis.Summary); summary != "" {
-		return summary
-	}
-	if decision.Decision == models.CodeReviewDecisionApproved {
-		return "143 reviewed the stored PR health and reviewer evidence and found the change acceptable under policy."
-	}
-	return "143 reviewed the stored PR health and reviewer evidence and withheld automated approval."
-}
-
 func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
 	findingCounts := make(map[uuid.UUID]int)
 	for _, finding := range findings {
@@ -2859,10 +2855,7 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 		if result.Role != models.CodeReviewAgentRoleReviewer {
 			continue
 		}
-		name := strings.TrimSpace(result.AgentProvider)
-		if name == "" {
-			name = "reviewer"
-		}
+		name := codeReviewAgentDisplayName(result.AgentProvider)
 		switch result.Status {
 		case models.CodeReviewAgentResultStatusCompleted:
 			if !codeReviewReviewerResultHasUsableOutput(result) {
@@ -2870,9 +2863,14 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				continue
 			}
 			if findingCounts[result.ID] == 0 {
-				summaries = append(summaries, name+" clean")
+				summaries = append(summaries, name+" found no blocking issues")
 			} else {
-				summaries = append(summaries, fmt.Sprintf("%s reported %d finding(s)", name, findingCounts[result.ID]))
+				count := findingCounts[result.ID]
+				label := "findings"
+				if count == 1 {
+					label = "finding"
+				}
+				summaries = append(summaries, fmt.Sprintf("%s reported %d %s", name, count, label))
 			}
 		case models.CodeReviewAgentResultStatusFailed:
 			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
@@ -2888,6 +2886,48 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 		}
 	}
 	return summaries
+}
+
+func codeReviewFailedDescriptionRequirements(summaries []string) []string {
+	issues := make([]string, 0)
+	for _, summary := range summaries {
+		summary = strings.TrimSpace(summary)
+		if !strings.Contains(summary, ": failed") {
+			continue
+		}
+		issues = append(issues, strings.TrimSpace(strings.Replace(summary, ": failed", "", 1)))
+	}
+	return issues
+}
+
+func codeReviewAgentDisplayName(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "codex":
+		return "Codex"
+	case "claude", "claude_code":
+		return "Claude Code"
+	case "opencode", "open_code":
+		return "OpenCode"
+	case "gemini":
+		return "Gemini"
+	case "":
+		return "Review agent"
+	}
+
+	words := strings.FieldsFunc(provider, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' '
+	})
+	for i, word := range words {
+		if word == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	if len(words) == 0 {
+		return "Review agent"
+	}
+	return strings.Join(words, " ")
 }
 
 func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codereviewsvc.PullRequestFile) []string {
