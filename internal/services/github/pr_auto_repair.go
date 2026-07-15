@@ -41,6 +41,24 @@ type AutoRepairDecision struct {
 	Response      *models.PullRequestRepairResponse
 }
 
+// MaybeStartAutoRepairForPullRequest resolves the session linked to a pull
+// request and delegates to MaybeStartAutoRepair. GitHub health updates know the
+// pull request before they know the owning session, while the coordinator keeps
+// all policy, budget, dedupe, and head-SHA checks session-centric.
+func (s *PRService) MaybeStartAutoRepairForPullRequest(ctx context.Context, orgID uuid.UUID, pullRequestID uuid.UUID, reason string) (*AutoRepairDecision, error) {
+	if s == nil || s.pullRequests == nil {
+		return autoRepairDecision(AutoRepairDecisionDisabled, &pullRequestID, "", "", "auto-repair dependencies are not configured"), nil
+	}
+	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
+	if err != nil {
+		return nil, fmt.Errorf("load pull request for auto-repair: %w", err)
+	}
+	if pr.SessionID == nil {
+		return autoRepairDecision(AutoRepairDecisionNoPullRequest, &pr.ID, "", headSHAValue(pr.HeadSHA), "pull request has no linked session"), nil
+	}
+	return s.MaybeStartAutoRepair(ctx, orgID, *pr.SessionID, reason)
+}
+
 func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*AutoRepairDecision, error) {
 	repository := ""
 	returnDecision := func(decision *AutoRepairDecision) (*AutoRepairDecision, error) {
@@ -58,7 +76,7 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		return returnDecision(autoRepairDecision(AutoRepairDecisionNotResumable, nil, "", "", "session is not idle or resumable"))
 	}
 
-	pr, err := s.pullRequests.GetBySessionID(ctx, orgID, sessionID)
+	pr, err := s.pullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return returnDecision(autoRepairDecision(AutoRepairDecisionNoPullRequest, nil, "", "", "session has no linked pull request"))

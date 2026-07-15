@@ -217,6 +217,49 @@ func TestStartRunnerRetryBranchPreviewStartupInterruptionResetsAndDestroysSandbo
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestStartRunnerRetryBranchPreviewStartupInterruptionDoesNotFailTransitionedReservation(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	previewID := uuid.New()
+	targetID := uuid.New()
+	now := time.Now()
+	provider := &destroyRecordingSandboxProvider{}
+	mock.ExpectQuery("INSERT INTO preview_logs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "preview_instance_id", "org_id", "level", "step", "message", "metadata", "created_at",
+		}).AddRow(uuid.New(), previewID, orgID, "warn", "start", "interrupted", json.RawMessage(`{}`), now))
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectRollback()
+
+	store := db.NewPreviewStore(mock)
+	runner := &StartRunner{
+		manager:         &Manager{store: store, logger: zerolog.Nop()},
+		previews:        store,
+		sandboxProvider: provider,
+		logger:          zerolog.Nop(),
+	}
+	reservation := &models.PreviewInstance{ID: previewID, OrgID: orgID, PreviewTargetID: &targetID, Status: models.PreviewStatusStarting}
+	payload := StartBranchPreviewJobPayload{OrgID: orgID, PreviewID: previewID, PreviewTargetID: targetID}
+	sb := &agent.Sandbox{ID: "sandbox-1", Provider: ProviderDocker}
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	err = runner.retryBranchPreviewStartupInterruption(ctx, payload, reservation, sb, "launch_preview", errors.New("Error response from daemon: No such container: sandbox-1"))
+
+	require.NoError(t, err, "stale branch preview startup reset should complete without dead-lettering the job")
+	require.Equal(t, []string{"sandbox-1"}, provider.destroyed, "stale branch preview startup should still destroy the transient sandbox")
+	jobctx.RunDeadLetterHooks(ctx, err)
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestStartRunnerEnsureReservationRuntimeForClaimingWorkerCreatesRuntimeForSameWorkerRetry(t *testing.T) {
 	t.Parallel()
 
@@ -776,6 +819,54 @@ func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_RestoresMatchingSnapsh
 	require.Equal(t, repoID, cache.findRepoID, "cache lookup should stay repo-scoped")
 	require.True(t, cache.restoreCalled, "branch preview startup should restore a matching cached workspace before launching")
 	require.Empty(t, cache.baseFindKey, "an exact hit should not consult base snapshots")
+}
+
+func TestStartRunnerPreviewCachePrewarmStartupSnapshotStatusDetectsExactHit(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	cache := &fakePreviewStartupCache{hit: &CacheHit{}}
+	runner := &StartRunner{
+		sandboxProvider: fakeStartRunnerSandboxProvider{
+			files: map[string][]byte{
+				"/workspace/repo/package-lock.json": []byte(`{"lockfileVersion":3}`),
+			},
+		},
+		snapshotCache: cache,
+		logger:        zerolog.Nop(),
+	}
+	cfg := &models.PreviewConfig{
+		Install: &models.PreviewInstallConfig{Lockfiles: []string{"package-lock.json"}},
+	}
+	payload := PreviewCachePrewarmJobPayload{
+		OrgID:        orgID,
+		RepositoryID: repoID,
+		Source:       PreviewCachePrewarmSourceBranch,
+		CommitSHA:    "0123456789abcdef0123456789abcdef01234567",
+	}
+
+	keys, warm, possible, err := runner.previewCachePrewarmStartupSnapshotStatus(context.Background(), payload, &agent.Sandbox{WorkDir: "/workspace/repo"}, cfg)
+
+	require.NoError(t, err, "startup snapshot status should compute the exact key")
+	require.True(t, possible, "branch prewarm should consider startup snapshots possible when lockfiles exist")
+	require.True(t, warm, "startup snapshot status should report an exact snapshot hit as warm")
+	require.NotEmpty(t, keys.SnapshotKey, "startup snapshot status should return the computed exact key")
+	require.Equal(t, orgID, cache.findOrgID, "startup snapshot lookup should be scoped to org")
+	require.Equal(t, repoID, cache.findRepoID, "startup snapshot lookup should be scoped to repository")
+	require.Equal(t, keys.SnapshotKey, cache.findKey, "startup snapshot lookup should use the exact target commit key")
+}
+
+func TestPreviewBuildPrewarmPlatformEnv(t *testing.T) {
+	t.Parallel()
+
+	env := previewBuildPrewarmPlatformEnv()
+
+	require.Equal(t, map[string]string{
+		"ONEFORTYTHREE":     "true",
+		"ONEFORTYTHREE_ENV": "preview",
+	}, env, "build snapshot prewarm should expose stable preview-mode markers")
+	require.NotContains(t, env, "PREVIEW_ORIGIN", "build snapshot prewarm should not bake an instance-specific origin before a preview instance exists")
 }
 
 func TestStartRunnerMaybeRestoreBranchPreviewStartupCache_PartialInvalidationOnExactMiss(t *testing.T) {

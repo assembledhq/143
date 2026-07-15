@@ -105,3 +105,9 @@ func TestRequireRole(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiredAPIScope_SessionTitleRegeneration(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "sessions:write", requiredAPIScope(http.MethodPost, "/api/v1/sessions/00000000-0000-0000-0000-000000000001/title/regenerate"), "explicit title regeneration should require session write scope")
+}

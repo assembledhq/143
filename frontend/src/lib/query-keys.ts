@@ -17,7 +17,9 @@ export const queryKeys = {
     diff: (id: string, revision?: string | null) => ["session", id, "diff", revision ?? null] as const,
     timeline: (id: string) => ["session", id, "timeline"] as const,
     logDetail: (sessionId: string, logId: number) => ["session", sessionId, "logs", logId, "detail"] as const,
-    pr: (id: string) => ["session", id, "pr"] as const,
+    pr: (id: string, changesetId?: string | null) => changesetId
+      ? ["session", id, "pr", changesetId] as const
+      : ["session", id, "pr"] as const,
     messages: (id: string) => ["session", id, "messages"] as const,
     humanInputRequests: (id: string, status?: string | null, threadId?: string | null) =>
       ["session", id, "human-input-requests", status ?? null, threadId ?? null] as const,
@@ -33,7 +35,7 @@ export const queryKeys = {
     threadRecoverableInbox: (sessionId: string, threadId: string) => ["session", sessionId, "thread", threadId, "recoverable-inbox"] as const,
     threadFileEvents: (id: string) => ["session", id, "thread-file-events"] as const,
     reviewLoops: (id: string) => ["session", id, "review-loops"] as const,
-    readiness: (id: string) => ["session", id, "readiness"] as const,
+    readiness: (id: string, changesetId?: string | null) => ["session", id, "readiness", changesetId ?? null] as const,
   },
   repositories: {
     all: ["repositories"] as const,

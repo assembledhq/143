@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { IntegrationsCard } from "./integrations-card";
 
 describe("IntegrationsCard", () => {
-  it("renders each integration as its own card with actions", async () => {
+  it("renders each integration as a grouped resource row with actions", async () => {
     const onConnect = vi.fn();
     const user = userEvent.setup();
 
@@ -40,7 +40,7 @@ describe("IntegrationsCard", () => {
     expect(screen.getByText("Coming soon")).toBeInTheDocument();
   });
 
-  it("stacks card content for compact layouts", () => {
+  it("gives actions a full-width compact layout and an inline desktop layout", () => {
     renderWithProviders(
       <IntegrationsCard
         items={[
@@ -54,17 +54,13 @@ describe("IntegrationsCard", () => {
       />,
     );
 
-    const card = screen.getByTestId("integration-card");
-    const content = card.querySelector('[data-slot="card-content"]');
-    const actionWrapper = screen.getByRole("button", { name: "Connect" }).parentElement;
+    const row = screen.getByTestId("integration-card");
+    const actionWrapper = screen.getByRole("button", { name: "Connect" }).parentElement?.parentElement;
 
-    expect(content).toHaveClass("flex-col");
-    expect(content).toHaveClass("items-start");
-    expect(content).toHaveClass("sm:flex-row");
-    expect(content).toHaveClass("sm:items-center");
+    expect(row).toHaveAttribute("data-slot", "resource-row");
+    expect(row).toHaveClass("flex-wrap");
+    expect(row).toHaveClass("sm:flex-nowrap");
     expect(actionWrapper).toHaveClass("w-full");
     expect(actionWrapper).toHaveClass("sm:w-auto");
-    expect(actionWrapper).toHaveClass("[&>*]:w-full");
-    expect(actionWrapper).toHaveClass("sm:[&>*]:w-auto");
   });
 });

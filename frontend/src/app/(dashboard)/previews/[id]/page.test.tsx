@@ -493,9 +493,9 @@ describe("PreviewLandingPage detail mode", () => {
 
     const startingLabels = await screen.findAllByText("Starting");
     const statusBadge = startingLabels
-      .map((label) => label.closest('[data-slot="badge"]'))
+      .map((label) => label.closest('[data-slot="status-label"]'))
       .find((badge): badge is Element => Boolean(badge));
-    expect(statusBadge?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+    expect(statusBadge?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
   });
 
   it("prioritizes the open command and keeps lifecycle controls in preview actions", async () => {

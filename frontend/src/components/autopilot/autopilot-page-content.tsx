@@ -8,6 +8,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, ArrowUpRight, Clock3, GitPullRequest, Loader2, Play, RotateCcw, Search, SlidersHorizontal } from "lucide-react";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { AutopilotConfigFooter } from "./autopilot-config-footer";
 import { useAutopilotPageData } from "./use-autopilot-page-data";
 import { useAnalyze } from "@/hooks/use-analyze";
@@ -149,7 +152,7 @@ export function AutopilotPageContent() {
           title="Autopilot"
           subtitle={statusLine}
           action={isAdmin ? (
-            <Button onClick={handleAnalyze} disabled={isAnalyzing || isPending}>
+            <Button className="min-h-11 w-full sm:min-h-0 sm:w-auto" onClick={handleAnalyze} disabled={isAnalyzing || isPending}>
               {isAnalyzing || isPending ? "Running..." : "Run analysis"}
             </Button>
           ) : undefined}
@@ -157,29 +160,34 @@ export function AutopilotPageContent() {
 
         <SummaryStrip summary={summary} />
 
-        <QueueFilters
-          source={source}
-          runState={runState}
-          automation={automation}
-          sort={sort}
-          search={search}
-          onSourceChange={setSource}
-          onRunStateChange={setRunState}
-          onAutomationChange={setAutomation}
-          onSortChange={setSort}
-          onSearchChange={setSearch}
-        />
+        <SectionGroup
+          title="Ranked issue queue"
+          description="Prioritized opportunities from connected issue sources."
+        >
+          <QueueFilters
+            source={source}
+            runState={runState}
+            automation={automation}
+            sort={sort}
+            search={search}
+            onSourceChange={setSource}
+            onRunStateChange={setRunState}
+            onAutomationChange={setAutomation}
+            onSortChange={setSort}
+            onSearchChange={setSearch}
+          />
 
-        <QueueTable
-          rows={rows}
-          loading={queueLoading}
-          hasNextPage={hasNextQueuePage}
-          loadingNextPage={isFetchingNextQueuePage}
-          onLoadMore={() => void fetchNextQueuePage()}
-          onStartRun={setSelectedIssue}
-          canOverrideBlocked={isAdmin}
-          canMutate={canMutate}
-        />
+          <QueueTable
+            rows={rows}
+            loading={queueLoading}
+            hasNextPage={hasNextQueuePage}
+            loadingNextPage={isFetchingNextQueuePage}
+            onLoadMore={() => void fetchNextQueuePage()}
+            onStartRun={setSelectedIssue}
+            canOverrideBlocked={isAdmin}
+            canMutate={canMutate}
+          />
+        </SectionGroup>
 
         <AutopilotProposalCard />
 
@@ -251,18 +259,18 @@ function SummaryStrip({ summary }: { summary?: { autorunnable_count: number; nee
   ];
 
   return (
-    <div className="grid gap-3 md:grid-cols-3">
+    <div className="grid grid-cols-3 gap-2 sm:gap-3">
       {cards.map((card) => {
         const Icon = card.icon;
         return (
-          <Card key={card.label} className="border-border/70">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-              <CardTitle className="text-xs font-medium text-muted-foreground">{card.label}</CardTitle>
-              <Icon className="h-4 w-4 text-muted-foreground" />
+          <Card key={card.label} variant="recessed" className="min-w-0">
+            <CardHeader className="flex flex-row items-start justify-between space-y-0 px-3 pt-3 pb-1 sm:px-4 sm:pt-4 sm:pb-2">
+              <CardTitle className="line-clamp-2 text-xs leading-4 font-medium text-muted-foreground">{card.label}</CardTitle>
+              <Icon className="hidden h-4 w-4 shrink-0 text-muted-foreground sm:block" />
             </CardHeader>
-            <CardContent>
-              <div className="truncate text-lg font-semibold text-foreground">{card.value}</div>
-              <p className="mt-1 truncate text-xs text-muted-foreground">{card.detail}</p>
+            <CardContent className="px-3 pt-0 pb-3 sm:px-4 sm:pb-4">
+              <div className="truncate font-display text-lg font-semibold text-foreground">{card.value}</div>
+              <p className="mt-1 hidden truncate text-xs text-muted-foreground sm:block">{card.detail}</p>
             </CardContent>
           </Card>
         );
@@ -284,18 +292,18 @@ function QueueFilters(props: {
   onSearchChange: (value: string) => void;
 }) {
   return (
-    <div className="flex flex-col gap-2 border-y border-border/70 py-3 lg:flex-row lg:items-center">
-      <div className="relative min-w-0 flex-1">
+    <div className="grid grid-cols-2 gap-2 border-y border-border/70 py-3 lg:flex lg:items-center">
+      <div className="relative col-span-2 min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted-foreground" />
         <Input
           value={props.search}
           onChange={(event) => props.onSearchChange(event.target.value)}
           placeholder="Search issues"
-          className="h-9 pl-8 text-sm"
+          className="h-11 pl-8 text-sm sm:h-9"
         />
       </div>
       <Select value={props.source} onValueChange={props.onSourceChange}>
-        <SelectTrigger className="h-9 lg:w-[150px]">
+        <SelectTrigger className="h-11 w-full sm:h-9 lg:w-[150px]">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -303,7 +311,7 @@ function QueueFilters(props: {
         </SelectContent>
       </Select>
       <Select value={props.runState} onValueChange={props.onRunStateChange}>
-        <SelectTrigger className="h-9 lg:w-[170px]">
+        <SelectTrigger className="h-11 w-full sm:h-9 lg:w-[170px]">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -311,7 +319,7 @@ function QueueFilters(props: {
         </SelectContent>
       </Select>
       <Select value={props.automation} onValueChange={props.onAutomationChange}>
-        <SelectTrigger className="h-9 lg:w-[160px]">
+        <SelectTrigger className="h-11 w-full sm:h-9 lg:w-[160px]">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -319,7 +327,7 @@ function QueueFilters(props: {
         </SelectContent>
       </Select>
       <Select value={props.sort} onValueChange={props.onSortChange}>
-        <SelectTrigger className="h-9 lg:w-[150px]">
+        <SelectTrigger className="h-11 w-full sm:h-9 lg:w-[150px]">
           <SlidersHorizontal className="mr-2 h-3.5 w-3.5" />
           <SelectValue />
         </SelectTrigger>
@@ -366,7 +374,7 @@ function QueueTable({
 
   return (
     <div className="space-y-3">
-      <Card className="overflow-hidden border-border/70">
+      <Card className="hidden overflow-hidden border-border/70 md:flex">
         <Table className="w-full min-w-[64rem] table-auto">
           <TableHeader>
             <TableRow>
@@ -382,8 +390,11 @@ function QueueTable({
           </TableHeader>
           <TableBody>
             {rows.map((row) => (
-              <TableRow key={row.id}>
-                <TableCell className="font-medium text-muted-foreground">#{row.rank}</TableCell>
+              <TableRow
+                key={row.id}
+                data-testid="autopilot-queue-row"
+              >
+                <TableCell className="text-xs font-medium text-muted-foreground">#{row.rank}</TableCell>
                 <TableCell className="whitespace-normal">
                   <IssueTitle row={row} />
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -416,9 +427,39 @@ function QueueTable({
           </TableBody>
         </Table>
       </Card>
+      <Card className="divide-y divide-border/70 md:hidden" aria-label="Ranked issue queue">
+        {rows.map((row) => (
+          <ResourceRow
+            key={row.id}
+            data-testid="autopilot-queue-mobile-row"
+            leading={<span className="font-medium">#{row.rank}</span>}
+            title={<IssueTitle row={row} />}
+            metadata={(
+              <span>
+                {row.repo?.name ?? "No repo"} · {row.issue_status}
+                {row.low_hanging_fruit.cluster_size > 1 ? ` · ${row.low_hanging_fruit.cluster_size} related` : ""}
+              </span>
+            )}
+            status={<RunState row={row} />}
+            detail={(
+              <div className="flex flex-wrap items-center gap-1.5">
+                <SourceBadge row={row} />
+                <MetricBadge label={row.customer_impact.label} detail={String(row.customer_impact.count)} />
+                <MetricBadge label={row.implementation_ease} />
+                <Badge variant={fruitBadgeVariant(row.low_hanging_fruit.label)}>{row.low_hanging_fruit.label} fit</Badge>
+              </div>
+            )}
+            actions={(
+              <div className="[&_a]:min-h-11 [&_a]:w-full [&_button]:min-h-11 [&_button]:w-full">
+                <RowAction row={row} onStartRun={onStartRun} canOverrideBlocked={canOverrideBlocked} canMutate={canMutate} />
+              </div>
+            )}
+          />
+        ))}
+      </Card>
       {hasNextPage && (
         <div className="flex justify-center">
-          <Button variant="outline" onClick={onLoadMore} disabled={loadingNextPage}>
+          <Button className="min-h-11 sm:min-h-0" variant="outline" onClick={onLoadMore} disabled={loadingNextPage}>
             {loadingNextPage ? "Loading..." : "Load more"}
           </Button>
         </div>
@@ -430,7 +471,7 @@ function QueueTable({
 function IssueTitle({ row }: { row: AutopilotQueueRow }) {
   const issueUrl = safeExternalUrl(row.issue_url);
   if (!issueUrl) {
-    return <div className="font-medium text-foreground">{row.title}</div>;
+    return <div className="break-words font-medium text-foreground">{row.title}</div>;
   }
 
   return (
@@ -440,7 +481,7 @@ function IssueTitle({ row }: { row: AutopilotQueueRow }) {
       rel="noreferrer"
       className="inline-flex min-w-0 items-center gap-1 font-medium text-foreground underline-offset-4 hover:underline"
     >
-      <span>{row.title}</span>
+      <span className="break-words">{row.title}</span>
       <ArrowUpRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
     </a>
   );
@@ -469,7 +510,11 @@ function RunState({ row }: { row: AutopilotQueueRow }) {
   const autoran = row.latest_agent_run?.trigger_mode === "auto";
   return (
     <div className="space-y-1">
-      <Badge variant={runStateVariant(row.display_run_state)}>{label}</Badge>
+      <StatusLabel
+        label={label}
+        tone={runStateTone(row.display_run_state)}
+        active={row.display_run_state === "queued" || row.display_run_state === "running"}
+      />
       {autoran && row.latest_agent_run?.started_at && (
         <div className="flex items-center gap-1 text-xs text-muted-foreground">
           <Clock3 className="h-3 w-3" />
@@ -541,7 +586,7 @@ function PreviewRowAction({ row, canMutate }: { row: AutopilotQueueRow; canMutat
 
   if (preview.new_commits_available) {
     return (
-      <div className="flex justify-end gap-2">
+      <div className="flex flex-col justify-end gap-2 md:flex-row">
         {canOpen && isOpenable ? (
           <OpenPreviewButton
             previewId={preview.preview_id}
@@ -735,12 +780,12 @@ function shortSourceKey(key: string) {
   return key.slice(0, 12);
 }
 
-function runStateVariant(state: AutopilotRunState): "default" | "secondary" | "outline" | "destructive" | "success" {
-  if (state === "running" || state === "queued") return "default";
-  if (state === "awaiting_input" || state === "needs_review") return "secondary";
+function runStateTone(state: AutopilotRunState): StatusTone {
+  if (state === "running" || state === "queued") return "primary";
+  if (state === "awaiting_input" || state === "needs_review") return "warning";
   if (state === "pr_open" || state === "merged") return "success";
   if (state === "failed") return "destructive";
-  return "outline";
+  return "neutral";
 }
 
 function fruitBadgeVariant(label: string): "default" | "secondary" | "outline" | "success" {

@@ -40,6 +40,7 @@ import { notify as toast } from "@/lib/notify";
 import { Badge } from "@/components/ui/badge";
 import { LazyMarkdownContent } from "@/components/lazy-markdown-content";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -92,6 +93,8 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatTimeline } from "@/components/chat-timeline";
+import { ContextHeader } from "@/components/context-header";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { SessionComposerAttachmentMenu } from "@/components/session-composer-attachment-menu";
 import { SessionComposerTriggerPicker, flattenGroups, type TriggerPickerGroup, type TriggerPickerPosition } from "@/components/session-composer-trigger-picker";
 import { useSessionComposerSlashCommands } from "@/hooks/use-session-composer-slash-commands";
@@ -142,7 +145,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -203,6 +206,16 @@ import {
 
 const loadReviewDiffView = () =>
   import("@/components/code-review/review-diff-view").then((m) => ({ default: m.ReviewDiffView }));
+
+function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus | null): StatusTone {
+  if (status === "failed") return "destructive";
+  if (status === "awaiting_input") return "warning";
+  if (status === "needs_human_guidance") return "attention";
+  if (status === "pr_created" && prStatus === "closed") return "neutral";
+  if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
+  if (status === "running" || status === "idle") return "primary";
+  return "neutral";
+}
 
 // Defer the diff viewer until the user actually opens review mode. Saves
 // review-specific code from the initial session-detail bundle for the common
@@ -803,7 +816,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                 )}
               </CardTitle>
               {session.failure_retry_advised && (
-                <div className="inline-flex">
+                <ButtonGroup size="xs">
                   <DisabledTooltip
                     disabled={retryMutation.isPending || checkpointRetryUnavailable}
                     content={recoveryActive ? "Runtime recovery is already in progress." : checkpointRetryUnavailable ? "No saved progress is available." : "Retrying session..."}
@@ -837,7 +850,7 @@ function OverviewTab({ session, activeThread, members, prStatus }: { session: Se
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
-                </div>
+                </ButtonGroup>
               )}
             </div>
           </CardHeader>
@@ -1598,22 +1611,25 @@ function SessionComposer({
       />
 
       <div
-        className="border-t border-border p-3 bg-background shrink-0"
+        className="shrink-0 border-t border-border bg-background/95 p-3"
         ref={composerCardRef}
         data-testid="session-composer-shell"
       >
         {planMode && (
           <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="flex items-center gap-1.5 rounded-full bg-amber-500/10 border border-amber-200 dark:border-amber-800/50 px-2.5 py-1">
-              <ClipboardList className="h-3 w-3 text-amber-600 dark:text-amber-400" />
-              <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Plan Mode</span>
-              <button
+            <div className="flex items-center gap-1.5 rounded-full border border-warning/20 bg-warning/8 px-2.5 py-1">
+              <ClipboardList className="h-3 w-3 text-warning" />
+              <span className="text-xs font-medium text-warning">Plan mode</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
                 onClick={() => onPlanModeChange(false)}
-                className="ml-1 text-amber-600/60 hover:text-amber-600 dark:text-amber-400/60 dark:hover:text-amber-400 text-xs"
+                className="ml-0.5 h-4 w-4 rounded-full text-warning/65 hover:bg-warning/10 hover:text-warning"
                 title="Exit plan mode"
               >
                 &times;
-              </button>
+              </Button>
             </div>
             <span className="text-xs text-muted-foreground">Agent will create a plan for review before making changes</span>
           </div>
@@ -1624,8 +1640,8 @@ function SessionComposer({
           data-testid="session-composer-input-surface"
           {...fileDropzone.dropzoneProps}
           className={cn(
-            "rounded-xl border bg-muted/30 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring",
-            planMode ? "border-amber-200 dark:border-amber-800/50" : "border-border",
+            "rounded-xl border bg-surface-raised shadow-[0_10px_30px_rgb(36_34_28_/_8%)] transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15",
+            planMode ? "border-warning/25" : "border-border-strong",
             fileDropzone.isDragActive && "border-primary/40 bg-primary/5 ring-1 ring-primary/30",
           )}
         >
@@ -1700,8 +1716,8 @@ function SessionComposer({
                   <Button
                     type="button"
                     variant="ghost"
-                    size="icon"
-                    className="h-5 w-5 rounded-full"
+                    size="icon-compact"
+                    className="rounded-full"
                     aria-label={`Remove ${reference.display}`}
                     onClick={() => removeReference(reference)}
                   >
@@ -1726,8 +1742,8 @@ function SessionComposer({
                     <Button
                       type="button"
                       variant="ghost"
-                      size="icon"
-                      className="h-5 w-5 rounded-full"
+                      size="icon-compact"
+                      className="rounded-full"
                       aria-label={`Remove ${command.token}`}
                       onClick={() => removeCommand(command)}
                     >
@@ -1749,7 +1765,7 @@ function SessionComposer({
             isUploading={isUploading}
             onRemove={onRemoveAttachment}
             size="md"
-            className="px-3 pb-2"
+            className="px-3 pt-2 pb-2"
           />
 
           {showImageInput && (
@@ -3405,6 +3421,91 @@ const TRANSCRIPT_STEP_PX = 72;
 const TRANSCRIPT_PAGE_MIN_PX = 160;
 const TRANSCRIPT_PAGE_VIEWPORT_RATIO = 0.85;
 const REVIEW_AGENT_KEYS = ["codex", "claude_code", "amp", "pi"] as const;
+export const CHANGESET_SPLIT_MIN_ADDITIONS = 750;
+
+export function shouldOfferChangesetSplit(additions?: number): boolean {
+  return additions !== undefined && additions >= CHANGESET_SPLIT_MIN_ADDITIONS;
+}
+
+export function PullRequestList({
+  changesets,
+  selectedID,
+  onSelect,
+}: {
+  changesets: ChangesetSummary[];
+  selectedID: string;
+  onSelect: (id: string) => void;
+}) {
+  if (changesets.length <= 1) return null;
+
+  return (
+    <Card className="border-border/60" data-testid="pull-request-list">
+      <CardHeader className="p-3 pb-2">
+        <CardTitle className="text-sm">Pull requests</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1 p-2 pt-0">
+        {changesets.map((changeset, index) => {
+          const selected = changeset.id === selectedID;
+          const pr = changeset.pull_request;
+          return (
+            <Button
+              key={changeset.id}
+              type="button"
+              variant={selected ? "secondary" : "ghost"}
+              className="h-auto w-full justify-start gap-2 px-2 py-2 text-left"
+              aria-pressed={selected}
+              onClick={() => onSelect(changeset.id)}
+            >
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-medium">
+                {index + 1}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">{changeset.title}</span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {pr ? `#${pr.github_pr_number} · ${pr.status}` : changeset.status.replaceAll("_", " ")}
+                </span>
+                <span className="block truncate text-xs text-muted-foreground">
+                  {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
+                </span>
+                {changeset.has_unpushed_changes && <span className="block text-xs text-amber-600">Unpushed changes</span>}
+                {changeset.active_lease_holder_label && (
+                  <span className="block truncate text-xs text-blue-600">
+                    {changeset.active_lease_holder_type === "agent_turn" ? "Being edited in" : "In use by"} {changeset.active_lease_holder_label}
+                  </span>
+                )}
+              </span>
+              <span className="flex shrink-0 items-center gap-1">
+                {pr?.ci_status && <Badge variant="outline" className="h-5 px-1 text-xs">CI {pr.ci_status}</Badge>}
+                {changeset.stacked_on_changeset_id && <GitBranch className="h-3.5 w-3.5 text-muted-foreground" />}
+              </span>
+            </Button>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
+}
+
+export function ChangesetSplitPrompt({
+  additions,
+  onRequestSplit,
+  requestSplitPending = false,
+}: {
+  additions?: number;
+  onRequestSplit?: () => void;
+  requestSplitPending?: boolean;
+}) {
+  if (!shouldOfferChangesetSplit(additions)) return null;
+
+  return (
+    <Card className="border-border/60">
+      <CardContent className="flex items-center justify-between gap-3 p-4">
+        <div><p className="text-sm font-medium">Need smaller pull requests?</p><p className="text-xs text-muted-foreground">Ask the coding agent to split the current diff into reviewable branches.</p></div>
+        <Button size="sm" variant="outline" disabled={requestSplitPending || !onRequestSplit} onClick={onRequestSplit}>Split PRs</Button>
+      </CardContent>
+    </Card>
+  );
+}
 
 function getDefaultReviewAgentType(sessionAgentType?: string): string {
   return REVIEW_AGENT_KEYS.find((agentType) => agentType !== sessionAgentType) ?? sessionAgentType ?? "codex";
@@ -3422,6 +3523,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
   const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
   const [githubPRParam, setGithubPRParam] = useQueryState("github_pr");
+  const [changesetParam, setChangesetParam] = useQueryState("changeset");
   const [centerMode, setCenterMode] = useState<"chat" | "review">(
     reviewParam === "active" ? "review" : "chat"
   );
@@ -3543,9 +3645,18 @@ export function SessionDetailContent({ id }: { id: string }) {
   const handleDetailResize = useCallback((delta: number) => {
     setDetailWidth((w) => Math.min(MAX_DETAIL, Math.max(MIN_DETAIL, w - delta)));
   }, []);
+  const selectedIsPrimaryRef = useRef(true);
 
   // --- Enter review mode ---
   const openReview = useCallback((fileIndex?: number) => {
+    if (!selectedIsPrimaryRef.current) {
+      setDetailTab("changes");
+      setShowDetailPanel(true);
+      if (isMobileReviewViewport) {
+        setMobileDetailOpen(true);
+      }
+      return;
+    }
     if (fileIndex !== undefined) setActiveFileIndex(fileIndex);
     setCenterMode("review");
     suppressNextReviewParamClearRef.current = true;
@@ -3695,6 +3806,60 @@ export function SessionDetailContent({ id }: { id: string }) {
   const rawSession = data?.data;
   const isProvisionalSession = isProvisionalSessionDetail(rawSession);
   const session = isProvisionalSession ? undefined : rawSession;
+  const changesets = session?.changesets ?? [];
+  const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
+  const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
+  const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const stackTopChangeset = changesets.filter((changeset) => changeset.status !== "abandoned").at(-1);
+  const hasMultipleChangesets = changesets.length > 1;
+  const changesetLifecycleMutation = useMutation({
+    mutationFn: (action: () => Promise<unknown>) => action(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["session", id] });
+      toast.success("Pull request action queued");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Pull request action failed"),
+  });
+  const changesetPreviewMutation = useMutation({
+    mutationFn: (target: ChangesetSummary) => {
+      if (!session?.repository_id || !target.working_branch) throw new Error("Pull request branch is unavailable");
+      return api.previews.create({
+        repository_id: session.repository_id,
+        branch: target.working_branch,
+        commit_sha: target.head_sha,
+        source: { type: "session", external_id: target.id },
+      });
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Preview could not be started"),
+  });
+  const selectedIsPrimary = selectedChangeset?.is_primary !== false;
+  selectedIsPrimaryRef.current = selectedIsPrimary;
+  // The primary changeset keeps the legacy null-tolerant PR lookup: sending a
+  // changeset_id would route the backend to GetByChangesetID, which cannot
+  // match legacy PR rows whose changeset_id is still NULL. Only non-primary
+  // slots, whose PRs always carry a changeset_id, are looked up by changeset.
+  const selectedBranchChangesetID = selectedIsPrimary ? undefined : selectedChangeset?.id;
+  const changesetSessionIDRef = useRef(id);
+  useEffect(() => {
+    const syncSelectionFromURL = () => setSelectedChangesetID(new URL(window.location.href).searchParams.get("changeset"));
+    window.addEventListener("popstate", syncSelectionFromURL);
+    return () => window.removeEventListener("popstate", syncSelectionFromURL);
+  }, []);
+  useEffect(() => {
+    if (changesetSessionIDRef.current === id) return;
+    changesetSessionIDRef.current = id;
+    setSelectedChangesetID(null);
+    void setChangesetParam(null);
+  }, [id, setChangesetParam]);
+  useEffect(() => {
+    if (selectedIsPrimary || selectedChangeset?.worktree_path || centerMode !== "review") return;
+    exitReview();
+    setDetailTab("changes");
+    setShowDetailPanel(true);
+    if (isMobileReviewViewport) {
+      setMobileDetailOpen(true);
+    }
+  }, [centerMode, exitReview, isMobileReviewViewport, selectedChangeset?.worktree_path, selectedIsPrimary]);
   // Tab title from whatever payload is available — the provisional row's
   // title matches what the user just clicked, so don't wait for the
   // authoritative detail to label the tab.
@@ -3726,12 +3891,12 @@ export function SessionDetailContent({ id }: { id: string }) {
     error: diffError,
     refetch: refetchDiff,
   } = useQuery({
-    queryKey: queryKeys.sessions.diff(id),
+    queryKey: queryKeys.sessions.diff(id, selectedBranchChangesetID),
     queryFn: () => {
       if (!diffRevisionKey) {
         fetchedDiffBeforeRevisionRef.current = true;
       }
-      return api.sessions.getDiff(id);
+      return api.sessions.getDiff(id, selectedBranchChangesetID);
     },
     enabled: shouldLoadDiff,
     staleTime: Infinity,
@@ -4112,6 +4277,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     activeThreadId?: string;
 	    body: {
 	      message: string;
+	      changesetId?: string;
 	      clientMessageID?: string;
 	      images?: string[];
       references?: SessionInputReference[];
@@ -4132,6 +4298,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       commands: SessionInputCommand[];
       planMode: boolean;
       selectedModel: string;
+      changesetId?: string;
     };
   };
 
@@ -4170,19 +4337,20 @@ export function SessionDetailContent({ id }: { id: string }) {
   // transition within milliseconds, and the SSE polling fallback re-reads the
   // session row on a 1s tick when Redis is unavailable.
   const { data: prData } = useQuery({
-    queryKey: ["session", id, "pr"],
-    queryFn: () => api.sessions.getPR(id),
+    queryKey: queryKeys.sessions.pr(id, selectedBranchChangesetID),
+    queryFn: () => api.sessions.getPR(id, selectedBranchChangesetID),
     enabled: !isProvisionalSession,
     // Updates flow in via mutation invalidations and the session SSE stream
     // (pr_creation_state / pr_push_state); a small staleTime suppresses
     // redundant refetches on remount or unrelated cache invalidations.
     staleTime: 30_000,
   });
-  const pullRequestId = prData?.data?.id;
+  const selectedPR = prData?.data ?? selectedChangeset?.pull_request;
+  const pullRequestId = selectedPR?.id;
   const { data: prHealthData, isLoading: isPRHealthLoading } = useQuery({
     queryKey: ["pull-request", pullRequestId, "health"],
     queryFn: () => api.pullRequests.getHealth(pullRequestId!),
-    enabled: !!pullRequestId && prData?.data?.status === "open",
+    enabled: !!pullRequestId && selectedPR?.status === "open",
     // Pushed via the PULL_REQUEST_UPDATED SSE event. The stream onopen handler
     // below also reconciles once because Redis pub/sub does not replay PR row
     // or health events missed while the tab was hidden or the EventSource was
@@ -4192,9 +4360,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   });
   const prHealth = prHealthData?.data;
   const prHealthActionsBlocked = prHealthBlocksPRActions(prHealth);
-  const rawPRStatus = prData?.data?.status;
+  const rawPRStatus = selectedPR?.status;
   const prStatus = deriveEffectivePRStatus(rawPRStatus, prHealth?.status);
-  const prNumber = prData?.data?.github_pr_number;
+  const prNumber = selectedPR?.github_pr_number;
   const closedPRNumber = prNumber;
   const closedPRLabel = closedPRNumber ? `PR #${closedPRNumber} closed` : "PR closed";
   const closedPRSummary = closedPRNumber
@@ -4250,7 +4418,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   useReconcileOptimisticAction({ phase: localPushState, serverState: session?.pr_push_state, onResolved: resolvePushAction });
   useReconcileOptimisticAction({ phase: localBranchState, serverState: session?.branch_creation_state, onResolved: resolveBranchAction });
 
-  const prUrl = prData?.data?.github_pr_url;
+  const prUrl = selectedPR?.github_pr_url;
   const serverPRState = session?.pr_creation_state;
   const localPRWaitingForServer =
     localPRState === "queued" &&
@@ -4445,7 +4613,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     // as the session log stream above. The onerror branch already invalidates
     // the health query on disconnect, so reconnecting on visibility refreshes
     // the cached health to whatever happened while we were away.
-    if (!pullRequestId || prData?.data?.status !== "open" || !isDocumentVisible) {
+    if (!pullRequestId || selectedPR?.status !== "open" || !isDocumentVisible) {
       return;
     }
 
@@ -4500,7 +4668,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         clearTimeout(reconnectTimer);
       }
     };
-  }, [apiBase, prData?.data?.status, pullRequestId, queryClient, isDocumentVisible, id]);
+  }, [apiBase, selectedPR?.status, pullRequestId, queryClient, isDocumentVisible, id]);
   const previousSessionStatusRef = useRef<SessionStatus | undefined>(undefined);
   const resetSessionNotificationRefs = useCallback(() => {
     previousSessionStatusRef.current = undefined;
@@ -4535,7 +4703,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     }
   }, [id, queryClient, session?.id]);
 
-  const hasPR = !!prData?.data;
+  const hasPR = !!selectedPR;
   const hasSnapshot = !!session?.snapshot_key;
   const hasSessionChanges = !!session?.diff || !!session?.diff_stats;
   const isTerminalSession = session ? terminalSessionStatuses.has(session.status) : false;
@@ -4562,18 +4730,18 @@ export function SessionDetailContent({ id }: { id: string }) {
     enabled: !!session,
   });
   const { data: readinessData } = useQuery({
-    queryKey: queryKeys.sessions.readiness(id),
-    queryFn: () => api.sessions.getReadiness(id),
-    enabled: !!session,
+    queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id),
+    queryFn: () => api.sessions.getReadiness(id, selectedChangeset?.id),
+    enabled: !!session && (selectedIsPrimary || !!selectedChangeset?.worktree_path),
     refetchInterval: (query) => {
       const status = query.state.data?.data.latest?.status;
       return status === "queued" || status === "running" ? pollMs(3000) : false;
     },
   });
   const runReadinessMutation = useMutation({
-    mutationFn: () => api.sessions.runReadiness(id),
+    mutationFn: () => api.sessions.runReadiness(id, selectedChangeset?.id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.sessions.readiness(id, selectedChangeset?.id) });
       toast.success("Readiness checks queued");
     },
     onError: (err) => {
@@ -4592,10 +4760,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       : true
   );
   const latestReadiness = readinessData?.data.latest;
-  const latestReadinessStale = !!latestReadiness && (
-    latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
-    (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? "")
-  );
+  const latestReadinessStale = !!latestReadiness && (selectedChangeset?.worktree_path
+    ? (latestReadiness.evaluated_head_sha ?? "") !== (selectedChangeset.head_sha ?? "")
+    : latestReadiness.evaluated_workspace_revision !== session?.workspace_revision ||
+      (latestReadiness.evaluated_snapshot_key ?? "") !== (session?.snapshot_key ?? ""));
   const latestBypassedKeys = new Set((latestReadiness?.bypasses ?? []).flatMap((bypass) => bypass.bypassed_checks));
   const hasUnbypassedReadinessBlocker = (latestReadiness?.checks ?? []).some((check) => {
     const key = check.check_key || check.check_type;
@@ -4606,8 +4774,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness.status !== "queued" &&
     latestReadiness.status !== "running" &&
     latestReadiness.status !== "failed" &&
-    latestReadiness.evaluated_workspace_revision === session?.workspace_revision &&
-    (latestReadiness.evaluated_snapshot_key ?? "") === (session?.snapshot_key ?? "") &&
+    !latestReadinessStale &&
     !hasUnbypassedReadinessBlocker;
   const builderReviewAllowsPR = !builderRequiresReviewBeforePR || readinessFresh;
   const readinessAutoRunOnCreatePR = readinessPolicyResponse?.data.config.auto_run?.on_create_pr === true;
@@ -4618,10 +4785,10 @@ export function SessionDetailContent({ id }: { id: string }) {
       latestReadiness.status === "queued" ||
       latestReadiness.status === "running");
   const createPRAllowsSubmission = builderReviewAllowsPR || readinessAutoRunCanQueue;
-  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning;
+  const canAttemptCreatePR = canShipPR && hasSnapshot && !hasPR && !isRunning && selectedIsPrimary;
   const canCreatePR = canAttemptCreatePR && createPRAllowsSubmission;
   const canCreateBranch = canAttemptCreatePR && builderReviewAllowsPR;
-  const needsGitHubStatus = canCreatePR || (hasPR && prData?.data?.status === "open");
+  const needsGitHubStatus = canCreatePR || (hasPR && selectedPR?.status === "open");
   const reviewLoopRunning = latestReviewLoop?.status === "running";
   const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
   const reviewUnavailableReason = reviewLoopRunning
@@ -4649,7 +4816,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const createPRMutation = useMutation({
     mutationFn: (options?: { draft?: boolean; authorMode?: PRAuthorMode; resumeToken?: string; mergeWhenReady?: boolean }) =>
-      api.sessions.createPR(id, options),
+      api.sessions.createPR(id, selectedChangeset ? { ...options, changesetId: selectedChangeset.id } : options),
     onMutate: () => {
       setLocalPRActionError(null);
       setLocalPRState("submitting");
@@ -4784,7 +4951,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     latestReadiness?.status === "running" ||
     runReadinessMutation.isPending;
   const readinessStale = !!session && readinessIsStale(latestReadiness, session);
-  const readinessCheckDisabled = readinessRunning || isRunning;
+  const readinessCheckDisabled = readinessRunning || isRunning || (!selectedIsPrimary && !selectedChangeset?.worktree_path);
 
   // Readiness findings, grouped with role-aware enforcement so the merged
   // Review card can surface blockers, bypasses, and the review packet inline.
@@ -4953,7 +5120,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const pushChangesMutation = useMutation({
     mutationFn: (options?: { authorMode?: PRAuthorMode; resumeToken?: string }) =>
-      api.sessions.pushChangesToPR(id, options),
+      api.sessions.pushChangesToPR(id, { ...options, changesetId: selectedChangeset?.id }),
     onMutate: () => {
       setLocalPushActionError(null);
       setLocalPushState("submitting");
@@ -4992,7 +5159,7 @@ export function SessionDetailContent({ id }: { id: string }) {
 
   const continueFromPRBranchMutation = useMutation({
     mutationFn: async () => {
-      const headRef = prData?.data?.head_ref ?? prData?.data?.branch_name;
+      const headRef = selectedPR?.head_ref ?? selectedPR?.branch_name;
       const message = continueFromPRBranchMessage(headRef);
       if (activeThread?.id) {
         const clientMessageID =
@@ -5223,6 +5390,7 @@ export function SessionDetailContent({ id }: { id: string }) {
   const [composerAttachments, setComposerAttachments] = useState<string[]>([]);
   const [composerReferences, setComposerReferences] = useState<SessionInputReference[]>([]);
   const [composerCommands, setComposerCommands] = useState<SessionInputCommand[]>([]);
+  const [composerChangesetID, setComposerChangesetID] = useState<string | null>(null);
   const [composerIsUploading, setComposerIsUploading] = useState(false);
   const [composerUploadError, setComposerUploadError] = useState<string | null>(null);
   const [addThreadOpen, setAddThreadOpen] = useState(false);
@@ -5248,6 +5416,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     setComposerAttachments([]);
     setComposerReferences([]);
     setComposerCommands([]);
+    setComposerChangesetID(null);
     setComposerIsUploading(false);
     setComposerUploadError(null);
     setAddThreadOpen(false);
@@ -5413,6 +5582,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerReferences([]);
       setComposerCommands([]);
       setComposerPlanMode(false);
+      setComposerChangesetID(null);
       if (centerMode === "review") {
         exitReview();
       }
@@ -5498,6 +5668,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       setComposerCommands(context.composerSnapshot.commands);
       setComposerPlanMode(context.composerSnapshot.planMode);
       setComposerSelectedModel(context.composerSnapshot.selectedModel);
+      setComposerChangesetID(context.composerSnapshot.changesetId ?? null);
     },
   });
 
@@ -5524,6 +5695,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       activeThreadId: activeThread?.id,
       body: {
         message: userFacingMessage,
+        changesetId: composerChangesetID ?? undefined,
         clientMessageID,
         images: composerAttachments.length > 0 ? composerAttachments : undefined,
         references: composerReferences.length > 0 ? composerReferences : undefined,
@@ -5554,6 +5726,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         commands: composerCommands,
         planMode: composerPlanMode,
         selectedModel: composerSelectedModel,
+        changesetId: composerChangesetID ?? undefined,
       },
     });
   }, [
@@ -5561,6 +5734,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     attachedReviewComments,
     composerAttachments,
     composerCommands,
+	composerChangesetID,
     composerMessage,
     composerPlanMode,
     composerReferences,
@@ -6018,11 +6192,11 @@ export function SessionDetailContent({ id }: { id: string }) {
   }, [continueFromPRBranchMutation, ghBlocked, localPushState, pushBranchDiverged, pushChangesMutation]);
 
   const viewPRFromKeyboard = useCallback(() => {
-    if (!prData?.data?.github_pr_url) {
+    if (!selectedPR?.github_pr_url) {
       return;
     }
-    window.open(prData.data.github_pr_url, "_blank", "noopener,noreferrer");
-  }, [prData?.data?.github_pr_url]);
+    window.open(selectedPR.github_pr_url, "_blank", "noopener,noreferrer");
+  }, [selectedPR?.github_pr_url]);
 
   useSessionKeyboardShortcuts({
     enabled: !isLoading && !!session,
@@ -6063,8 +6237,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     },
     pr: {
       canCreate: canCreatePR && localPRState === "idle" && !createPRMutation.isPending,
-      canView: !!prData?.data?.github_pr_url,
-      canPush: !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
+      canView: !!selectedPR?.github_pr_url,
+      canPush: selectedIsPrimary && !prHealthActionsBlocked && canShipPR && builderReviewAllowsPR && hasPR && prStatus === "open" && !!session?.has_unpushed_changes && hasSnapshot && !isRunning && localPushState === "idle" && !pushChangesMutation.isPending && !continueFromPRBranchMutation.isPending,
       canFixTests: !prHealthActionsBlocked && canManagePR && hasRepairableFailedChecks(prHealth) && pendingPRAction === null,
       canResolveConflicts: !prHealthActionsBlocked && canManagePR && !!prHealth?.can_resolve_conflicts && pendingPRAction === null,
       canMerge: !prHealthActionsBlocked && canManagePR && prHealthAllowsMerge(prHealth) && pendingPRAction === null,
@@ -6190,8 +6364,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const pushAction = derivePushChangesActionState({
     canShipPR,
     hasOpenPR: hasPR && prStatus === "open",
-    hasUnpushedChanges: !!session.has_unpushed_changes,
-    hasSnapshot,
+    hasUnpushedChanges: selectedChangeset?.worktree_path ? !!selectedChangeset.has_unpushed_changes : !!session.has_unpushed_changes,
+    hasSnapshot: selectedChangeset?.worktree_path ? true : hasSnapshot,
     isRunning,
     builderReviewAllowsPR,
     snapshotUnavailable,
@@ -6266,6 +6440,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     setDraftTitle(currentTitle);
     setMobileRenameOpen(true);
   };
+  const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
+  const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6307,15 +6483,15 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
-            {hasPR && prData?.data?.github_pr_url ? (
+            {hasPR && selectedPR?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
                   <Badge variant="secondary" className="h-7 px-2 text-xs">
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View PR (p v)">
-                  <a href={prData.data.github_pr_url} target="_blank" rel="noopener noreferrer">
+                <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View PR (p v)">
+                  <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
                   </a>
@@ -6324,7 +6500,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ) : showPRAction && !prErrorNotice ? (
               <>
                 {branchURL ? (
-                  <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1.5" title="View branch">
+                  <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View branch">
                     <a href={branchURL} target="_blank" rel="noopener noreferrer">
                       <GitBranch className="h-3 w-3" />
                       View branch
@@ -6332,11 +6508,11 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 ) : null}
                 <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                  <div className="inline-flex">
+                  <ButtonGroup size={detailActionSize}>
                     <Button
                       variant="outline"
-                      size="sm"
-                      className="h-7 rounded-r-none border-r-0 text-xs gap-1.5"
+                      size={detailActionSize}
+                      className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
                       title={prActionTitle ? `${prActionTitle} (p c)` : `${prActionLabel} (p c)`}
@@ -6353,8 +6529,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon"
-                          className="h-7 w-7 rounded-l-none"
+                          size={detailActionIconSize}
+                          className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
                           title="More publish actions"
@@ -6391,7 +6567,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
-                  </div>
+                  </ButtonGroup>
                 </DisabledTooltip>
               </>
             ) : null}
@@ -6428,7 +6604,9 @@ export function SessionDetailContent({ id }: { id: string }) {
           passRange={passRange}
           onPassRangeChange={setPassRange}
           emptyStatusText={
-            isDiffDisplayLoading
+            !selectedIsPrimary
+              ? "Changes for this pull request will be available after its branch is materialized."
+              : isDiffDisplayLoading
               ? "Loading changes..."
               : session.status === "running" || session.status === "pending"
               ? "Changes will appear here as the agent modifies files."
@@ -6442,6 +6620,100 @@ export function SessionDetailContent({ id }: { id: string }) {
       </TabsContent>
       <TabsContent value="overview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
         <div className="space-y-4">
+          <PullRequestList
+            changesets={changesets}
+            selectedID={selectedChangeset?.id ?? ""}
+            onSelect={(changesetID) => {
+              setSelectedChangesetID(changesetID);
+              void setChangesetParam(changesetID);
+            }}
+          />
+          {hasMultipleChangesets && (
+            <Card className="border-border/60" data-testid="stack-health">
+              <CardContent className="flex items-center justify-between gap-3 p-4">
+                <div>
+                  <div className="text-sm font-medium">Stack health</div>
+                  <p className="text-xs text-muted-foreground">{(session.changeset_stack_state ?? "coherent").replaceAll("-", " ")}</p>
+                </div>
+                {selectedChangeset && changesets.some((item) => item.status === "needs_restack") && (
+                  <Button size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.restackChangesetDescendants(id, selectedChangeset.id))}>
+                    Restack descendants
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
+          <ChangesetSplitPrompt
+            additions={session.diff_stats?.added}
+            onRequestSplit={() => queueSend({
+              overrideMessage: "Split the current diff into smaller, independently reviewable pull requests. Before making changes, run `143-tools changesets list`, `143-tools changesets current`, and `143-tools changesets status` so the platform changeset state is authoritative. Then use the changeset tools to create and materialize the split; do not create worktrees manually. Keep each pull request cohesive, account for every changed file, and verify the completed split with the changeset tools.",
+            })}
+            requestSplitPending={sendMutation.isPending || !composerCanSendMessage}
+          />
+          {hasMultipleChangesets && selectedChangeset && (
+            <Card className="border-border/60" data-testid="selected-pull-request-panel">
+              <CardContent className="space-y-1 p-4">
+                <div className="text-sm font-medium">{selectedChangeset.title}</div>
+                {selectedChangeset.summary && <p className="text-xs text-muted-foreground">{selectedChangeset.summary}</p>}
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 pt-1 text-xs">
+                  <dt className="text-muted-foreground">Base</dt><dd className="truncate">{selectedChangeset.base_branch}</dd>
+                  <dt className="text-muted-foreground">Head</dt><dd className="truncate">{selectedChangeset.working_branch ?? "Not materialized"}</dd>
+                  <dt className="text-muted-foreground">Target</dt><dd className="truncate">{selectedChangeset.target_branch}</dd>
+                  <dt className="text-muted-foreground">State</dt><dd>{selectedChangeset.pull_request?.status ?? selectedChangeset.status.replaceAll("_", " ")}</dd>
+                  {selectedChangeset.pull_request?.ci_status && <><dt className="text-muted-foreground">CI</dt><dd>{selectedChangeset.pull_request.ci_status}</dd></>}
+                  {selectedChangeset.pull_request?.review_status && <><dt className="text-muted-foreground">Review</dt><dd>{selectedChangeset.pull_request.review_status.replaceAll("_", " ")}</dd></>}
+                </dl>
+                {selectedChangeset.restack_delta_kind ? (
+                  <Card className="bg-muted/40">
+                    <CardContent className="p-3 text-xs">
+                    <p className="font-medium text-foreground">
+                      Restack delta: {selectedChangeset.restack_delta_kind.replaceAll("_", " ")}
+                    </p>
+                    {selectedChangeset.restack_delta_summary ? (
+                      <p className="mt-1 text-muted-foreground">{selectedChangeset.restack_delta_summary}</p>
+                    ) : null}
+                    {selectedChangeset.restack_confirmation_required ? (
+                      <Button className="mt-2" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.confirmChangesetRestack(id, selectedChangeset.id))}>
+                        Confirm restack delta
+                      </Button>
+                    ) : null}
+                    </CardContent>
+                  </Card>
+                ) : null}
+                <div className="flex flex-wrap gap-2 pt-2">
+                {!selectedChangeset.pull_request && (
+                  <DisabledTooltip disabled={!!selectedChangeset.worktree_path} content="Create PR becomes available after branch materialization">
+                    <Button type="button" size="sm" disabled={!selectedChangeset.worktree_path || changesetLifecycleMutation.isPending} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangeset(id, selectedChangeset.id))}>
+                      <GitPullRequest className="h-3.5 w-3.5" />
+                      Create PR
+                    </Button>
+                  </DisabledTooltip>
+                )}
+                <Button type="button" size="sm" variant="outline" disabled={!selectedChangeset.worktree_path} onClick={() => {
+                  setComposerChangesetID(selectedChangeset.id);
+                  if (selectedChangeset.status === "restack_conflict") {
+                    setComposerMessage("Resolve the restack conflict while preserving this pull request's intent. Explain any semantic changes and do not push; I will review and confirm the result.");
+                  } else if (selectedChangeset.status === "external_update_detected") {
+                    setComposerMessage("Run `143-tools changesets import-remote --changeset " + selectedChangeset.id + "`, fetch this pull request's remote branch, and reconcile its remote commits with the local worktree without dropping either side's intended changes. Do not push; I will review and confirm the result.");
+                  }
+                  focusComposerFromKeyboard();
+                }}>
+                  {selectedChangeset.status === "restack_conflict"
+                    ? "Resolve with agent"
+                    : selectedChangeset.status === "external_update_detected"
+                      ? "Reconcile with agent"
+                      : "Ask agent"}
+                </Button>
+                {hasMultipleChangesets && <Button type="button" size="sm" variant="outline" disabled={changesetLifecycleMutation.isPending || changesets.some((item) => item.status !== "abandoned" && !item.worktree_path)} onClick={() => changesetLifecycleMutation.mutate(() => api.sessions.publishChangesetStack(id))}>Publish stack</Button>}
+                </div>
+                {!selectedChangeset.is_primary && !selectedChangeset.worktree_path && (
+                  <p className="pt-2 text-xs text-muted-foreground" data-testid="branch-actions-unavailable">
+                    Changes, preview, readiness, review, publishing, and agent editing become available after branch materialization.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          )}
           {pullRequestId && prStatus === "open" && (
             prHealth ? (
               <PRHealthBanner
@@ -6468,7 +6740,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 }}
                 onStopAutoRepair={(sessionId, threadId) => stopAutoRepairMutation.mutate({ sessionId, threadId })}
                 stopAutoRepairPending={stopAutoRepairMutation.isPending}
-                reviewAction={canManageSession && canUseNativeReviewLoop ? {
+                reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
                   disabled: reviewActionDisabled,
                   spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
                   title: reviewActionDisabledReason,
@@ -6498,7 +6770,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </Card>
             ) : null
           )}
-          {canManageSession && !hasPR && hasSessionChanges ? (
+          {selectedIsPrimary && canManageSession && !hasPR && hasSessionChanges ? (
             <Card className="border-border/60">
               <CardContent className="space-y-3 p-4">
                 <div className="flex flex-col gap-3">
@@ -6693,12 +6965,44 @@ export function SessionDetailContent({ id }: { id: string }) {
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">
-        <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
-          <PreviewPanel
-            sessionId={id}
-            previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
-          />
-        </ErrorBoundary>
+        {selectedIsPrimary && !selectedChangeset?.worktree_path ? (
+          <ErrorBoundary fallback={<PreviewTabErrorFallback />}>
+            <PreviewPanel
+              sessionId={id}
+              previewOriginTemplate={PREVIEW_ORIGIN_TEMPLATE}
+            />
+          </ErrorBoundary>
+        ) : selectedChangeset ? (
+          <Card className="border-border/60">
+            <CardContent className="space-y-3 p-4 text-sm">
+              {!selectedChangeset.worktree_path ? (
+                <p className="text-sm text-muted-foreground">Preview for this pull request will be available after its branch is materialized.</p>
+              ) : (
+                <>
+              <div>
+                <div className="font-medium">Preview {selectedChangeset.title}</div>
+                <p className="text-xs text-muted-foreground">Runs from {selectedChangeset.working_branch ?? "the selected pull request branch"}. A stacked branch includes its ancestors.</p>
+              </div>
+              {changesetPreviewMutation.data?.data.preview_url || changesetPreviewMutation.data?.data.stable_url ? (
+                <Button asChild size="sm"><a href={changesetPreviewMutation.data.data.preview_url ?? changesetPreviewMutation.data.data.stable_url} target="_blank" rel="noreferrer">Open preview</a></Button>
+              ) : (
+                <DisabledTooltip disabled={!!selectedChangeset.working_branch && !selectedChangeset.has_unpushed_changes} content={selectedChangeset.has_unpushed_changes ? "Push this pull request before previewing its branch" : "Materialize and publish this branch before previewing it"}>
+                  <Button size="sm" disabled={!selectedChangeset.working_branch || !!selectedChangeset.has_unpushed_changes || changesetPreviewMutation.isPending} onClick={() => changesetPreviewMutation.mutate(selectedChangeset)}>
+                    {changesetPreviewMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    Preview pull request
+                  </Button>
+                </DisabledTooltip>
+              )}
+              {stackTopChangeset && stackTopChangeset.id !== selectedChangeset.id && stackTopChangeset.working_branch && !stackTopChangeset.has_unpushed_changes ? (
+                <Button size="sm" variant="outline" disabled={changesetPreviewMutation.isPending} onClick={() => changesetPreviewMutation.mutate(stackTopChangeset)}>
+                  Preview stack top
+                </Button>
+              ) : null}
+                </>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
       </TabsContent>
     </Tabs>
   );
@@ -6729,16 +7033,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               archivePendingThreadId={archiveThreadMutation.isPending ? archiveThreadMutation.variables ?? null : null}
             />
 
-            <div
+            <ContextHeader
               data-testid="session-main-header"
-              className={cn(
-                "hidden border-b border-border bg-background px-4 py-3 md:flex items-center justify-between shrink-0",
-                SESSION_HEADER_HEIGHT_CLASSNAME,
-              )}
-            >
+              className={cn("hidden shrink-0 md:block", SESSION_HEADER_HEIGHT_CLASSNAME)}
+              title={
               <div
                 data-testid="session-header-summary"
-                className="min-w-0 flex-1 overflow-hidden flex items-center gap-2"
+                className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden"
               >
                 {isEditingTitle ? (
                   <div className="min-w-0 flex-1 flex items-center gap-2">
@@ -6777,7 +7078,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </div>
                 ) : (
                   <>
-                    <h1 className="text-sm font-medium text-foreground truncate">
+                    <h1 className="truncate font-display text-base font-semibold tracking-[-0.025em] text-foreground">
                       {sessionTitle(session)}
                     </h1>
                     <Button
@@ -6794,9 +7095,12 @@ export function SessionDetailContent({ id }: { id: string }) {
                     </Button>
                   </>
                 )}
-                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium shrink-0 ${status.color}`}>
-                  {status.label}
-                </span>
+                <StatusLabel
+                  label={status.label}
+                  tone={sessionStatusTone(session.status, prStatus)}
+                  active={session.status === "running"}
+                  className="shrink-0"
+                />
                 {diffStats && (
                   <DiffStatsBadge
                     added={diffStats.added}
@@ -6807,6 +7111,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                 )}
                 <LinkedIssueChips session={session} />
               </div>
+              }
+              actions={
               <div className="flex shrink-0 items-center gap-2" data-testid="session-header-actions">
                 <DisabledTooltip disabled={centerMode === "review" && showDetailPanel} content={detailToggleTitle}>
                   <Button
@@ -6822,7 +7128,8 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 </DisabledTooltip>
               </div>
-            </div>
+              }
+            />
           </>
         ) : null}
 
@@ -6954,6 +7261,15 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             )}
             {renderRecoverableInboxNotice()}
+            {composerChangesetID && (() => {
+              const target = changesets.find((item) => item.id === composerChangesetID);
+              return target ? (
+                <div className="mb-2 flex items-center justify-between rounded-md border border-border bg-muted/40 px-3 py-2 text-xs" data-testid="composer-changeset-target">
+                  <span>Editing PR: {target.title}</span>
+                  <Button type="button" size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => setComposerChangesetID(null)}>Clear</Button>
+                </div>
+              ) : null;
+            })()}
             <SessionComposer
               sessionId={session.id}
               message={composerMessage}

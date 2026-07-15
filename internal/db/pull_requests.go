@@ -35,9 +35,33 @@ type PullRequestGitHubSnapshot struct {
 }
 
 func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) error {
+	if pr.ChangesetID == nil {
+		query := `
+			INSERT INTO pull_requests (session_id, changeset_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref, base_sha)
+			VALUES (
+				@session_id,
+				CASE WHEN @session_id::uuid IS NULL THEN NULL ELSE (
+					SELECT id FROM session_changesets
+					WHERE org_id = @org_id AND session_id = @session_id AND is_primary
+				) END,
+				@org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body,
+				@status, @review_status, @authored_by, @head_sha, @head_ref, @base_sha
+			)
+			RETURNING id, created_at, updated_at`
+		authoredBy := pr.AuthoredBy
+		if authoredBy == "" {
+			authoredBy = models.GitIdentitySourceApp
+		}
+		return s.db.QueryRow(ctx, query, pgx.NamedArgs{
+			"session_id": pr.SessionID, "org_id": pr.OrgID, "github_pr_number": pr.GitHubPRNumber,
+			"github_pr_url": pr.GitHubPRURL, "github_repo": pr.GitHubRepo, "title": pr.Title,
+			"body": pr.Body, "status": pr.Status, "review_status": pr.ReviewStatus, "authored_by": authoredBy,
+			"head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_sha": pr.BaseSHA,
+		}).Scan(&pr.ID, &pr.CreatedAt, &pr.UpdatedAt)
+	}
 	query := `
-		INSERT INTO pull_requests (session_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref, base_sha)
-		VALUES (@session_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha, @head_ref, @base_sha)
+		INSERT INTO pull_requests (session_id, changeset_id, org_id, github_pr_number, github_pr_url, github_repo, title, body, status, review_status, authored_by, head_sha, head_ref, base_sha)
+		VALUES (@session_id, @changeset_id, @org_id, @github_pr_number, @github_pr_url, @github_repo, @title, @body, @status, @review_status, @authored_by, @head_sha, @head_ref, @base_sha)
 		RETURNING id, created_at, updated_at`
 
 	authoredBy := pr.AuthoredBy
@@ -46,6 +70,7 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 	}
 	args := pgx.NamedArgs{
 		"session_id":       pr.SessionID,
+		"changeset_id":     pr.ChangesetID,
 		"org_id":           pr.OrgID,
 		"github_pr_number": pr.GitHubPRNumber,
 		"github_pr_url":    pr.GitHubPRURL,
@@ -64,12 +89,13 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 	return row.Scan(&pr.ID, &pr.CreatedAt, &pr.UpdatedAt)
 }
 
-const prSelectColumns = `id, session_id, org_id, github_pr_number, github_pr_url, github_repo,
+const prSelectColumns = `id, session_id, changeset_id, org_id, github_pr_number, github_pr_url, github_repo,
 		       title, body, status, review_status, authored_by, ci_status, head_sha, head_ref, base_sha,
 		       merge_state, has_conflicts, failing_test_count, needs_agent_action, github_state_synced_at,
 		       health_version, merge_when_ready_state, merge_when_ready_requested_by, merge_when_ready_requested_at,
 		       merge_when_ready_head_sha, merge_when_ready_health_version, merge_when_ready_error,
-		       merge_when_ready_updated_at, merged_at, created_at, updated_at`
+		       merge_when_ready_updated_at, feedback_monitoring, feedback_bot_epoch,
+		       feedback_bot_cycles_in_epoch, merged_at, created_at, updated_at`
 
 const prMergeWhenReadyStatusColumns = `merge_when_ready_state, merge_when_ready_requested_by,
 	merge_when_ready_requested_at, merge_when_ready_head_sha, merge_when_ready_health_version,
@@ -88,14 +114,35 @@ func (s *PullRequestStore) GetByID(ctx context.Context, orgID, id uuid.UUID) (mo
 	if err != nil {
 		return models.PullRequest{}, fmt.Errorf("query pull request: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
+	return s.GetPrimaryBySessionID(ctx, orgID, sessionID)
+}
+
+// GetPrimaryBySessionID returns the PR attached to the session's primary
+// changeset. Use changeset-scoped lookups for multi-PR behavior; this method is
+// the explicit compatibility path for legacy one-PR session surfaces.
+func (s *PullRequestStore) GetPrimaryBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	query := `
 		SELECT ` + prSelectColumns + `
 		FROM pull_requests
-		WHERE session_id = @session_id AND org_id = @org_id`
+		WHERE session_id = @session_id AND org_id = @org_id
+		  AND (
+			changeset_id IS NULL
+			OR changeset_id = (
+				SELECT id FROM session_changesets
+				WHERE org_id = @org_id AND session_id = @session_id AND is_primary
+			)
+		  )
+		ORDER BY
+			(changeset_id = (
+				SELECT id FROM session_changesets
+				WHERE org_id = @org_id AND session_id = @session_id AND is_primary
+			)) DESC NULLS LAST,
+			created_at DESC
+		LIMIT 1`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"session_id": sessionID,
@@ -104,7 +151,19 @@ func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID 
 	if err != nil {
 		return models.PullRequest{}, fmt.Errorf("query pull request by session: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
+}
+
+func (s *PullRequestStore) GetByChangesetID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.PullRequest, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+prSelectColumns+`
+		FROM pull_requests
+		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	})
+	if err != nil {
+		return models.PullRequest{}, fmt.Errorf("query pull request by changeset: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID, status models.PullRequestStatus) error {
@@ -230,7 +289,7 @@ func (s *PullRequestStore) GetByRepoAndNumber(ctx context.Context, repo string, 
 	if err != nil {
 		return models.PullRequest{}, fmt.Errorf("query pull request by repo and number: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) GetByOrgRepoAndNumber(ctx context.Context, orgID uuid.UUID, repo string, number int) (models.PullRequest, error) {
@@ -247,7 +306,7 @@ func (s *PullRequestStore) GetByOrgRepoAndNumber(ctx context.Context, orgID uuid
 	if err != nil {
 		return models.PullRequest{}, fmt.Errorf("query pull request by org, repo, and number: %w", err)
 	}
-	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) ListOpenByOrgRepoAndHeadSHA(ctx context.Context, orgID uuid.UUID, repo, headSHA string) ([]models.PullRequest, error) {
@@ -267,7 +326,7 @@ func (s *PullRequestStore) ListOpenByOrgRepoAndHeadSHA(ctx context.Context, orgI
 	if err != nil {
 		return nil, fmt.Errorf("query open pull requests by org, repo, and head SHA: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) UpdateReviewStatus(ctx context.Context, orgID, id uuid.UUID, reviewStatus models.PullRequestReviewStatus) error {
@@ -312,19 +371,79 @@ func (s *PullRequestStore) ListByOrg(ctx context.Context, orgID uuid.UUID, filte
 	if err != nil {
 		return nil, fmt.Errorf("query pull requests: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
-// BatchGetBySessionIDs returns PRs keyed by session_id for the given session IDs.
 func (s *PullRequestStore) BatchGetBySessionIDs(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]models.PullRequest, error) {
+	return s.BatchGetPrimaryBySessionIDs(ctx, orgID, sessionIDs)
+}
+
+// ListBySessionChangesets returns at most one current PR for each changeset.
+// Legacy PRs without a changeset remain represented by the primary changeset
+// through the migration backfill, so callers never need a second join path.
+func (s *PullRequestStore) ListBySessionChangesets(ctx context.Context, orgID, sessionID uuid.UUID) (map[uuid.UUID]models.PullRequest, error) {
+	batched, err := s.BatchListBySessionChangesets(ctx, orgID, []uuid.UUID{sessionID})
+	if err != nil {
+		return nil, err
+	}
+	return batched[sessionID], nil
+}
+
+// BatchListBySessionChangesets preserves every changeset PR while hydrating
+// multiple sessions. The outer key is session ID and the inner key is
+// changeset ID; unlike the scalar compatibility helper, no PR is collapsed.
+func (s *PullRequestStore) BatchListBySessionChangesets(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]models.PullRequest, error) {
+	if len(sessionIDs) == 0 {
+		return map[uuid.UUID]map[uuid.UUID]models.PullRequest{}, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT ON (changeset_id) `+prSelectColumns+`
+		FROM pull_requests
+		WHERE org_id = @org_id AND session_id = ANY(@session_ids) AND changeset_id IS NOT NULL
+		ORDER BY changeset_id, created_at DESC, id DESC`, pgx.NamedArgs{"org_id": orgID, "session_ids": sessionIDs})
+	if err != nil {
+		return nil, fmt.Errorf("list pull requests by changeset: %w", err)
+	}
+	prs, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
+	if err != nil {
+		return nil, fmt.Errorf("collect pull requests by changeset: %w", err)
+	}
+	result := make(map[uuid.UUID]map[uuid.UUID]models.PullRequest)
+	for _, pr := range prs {
+		if pr.SessionID != nil && pr.ChangesetID != nil {
+			if result[*pr.SessionID] == nil {
+				result[*pr.SessionID] = make(map[uuid.UUID]models.PullRequest)
+			}
+			result[*pr.SessionID][*pr.ChangesetID] = pr
+		}
+	}
+	return result, nil
+}
+
+// BatchGetPrimaryBySessionIDs returns only the PR attached to each session's
+// primary changeset. It is the scalar compatibility read for session list and
+// sidebar surfaces; Phase 2 multi-PR hydration must use a changeset-keyed read.
+func (s *PullRequestStore) BatchGetPrimaryBySessionIDs(ctx context.Context, orgID uuid.UUID, sessionIDs []uuid.UUID) (map[uuid.UUID]models.PullRequest, error) {
 	if len(sessionIDs) == 0 {
 		return nil, nil
 	}
 
 	query := `
-		SELECT ` + prSelectColumns + `
+		SELECT DISTINCT ON (session_id) ` + prSelectColumns + `
 		FROM pull_requests
-		WHERE org_id = @org_id AND session_id = ANY(@session_ids)`
+		WHERE org_id = @org_id AND session_id = ANY(@session_ids)
+		  AND (
+			changeset_id IS NULL
+			OR changeset_id = (
+				SELECT id FROM session_changesets
+				WHERE session_changesets.org_id = pull_requests.org_id
+				  AND session_changesets.session_id = pull_requests.session_id
+				  AND is_primary
+			)
+		  )
+		ORDER BY session_id,
+			(changeset_id IS NOT NULL) DESC,
+			created_at DESC,
+			id DESC`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
 		"org_id":      orgID,
@@ -333,7 +452,7 @@ func (s *PullRequestStore) BatchGetBySessionIDs(ctx context.Context, orgID uuid.
 	if err != nil {
 		return nil, fmt.Errorf("batch query pull requests: %w", err)
 	}
-	prs, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	prs, err := pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +628,7 @@ func (s *PullRequestStore) ListMergeWhenReadyForProcessing(ctx context.Context, 
 	if err != nil {
 		return nil, fmt.Errorf("list merge-when-ready pull requests for processing: %w", err)
 	}
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.PullRequest])
+	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.PullRequest])
 }
 
 func (s *PullRequestStore) queryMergeWhenReadyStatus(ctx context.Context, query string, args pgx.NamedArgs) (models.PullRequestMergeWhenReadyStatus, error) {

@@ -22,26 +22,30 @@ interface ToolItem {
 export default function IntegrationsSection({
   isDark,
 }: IntegrationsSectionProps) {
-  const label = isDark ? "text-white/30" : "text-slate-500";
-  const heading = isDark ? "text-white" : "text-slate-900";
-  const body = isDark ? "text-white/50" : "text-slate-600";
+  const label = isDark ? "text-[#7992ff]" : "text-[#315ce8]";
+  const heading = isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]";
+  const body = isDark ? "text-[#aaa89f]" : "text-[#6b6b65]";
 
   const renderGrid = (items: ToolItem[]) => (
-    <div className="flex flex-wrap justify-center gap-3">
+    <div className="flex flex-wrap justify-center gap-4">
       {items.map((item) => (
         <Card
           key={item.name}
-          className={`w-full flex-none sm:w-[calc(50%_-_0.375rem)] lg:w-[calc(33.333%_-_0.5rem)] ${
+          className={`w-full flex-none sm:w-[calc(50%_-_0.5rem)] lg:w-[calc(33.333%_-_0.667rem)] ${
             item.description ? "min-h-44" : ""
-          } ${isDark ? "bg-[#0d0d15]" : "bg-white/80"}`}
+          } ${
+            isDark
+              ? "border-white/10 bg-[#1d1d1a]"
+              : "border-[#e1ded5] bg-[#fefdfb] shadow-[0_18px_48px_-36px_rgb(36_34_28_/_32%)]"
+          }`}
         >
-          <CardContent className="p-5">
+          <CardContent className="p-6">
             <div className="flex items-center gap-3">
               <div
-                className={`flex size-10 items-center justify-center rounded-md border ${
+                className={`flex size-11 items-center justify-center rounded-lg border ${
                   isDark
-                    ? "border-white/10 bg-white/5"
-                    : "border-slate-200 bg-white"
+                    ? "border-white/10 bg-[#242420]"
+                    : "border-[#e1ded5] bg-[#f6f5f0]"
                 }`}
               >
                 <Image
@@ -53,7 +57,7 @@ export default function IntegrationsSection({
               </div>
               <h3
                 className={`${type.cardTitle} ${
-                  isDark ? "text-white/85" : "text-slate-900"
+                  isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
                 }`}
               >
                 {item.name}
@@ -71,8 +75,10 @@ export default function IntegrationsSection({
   return (
     <section
       id="integrations"
-      className="relative overflow-hidden px-6 py-28 sm:px-10 sm:py-36"
-      style={{ background: isDark ? "#0a0a12" : "#f2f5f9" }}
+      className={`relative overflow-hidden border-t px-6 py-28 sm:px-10 sm:py-40 ${
+        isDark ? "border-white/10" : "border-[#e1ded5]"
+      }`}
+      style={{ background: isDark ? "#151513" : "#f6f5f0" }}
     >
       <div className="mx-auto max-w-5xl">
         <div className="grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
@@ -88,24 +94,25 @@ export default function IntegrationsSection({
           </div>
         </div>
 
-        <div className="mt-14">{renderGrid(codingAgents)}</div>
+        <div className="mt-16">{renderGrid(codingAgents)}</div>
 
         <div
-          className={`mt-8 grid gap-3 rounded-lg border p-3 md:grid-cols-3 ${
+          className={`mt-8 grid gap-1 rounded-2xl border p-2 md:grid-cols-3 ${
             isDark
-              ? "border-white/10 bg-white/[0.03]"
-              : "border-slate-200 bg-white/60"
+              ? "border-white/10 bg-[#11110f]"
+              : "border-[#e1ded5] bg-[#efeee8]"
           }`}
         >
           {agentChoiceHighlights.map((highlight) => (
             <Card
               key={highlight.title}
-              className={isDark ? "bg-[#0d0d15]" : "bg-white/80"}
+              variant="quiet"
+              className={isDark ? "bg-[#1d1d1a]" : "bg-[#fefdfb]"}
             >
-              <CardContent className="p-5">
+              <CardContent className="p-6">
                 <h3
                   className={`${type.cardTitle} ${
-                    isDark ? "text-white/85" : "text-slate-900"
+                    isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
                   }`}
                 >
                   {highlight.title}
@@ -118,7 +125,7 @@ export default function IntegrationsSection({
           ))}
         </div>
 
-        <div className="mt-24 grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
+        <div className="mt-28 grid gap-8 lg:grid-cols-[0.38fr_0.62fr] lg:items-end">
           <p className={`${type.eyebrow} ${label}`}>08 Integrations</p>
           <div className="space-y-5">
             <h2 className={`max-w-3xl ${type.featureTitle} ${heading}`}>
@@ -132,7 +139,7 @@ export default function IntegrationsSection({
           </div>
         </div>
 
-        <div className="mt-14">{renderGrid(integrations)}</div>
+        <div className="mt-16">{renderGrid(integrations)}</div>
       </div>
     </section>
   );

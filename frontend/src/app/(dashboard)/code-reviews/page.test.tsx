@@ -265,18 +265,27 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
-    expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
-    expect(screen.getByText("Acceptable")).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Evidence/i }));
-    expect(await screen.findByText(/Evidence for #428/i)).toBeInTheDocument();
-    expect(screen.getByText("No blocking issues found.")).toBeInTheDocument();
-    expect(screen.getByText("Clarify branch name")).toBeInTheDocument();
-    expect(screen.getByText("Review this PR.")).toBeInTheDocument();
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    expect(screen.getAllByText("Acceptable")).toHaveLength(2);
+    expect(screen.getAllByText("Approved")).toHaveLength(2);
+    const filterToggle = screen.getByRole("button", { name: /Filter reviews/i });
+    expect(filterToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(filterToggle);
+    expect(filterToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(evidenceSheet).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Clarify branch name")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Review this PR.")).toBeInTheDocument();
+    expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
-    await user.click(screen.getByRole("combobox", { name: /Repository/i }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("combobox", { name: "Policy repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
@@ -286,7 +295,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
     expect(screen.getByText("2 reviewers")).toBeInTheDocument();
     expect(screen.getByText("quorum 2")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Comment only/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
@@ -376,18 +385,18 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
-    await user.click(await screen.findByRole("button", { name: /^Comment only/i }));
+    await user.click(await screen.findByRole("radio", { name: /^Comment only/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });
     expect(state.getCurrentConfig().approval_mode).toBe("comment_only");
 
-    await user.click(screen.getByRole("button", { name: /^Disabled/i }));
+    await user.click(screen.getByRole("radio", { name: /^Disabled/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(false);
     });
 
-    await user.click(screen.getByRole("button", { name: /^Approve acceptable PRs/i }));
+    await user.click(screen.getByRole("radio", { name: /^Approve acceptable PRs/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });

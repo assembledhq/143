@@ -1145,11 +1145,102 @@ func TestSessionStore_UpdateTitle(t *testing.T) {
 	sessionID := uuid.New()
 
 	mock.ExpectExec("UPDATE sessions SET title").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("Fix auth flow", models.SessionTitleSourceManual, sessionID, orgID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTitle(context.Background(), orgID, sessionID, "Fix auth flow")
 	require.NoError(t, err, "UpdateTitle should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateTitleWithSource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		source  models.SessionTitleSource
+		wantErr bool
+	}{
+		{name: "generated", source: models.SessionTitleSourceGenerated},
+		{name: "issue", source: models.SessionTitleSourceIssue},
+		{name: "invalid", source: models.SessionTitleSource("unknown"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			if !tt.wantErr {
+				mock.ExpectExec("UPDATE sessions SET title").
+					WithArgs("New title", tt.source, sessionID, orgID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.UpdateTitleWithSource(context.Background(), orgID, sessionID, "New title", tt.source)
+			if tt.wantErr {
+				require.Error(t, err, "invalid title provenance should be rejected before persistence")
+				return
+			}
+			require.NoError(t, err, "valid title provenance should be persisted")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_GetTitleState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	title := "Fix auth flow"
+	intent := "Fix authentication"
+	pivotTurn := 10
+	generatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	expected := models.SessionTitleState{
+		Title:              &title,
+		TitleSource:        models.SessionTitleSourceGenerated,
+		TitleIntent:        &intent,
+		TitlePivotedAtTurn: &pivotTurn,
+		TitleGeneratedAt:   &generatedAt,
+		CurrentTurn:        20,
+	}
+
+	mock.ExpectQuery("SELECT title, title_source, title_intent, title_pivoted_at_turn, title_generated_at, current_turn FROM sessions WHERE id = .+ AND org_id = .+").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"title", "title_source", "title_intent", "title_pivoted_at_turn", "title_generated_at", "current_turn"}).
+			AddRow(title, models.SessionTitleSourceGenerated, intent, pivotTurn, generatedAt, 20))
+
+	actual, err := store.GetTitleState(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "title state query should succeed")
+	require.Equal(t, expected, actual, "title state query should return title, provenance, and cadence state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateTitleForPivot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectExec("UPDATE sessions SET title = .+ title_intent = .+ title_pivoted_at_turn").
+		WithArgs("Add billing export", "Build a billing export", 10, sessionID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTitleForPivot(context.Background(), orgID, sessionID, "Add billing export", "Build a billing export", 10)
+	require.NoError(t, err, "accepted pivot should persist title and intent atomically")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

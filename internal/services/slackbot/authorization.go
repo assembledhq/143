@@ -23,6 +23,10 @@ type SlackUserLinkStore interface {
 	GetBySlackUser(ctx context.Context, orgID uuid.UUID, teamID, slackUserID string) (models.SlackUserLink, error)
 }
 
+type ExternalUserLinkStore interface {
+	GetActiveByExternal(ctx context.Context, orgID uuid.UUID, provider models.ExternalIdentityProvider, workspaceID, providerUserID string) (models.ExternalUserLink, error)
+}
+
 type MembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
@@ -33,6 +37,7 @@ type SlackChannelStore interface {
 
 type Authorizer struct {
 	links       SlackUserLinkStore
+	external    ExternalUserLinkStore
 	memberships MembershipStore
 	channels    SlackChannelStore
 }
@@ -59,6 +64,10 @@ type Decision struct {
 
 func NewAuthorizer(links SlackUserLinkStore, memberships MembershipStore, channels SlackChannelStore) *Authorizer {
 	return &Authorizer{links: links, memberships: memberships, channels: channels}
+}
+
+func NewAuthorizerWithExternal(external ExternalUserLinkStore, memberships MembershipStore, channels SlackChannelStore) *Authorizer {
+	return &Authorizer{external: external, memberships: memberships, channels: channels}
 }
 
 func (a *Authorizer) Authorize(ctx context.Context, req ActionRequest) (Decision, error) {
@@ -116,6 +125,14 @@ func (a *Authorizer) authorizeChannelCapability(ctx context.Context, req ActionR
 }
 
 func (a *Authorizer) resolveUserLink(ctx context.Context, req ActionRequest) (models.SlackUserLink, error) {
+	if a.external != nil {
+		link, err := a.external.GetActiveByExternal(ctx, req.OrgID, models.ExternalIdentityProviderSlack, req.TeamID, req.SlackUserID)
+		if err != nil {
+			return models.SlackUserLink{}, fmt.Errorf("resolve external slack user link: %w", err)
+		}
+		userID := link.UserID
+		return models.SlackUserLink{OrgID: req.OrgID, SlackTeamID: req.TeamID, SlackUserID: req.SlackUserID, UserID: &userID}, nil
+	}
 	if a.links == nil {
 		return models.SlackUserLink{}, pgx.ErrNoRows
 	}

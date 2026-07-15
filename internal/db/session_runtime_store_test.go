@@ -113,7 +113,7 @@ func TestSessionStore_ListRuntimeControlStalledSessions(t *testing.T) {
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectQuery(`runtime_graceful_stop_at >= started_at[\s\S]+runtime_graceful_stop_at < @stop_after_before`).
+	mock.ExpectQuery(`EXISTS \([\s\S]+FROM jobs j[\s\S]+j.org_id = sessions.org_id[\s\S]+j.status = 'running'[\s\S]+j.job_type IN \('run_agent', 'continue_session'\)[\s\S]+j.payload->>'session_id' = sessions.id::text[\s\S]+j.lock_token IS NOT NULL[\s\S]+j.lease_expires_at > @stop_after_before[\s\S]+runtime_graceful_stop_at >= sessions.started_at[\s\S]+runtime_graceful_stop_at < @stop_after_before`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 
@@ -135,7 +135,7 @@ func TestSessionStore_ListRuntimeControlStalledSessionsIgnoresDeadlinesBeforeCur
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
-	mock.ExpectQuery(`runtime_soft_deadline_at >= started_at`).
+	mock.ExpectQuery(`runtime_soft_deadline_at >= sessions.started_at`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 

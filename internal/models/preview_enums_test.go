@@ -866,3 +866,35 @@ func TestPreviewReadiness_Validate(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentNativePreviewEnums_Validate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		validate  func() error
+		expectErr bool
+	}{
+		{name: "agent control", validate: PreviewBrowserControlAgent.Validate},
+		{name: "human control", validate: PreviewBrowserControlHuman.Validate},
+		{name: "waiting for handoff", validate: PreviewBrowserControlWaiting.Validate},
+		{name: "invalid control", validate: PreviewBrowserControlState("invalid").Validate, expectErr: true},
+		{name: "preserved browser", validate: PreviewBrowserRestorationPreserved.Validate},
+		{name: "restored browser", validate: PreviewBrowserRestorationRestored.Validate},
+		{name: "reset browser", validate: PreviewBrowserRestorationReset.Validate},
+		{name: "unavailable browser", validate: PreviewBrowserRestorationUnavailable.Validate},
+		{name: "invalid browser restoration", validate: PreviewBrowserRestorationStatus("invalid").Validate, expectErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.validate()
+			if tt.expectErr {
+				require.Error(t, err, "invalid enum should be rejected")
+				return
+			}
+			require.NoError(t, err, "documented enum value should be accepted")
+		})
+	}
+}

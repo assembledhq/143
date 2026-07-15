@@ -41,8 +41,8 @@ export function ResponsiveResourceList<TItem>({
 }: ResponsiveResourceListProps<TItem>) {
   if (items.length === 0) {
     return (
-      <Card className={cn("border-border/70", className)}>
-        <CardContent className="px-4 py-8 text-center text-sm text-muted-foreground">
+      <Card variant="quiet" className={cn("bg-surface-recessed/45", className)}>
+        <CardContent className="px-4 py-10 text-center text-sm text-muted-foreground">
           {emptyState}
         </CardContent>
       </Card>
@@ -50,7 +50,7 @@ export function ResponsiveResourceList<TItem>({
   }
 
   return (
-    <Card className={cn("overflow-hidden border-border/70", className)}>
+    <Card className={cn("overflow-hidden border-border/80 bg-card", className)}>
       <CardContent className="p-0">
         <div className="hidden md:block">
           <Table aria-label={ariaLabel}>

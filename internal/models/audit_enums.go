@@ -49,6 +49,10 @@ const (
 	AuditActionSessionArchived             AuditAction = "session.archived"
 	AuditActionSessionUnarchived           AuditAction = "session.unarchived"
 	AuditActionSessionPreviewLifetimeSet   AuditAction = "session.preview_lifetime_set"
+	AuditActionSessionSplitStarted         AuditAction = "session.split.started"
+	AuditActionSessionSplitUpdated         AuditAction = "session.split.updated"
+	AuditActionSessionSplitMaterialized    AuditAction = "session.split.materialization_requested"
+	AuditActionSessionSplitAccepted        AuditAction = "session.split.accepted"
 	// AuditActionSessionThreadInboxReplayed is emitted when an operator
 	// forces an unknown_delivery inbox entry back into the delivery loop —
 	// the entry may already have reached the runtime, so the replay is a
@@ -132,6 +136,7 @@ const (
 	AuditActionIntegrationDisconnected             AuditAction = "integration.disconnected"
 	AuditActionIntegrationWriteback                AuditAction = "integration.writeback"
 	AuditActionExternalUserLinkCreated             AuditAction = "external_user_link.created"
+	AuditActionExternalUserLinkReplaced            AuditAction = "external_user_link.replaced"
 	AuditActionExternalUserLinkClaimed             AuditAction = "external_user_link.claimed"
 	AuditActionExternalUserLinkRevoked             AuditAction = "external_user_link.revoked"
 	AuditActionExternalUserLinkSuggestionApproved  AuditAction = "external_user_link_suggestion.approved"
@@ -196,6 +201,7 @@ func (a AuditAction) Validate() error {
 		AuditActionSessionReviewCommentCreated, AuditActionSessionReviewCommentUpdated, AuditActionSessionReviewCommentDeleted,
 		AuditActionSessionPRRequested, AuditActionSessionBranchRequested, AuditActionSessionPRPushRequested, AuditActionSessionRetried,
 		AuditActionSessionArchived, AuditActionSessionUnarchived, AuditActionSessionPreviewLifetimeSet,
+		AuditActionSessionSplitStarted, AuditActionSessionSplitUpdated, AuditActionSessionSplitMaterialized, AuditActionSessionSplitAccepted,
 		AuditActionSessionThreadInboxReplayed, AuditActionSessionThreadCreatedByAgentTool, AuditActionSessionThreadMessagedByAgentTool,
 		AuditActionPullRequestAutoRepairStarted,
 		AuditActionProjectCreated, AuditActionProjectUpdated, AuditActionProjectDeleted,
@@ -220,7 +226,7 @@ func (a AuditAction) Validate() error {
 		AuditActionTeamGitHubOrgAutoJoinEnabled, AuditActionTeamGitHubOrgAutoJoinDisabled,
 		AuditActionOrganizationCreated,
 		AuditActionIntegrationConnected, AuditActionIntegrationUpdated, AuditActionIntegrationDisconnected, AuditActionIntegrationWriteback,
-		AuditActionExternalUserLinkCreated, AuditActionExternalUserLinkClaimed, AuditActionExternalUserLinkRevoked,
+		AuditActionExternalUserLinkCreated, AuditActionExternalUserLinkReplaced, AuditActionExternalUserLinkClaimed, AuditActionExternalUserLinkRevoked,
 		AuditActionExternalUserLinkSuggestionApproved, AuditActionExternalUserLinkSuggestionDismissed,
 		AuditActionCredentialUpdated, AuditActionCredentialDeleted,
 		AuditActionPreviewSecretBundleUpdated, AuditActionPreviewSecretBundleDeleted,

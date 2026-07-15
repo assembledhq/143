@@ -159,12 +159,12 @@ describe("AutomationDetailPage", () => {
     expect(timezoneButton).toHaveClass("w-[12.5rem]", "max-w-full");
     expect(intervalUnitTrigger).toHaveClass(
       "h-9",
-      "text-xs",
+      "type-dense",
       "max-sm:text-base",
     );
-    expect(hourTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
-    expect(minuteTrigger).toHaveClass("h-9", "text-xs", "max-sm:text-base");
-    expect(timezoneButton).toHaveClass("h-9", "text-xs", "max-sm:text-base");
+    expect(hourTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(minuteTrigger).toHaveClass("h-9", "type-dense", "max-sm:text-base");
+    expect(timezoneButton).toHaveClass("h-9", "type-dense", "max-sm:text-base");
     expect(intervalUnitTrigger).not.toHaveClass("text-base");
     expect(timezoneButton).not.toHaveClass("text-base");
     expect(runEveryText).toHaveClass(
@@ -557,8 +557,12 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "Run history" }),
+      await screen.findByRole("heading", { name: "Execution history" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Latest execution" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Operational status only/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Previous runs" }),
     ).not.toBeInTheDocument();
@@ -844,10 +848,18 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal automation"));
+    await user.click(screen.getByText("Advanced settings"));
+    await user.click(
+      screen.getByRole("combobox", { name: "After a successful run" }),
+    );
+    await user.click(await screen.findByText("Do not publish"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ identity_scope: "personal" });
+      expect(updateBody).toMatchObject({
+        identity_scope: "personal",
+        publish_policy: "none",
+      });
     });
   });
 

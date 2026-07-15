@@ -245,7 +245,7 @@ describe('SessionDetailPage PR health and merge', () => {
       );
     });
 
-    expect(await screen.findByText('Implementation Plan')).toBeInTheDocument();
+    expect(await screen.findByText('Implementation plan')).toBeInTheDocument();
     expect(screen.getByText('Plan step 1')).toBeInTheDocument();
   });
 
@@ -301,6 +301,7 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(viewPRLink).toHaveAttribute('href', 'https://github.com/example/repo/pull/42');
     expect(viewPRLink).toHaveAttribute('target', '_blank');
     expect(viewPRLink).toHaveAttribute('rel', expect.stringContaining('noopener'));
+    expect(viewPRLink).toHaveAttribute('data-size', 'sm');
     expect(within(viewPRLink).queryByRole('button')).not.toBeInTheDocument();
   });
 
@@ -619,10 +620,41 @@ describe('SessionDetailPage PR health and merge', () => {
     expect(screen.getByText('PR #42 was merged successfully.')).toHaveClass('text-xs');
     expect(screen.getByText('This change has landed. Open a follow-up session if you need to make another revision.')).toHaveClass('text-xs');
     expect(screen.getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-violet-700', 'dark:text-violet-400');
+    expect(screen.getByLabelText('Merged PR status')).toHaveClass('text-success');
     expect(screen.queryAllByText('PR created')).toHaveLength(0);
     expect(within(screen.getByLabelText('Session detail actions')).queryByText('PR #42 merged')).not.toBeInTheDocument();
     expect(screen.queryByText('PR health')).not.toBeInTheDocument();
+  });
+
+  it('shows a closed PR with a neutral status tone', async () => {
+    const prCreatedSession: Session = {
+      ...mockSessions[0],
+      status: 'pr_created',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: prCreatedSession,
+        } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockPR,
+            status: 'closed',
+            merged_at: null,
+            closed_at: '2026-02-17T07:10:00Z',
+          },
+        } satisfies SingleResponse<PullRequest>);
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    const header = await screen.findByTestId('session-main-header');
+    expect(within(header).getByText('PR closed')).toHaveClass('text-muted-foreground');
+    expect(within(header).getByText('PR closed')).not.toHaveClass('text-success');
   });
 
   it('uses merged health as terminal while the cached PR row still says open', async () => {
@@ -722,7 +754,7 @@ describe('SessionDetailPage PR health and merge', () => {
       const mergedBadges = screen.getAllByText('PR merged');
       expect(mergedBadges).toHaveLength(2);
       for (const badge of mergedBadges) {
-        expect(badge).toHaveClass('text-violet-700', 'dark:text-violet-400');
+        expect(badge).toHaveClass('text-success');
       }
     });
     expect(screen.queryAllByText('PR created')).toHaveLength(0);

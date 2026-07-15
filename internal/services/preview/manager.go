@@ -107,6 +107,9 @@ type Manager struct {
 	pollStopMu  sync.Mutex
 	pollStopChs map[uuid.UUID]chan struct{}
 
+	resourceSamplerMu    sync.Mutex
+	resourceSamplerStops map[uuid.UUID]func()
+
 	// Caps. maxPerUser is the process fallback; org settings can override it.
 	maxPerUser   int
 	maxPerOrg    int
@@ -179,6 +182,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		previewInternalBaseURL: strings.TrimRight(cfg.PreviewInternalBaseURL, "/"),
 		previewOriginTemplate:  cfg.PreviewOriginTemplate,
 		pollStopChs:            make(map[uuid.UUID]chan struct{}),
+		resourceSamplerStops:   make(map[uuid.UUID]func()),
 		maxPerUser:             cfg.MaxPerUser,
 		maxPerOrg:              cfg.MaxPerOrg,
 		maxPerWorker:           cfg.MaxPerWorker,
@@ -661,6 +665,14 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	}
 	observer := m.newServiceObserver(input.OrgID, instance.ID, metricsSource, input.MetricsRepositoryFullName, input.Config.Primary, instance.MemoryLimitMB)
 	defer observer.Close()
+	stopResourceSampler := m.startPreviewResourceSampler(input.OrgID, instance.ID, input.Sandbox, instance.CPULimitMillis, observer.CurrentPhase)
+	if stopResourceSampler != nil {
+		defer func() {
+			if stopResourceSampler != nil {
+				stopResourceSampler()
+			}
+		}()
+	}
 	handle, err := m.provider.StartPreview(ctx, input.Sandbox, input.Config, StartPreviewOptions{
 		OrgID:        input.OrgID,
 		RepositoryID: input.RepositoryID,
@@ -671,6 +683,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if err != nil {
 		return nil, fmt.Errorf("provider start preview: %w", err)
 	}
+	observer.SetResourcePhase("runtime")
 
 	instance.PreviewHandle = handle.Handle
 	instance.Port = handle.PrimaryPort
@@ -692,6 +705,10 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 		_ = m.provider.StopPreview(ctx, handle.Handle)
 		return nil, fmt.Errorf("persist preview handle: %w", err)
 	}
+	if stopResourceSampler != nil {
+		m.registerPreviewResourceSampler(instance.ID, stopResourceSampler)
+		stopResourceSampler = nil
+	}
 
 	nextStatus := models.PreviewStatusReady
 	if handle.PartiallyReady {
@@ -704,6 +721,7 @@ func (m *Manager) LaunchPreview(ctx context.Context, instance *models.PreviewIns
 	if !updated {
 		// Preview was stopped concurrently — clean up the provider.
 		m.logger.Warn().Str("preview_id", instance.ID.String()).Msg("preview was stopped during startup, cleaning up provider")
+		m.stopPreviewResourceSampler(instance.ID)
 		_ = m.provider.StopPreview(ctx, handle.Handle)
 		return nil, fmt.Errorf("preview was stopped concurrently during startup")
 	}
@@ -871,6 +889,7 @@ func (m *Manager) newServiceObserver(orgID, previewID uuid.UUID, metricsSource, 
 		primaryService: strings.TrimSpace(primaryService),
 		memoryLimitMB:  memoryLimitMB,
 		phaseStarts:    make(map[string]time.Time),
+		currentPhase:   "launch",
 		outputCh:       make(chan previewServiceOutput, serviceOutputBufferSize),
 		outputDone:     make(chan struct{}),
 		lifecycleCh:    make(chan previewLifecycleLog, lifecycleLogBufferSize),
@@ -898,6 +917,7 @@ type managerServiceObserver struct {
 	memoryLimitMB int
 	phaseMu       sync.Mutex
 	phaseStarts   map[string]time.Time
+	currentPhase  string
 	outputCh      chan previewServiceOutput
 	outputDone    chan struct{}
 	lifecycleCh   chan previewLifecycleLog
@@ -1053,6 +1073,7 @@ func (o *managerServiceObserver) OnPhaseStart(name string) {
 	}
 	o.phaseMu.Lock()
 	o.phaseStarts[name] = time.Now()
+	o.currentPhase = name
 	o.phaseMu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), observerWriteTimeout)
@@ -1100,6 +1121,22 @@ func (o *managerServiceObserver) OnPhaseEnd(name string, phaseErr error) {
 	if ok && o.source != "" && o.repository != "" {
 		metrics.RecordBranchPreviewPhaseDuration(context.Background(), o.orgID.String(), o.source, o.repository, name, time.Since(started))
 	}
+}
+
+func (o *managerServiceObserver) SetResourcePhase(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	o.phaseMu.Lock()
+	o.currentPhase = name
+	o.phaseMu.Unlock()
+}
+
+func (o *managerServiceObserver) CurrentPhase() string {
+	o.phaseMu.Lock()
+	defer o.phaseMu.Unlock()
+	return o.currentPhase
 }
 
 func (o *managerServiceObserver) OnServiceReady(name string, port, pid int) {
@@ -1599,6 +1636,62 @@ func (m *Manager) pollSupportServiceStatus(stopCh <-chan struct{}, orgID, previe
 	}
 }
 
+func (m *Manager) startPreviewResourceSampler(orgID, previewID uuid.UUID, sb *agent.Sandbox, cpuLimitMillis int, phase func() string) func() {
+	if m == nil || m.store == nil || m.sandboxProvider == nil {
+		return nil
+	}
+	statsProvider, ok := m.sandboxProvider.(agent.RuntimeStatsProvider)
+	if !ok || statsProvider == nil {
+		return nil
+	}
+	sampler := newPreviewResourceSampler(
+		m.store,
+		statsProvider,
+		m.sandboxProvider,
+		sb,
+		orgID,
+		previewID,
+		m.workerNodeID,
+		cpuLimitMillis,
+		phase,
+		m.logger,
+	)
+	if sampler == nil {
+		return nil
+	}
+	return sampler.Start()
+}
+
+func (m *Manager) registerPreviewResourceSampler(previewID uuid.UUID, stop func()) {
+	if m == nil || stop == nil || previewID == uuid.Nil {
+		return
+	}
+	var old func()
+	m.resourceSamplerMu.Lock()
+	if m.resourceSamplerStops == nil {
+		m.resourceSamplerStops = make(map[uuid.UUID]func())
+	}
+	old = m.resourceSamplerStops[previewID]
+	m.resourceSamplerStops[previewID] = stop
+	m.resourceSamplerMu.Unlock()
+	if old != nil {
+		old()
+	}
+}
+
+func (m *Manager) stopPreviewResourceSampler(previewID uuid.UUID) {
+	if m == nil || previewID == uuid.Nil {
+		return
+	}
+	m.resourceSamplerMu.Lock()
+	stop := m.resourceSamplerStops[previewID]
+	delete(m.resourceSamplerStops, previewID)
+	m.resourceSamplerMu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
 // =============================================================================
 // StopPreview
 // =============================================================================
@@ -1615,6 +1708,7 @@ func (m *Manager) StopPreviewWithReason(ctx context.Context, orgID, previewID uu
 	if err != nil {
 		return fmt.Errorf("get preview instance: %w", err)
 	}
+	m.stopPreviewResourceSampler(previewID)
 
 	if instance.Status.IsTerminal() {
 		return nil // already stopped — idempotent

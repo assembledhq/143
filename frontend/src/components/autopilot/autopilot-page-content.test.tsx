@@ -114,13 +114,16 @@ describe("AutopilotPageContent", () => {
     expect(screen.queryByText("Top opportunity")).not.toBeInTheDocument();
   });
 
-  it("lets the queue table keep normal column widths on mobile", async () => {
+  it("turns queue rows into compact cards on mobile while preserving the desktop table", async () => {
     renderWithProviders(<AutopilotPageContent />);
 
     const table = screen.getByRole("table");
     expect(table).toHaveClass("w-full", "min-w-[64rem]", "table-auto");
-    expect(table).not.toHaveClass("table-fixed");
+    expect(screen.getByTestId("autopilot-queue-row")).toHaveAttribute("data-slot", "table-row");
+    expect(screen.getByTestId("autopilot-queue-mobile-row")).toHaveAttribute("data-slot", "resource-row");
+    expect(screen.getAllByRole("button", { name: "Start run" })).toHaveLength(2);
     expect(await screen.findByText("Source")).toBeInTheDocument();
+    expect(screen.getByText("Source").closest("thead")).not.toHaveClass("hidden");
   });
 
   it("keeps the queue table header sticky while the issue rows scroll", async () => {
@@ -143,7 +146,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Start run" }))[0]);
 
     expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
@@ -177,7 +180,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Start run" }))[0]);
     expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
 
     const notes = screen.getByLabelText("Session notes");
@@ -198,7 +201,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    await userEvent.click(await screen.findByRole("button", { name: "Start run" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Start run" }))[0]);
     expect(await screen.findByRole("heading", { name: "Start run" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create session" })).toBeEnabled();
   });
@@ -214,7 +217,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Start run" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Start run" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
@@ -231,7 +234,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Blocked" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Blocked" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Start run" })).not.toBeInTheDocument();
   });
 
@@ -254,7 +257,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Open preview" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Open preview" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Open PR" })).not.toBeInTheDocument();
   });
 
@@ -277,8 +280,10 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Update to latest" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
+    const updateButtons = await screen.findAllByRole("button", { name: "Update to latest" });
+    expect(updateButtons).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Open stale preview" })).toHaveLength(2);
+    expect(updateButtons[1].parentElement).toHaveClass("flex-col", "md:flex-row");
     expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   });
 
@@ -302,7 +307,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Open stale preview" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Open stale preview" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Update to latest" })).not.toBeInTheDocument();
   });
 
@@ -325,7 +330,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Retry preview" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Retry preview" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   });
 
@@ -347,7 +352,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("button", { name: "Start preview" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("button", { name: "Start preview" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   });
 
@@ -370,9 +375,10 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    const btn = await screen.findByRole("button", { name: "Starting..." });
-    expect(btn).toBeInTheDocument();
-    expect(btn).toBeDisabled();
+    const buttons = await screen.findAllByRole("button", { name: "Starting..." });
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeDisabled();
   });
 
   it("does not let a preview target override view_run for an in-progress session", async () => {
@@ -396,7 +402,7 @@ describe("AutopilotPageContent", () => {
 
     renderWithProviders(<AutopilotPageContent />);
 
-    expect(await screen.findByRole("link", { name: "View run" })).toBeInTheDocument();
+    expect(await screen.findAllByRole("link", { name: "View run" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "Open preview" })).not.toBeInTheDocument();
   });
 });

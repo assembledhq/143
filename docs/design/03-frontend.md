@@ -1,6 +1,6 @@
 # Design: Frontend Architecture
 
-> **Status:** Partially Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-07-11
 
 This document is the current frontend architecture map for 143.dev. It should help engineers place new UI work, choose the right state pattern, and keep the product surface consistent.
 
@@ -29,9 +29,15 @@ Avoid standalone pages that only report information. If a page has no next actio
 ## Visual System
 
 - Use shadcn/ui components for interactive and structural UI.
-- Use semantic tokens such as `bg-background`, `bg-card`, `text-foreground`, `text-muted-foreground`, and `border-border`.
-- Keep app surfaces dense and work-focused: compact controls, subtle borders, restrained selected states, and stable columns.
+- Use the warm mineral/charcoal semantic tokens. Choose `bg-background`, `bg-surface-raised`, or `bg-surface-recessed` by elevation; use `border-border-strong` only when a boundary must be emphasized.
+- Instrument Sans (`font-display`) is for brand, page titles, and narrative hierarchy. Geist remains the readable and operational face.
+- Body copy is 14px. Use `type-dense` for the explicit 13px dense-UI role and `text-xs` only for metadata.
+- Keep app surfaces dense and work-focused: compact controls, hairline boundaries, restrained selected states, and stable columns.
 - Use saturated color only for primary actions and meaningful state.
+- Primary controls and user messages use solid fills. Do not reintroduce blue-purple gradients or ambient glows.
+- Static `Card` instances have no hover affordance. Use `variant="interactive"` or `InteractiveCard` only when the entire surface has an action.
+- Use `StatusLabel` for operational state, `ResourceRow` for identity/metadata/state/action rows, `SectionGroup` for explanatory sections, and `ContextHeader` for durable workspace context.
+- Use a single selected-state signal: a soft accent surface plus, where needed, one leading indicator. Do not stack border, ring, and shadow signals.
 - Prefer persistent layout over surprise: tabs, columns, sidebars, and empty states should stay in place across loading and zero-data states.
 - Keep typing local. Search boxes, composers, and settings forms should not rerender large adjacent panels on every keystroke.
 
@@ -165,6 +171,7 @@ Choose verification by blast radius:
 
 ## Related Docs
 
+- [implemented/117-visual-system-and-product-polish.md](implemented/117-visual-system-and-product-polish.md)
 - [implemented/45-global-command-palette.md](implemented/45-global-command-palette.md)
 - [implemented/55-toast-notifications.md](implemented/55-toast-notifications.md)
 - [implemented/73-session-keyboard-navigation.md](implemented/73-session-keyboard-navigation.md)

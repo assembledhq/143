@@ -31,6 +31,19 @@ describe("Card", () => {
     render(<Card data-testid="test-card">content</Card>);
     expect(screen.getByTestId("test-card")).toBeInTheDocument();
   });
+
+  it("keeps static cards free of hover elevation", () => {
+    render(<Card data-testid="static-card">content</Card>);
+
+    expect(screen.getByTestId("static-card")).not.toHaveClass("hover:-translate-y-px");
+  });
+
+  it("opts interactive cards into hover and focus treatment", () => {
+    render(<Card variant="interactive" data-testid="interactive-card">content</Card>);
+
+    expect(screen.getByTestId("interactive-card")).toHaveClass("hover:-translate-y-px");
+    expect(screen.getByTestId("interactive-card")).toHaveClass("focus-within:border-primary/45");
+  });
 });
 
 describe("CardHeader", () => {

@@ -382,12 +382,13 @@ type SessionAttributionSource string
 
 const (
 	SessionAttributionSourceSlack       SessionAttributionSource = "slack"
+	SessionAttributionSourceLinear      SessionAttributionSource = "linear"
 	SessionAttributionSourceExternalAPI SessionAttributionSource = "external_api"
 )
 
 func (s SessionAttributionSource) Validate() error {
 	switch s {
-	case SessionAttributionSourceSlack, SessionAttributionSourceExternalAPI:
+	case SessionAttributionSourceSlack, SessionAttributionSourceLinear, SessionAttributionSourceExternalAPI:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionAttributionSource: %q", s)

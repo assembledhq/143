@@ -31,7 +31,6 @@ go.work.sum
 .env.staging
 .env.production
 .env.single-node
-.env.demo
 .env.*.local
 # SOPS-encrypted bundles and .sops.yaml live in the private secrets repo
 # (../143-infra), never here: ciphertext published in a public repo can't

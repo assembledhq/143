@@ -2,9 +2,13 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -22,7 +26,7 @@ func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 		require.Equal(t, http.MethodPost, r.Method, "screenshot should use POST")
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
 		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"data":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}`))
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
 	defer server.Close()
@@ -37,9 +41,62 @@ func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 	}))
 
 	require.False(t, result.IsError, "screenshot should succeed")
-	require.Equal(t, "/api/v1/sessions/session-1/preview/screenshot", gotPath, "screenshot should target session preview endpoint")
+	require.Equal(t, "/api/v1/sessions/session-1/preview/observe", gotPath, "session screenshot should use the fenced shared-browser observation endpoint")
 	require.Equal(t, "/dashboard", gotBody["path"], "screenshot should forward requested path")
 	require.NotContains(t, firstText(result), "png_base64", "inline_base64=false should remove large screenshot payloads from CLI output")
+}
+
+func TestPreviewToolExecutor_InternalCreateRejectsBranchTarget(t *testing.T) {
+	// Not parallel: mutates process env via t.Setenv.
+	t.Setenv("143_SESSION_ID", "session-1")
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: "http://unused.test", Token: "sandbox-token"}), internal: true}
+	result := executor.create(context.Background(), mustJSON(map[string]any{
+		"repository": "acme/web",
+		"branch":     "main",
+	}))
+
+	require.True(t, result.IsError, "sandbox branch preview should be rejected")
+	require.Contains(t, firstText(result), "current session", "error should explain sandbox tools are session-scoped")
+	require.NotContains(t, firstText(result), "not both", "should not surface the misleading not-both error")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutArtifact(t *testing.T) {
+	t.Parallel()
+
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be JSON")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.Equal(t, true, gotBody["inline_base64"], "session screenshot should request bytes by default so the image is not silently dropped")
+	require.Contains(t, firstText(result), "png_base64", "without artifact storage the image must still be inlined by default")
+}
+
+func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenArtifactPresent(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","artifact":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+
+	require.False(t, result.IsError, "screenshot should succeed")
+	require.NotContains(t, firstText(result), "png_base64", "an artifact reference should replace inline bytes in the transcript")
+	require.Contains(t, firstText(result), "art-1", "artifact reference should be retained")
 }
 
 func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
@@ -66,6 +123,207 @@ func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
 	require.True(t, ok, "steps should be forwarded as a JSON array")
 	require.Len(t, steps, 1, "one interaction step should be forwarded")
 	require.Contains(t, firstText(result), `"success": true`, "interact should print response JSON")
+}
+
+func TestPreviewToolExecutor_ObserveUsesUnifiedEndpoint(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"url":"https://preview.test/app","semantic_state":"[]","screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
+		require.NoError(t, err, "observe response should write")
+	}))
+	defer server.Close()
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "path": "/app", "include_dom": true}))
+	require.False(t, result.IsError, "observe should succeed")
+	require.Equal(t, "/api/v1/sessions/session-1/preview/observe", gotPath, "observe should use the unified endpoint")
+	require.Len(t, result.Content, 2, "observe should return semantic context and a native image")
+	require.Equal(t, "image", result.Content[1].Type, "second observation block should be a native image")
+	require.Equal(t, "image/png", result.Content[1].MIMEType, "native observation should identify PNG content")
+	require.NotContains(t, firstText(result), "png_base64", "semantic context should not duplicate native image bytes")
+}
+
+func TestPreviewToolExecutor_InternalObserveUsesSessionScopedEndpoint(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
+		require.NoError(t, err, "internal observe response should write")
+	}))
+	defer server.Close()
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}), internal: true}
+	result := executor.call(context.Background(), "preview_observe", mustJSON(map[string]any{"session_id": "session-1"}))
+	require.False(t, result.IsError, "internal observe should succeed")
+	require.Equal(t, "/api/v1/internal/sessions/session-1/preview/observe", gotPath, "sandbox preview tools should use the session-scoped internal endpoint")
+}
+
+func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
+	t.Parallel()
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/v1/sessions/session-1/preview/act", r.URL.Path, "act should use the unified endpoint")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "act body should decode")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","artifact":{"id":"artifact-1"}},"ready":true}}}`))
+		require.NoError(t, err, "act response should write")
+	}))
+	defer server.Close()
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.act(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "steps": `[{"action":"click","role":"button","name":"Save"}]`}))
+	require.False(t, result.IsError, "act should succeed")
+	steps, ok := gotBody["steps"].([]any)
+	require.True(t, ok, "act should send steps as a JSON array")
+	require.Len(t, steps, 1, "act should send every requested step")
+	require.Len(t, result.Content, 2, "act should return its structured result and final native image")
+	require.Equal(t, "image", result.Content[1].Type, "act should extract the image from its nested observation")
+	require.Contains(t, firstText(result), "artifact-1", "act should retain durable screenshot artifact metadata")
+	require.NotContains(t, firstText(result), "png_base64", "act text should not duplicate native image bytes")
+}
+
+func TestPreviewToolExecutor_RequestHandoffUsesSessionScopedEndpoint(t *testing.T) {
+	t.Parallel()
+	var gotPath string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "handoff body should decode")
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"data":{"state":"waiting_for_handoff","handoff_reason":"MFA required"}}`))
+		require.NoError(t, err, "handoff response should write")
+	}))
+	defer server.Close()
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}), internal: true}
+	result := executor.call(context.Background(), "preview_request_handoff", mustJSON(map[string]any{"session_id": "session-1", "reason": "MFA required"}))
+	require.False(t, result.IsError, "sandbox agent should request handoff")
+	require.Equal(t, "/api/v1/internal/sessions/session-1/preview/control/request-handoff", gotPath, "handoff should use the internal same-session route")
+	require.Equal(t, "MFA required", gotBody["reason"], "handoff should preserve the reason")
+}
+
+func TestPreviewArgsWithSessionDefault(t *testing.T) {
+	// Environment variables are process-global, so this test cannot run in parallel.
+	t.Setenv("143_SESSION_ID", "session-from-env")
+	var actual map[string]any
+	require.NoError(t, json.Unmarshal(previewArgsWithSessionDefault(mustJSON(map[string]any{"path": "/"})), &actual), "defaulted arguments should remain valid JSON")
+	require.Equal(t, "session-from-env", actual["session_id"], "preview tools should default to the injected session ID")
+}
+
+func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {
+	t.Parallel()
+	dir, err := os.MkdirTemp(".", "preview-observe-test-")
+	require.NoError(t, err, "repository-backed image directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(dir), "image test directory should be removed") }()
+	output := filepath.Join(dir, "observation.png")
+	require.NoError(t, os.WriteFile(output, []byte("old"), 0o644), "workspace fixture should begin with broad permissions")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, writeErr := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
+		require.NoError(t, writeErr, "observe response should write")
+	}))
+	defer server.Close()
+	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+	result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "output": output}))
+	require.False(t, result.IsError, "observe with output should succeed")
+	actual, err := os.ReadFile(output)
+	require.NoError(t, err, "workspace screenshot should be readable")
+	require.Equal(t, pngSignature, actual, "workspace screenshot should contain decoded PNG bytes")
+	require.NotContains(t, firstText(result), "png_base64", "workspace output should remove base64 from the CLI transcript")
+	require.Contains(t, firstText(result), output, "workspace output should report the written path")
+	info, err := os.Stat(output)
+	require.NoError(t, err, "workspace screenshot metadata should be readable")
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "workspace screenshot should remain private")
+	require.Len(t, result.Content, 1, "workspace fallback should not duplicate the screenshot as native image content")
+}
+
+func TestPreviewToolExecutor_ObserveRejectsInvalidImages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		screenshot    string
+		expectedError string
+	}{
+		{name: "missing screenshot", screenshot: ``, expectedError: "did not include a screenshot"},
+		{name: "missing bytes", screenshot: `"screenshot":{}`, expectedError: "did not include screenshot bytes"},
+		{name: "invalid base64", screenshot: `"screenshot":{"png_base64":"%%%"}`, expectedError: "decode preview screenshot"},
+		{name: "invalid png", screenshot: `"screenshot":{"png_base64":"bm90LXBuZw=="}`, expectedError: "not a valid PNG"},
+		{name: "wrong mime", screenshot: `"screenshot":{"png_base64":"iVBORw0KGgo=","mime_type":"image/jpeg"}`, expectedError: "unsupported MIME type"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := `{"data":{"ready":true` + func() string {
+				if tt.screenshot == "" {
+					return ""
+				}
+				return "," + tt.screenshot
+			}() + `}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(body))
+				require.NoError(t, err, "invalid image fixture should write")
+			}))
+			defer server.Close()
+
+			executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
+			result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
+			require.True(t, result.IsError, "invalid screenshot should fail the observation")
+			require.Contains(t, firstText(result), tt.expectedError, "observation error should identify the image problem")
+		})
+	}
+}
+
+func TestPreviewToolExecutor_ObserveRejectsOversizedImageBeforeDecode(t *testing.T) {
+	t.Parallel()
+
+	encoded := strings.Repeat("A", base64.StdEncoding.EncodedLen(maxPreviewImageBytes)+1)
+	result := writePreviewObservationImage(jsonResult(map[string]any{
+		"screenshot": map[string]any{"png_base64": encoded},
+	}), "", false)
+
+	require.True(t, result.IsError, "oversized native image should be rejected")
+	require.Contains(t, firstText(result), "exceeds", "oversized image error should identify the size limit")
+}
+
+func TestWritePrivatePreviewImageRejectsWorkspaceEscape(t *testing.T) {
+	t.Parallel()
+
+	workspace, err := os.Getwd()
+	require.NoError(t, err, "test should resolve the current workspace")
+	outsideDir, err := os.MkdirTemp(filepath.Dir(workspace), "preview-output-outside-")
+	require.NoError(t, err, "outside output directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(outsideDir), "outside output directory should be removed") }()
+
+	insideDir, err := os.MkdirTemp(".", "preview-output-links-")
+	require.NoError(t, err, "workspace symlink directory should be created")
+	defer func() { require.NoError(t, os.RemoveAll(insideDir), "workspace symlink directory should be removed") }()
+	symlinkPath := filepath.Join(insideDir, "outside")
+	require.NoError(t, os.Symlink(outsideDir, symlinkPath), "workspace symlink should target the outside directory")
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "parent traversal", path: filepath.Join("..", filepath.Base(outsideDir), "image.png")},
+		{name: "absolute outside path", path: filepath.Join(outsideDir, "image.png")},
+		{name: "symlink escape", path: filepath.Join(symlinkPath, "image.png")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := writePrivatePreviewImage(tt.path, pngSignature)
+			require.Error(t, err, "workspace image writer should reject paths that escape the workspace")
+			_, statErr := os.Stat(filepath.Join(outsideDir, "image.png"))
+			require.ErrorIs(t, statErr, os.ErrNotExist, "rejected output should not create a file outside the workspace")
+		})
+	}
 }
 
 func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {

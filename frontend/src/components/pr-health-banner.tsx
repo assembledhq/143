@@ -7,6 +7,7 @@ import type { PullRequestHealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import { Card, CardContent } from "@/components/ui/card";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -228,7 +229,7 @@ export function PRHealthBanner({
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span className="text-warning">Reconnect this repository to update PR status and resume PR actions.</span>
                 </div>
-                <Button asChild size="sm" variant="outline" className="w-fit bg-background text-foreground">
+                <Button asChild size="xs" variant="outline" className="w-fit bg-background text-foreground">
                   <Link href="/settings/integrations">
                     Open GitHub settings
                   </Link>
@@ -245,7 +246,7 @@ export function PRHealthBanner({
                     </Badge>
                     {activeRepairState.openSessionID && onOpenRepairSession && (
                       <Button
-                        size="sm"
+                        size="xs"
                         variant="outline"
                         onClick={() => onOpenRepairSession(activeRepairState.openSessionID!, activeRepairState.openThreadID ?? undefined)}
                       >
@@ -254,7 +255,7 @@ export function PRHealthBanner({
                     )}
                     {activeRepairState.isAutoRepair && activeRepairState.repairSessionID && onStopAutoRepair && (
                       <Button
-                        size="sm"
+                        size="xs"
                         variant="outline"
                         loading={stopAutoRepairPending}
                         onClick={() => onStopAutoRepair(activeRepairState.repairSessionID!, activeRepairState.openThreadID ?? undefined)}
@@ -264,12 +265,12 @@ export function PRHealthBanner({
                     )}
                   </div>
                 )}
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-stretch gap-2">
                   {canShowMergeButton && (
-                    <div className="inline-flex">
+                    <ButtonGroup size="xs">
                       <DisabledTooltip disabled={mergeAction.disabled} content={mergeAction.disabledReason}>
                         <Button
-                          size="sm"
+                          size="xs"
                           variant="default"
                           className={cn(canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
                           disabled={mergeAction.disabled}
@@ -288,9 +289,9 @@ export function PRHealthBanner({
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
-                              size="icon"
+                              size="icon-xs"
                               variant="default"
-                              className="h-7 w-7 rounded-l-none"
+                              className="rounded-l-none"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"
@@ -314,13 +315,13 @@ export function PRHealthBanner({
                           </DropdownMenuContent>
                         </DropdownMenu>
                       )}
-                    </div>
+                    </ButtonGroup>
                   )}
                   {canShowResolveConflictsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="xs">
                         <Button
-                          size="sm"
+                          size="xs"
                           variant="outline"
                           className={onResolveConflictsWithoutPushing ? "rounded-r-none" : undefined}
                           disabled={pendingAction !== null}
@@ -338,9 +339,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-xs"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More resolve conflicts actions"}
                                 aria-label="More resolve conflicts actions"
@@ -356,14 +357,14 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowFixTestsButton && (
                     <DisabledTooltip disabled={pendingAction !== null} content="Wait for the current PR action to finish">
-                      <span className="inline-flex">
+                      <ButtonGroup size="xs">
                         <Button
-                          size="sm"
+                          size="xs"
                           variant="outline"
                           className={onFixTestsWithoutPushing ? "rounded-r-none" : undefined}
                           disabled={pendingAction !== null}
@@ -381,9 +382,9 @@ export function PRHealthBanner({
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <Button
-                                size="icon"
+                                size="icon-xs"
                                 variant="outline"
-                                className="h-7 w-7 rounded-l-none border-l-0"
+                                className="rounded-l-none border-l-0"
                                 disabled={pendingAction !== null}
                                 title={pendingAction !== null ? "Wait for the current PR action to finish" : "More fix tests actions"}
                                 aria-label="More fix tests actions"
@@ -399,7 +400,7 @@ export function PRHealthBanner({
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </span>
+                      </ButtonGroup>
                     </DisabledTooltip>
                   )}
                   {canShowReviewAction && reviewAction && (
@@ -408,7 +409,7 @@ export function PRHealthBanner({
                       content={pendingAction !== null ? "Wait for the current PR action to finish" : reviewAction.title}
                     >
                       <Button
-                        size="sm"
+                        size="xs"
                         variant="outline"
                         disabled={reviewAction.disabled || pendingAction !== null}
                         title={pendingAction !== null ? "Wait for the current PR action to finish" : reviewAction.title}
@@ -429,7 +430,7 @@ export function PRHealthBanner({
                       content={pendingAction !== null ? "Wait for the current PR action to finish" : pushChanges.title}
                     >
                       <Button
-                        size="sm"
+                        size="xs"
                         variant="outline"
                         disabled={pushChanges.disabled || pendingAction !== null}
                         title={pendingAction !== null ? "Wait for the current PR action to finish" : pushChanges.title ?? "Push changes (p p)"}
@@ -475,9 +476,9 @@ export function PRHealthBanner({
                     {onQueueMergeWhenReady && (
                       <DisabledTooltip disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending} content={mergeWhenReadyAction.disabledReason}>
                         <Button
-                          size="sm"
+                          size="xs"
                           variant="ghost"
-                          className="h-6 w-fit shrink-0 px-2 text-xs"
+                          className="w-fit shrink-0"
                           onClick={onQueueMergeWhenReady}
                           disabled={mergeWhenReadyAction.disabled || mergeWhenReadyPending}
                           title={mergeWhenReadyAction.disabledReason}

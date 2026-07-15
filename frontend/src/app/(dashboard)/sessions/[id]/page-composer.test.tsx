@@ -812,11 +812,11 @@ describe('SessionDetailPage composer and session metadata', () => {
     await user.keyboard('{Shift>}{Tab}{/Shift}');
 
     // Plan mode should now be active
-    expect(screen.getByText('Plan Mode')).toBeInTheDocument();
+    expect(screen.getByText('Plan mode')).toBeInTheDocument();
 
     // Shift+Tab again should exit plan mode
     await user.keyboard('{Shift>}{Tab}{/Shift}');
-    expect(screen.queryByText('Plan Mode')).not.toBeInTheDocument();
+    expect(screen.queryByText('Plan mode')).not.toBeInTheDocument();
   });
 
   it('shows idle status badge', async () => {

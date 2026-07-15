@@ -308,7 +308,7 @@ export function ProjectSidebar() {
                       <div className="mt-1.5 flex items-center gap-2">
                         <div className="h-1 flex-1 overflow-hidden rounded-full bg-muted">
                           <div
-                            className="h-full rounded-full bg-[image:var(--gradient-primary)] transition-all"
+                            className="h-full rounded-full bg-primary transition-all"
                             style={{ width: `${pct}%` }}
                           />
                         </div>

@@ -39,7 +39,9 @@ var previewInstanceTestCols = []string{
 	"id", "session_id", "preview_target_id", "org_id", "user_id", "profile_name", "name", "status",
 	"provider", "worker_node_id", "preview_handle", "primary_service", "port",
 	"config_digest", "base_commit_sha", "last_accessed_at", "expires_at", "stopped_at",
-	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox", "current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
+	"last_path", "memory_limit_mb", "cpu_limit_millis", "disk_limit_mb", "recycle_config", "recycle_sandbox",
+	"peak_memory_bytes", "peak_memory_sampled_at", "peak_memory_phase",
+	"current_phase", "request_id", "error", "created_at", "updated_at", "recycled_at", "recycle_scheduled_at",
 	"source_workspace_revision", "source_workspace_revision_updated_at", "runtime_workspace_revision", "runtime_workspace_revision_updated_at", "runtime_workspace_revision_source", "unavailable_reason", "preview_holding_container",
 }
 
@@ -515,7 +517,9 @@ func newPreviewInstanceRow(id, sessionID, orgID, userID uuid.UUID, now time.Time
 		id, sessionID, nil, orgID, userID, "bootstrap", "my-preview", "starting",
 		"docker", "worker-1", "handle-abc", "web", 3000,
 		"sha256:abc", "deadbeef", now, now.Add(30 * time.Minute), nil,
-		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`), "reserved", previewStringPtr("req-1"), "", now, now, now, nil,
+		"/", 512, 500, 10240, []byte(`{"version":"3","name":"my-preview","primary":"web","services":{"web":{"command":["npm","start"],"port":3000,"ready":{"http_path":"/"}}},"credentials":{"mode":"none"},"network":{"mode":"restricted"}}`), []byte(`{"id":"sandbox-1","provider":"docker","work_dir":"/workspace","metadata":{"container_id":"abc"}}`),
+		int64(0), (*time.Time)(nil), "",
+		"reserved", previewStringPtr("req-1"), "", now, now, now, nil,
 		(*int64)(nil), (*time.Time)(nil), (*int64)(nil), (*time.Time)(nil), "",
 		"",
 		false,
@@ -878,6 +882,57 @@ func TestPreviewStore_CreatePreviewInstance(t *testing.T) {
 	require.Equal(t, models.PreviewRuntimeRevisionSourceLaunch, p.RuntimeWorkspaceRevisionSource)
 	require.Equal(t, now, p.CreatedAt)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPreviewStore_RecordPreviewResourceSample(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	store := NewPreviewStore(mock)
+	orgID := uuid.New()
+	previewID := uuid.New()
+	sampledAt := time.Now()
+	sample := &models.PreviewResourceSample{
+		OrgID:             orgID,
+		PreviewInstanceID: previewID,
+		WorkerNodeID:      "worker-1",
+		Phase:             "service_build",
+		MemoryBytes:       7 * 1024 * 1024 * 1024,
+		MemoryLimitBytes:  8 * 1024 * 1024 * 1024,
+		CPUCores:          1.25,
+		CPULimitMillis:    2000,
+		Processes:         json.RawMessage(`[{"pid":123,"rss_kib":4096,"command":"go"}]`),
+		SampledAt:         sampledAt,
+	}
+
+	mock.ExpectExec("WITH inserted AS").
+		WithArgs(previewAnyArgs(10)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.RecordPreviewResourceSample(context.Background(), orgID, sample)
+	require.NoError(t, err, "RecordPreviewResourceSample should insert the sample and update the preview peak")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPreviewStore_DeleteExpiredPreviewResourceSamples(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+
+	cutoff := time.Now().UTC()
+	mock.ExpectExec("WITH expired AS").
+		WithArgs(previewAnyArgs(2)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 42))
+
+	deleted, err := NewPreviewStore(mock).DeleteExpiredPreviewResourceSamples(context.Background(), cutoff, 500)
+	require.NoError(t, err, "DeleteExpiredPreviewResourceSamples should delete stale samples")
+	require.Equal(t, int64(42), deleted, "DeleteExpiredPreviewResourceSamples should return the deleted row count")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestPreviewStore_UpdatePreviewRuntimeWorkspaceRevision(t *testing.T) {

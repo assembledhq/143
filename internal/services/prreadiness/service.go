@@ -39,6 +39,8 @@ type EnqueueRunRequest struct {
 	OrgID             uuid.UUID
 	Session           models.Session
 	TriggeredByUserID *uuid.UUID
+	ChangesetID       *uuid.UUID
+	ChangesetHeadSHA  *string
 }
 
 func (s *Service) EnqueueRun(ctx context.Context, req EnqueueRunRequest) (*models.PRReadinessRun, error) {
@@ -59,7 +61,19 @@ func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context
 		return nil, uuid.Nil, fmt.Errorf("org_id and session_id are required")
 	}
 
-	existing, err := store.GetLatestBySession(ctx, req.OrgID, sessionID)
+	var existing *models.PRReadinessRun
+	var err error
+	if req.ChangesetID != nil {
+		if scoped, ok := store.(interface {
+			GetLatestByChangeset(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PRReadinessRun, error)
+		}); ok {
+			existing, err = scoped.GetLatestByChangeset(ctx, req.OrgID, sessionID, *req.ChangesetID)
+		} else {
+			existing, err = store.GetLatestBySession(ctx, req.OrgID, sessionID)
+		}
+	} else {
+		existing, err = store.GetLatestBySession(ctx, req.OrgID, sessionID)
+	}
 	if err == nil && existing != nil && isQueuedOrRunning(existing.Status) {
 		return existing, uuid.Nil, nil
 	}
@@ -76,6 +90,10 @@ func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context
 		Summary:                    "Queued",
 		TriggeredByUserID:          req.TriggeredByUserID,
 	}
+	if req.ChangesetID != nil {
+		run.ChangesetID = *req.ChangesetID
+		run.EvaluatedHeadSHA = req.ChangesetHeadSHA
+	}
 	if req.Session.SnapshotKey != nil && *req.Session.SnapshotKey != "" {
 		snapshotKey := *req.Session.SnapshotKey
 		run.EvaluatedSnapshotKey = &snapshotKey
@@ -89,7 +107,14 @@ func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context
 		"session_id":   sessionID.String(),
 		"readiness_id": run.ID.String(),
 	}
-	dedupeKey := DedupeKey(sessionID)
+	if run.ChangesetID != uuid.Nil {
+		payload["changeset_id"] = run.ChangesetID.String()
+	}
+	dedupeTarget := run.ChangesetID
+	if dedupeTarget == uuid.Nil {
+		dedupeTarget = sessionID
+	}
+	dedupeKey := DedupeKey(dedupeTarget)
 	jobID, err := enqueue(ctx, req.OrgID, runJobQueue, runJobType, payload, runJobPriority, &dedupeKey)
 	if err != nil {
 		return nil, uuid.Nil, err
@@ -97,8 +122,8 @@ func enqueueRunOn(ctx context.Context, store Store, enqueue func(context.Context
 	return run, jobID, nil
 }
 
-func DedupeKey(sessionID uuid.UUID) string {
-	return "pr_readiness:" + sessionID.String()
+func DedupeKey(changesetID uuid.UUID) string {
+	return "pr_readiness:" + changesetID.String()
 }
 
 func isQueuedOrRunning(status models.PRReadinessRunStatus) bool {

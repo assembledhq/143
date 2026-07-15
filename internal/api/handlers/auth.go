@@ -23,7 +23,6 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
-	"github.com/assembledhq/143/internal/demoseed"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/domains"
 	"github.com/assembledhq/143/internal/services/email"
@@ -150,16 +149,20 @@ func NewAuthHandler(
 //
 // When DemoMode is on, "github" is forced to false regardless of OAuth
 // configuration so the login page does not offer a button that would 500
-// against the stubbed GitHub client. "demo" tells the frontend to render
-// direct demo entry; demo credentials are never exposed.
+// against the stubbed GitHub client. "demo" tells the frontend to render the
+// seeded-credentials banner; demo_email/demo_password carry the banner text
+// so the server remains the single source of truth for preview credentials.
 func (h *AuthHandler) Providers(w http.ResponseWriter, r *http.Request) {
 	githubEnabled := h.cfg.GitHubOAuthClientID != "" && !h.cfg.DemoMode
 	data := map[string]any{
-		"github":         githubEnabled,
-		"google":         h.cfg.GoogleOAuthClientID != "",
-		"email":          !h.cfg.DemoMode,
-		"demo":           h.cfg.DemoMode,
-		"demo_read_only": h.cfg.DemoReadOnly,
+		"github": githubEnabled,
+		"google": h.cfg.GoogleOAuthClientID != "",
+		"email":  true,
+		"demo":   h.cfg.DemoMode,
+	}
+	if h.cfg.DemoMode {
+		data["demo_email"] = h.cfg.DemoEmail
+		data["demo_password"] = h.cfg.DemoPassword
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
 }
@@ -470,54 +473,6 @@ func (h *AuthHandler) EmailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.emitAuthEvent(r, &user, models.AuditActionAuthLogin)
-	h.createSessionAndRespond(w, r, &user)
-}
-
-// DemoLogin signs a visitor into the configured seeded demo viewer. It is
-// intentionally bodyless: public demos never expose or accept demo passwords.
-func (h *AuthHandler) DemoLogin(w http.ResponseWriter, r *http.Request) {
-	if h.cfg == nil || !h.cfg.DemoMode {
-		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "demo entry is not enabled")
-		return
-	}
-	if h.userStore == nil || h.memberships == nil {
-		writeError(w, r, http.StatusInternalServerError, "DEMO_ENTRY_UNCONFIGURED", "demo entry stores are not configured")
-		return
-	}
-
-	entryEmail := strings.TrimSpace(h.cfg.DemoEntryEmail)
-	if entryEmail == "" {
-		entryEmail = demoseed.DemoViewerEmail
-	}
-
-	user, err := h.userStore.GetByEmail(r.Context(), entryEmail)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "DEMO_ENTRY_USER_NOT_FOUND", "demo entry user is not seeded", err)
-		return
-	}
-
-	demoOrgID, err := uuid.Parse(demoseed.DemoOrgID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "DEMO_ENTRY_INVALID_ORG", "demo organization is misconfigured", err)
-		return
-	}
-	membership, err := h.memberships.Get(r.Context(), user.ID, demoOrgID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "DEMO_ENTRY_MEMBERSHIP_NOT_FOUND", "demo entry user is not a member of the demo organization", err)
-		return
-	}
-	if membership.Role != models.RoleViewer {
-		writeError(w, r, http.StatusForbidden, "DEMO_ENTRY_REQUIRES_VIEWER", "demo entry is limited to the seeded viewer user")
-		return
-	}
-	if user.PasswordHash != nil {
-		writeError(w, r, http.StatusForbidden, "DEMO_ENTRY_REQUIRES_PASSWORDLESS", "demo entry user must be passwordless")
-		return
-	}
-
-	user.OrgID = demoOrgID
-	user.Role = membership.Role
 	h.emitAuthEvent(r, &user, models.AuditActionAuthLogin)
 	h.createSessionAndRespond(w, r, &user)
 }

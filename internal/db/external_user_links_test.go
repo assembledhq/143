@@ -41,6 +41,28 @@ func TestExternalUserLinkStore_GetActiveByExternal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestExternalUserLinkStore_CreateClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	claimID := uuid.New()
+	now := time.Now().UTC()
+	expiresAt := now.Add(30 * time.Minute)
+	tokenHash := []byte("hashed-token")
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock")
+	defer mock.Close()
+	mock.ExpectQuery(`INSERT INTO external_user_link_claims \([\s\S]*org_id, provider, provider_workspace_id, provider_user_id[\s\S]*RETURNING`).
+		WithArgs(orgID, models.ExternalIdentityProviderSlack, "T123", "U123", tokenHash, []byte(`{"surface":"slack"}`), expiresAt).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "provider", "provider_workspace_id", "provider_user_id", "source_context", "expires_at", "claimed_by_user_id", "claimed_at", "created_at"}).
+			AddRow(claimID, orgID, models.ExternalIdentityProviderSlack, "T123", "U123", []byte(`{"surface":"slack"}`), expiresAt, nil, nil, now))
+	store := NewExternalUserLinkStore(mock)
+	claim, err := store.CreateClaim(context.Background(), models.ExternalUserLinkClaim{OrgID: orgID, Provider: models.ExternalIdentityProviderSlack, ProviderWorkspaceID: "T123", ProviderUserID: "U123", SourceContext: []byte(`{"surface":"slack"}`), ExpiresAt: expiresAt}, tokenHash)
+	require.NoError(t, err, "CreateClaim should persist an org-scoped hashed claim")
+	require.Equal(t, claimID, claim.ID, "CreateClaim should return the persisted claim")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestExternalUserLinkStore_UpsertEmailMatchDoesNotOverwriteTrustedLinks(t *testing.T) {
 	t.Parallel()
 

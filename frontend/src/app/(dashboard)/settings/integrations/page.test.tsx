@@ -1173,12 +1173,12 @@ describe("IntegrationsPage", () => {
     await user.click(await screen.findByRole("button", { name: "Manage Slack" }));
     const sheet = await screen.findByRole("dialog", { name: "Slack" });
 
-    await user.click(await within(sheet).findByLabelText("Session failed"));
+    await user.click(await within(sheet).findByLabelText("Human input requested"));
 
     await waitFor(() => {
       expect(updateSlackSettingsMock).toHaveBeenCalledWith({
         notification_preset: "custom",
-        notification_subscriptions: { events: ["session.failed"], automations: [], slack_user_ids: [] },
+        notification_subscriptions: { events: ["human_input.requested"], automations: [], slack_user_ids: [] },
       });
     });
   });

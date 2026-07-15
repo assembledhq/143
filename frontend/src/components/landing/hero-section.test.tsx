@@ -26,4 +26,14 @@ describe("HeroSection", () => {
       "/login?tab=signup",
     );
   });
+
+  it("preserves the plane-led homepage content while applying the flight-blue visual system", () => {
+    render(<HeroSection isDark={false} />);
+
+    expect(screen.getByTestId("hero-canvas")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Where your whole team builds software together" })).toBeInTheDocument();
+    expect(screen.getByText(/Run Codex, Claude Code, and OpenCode in an open-source cloud/)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /get started/i })).toHaveClass("bg-[#315ce8]");
+    expect(screen.queryByText(/mission control/i)).not.toBeInTheDocument();
+  });
 });

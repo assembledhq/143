@@ -15,6 +15,7 @@ func TestSessionAttributionSourceValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "slack is valid", source: SessionAttributionSourceSlack},
+		{name: "linear is valid", source: SessionAttributionSourceLinear},
 		{name: "external api is valid", source: SessionAttributionSourceExternalAPI},
 		{name: "unknown is invalid", source: SessionAttributionSource("email"), expectErr: true},
 	}

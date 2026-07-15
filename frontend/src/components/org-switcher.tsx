@@ -304,9 +304,6 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
   );
 
   const orgLabel = activeMembership?.org_name ?? "Workspace";
-  // Index by code points, not UTF-16 code units: "🏢 Acme"[0] is a lone high
-  // surrogate that renders as a replacement char. Array.from splits correctly.
-  const initial = Array.from(orgLabel)[0]?.toUpperCase() ?? "?";
 
   // Sync nowMs with real time whenever new pending-invites data arrives.
   // This is the "update React state from an external source" shape the
@@ -375,8 +372,8 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
           data-testid="org-switcher"
           aria-label={`Switch organization${ariaPendingSuffix}`}
         >
-          <div className="relative flex h-5 w-5 items-center justify-center rounded bg-foreground text-background text-xs font-semibold shrink-0">
-            {initial}
+          <div className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-foreground font-display text-xs font-semibold tracking-[-0.04em] text-background">
+            143
             {visiblePendingCount > 0 && (
               <span
                 // bg-primary rather than bg-foreground: the avatar is already
@@ -389,7 +386,7 @@ export function OrgSwitcher({ userEmail }: OrgSwitcherProps) {
               />
             )}
           </div>
-          <span className="text-sm font-semibold text-sidebar-foreground truncate flex-1 text-left">
+          <span className="font-display text-sm font-semibold tracking-[-0.02em] text-sidebar-foreground truncate flex-1 text-left">
             {orgLabel}
           </span>
           <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 opacity-40" />

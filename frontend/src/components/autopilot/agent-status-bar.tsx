@@ -49,7 +49,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
     <div
       className={`flex items-center gap-3 rounded-lg border px-4 py-2.5 transition-colors ${
         isRunning
-          ? "border-primary/20 bg-primary/5 dark:border-primary/30 dark:bg-primary/10 dark:shadow-[0_0_20px_oklch(0.6_0.15_270_/_8%)]"
+          ? "border-primary/25 bg-primary/5 dark:border-primary/30 dark:bg-primary/10"
           : "border-border bg-muted/30"
       }`}
     >
@@ -62,7 +62,7 @@ export function AgentStatusBar({ label, pmStatus, agentStatus, children }: Agent
       <span className="text-xs font-medium text-foreground">{label}</span>
 
       <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
-        isRunning ? "bg-primary/10 text-primary shadow-[var(--glow-primary-sm)]"
+        isRunning ? "bg-primary/10 text-primary"
         : agentStatus === "completed" ? "bg-success/10 text-success"
         : agentStatus === "failed" ? "bg-destructive/10 text-destructive"
         : "bg-muted text-muted-foreground"

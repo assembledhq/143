@@ -60,6 +60,10 @@ type PreviewCachePrewarmProvider interface {
 	PrewarmPreviewInstallCaches(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) error
 }
 
+type PreviewBuildSnapshotPrewarmProvider interface {
+	PrewarmPreviewBuildSnapshot(ctx context.Context, sb *agent.Sandbox, cfg *models.PreviewConfig, opts StartPreviewOptions, observer ServiceObserver) error
+}
+
 // PreviewSoftRestartProvider restarts application services in an existing
 // preview without reprovisioning infrastructure or rerunning install/build
 // phases. Providers that cannot do this should omit the interface; callers

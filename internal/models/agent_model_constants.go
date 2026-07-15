@@ -86,7 +86,7 @@ const (
 	CodexModelGPT53CodexSpark = "gpt-5.3-codex-spark"
 )
 
-const DefaultCodexModel = CodexModelGPT55
+const DefaultCodexModel = CodexModelGPT56Sol
 
 var AvailableCodexModels = []string{
 	CodexModelGPT56Sol,

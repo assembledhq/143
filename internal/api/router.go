@@ -99,6 +99,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	slackSessionLinkStore := db.NewSlackSessionLinkStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
+	sessionChangesetStore := db.NewSessionChangesetStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 	pagerDutyIntegrationStore := db.NewPagerDutyIntegrationStore(pool)
@@ -138,6 +139,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	evalReleaseGateStore := db.NewEvalReleaseGateStore(pool)
 	sessionReviewCommentStore := db.NewSessionReviewCommentStore(pool)
 	previewStore := db.NewPreviewStore(pool)
+	previewBrowserSessionStore := db.NewPreviewBrowserSessionStore(pool)
 	previewAPITokenStore := db.NewPreviewAPITokenStore(pool)
 	apiClientStore := db.NewAPIClientStore(pool)
 	apiTokenStore := db.NewAPITokenStore(pool)
@@ -186,6 +188,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
 			)
+			prService.SetChangesetStore(sessionChangesetStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -206,7 +209,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		healthHandler.SetRedisHealthCheck(redisClient.Healthy)
 	}
 	authHandler := handlers.NewAuthHandler(cfg, pool, userStore, authSessionStore, invitationStore, membershipStore)
-	demoHandler := handlers.NewDemoHandler(cfg)
 	// CLI login flow stores (browser-based `143-tools login`, join-token JIT).
 	cliAuthCodeStore := db.NewCLIAuthCodeStore(pool)
 	userCLITokenStore := db.NewUserCLITokenStore(pool)
@@ -383,6 +385,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		llmClient,
 		logger,
 	)
+	sessionHandler.SetChangesetStore(sessionChangesetStore)
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
@@ -518,6 +521,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	transcriptStore := db.NewSessionTranscriptStore(pool)
 	threadSvc.SetTranscriptStore(transcriptStore)
 	sessionThreadHandler := handlers.NewSessionThreadHandler(threadSvc)
+	sessionThreadHandler.SetChangesetStore(sessionChangesetStore)
 	sessionThreadHandler.SetAuditEmitter(auditEmitter)
 	sessionThreadHandler.SetLogger(logger)
 	// Mirror sessionHandler.SetLinearLinker so Linear refs typed into a
@@ -903,6 +907,12 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	}
 
 	previewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, sandboxProvider, snapshotStore, logger)
+	previewVerificationHandler := handlers.NewPreviewVerificationHandler(db.NewPreviewVerificationRunStore(pool))
+	var browserInspector preview.SessionBrowserInspector
+	if resolved, ok := previewInspector.(preview.SessionBrowserInspector); ok {
+		browserInspector = resolved
+	}
+	previewHandler.SetBrowserSessionService(preview.NewBrowserSessionService(previewBrowserSessionStore, browserInspector))
 	branchPreviewHandler := handlers.NewBranchPreviewHandler(previewStore, repoStore, prService, previewManager, cfg.FrontendURL, cfg.PreviewOriginTemplate)
 	previewHandler.SetAuditEmitter(auditEmitter)
 	branchPreviewHandler.SetAuditEmitter(auditEmitter)
@@ -970,6 +980,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		r.Post("/internal/preview/{previewID}/soft-restart", internalPreviewHandler.SoftRestartPreview)
 		r.Post("/internal/preview/{previewID}/recycle", internalPreviewHandler.RecyclePreview)
 		r.Post("/internal/preview/{previewID}/screenshot", internalPreviewHandler.CaptureScreenshot)
+		r.Post("/internal/preview/{previewID}/observe", internalPreviewHandler.Observe)
+		r.Post("/internal/preview/{previewID}/act", internalPreviewHandler.Act)
+		r.Post("/internal/preview/{previewID}/human-act", internalPreviewHandler.HumanAct)
 		r.Post("/internal/preview/{previewID}/inspect", internalPreviewHandler.InspectElement)
 		r.Get("/internal/preview/{previewID}/console", internalPreviewHandler.ReadConsole)
 		r.Post("/internal/preview/{previewID}/interact", internalPreviewHandler.ExecuteInteraction)
@@ -985,7 +998,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		uploadAPIPath: uploadMaxRequestBodyBytes,
 	})) // 1MB default request body limit; uploads allow a 10MB file plus multipart overhead.
 	apiRoutes.Use(middleware.RateLimit(middleware.DefaultRateLimitConfig()))
-	apiRoutes.Use(middleware.DemoReadOnly(cfg.DemoReadOnly))
 
 	apiRoutes.Group(func(r chi.Router) {
 		// CLI distribution routes (no auth — fetched by `curl | sh` and the
@@ -1011,6 +1023,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// Internal API routes (token-based auth — called by sandbox agents)
 		internalIssueHandler := handlers.NewInternalIssueHandler(issueStore, sessionStore, jobStore, orgStore, cfg.SessionSecret, logger)
 		internalPullRequestHandler := handlers.NewInternalPullRequestHandler(sessionStore, pullRequestStore, jobStore, cfg.SessionSecret, logger)
+		internalPullRequestHandler.SetChangesetStore(sessionChangesetStore)
 		internalProjectHandler := handlers.NewInternalProjectHandler(pool, projectStore, projectTaskStore, repoStore, cfg.SessionSecret, logger)
 		internalSessionTabsHandler := handlers.NewInternalSessionTabsHandler(threadSvc, sessionStore, orgStore, cfg.SessionSecret, logger)
 		internalAutomationHandler := handlers.NewInternalAutomationHandler(automationHandler, sessionStore, automationStore, cfg.SessionSecret)
@@ -1018,11 +1031,40 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalEvalHandler := handlers.NewInternalEvalHandler(evalBootstrapStore, sessionStore, cfg.SessionSecret, logger)
 		internalAutomationGoalImprovementHandler := handlers.NewInternalAutomationGoalImprovementHandler(automationGoalImprovementService, sessionStore, cfg.SessionSecret, logger)
 		internalAgentCapabilitiesHandler := handlers.NewInternalAgentCapabilitiesHandler(agentCapabilitySvc, sessionStore, cfg.SessionSecret)
+		internalAgentPreviewHandler := handlers.NewInternalAgentPreviewHandler(previewHandler, sessionStore, cfg.SessionSecret, logger)
 		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
+		internalChangesetHandler := handlers.NewInternalChangesetHandler(sessionStore, sessionHandler, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
+			r.Get("/sessions/{id}/preview", internalAgentPreviewHandler.Status)
+			r.Post("/sessions/{id}/preview/ensure", internalAgentPreviewHandler.Ensure)
+			r.Post("/sessions/{id}/preview/update", internalAgentPreviewHandler.Update)
+			r.Post("/sessions/{id}/preview/restart", internalAgentPreviewHandler.Restart)
+			r.Delete("/sessions/{id}/preview", internalAgentPreviewHandler.Stop)
+			r.Post("/sessions/{id}/preview/observe", internalAgentPreviewHandler.Observe)
+			r.Post("/sessions/{id}/preview/act", internalAgentPreviewHandler.Act)
+			r.Get("/sessions/{id}/preview/control", internalAgentPreviewHandler.BrowserControl)
+			r.Post("/sessions/{id}/preview/control/request-handoff", internalAgentPreviewHandler.RequestHumanHandoff)
+			r.Post("/sessions/{id}/preview/screenshot", internalAgentPreviewHandler.Screenshot)
+			r.Get("/sessions/{id}/preview/console", internalAgentPreviewHandler.Console)
+			r.Post("/sessions/{id}/preview/inspect", internalAgentPreviewHandler.Inspect)
+			r.Post("/sessions/{id}/preview/interact", internalAgentPreviewHandler.Interact)
+			r.Post("/sessions/{id}/preview/multi-viewport", internalAgentPreviewHandler.MultiViewport)
+			r.Post("/sessions/{id}/preview/visual-diff", internalAgentPreviewHandler.VisualDiff)
+			r.Post("/sessions/{id}/preview/assert", internalAgentPreviewHandler.Assert)
 			r.Post("/issues", internalIssueHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
+			r.Get("/sessions/{id}/changesets", internalChangesetHandler.List)
+			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)
+			r.Post("/sessions/{id}/changesets", internalChangesetHandler.Create)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/materialize", internalChangesetHandler.Materialize)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/publish", internalChangesetHandler.Publish)
+			r.Post("/sessions/{id}/changesets/publish-stack", internalChangesetHandler.PublishStack)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/restack-descendants", internalChangesetHandler.Restack)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/import-remote", internalChangesetHandler.ImportRemote)
+			r.Post("/sessions/{id}/changesets/{changeset_id}/confirm-restack", internalChangesetHandler.ConfirmRestack)
+			r.Post("/sessions/{id}/changesets/verify", internalChangesetHandler.Verify)
+			r.Get("/sessions/{id}/changesets/diff", internalChangesetHandler.Diff)
 			r.Post("/slack/messages", internalSlackMessageHandler.Send)
 			r.Post("/projects/propose", internalProjectHandler.Propose)
 			r.Post("/automations", internalAutomationHandler.Create)
@@ -1076,7 +1118,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/api/v1/auth/google/callback", authHandler.GoogleCallback)
 			r.Post("/api/v1/auth/register", authHandler.Register)
 			r.Post("/api/v1/auth/login", authHandler.EmailLogin)
-			r.With(middleware.DemoEntryRateLimit(10)).Post("/api/v1/auth/demo", authHandler.DemoLogin)
 			// Public: the verification link may be opened on a device with
 			// no session; the single-use token is the credential. Shares the
 			// claim endpoints' rate limit — same token-guessing surface.
@@ -1127,7 +1168,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			// `143-tools logout` must work for them.
 			r.Get("/api/v1/auth/cli-tokens", authHandler.ListCLITokens)
 			r.Delete("/api/v1/auth/cli-tokens/{id}", authHandler.RevokeCLIToken)
-			r.Get("/api/v1/demo/manifest", demoHandler.Manifest)
 			// GitHub App setup callbacks are validated against a signed setup
 			// intent inside the handler. Keep them outside OrgContext so a
 			// stale active org in another tab cannot block linking to the
@@ -1232,6 +1272,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions", sessionHandler.List)
 				r.Get("/api/v1/sessions/counts", sessionHandler.Counts)
 				r.Get("/api/v1/sessions/{id}", sessionHandler.Get)
+				r.Get("/api/v1/sessions/{id}/changesets", sessionHandler.ListChangesets)
+				r.Get("/api/v1/sessions/{id}/changesets/split-status", sessionHandler.GetChangesetSplitStatus)
 				r.Get("/api/v1/sessions/{id}/diff", sessionHandler.GetDiff)
 				r.Patch("/api/v1/sessions/{id}", sessionHandler.Update)
 				r.Get("/api/v1/sessions/{id}/logs", sessionHandler.GetLogs)
@@ -1269,7 +1311,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/sessions/{id}/preview/logs", previewHandler.GetLogs)
 				r.Get("/api/v1/sessions/{id}/preview/services", previewHandler.GetServices)
 				r.Get("/api/v1/sessions/{id}/preview/console", previewHandler.ReadConsole)
+				r.Post("/api/v1/sessions/{id}/preview/watch", previewHandler.WatchBrowser)
+				r.Get("/api/v1/sessions/{id}/preview/control", previewHandler.GetBrowserControl)
 				r.Get("/api/v1/sessions/{id}/preview/snapshots", previewHandler.GetSnapshots)
+				r.Get("/api/v1/sessions/{id}/preview/verifications", previewVerificationHandler.ListBySession)
 				r.Get("/api/v1/previews/{preview_id}/console", previewHandler.ReadConsole)
 				r.Get("/api/v1/previews/{preview_id}/services", previewHandler.GetServices)
 				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)
@@ -1399,6 +1444,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/answer", sessionHandler.AnswerHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/human-input-requests/{request_id}/cancel", sessionHandler.CancelHumanInputRequest)
 				r.Post("/api/v1/sessions/{id}/messages", sessionHandler.SendMessage)
+				r.Post("/api/v1/sessions/{id}/title/regenerate", sessionHandler.RegenerateTitle)
 				r.Post("/api/v1/sessions/{id}/end", sessionHandler.EndSession)
 				r.Post("/api/v1/sessions/{id}/retry", sessionHandler.RetrySession)
 				r.Post("/api/v1/sessions/{id}/cancel", sessionHandler.CancelSession)
@@ -1440,12 +1486,20 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/preview/bootstrap", previewHandler.MintBootstrapToken)
 				r.Patch("/api/v1/sessions/{id}/preview/lifetime", previewHandler.SetLifetime)
 				r.Post("/api/v1/sessions/{id}/preview/screenshot", previewHandler.CaptureScreenshot)
+				r.Post("/api/v1/sessions/{id}/preview/observe", previewHandler.Observe)
+				r.Post("/api/v1/sessions/{id}/preview/act", previewHandler.Act)
+				r.Post("/api/v1/sessions/{id}/preview/control/acquire", previewHandler.AcquireHumanControl)
+				r.Post("/api/v1/sessions/{id}/preview/control/return", previewHandler.ReturnAgentControl)
+				r.Post("/api/v1/sessions/{id}/preview/control/request-handoff", previewHandler.RequestHumanHandoff)
+				r.Post("/api/v1/sessions/{id}/preview/control/act", previewHandler.HumanAct)
 				r.Post("/api/v1/sessions/{id}/preview/inspect", previewHandler.InspectElement)
 				r.Post("/api/v1/sessions/{id}/preview/interact", previewHandler.ExecuteInteraction)
 				r.Post("/api/v1/sessions/{id}/preview/multi-viewport", previewHandler.CaptureMultiViewport)
 				r.Post("/api/v1/sessions/{id}/preview/visual-diff", previewHandler.ComputeVisualDiff)
 				r.Post("/api/v1/sessions/{id}/preview/assert", previewHandler.RunAssertions)
 				r.Post("/api/v1/previews/{preview_id}/screenshot", previewHandler.CaptureScreenshot)
+				r.Post("/api/v1/previews/{preview_id}/observe", previewHandler.Observe)
+				r.Post("/api/v1/previews/{preview_id}/act", previewHandler.Act)
 				r.Post("/api/v1/previews/{preview_id}/inspect", previewHandler.InspectElement)
 				r.Post("/api/v1/previews/{preview_id}/interact", previewHandler.ExecuteInteraction)
 				r.Post("/api/v1/previews/{preview_id}/multi-viewport", previewHandler.CaptureMultiViewport)
@@ -1465,6 +1519,21 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
 
 				r.Post("/api/v1/sessions/{id}/pr", sessionHandler.CreatePR)
+				r.Post("/api/v1/sessions/{id}/changesets", sessionHandler.CreateChangeset)
+				r.Post("/api/v1/sessions/{id}/changesets/split", sessionHandler.InitializeChangesetSplit)
+				r.Patch("/api/v1/sessions/{id}/changesets/{changeset_id}", sessionHandler.UpdateChangeset)
+				r.Put("/api/v1/sessions/{id}/changesets/{changeset_id}/split-paths", sessionHandler.ReplaceChangesetSplitPaths)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/materialize", sessionHandler.MaterializeChangeset)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/publish", sessionHandler.PublishChangeset)
+				r.Post("/api/v1/sessions/{id}/changesets/publish-stack", sessionHandler.PublishChangesetStack)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/restack-descendants", sessionHandler.RestackChangesetDescendants)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/import-remote", sessionHandler.ImportChangesetRemote)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/confirm-restack", sessionHandler.ConfirmChangesetRestack)
+				r.Post("/api/v1/sessions/{id}/changesets/verify", sessionHandler.VerifyChangesetSplit)
+				r.Put("/api/v1/sessions/{id}/changesets/split-omissions", sessionHandler.ReplaceChangesetSplitOmissions)
+				r.Post("/api/v1/sessions/{id}/changesets/accept-split", sessionHandler.AcceptChangesetSplit)
+				r.Put("/api/v1/sessions/{id}/changesets/order", sessionHandler.ReorderChangesets)
+				r.Post("/api/v1/sessions/{id}/changesets/{changeset_id}/fold", sessionHandler.FoldChangeset)
 				r.Post("/api/v1/sessions/{id}/branch", sessionHandler.CreateBranch)
 				r.Post("/api/v1/sessions/{id}/pr/push", sessionHandler.PushChangesToPR)
 			})
@@ -1662,6 +1731,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/integrations/external-user-links", integrationHandler.CreateExternalUserLink)
 				r.Delete("/api/v1/integrations/external-user-links/{id}", integrationHandler.DeleteExternalUserLink)
 				r.Get("/api/v1/integrations/external-user-link-suggestions", integrationHandler.ListExternalUserLinkSuggestions)
+				r.Get("/api/v1/integrations/external-unmapped-users", integrationHandler.ListUnmappedExternalUsers)
 				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/approve", integrationHandler.ApproveExternalUserLinkSuggestion)
 				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/dismiss", integrationHandler.DismissExternalUserLinkSuggestion)
 

@@ -116,25 +116,6 @@ type ReviewContext struct {
 	BlockingHumanReviews   int
 }
 
-type CommitStatusState string
-
-const (
-	CommitStatusStateError   CommitStatusState = "error"
-	CommitStatusStateFailure CommitStatusState = "failure"
-	CommitStatusStatePending CommitStatusState = "pending"
-	CommitStatusStateSuccess CommitStatusState = "success"
-)
-
-type CommitStatusRequest struct {
-	InstallationID int64
-	Repository     string
-	SHA            string
-	State          CommitStatusState
-	Context        string
-	Description    string
-	TargetURL      string
-}
-
 type RequestedReviewersRequest struct {
 	InstallationID int64
 	Repository     string
@@ -588,59 +569,6 @@ func loginInSet(login string, set map[string]struct{}) bool {
 	return ok
 }
 
-func (s *GitHubSubmitter) PublishCommitStatus(ctx context.Context, req CommitStatusRequest) error {
-	if s == nil || s.tokens == nil {
-		return fmt.Errorf("github submitter is not configured")
-	}
-	owner, repo, ok := strings.Cut(req.Repository, "/")
-	if !ok || owner == "" || repo == "" {
-		return fmt.Errorf("repository must be owner/name")
-	}
-	if req.InstallationID <= 0 {
-		return fmt.Errorf("installation id is required")
-	}
-	if strings.TrimSpace(req.SHA) == "" {
-		return fmt.Errorf("sha is required")
-	}
-	if err := req.State.validate(); err != nil {
-		return err
-	}
-	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
-	if err != nil {
-		return fmt.Errorf("get installation token: %w", err)
-	}
-	payload := map[string]any{
-		"state":       req.State,
-		"context":     firstNonEmpty(req.Context, "143 Code Reviewer"),
-		"description": req.Description,
-	}
-	if strings.TrimSpace(req.TargetURL) != "" {
-		payload["target_url"] = req.TargetURL
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal commit status payload: %w", err)
-	}
-	statusURL := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(req.SHA))
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, statusURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("create commit status request: %w", err)
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-	httpReq.Header.Set("Accept", "application/vnd.github+json")
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := s.client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("publish GitHub commit status: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("publish GitHub commit status returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
-	}
-	return nil
-}
-
 func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req RequestedReviewersRequest) error {
 	if s == nil || s.tokens == nil {
 		return fmt.Errorf("github submitter is not configured")
@@ -664,9 +592,8 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
 	}
-	payload := map[string]any{}
-	if len(reviewers) > 0 {
-		payload["reviewers"] = reviewers
+	payload := map[string]any{
+		"reviewers": reviewers,
 	}
 	if len(teams) > 0 {
 		payload["team_reviewers"] = teams
@@ -946,15 +873,6 @@ func (d SubmitReviewDecision) validate() error {
 		return nil
 	default:
 		return fmt.Errorf("invalid submit review decision: %q", d)
-	}
-}
-
-func (s CommitStatusState) validate() error {
-	switch s {
-	case CommitStatusStateError, CommitStatusStateFailure, CommitStatusStatePending, CommitStatusStateSuccess:
-		return nil
-	default:
-		return fmt.Errorf("invalid commit status state: %q", s)
 	}
 }
 

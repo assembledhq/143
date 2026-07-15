@@ -45,10 +45,10 @@
 	}
 }
 
-# Preview gateway responses can reflect a single preview, worker, or sandbox
-# becoming unavailable. Do not apply passive 5xx health marking here: the
-# wildcard route has one API gateway upstream, so poisoning it turns one
-# preview failure into a short wildcard-preview outage.
+# Preview data-plane responses can reflect a single preview, worker, or sandbox
+# becoming unavailable. Do not apply passive 5xx health marking to those
+# routes: poisoning the shared API gateway turns one preview failure into a
+# short wildcard-preview or main-app outage.
 (preview_gateway_upstream_defaults) {
 	lb_try_duration 10s
 	lb_try_interval 250ms
@@ -110,6 +110,36 @@ www.{$DOMAIN:143.dev} {
 	# handler with lb_retries 0 and rely on active/passive health checks
 	# alone to keep bad upstreams out of rotation.
 	@safe method GET HEAD OPTIONS
+	@preview_data_plane path /api/v1/sessions/*/preview /api/v1/sessions/*/preview/* /api/v1/previews /api/v1/previews/*
+
+	# Preview endpoints can proxy worker-owned browsers and sandbox runtimes. A
+	# worker timeout may legitimately fail one request; it must not passively
+	# quarantine the shared API upstream and fan out to the rest of the app.
+	# Active /healthz checks still remove an API container that is actually down.
+	handle @preview_data_plane {
+		handle @safe {
+			reverse_proxy {
+				dynamic a {
+					name api
+					port 8080
+					refresh 2s
+				}
+				lb_retries 5
+				import preview_gateway_upstream_defaults
+			}
+		}
+		handle {
+			reverse_proxy {
+				dynamic a {
+					name api
+					port 8080
+					refresh 2s
+				}
+				lb_retries 0
+				import preview_gateway_upstream_defaults
+			}
+		}
+	}
 
 	handle /api/* {
 		handle @safe {

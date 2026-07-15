@@ -25,8 +25,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("FRONTEND_URL", "")
 	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 	t.Setenv("MODE", "")
-	t.Setenv("DEMO_READ_ONLY", "")
-	t.Setenv("DEMO_ENTRY_EMAIL", "")
+	t.Setenv("DEMO_EMAIL", "")
+	t.Setenv("DEMO_PASSWORD", "")
 	t.Setenv("SANDBOX_HEALTH_CHECK_IMAGE", "")
 	t.Setenv("PREVIEW_DEPENDENCY_CACHE_LOCAL_DIR", "")
 	t.Setenv("PREVIEW_PACKAGE_MANAGER_CACHE_ENABLED", "")
@@ -53,8 +53,8 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, []string{"http://localhost:8080"}, cfg.CORSAllowedOrigins, "CORS origins should default to FrontendURL")
 	require.Equal(t, int64(0), cfg.GitHubAppID, "Load should default GitHub app ID to zero")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
-	require.False(t, cfg.DemoReadOnly, "Load should default demo read-only off")
-	require.Equal(t, defaultDemoEntryEmail, cfg.DemoEntryEmail, "Load should default demo entry to seeded viewer")
+	require.Equal(t, defaultDemoEmail, cfg.DemoEmail, "Load should default demo email to seeded admin")
+	require.Equal(t, defaultDemoPassword, cfg.DemoPassword, "Load should default demo password to seeded preview password")
 	require.Equal(t, 2, cfg.WorkerProcessCount, "Load should default worker process count to 2")
 	require.Equal(t, 0, cfg.WorkerMaxActiveSandboxes, "Load should default worker max active sandboxes to derived mode")
 	require.Equal(t, 2*time.Hour, cfg.WorkerPreviewDrainTimeout, "Load should default worker preview drain timeout to two hours")
@@ -587,6 +587,66 @@ func TestLogStatus_DemoModeWarns(t *testing.T) {
 	cfg.LogStatus(logger)
 
 	require.Contains(t, buf.String(), "DEMO_MODE is enabled", "LogStatus should warn when DemoMode is set")
+}
+
+func TestLogStatus_DemoCredentialOverrideWarns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cfg      Config
+		wantWarn bool
+	}{
+		{
+			name: "default credentials do not warn",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: false,
+		},
+		{
+			name: "overridden email warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      "other@143.dev",
+				DemoPassword:   defaultDemoPassword,
+			},
+			wantWarn: true,
+		},
+		{
+			name: "overridden password warns",
+			cfg: Config{
+				SessionSecret:  "s",
+				CSRFSigningKey: "c",
+				DemoMode:       true,
+				DemoEmail:      defaultDemoEmail,
+				DemoPassword:   "different",
+			},
+			wantWarn: true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var buf bytes.Buffer
+			tc.cfg.LogStatus(zerolog.New(&buf))
+
+			if tc.wantWarn {
+				require.Contains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden", "LogStatus should warn about mismatched seeded credentials")
+			} else {
+				require.NotContains(t, buf.String(), "DEMO_EMAIL or DEMO_PASSWORD overridden", "LogStatus should not warn when seeded credentials match defaults")
+			}
+		})
+	}
 }
 
 // TestLogStatus_DemoSuppressesGitHubApp covers the boot-time warning emitted

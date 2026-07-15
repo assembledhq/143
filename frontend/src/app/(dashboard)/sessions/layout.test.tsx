@@ -1,6 +1,6 @@
 import React from "react";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, renderWithProviders, screen, waitFor } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen } from "@/test/test-utils";
 import SessionsLayout from "./layout";
 
 const sidebarLayoutMock = vi.fn(
@@ -173,7 +173,7 @@ describe("SessionsLayout", () => {
     expect(screen.queryByText("Legacy child content")).not.toBeInTheDocument();
   });
 
-  it("redirects viewers away from create-session content", async () => {
+  it("shows a viewer permission empty state instead of create-session content", () => {
     mockAuthUser.value = { role: "viewer" };
     mockPathname = "/sessions/new";
     mockSelectedSegment = "new";
@@ -185,11 +185,10 @@ describe("SessionsLayout", () => {
       </SessionsLayout>,
     );
 
-    expect(screen.getByText("Choose a seeded session")).toBeInTheDocument();
+    expect(screen.getByText("Choose a session")).toBeInTheDocument();
+    expect(screen.getByText("Viewer accounts can inspect existing sessions but cannot create new ones.")).toBeInTheDocument();
     expect(screen.queryByTestId("manual-session-create-page")).not.toBeInTheDocument();
-    await waitFor(() => {
-      expect(mockRouterReplace).toHaveBeenCalledWith("/demo");
-    });
+    expect(mockRouterReplace).not.toHaveBeenCalled();
   });
 
   it("owns the create-session content on the /sessions/new route", () => {

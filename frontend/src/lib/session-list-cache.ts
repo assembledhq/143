@@ -16,12 +16,19 @@ function isArchivedListKey(key: QueryKey): boolean {
 }
 
 function mergeSessionListItem(existing: SessionListItem, updated: SessionDetail): SessionListItem {
+  const {
+    changesets,
+    threads,
+    ...updatedListFields
+  } = updated;
+  void [changesets, threads];
+
   return {
     ...existing,
-    ...updated,
-    last_viewed_at: existing.last_viewed_at,
-    pr_summary: existing.pr_summary,
-    threads: existing.threads,
+    ...updatedListFields,
+    ...(Object.hasOwn(existing, "last_viewed_at") ? { last_viewed_at: existing.last_viewed_at } : {}),
+    ...(Object.hasOwn(existing, "pr_summary") ? { pr_summary: existing.pr_summary } : {}),
+    ...(Object.hasOwn(existing, "threads") ? { threads: existing.threads } : {}),
   };
 }
 
