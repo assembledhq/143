@@ -122,8 +122,10 @@ func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestOpened,
-		Repository: "acme/api", PullRequestNumber: 42, PullRequestURL: "https://github.com/acme/api/pull/42",
-		Actor: "octocat", Body: "please review",
+		Repository: "acme/api", PullRequestNumber: 42,
+		PullRequestTitle: "Improve checkout", HeadSHA: "abc123",
+		Actor: "octocat", ActorType: "User", Body: "please review",
+		ProviderEventID: "delivery-123", EventID: "pull_request:opened:42",
 	})
 	require.NoError(t, err, "triggering a GitHub event should succeed")
 	require.Equal(t, []fakeListGitHubEventCall{{
@@ -131,8 +133,14 @@ func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 	}}, store.calls, "service should list automations by org, repository, and event")
 	require.Len(t, runs.runs, 1, "matching automation should create one run")
 	require.Equal(t, models.AutomationTriggeredByGitHub, runs.runs[0].TriggeredBy, "run should record GitHub as the trigger source")
+	require.NotNil(t, runs.runs[0].Provider, "run should record the trigger provider")
+	require.Equal(t, models.AutomationEventProviderGitHub, *runs.runs[0].Provider, "run should identify GitHub as the provider")
+	require.NotNil(t, runs.runs[0].ProviderEventID, "run should preserve the GitHub delivery id")
+	require.Equal(t, "delivery-123:pr:42", *runs.runs[0].ProviderEventID, "delivery id should be scoped to the target PR")
 	require.Contains(t, runs.runs[0].GoalSnapshot, "Run a review", "goal snapshot should include the automation goal")
 	require.Contains(t, runs.runs[0].GoalSnapshot, "PR #42", "goal snapshot should include pull request context")
+	require.Contains(t, runs.runs[0].GoalSnapshot, "Improve checkout", "goal snapshot should include the pull request title")
+	require.Contains(t, runs.runs[0].GoalSnapshot, "abc123", "goal snapshot should include the evaluated head SHA")
 	require.Len(t, jobs.jobs, 1, "matching automation should enqueue one worker job")
 	require.Equal(t, models.JobTypeAutomationRun, jobs.jobs[0].jobType, "job type should dispatch the automation worker")
 	require.Equal(t, []uuid.UUID{jobID}, jobs.notified, "created job should be notified")
@@ -142,6 +150,59 @@ func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 	require.Equal(t, string(models.AutomationIdentityScopeOrg), config["identity_scope"], "config snapshot should preserve automation identity scope")
 	require.Equal(t, string(models.AutomationGitHubEventPullRequestOpened), config["github_event"], "config snapshot should include the GitHub event")
 	require.Equal(t, "PR opened", config["github_trigger"], "config snapshot should include a product-level trigger label")
+	github, ok := config["github"].(map[string]any)
+	require.True(t, ok, "config snapshot should include typed GitHub context")
+	require.Equal(t, "https://github.com/acme/api/pull/42", github["pull_request_url"], "missing webhook URL should be normalized from repository and PR number")
+	require.Equal(t, "Improve checkout", github["pull_request_title"], "config snapshot should include the PR title")
+	require.Equal(t, "abc123", github["head_sha"], "config snapshot should include the evaluated head SHA")
+	require.Equal(t, "delivery-123:pr:42", github["provider_event_id"], "config snapshot should include the scoped delivery id")
+
+	var triggerContext map[string]any
+	require.NoError(t, json.Unmarshal(runs.runs[0].TriggerContext, &triggerContext), "trigger context should be valid JSON")
+	require.Equal(t, "github", triggerContext["provider"], "trigger context should identify GitHub")
+	require.Equal(t, "delivery-123:pr:42", triggerContext["provider_event_id"], "trigger context should include the scoped delivery id")
+}
+
+func TestNormalizeGitHubEventTriggerRequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		request  GitHubEventTriggerRequest
+		expected GitHubEventTriggerRequest
+	}{
+		{
+			name: "fills target URL and infers bot actor type",
+			request: GitHubEventTriggerRequest{
+				Repository: " acme/api ", PullRequestNumber: 42,
+				Actor: "dependabot[bot]", ProviderEventID: " delivery-1 ",
+			},
+			expected: GitHubEventTriggerRequest{
+				Repository: "acme/api", PullRequestNumber: 42,
+				PullRequestURL: "https://github.com/acme/api/pull/42",
+				Actor:          "dependabot[bot]", ActorType: "Bot", ProviderEventID: "delivery-1:pr:42",
+			},
+		},
+		{
+			name: "does not append PR suffix twice",
+			request: GitHubEventTriggerRequest{
+				Repository: "acme/api", PullRequestNumber: 42,
+				ProviderEventID: "delivery-1:pr:42",
+			},
+			expected: GitHubEventTriggerRequest{
+				Repository: "acme/api", PullRequestNumber: 42,
+				PullRequestURL:  "https://github.com/acme/api/pull/42",
+				ProviderEventID: "delivery-1:pr:42",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, normalizeGitHubEventTriggerRequest(tt.request), "normalization should produce stable trigger context")
+		})
+	}
 }
 
 func TestGitHubEventTriggerService_DedupesFeedbackByReviewGroup(t *testing.T) {

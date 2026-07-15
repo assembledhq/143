@@ -863,6 +863,8 @@ var AutomationRunListColumns = []string{
 	"id", "automation_id", "org_id", "triggered_at", "triggered_by",
 	"triggered_by_user_id", "scheduled_time", "trigger_id", "provider",
 	"provider_event_id", "trigger_context", "goal_snapshot",
+	"target_repository", "target_pr_number", "target_pr_url", "target_pr_title", "target_head_sha",
+	"trigger_event", "trigger_event_id", "trigger_dedupe_group_id", "trigger_actor", "trigger_actor_type", "trigger_bot",
 	"status", "completed_at", "result_summary", "created_at", "updated_at",
 	"session_id", "session_title", "session_status",
 	"session_diff_stats",
@@ -885,6 +887,30 @@ var AutomationRunListColumns = []string{
 const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.triggered_at, ar.triggered_by,
 	ar.triggered_by_user_id, ar.scheduled_time, ar.trigger_id, ar.provider,
 	ar.provider_event_id, ar.trigger_context, ar.goal_snapshot,
+	NULLIF(ar.config_snapshot #>> '{github,repository}', '') AS target_repository,
+	CASE
+		WHEN ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
+		THEN (ar.config_snapshot #>> '{github,pull_request_number}')::integer
+	END AS target_pr_number,
+	COALESCE(
+		NULLIF(ar.config_snapshot #>> '{github,pull_request_url}', ''),
+		CASE
+			WHEN ar.config_snapshot #>> '{github,repository}' <> ''
+			 AND ar.config_snapshot #>> '{github,pull_request_number}' ~ '^[1-9][0-9]*$'
+			THEN 'https://github.com/' || (ar.config_snapshot #>> '{github,repository}') || '/pull/' || (ar.config_snapshot #>> '{github,pull_request_number}')
+		END
+	) AS target_pr_url,
+	NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', '') AS target_pr_title,
+	NULLIF(ar.config_snapshot #>> '{github,head_sha}', '') AS target_head_sha,
+	NULLIF(ar.config_snapshot ->> 'github_event', '') AS trigger_event,
+	NULLIF(ar.config_snapshot #>> '{github,event_id}', '') AS trigger_event_id,
+	NULLIF(ar.config_snapshot #>> '{github,dedupe_group_id}', '') AS trigger_dedupe_group_id,
+	NULLIF(ar.config_snapshot #>> '{github,actor}', '') AS trigger_actor,
+	NULLIF(ar.config_snapshot #>> '{github,actor_type}', '') AS trigger_actor_type,
+	CASE WHEN ar.triggered_by = 'github' THEN
+		lower(COALESCE(ar.config_snapshot #>> '{github,actor_type}', '')) = 'bot'
+		OR lower(COALESCE(ar.config_snapshot #>> '{github,actor}', '')) ~ '\[bot\]$'
+	END AS trigger_bot,
 	ar.status, ar.completed_at, ar.result_summary, ar.created_at, ar.updated_at,
 	s.id AS session_id, s.title AS session_title, s.status AS session_status,
 	s.diff_stats AS session_diff_stats,
@@ -986,8 +1012,19 @@ func scanAutomationRunsWithSession(rows pgx.Rows) ([]models.AutomationRun, error
 
 func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 	var (
-		r        models.AutomationRun
-		provider *string
+		r                models.AutomationRun
+		provider         *string
+		targetRepository *string
+		targetPRNumber   *int
+		targetPRURL      *string
+		targetPRTitle    *string
+		targetHeadSHA    *string
+		triggerEvent     *string
+		triggerEventID   *string
+		triggerDedupeID  *string
+		triggerActor     *string
+		triggerActorType *string
+		triggerBot       *bool
 
 		// Session columns. All nullable because the LEFT JOIN may produce
 		// NULL for runs that haven't spawned a session yet (pending,
@@ -1013,6 +1050,8 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 	err := row.Scan(
 		&r.ID, &r.AutomationID, &r.OrgID, &r.TriggeredAt, &r.TriggeredBy,
 		&r.TriggeredByUserID, &r.ScheduledTime, &r.TriggerID, &provider, &r.ProviderEventID, &r.TriggerContext, &r.GoalSnapshot,
+		&targetRepository, &targetPRNumber, &targetPRURL, &targetPRTitle, &targetHeadSHA,
+		&triggerEvent, &triggerEventID, &triggerDedupeID, &triggerActor, &triggerActorType, &triggerBot,
 		&r.Status, &r.CompletedAt, &r.ResultSummary, &r.CreatedAt, &r.UpdatedAt,
 		&sessionID, &sessionTitle, &sessionStatus,
 		&sessionDiffStats,
@@ -1029,6 +1068,23 @@ func scanAutomationRunWithSession(row pgx.Row) (models.AutomationRun, error) {
 	if provider != nil {
 		p := models.AutomationEventProvider(*provider)
 		r.Provider = &p
+	}
+	if targetRepository != nil && targetPRNumber != nil && targetPRURL != nil {
+		r.TriggerTarget = &models.AutomationRunTriggerTarget{
+			Repository: *targetRepository, PullRequestNumber: *targetPRNumber, PullRequestURL: *targetPRURL,
+			PullRequestTitle: targetPRTitle, HeadSHA: targetHeadSHA,
+		}
+	}
+	if triggerEvent != nil {
+		details := &models.AutomationRunTriggerDetails{
+			Event: models.AutomationGitHubEvent(*triggerEvent), ProviderEventID: r.ProviderEventID,
+			EventID: triggerEventID, DedupeGroupID: triggerDedupeID,
+			Actor: triggerActor, ActorType: triggerActorType,
+		}
+		if triggerBot != nil {
+			details.BotTriggered = *triggerBot
+		}
+		r.TriggerDetails = details
 	}
 
 	if sessionID != nil {

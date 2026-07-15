@@ -35,8 +35,12 @@ type GitHubEventTriggerRequest struct {
 	Repository        string
 	PullRequestNumber int
 	PullRequestURL    string
+	PullRequestTitle  string
+	HeadSHA           string
 	Actor             string
+	ActorType         string
 	Body              string
+	ProviderEventID   string
 	EventID           string
 	DedupeGroupID     string
 	BaseBranch        string
@@ -80,6 +84,7 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 	if err := req.Event.Validate(); err != nil {
 		return err
 	}
+	req = normalizeGitHubEventTriggerRequest(req)
 	automations, err := s.automations.ListEnabledByGitHubEvent(ctx, req.OrgID, req.RepositoryID, req.Event)
 	if err != nil {
 		return fmt.Errorf("list github event automations: %w", err)
@@ -115,13 +120,21 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		return err
 	}
 
+	triggerContext, err := githubRunTriggerContext(req)
+	if err != nil {
+		return err
+	}
+	provider := models.AutomationEventProviderGitHub
 	run := models.AutomationRun{
-		AutomationID:   automation.ID,
-		OrgID:          automation.OrgID,
-		TriggeredBy:    models.AutomationTriggeredByGitHub,
-		GoalSnapshot:   githubEventGoalSnapshot(automation.Goal, req),
-		ConfigSnapshot: configSnapshot,
-		Status:         models.AutomationRunStatusPending,
+		AutomationID:    automation.ID,
+		OrgID:           automation.OrgID,
+		TriggeredBy:     models.AutomationTriggeredByGitHub,
+		Provider:        &provider,
+		ProviderEventID: optionalString(req.ProviderEventID),
+		TriggerContext:  triggerContext,
+		GoalSnapshot:    githubEventGoalSnapshot(automation.Goal, req),
+		ConfigSnapshot:  configSnapshot,
+		Status:          models.AutomationRunStatusPending,
 	}
 	if s.capabilities != nil {
 		snapshot, err := s.capabilities.ResolveForSession(ctx, agentcapabilities.ResolveInput{
@@ -177,6 +190,24 @@ func withGitHubEventSnapshot(raw json.RawMessage, req GitHubEventTriggerRequest)
 		"pull_request_url":    req.PullRequestURL,
 		"actor":               req.Actor,
 	}
+	if req.PullRequestTitle != "" {
+		decoded["github"].(map[string]any)["pull_request_title"] = req.PullRequestTitle
+	}
+	if req.HeadSHA != "" {
+		decoded["github"].(map[string]any)["head_sha"] = req.HeadSHA
+	}
+	if req.ActorType != "" {
+		decoded["github"].(map[string]any)["actor_type"] = req.ActorType
+	}
+	if req.ProviderEventID != "" {
+		decoded["github"].(map[string]any)["provider_event_id"] = req.ProviderEventID
+	}
+	if req.EventID != "" {
+		decoded["github"].(map[string]any)["event_id"] = req.EventID
+	}
+	if req.DedupeGroupID != "" {
+		decoded["github"].(map[string]any)["dedupe_group_id"] = req.DedupeGroupID
+	}
 	if req.BaseBranch != "" {
 		decoded["github"].(map[string]any)["base_branch"] = req.BaseBranch
 	}
@@ -216,6 +247,14 @@ func githubEventGoalSnapshot(goal string, req GitHubEventTriggerRequest) string 
 		b.WriteString("\n- URL: ")
 		b.WriteString(req.PullRequestURL)
 	}
+	if req.PullRequestTitle != "" {
+		b.WriteString("\n- PR title: ")
+		b.WriteString(req.PullRequestTitle)
+	}
+	if req.HeadSHA != "" {
+		b.WriteString("\n- Head SHA: ")
+		b.WriteString(req.HeadSHA)
+	}
 	if req.Actor != "" {
 		b.WriteString("\n- Actor: ")
 		b.WriteString(req.Actor)
@@ -237,6 +276,60 @@ func githubEventGoalSnapshot(goal string, req GitHubEventTriggerRequest) string 
 		b.WriteString(strings.TrimSpace(req.Body))
 	}
 	return b.String()
+}
+
+func normalizeGitHubEventTriggerRequest(req GitHubEventTriggerRequest) GitHubEventTriggerRequest {
+	req.Repository = strings.TrimSpace(req.Repository)
+	req.PullRequestURL = strings.TrimSpace(req.PullRequestURL)
+	if req.PullRequestURL == "" && req.Repository != "" && req.PullRequestNumber > 0 {
+		req.PullRequestURL = fmt.Sprintf("https://github.com/%s/pull/%d", strings.Trim(req.Repository, "/"), req.PullRequestNumber)
+	}
+	req.PullRequestTitle = strings.TrimSpace(req.PullRequestTitle)
+	req.HeadSHA = strings.TrimSpace(req.HeadSHA)
+	req.Actor = strings.TrimSpace(req.Actor)
+	req.ActorType = strings.TrimSpace(req.ActorType)
+	if req.ActorType == "" && strings.HasSuffix(strings.ToLower(req.Actor), "[bot]") {
+		req.ActorType = "Bot"
+	}
+	req.ProviderEventID = strings.TrimSpace(req.ProviderEventID)
+	if req.ProviderEventID != "" && req.PullRequestNumber > 0 {
+		suffix := fmt.Sprintf(":pr:%d", req.PullRequestNumber)
+		if !strings.HasSuffix(req.ProviderEventID, suffix) {
+			req.ProviderEventID += suffix
+		}
+	}
+	req.EventID = strings.TrimSpace(req.EventID)
+	req.DedupeGroupID = strings.TrimSpace(req.DedupeGroupID)
+	return req
+}
+
+func githubRunTriggerContext(req GitHubEventTriggerRequest) (json.RawMessage, error) {
+	context := map[string]any{
+		"provider": "github",
+		"event":    string(req.Event),
+	}
+	if req.ProviderEventID != "" {
+		context["provider_event_id"] = req.ProviderEventID
+	}
+	if req.EventID != "" {
+		context["event_id"] = req.EventID
+	}
+	if req.DedupeGroupID != "" {
+		context["dedupe_group_id"] = req.DedupeGroupID
+	}
+	out, err := json.Marshal(context)
+	if err != nil {
+		return nil, fmt.Errorf("encode github trigger context: %w", err)
+	}
+	return out, nil
+}
+
+func optionalString(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 func (s *GitHubEventTriggerService) claimDedupe(ctx context.Context, automation models.Automation, req GitHubEventTriggerRequest) (bool, error) {

@@ -1831,6 +1831,8 @@ func TestAutomationHandler_ListRuns_OK(t *testing.T) {
 			pgxmock.NewRows(db.AutomationRunListColumns).AddRow(
 				uuid.New(), id, orgID, now, models.AutomationTriggeredBySchedule,
 				nil, nil, nil, nil, nil, []byte(`{}`), "goal",
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil, nil, nil,
 				models.AutomationRunStatusCompleted, nil, nil, now, now,
 				&sessionID, &title, &sessionStatus,
 				[]byte(`{"added":12,"removed":3}`),
