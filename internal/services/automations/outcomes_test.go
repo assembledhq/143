@@ -62,6 +62,13 @@ func TestOutcomeServiceReport(t *testing.T) {
 			req:  ReportOutcomeRequest{Decision: models.AutomationOutcomeDecisionPassed, Reason: "No blocking issues were found."},
 		},
 		{
+			name: "missing snapshot URL uses canonical target",
+			mutateRun: func(run *models.AutomationRun) {
+				run.ConfigSnapshot = json.RawMessage(`{"github":{"repository":"assembledhq/143","pull_request_number":123}}`)
+			},
+			req: ReportOutcomeRequest{Decision: models.AutomationOutcomeDecisionPassed, Reason: "No blocking issues were found."},
+		},
+		{
 			name: "changes requested with linked review",
 			req: ReportOutcomeRequest{
 				Decision: models.AutomationOutcomeDecisionChangesRequested, Reason: "The migration is unsafe.",
@@ -119,6 +126,7 @@ func TestOutcomeServiceReport(t *testing.T) {
 			require.Equal(t, run.ID, outcome.AutomationRunID, "outcome should remain linked to the triggering run")
 			require.Equal(t, "assembledhq/143", outcome.Repository, "outcome should derive the repository from the run snapshot")
 			require.Equal(t, 123, outcome.PullRequestNumber, "outcome should derive the PR number from the run snapshot")
+			require.Equal(t, "https://github.com/assembledhq/143/pull/123", outcome.PullRequestURL, "outcome should preserve or reconstruct the canonical PR URL")
 			require.Equal(t, tt.wantAction, outcome.ExternalAction != nil, "outcome should persist an action only when one was reported")
 		})
 	}

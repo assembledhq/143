@@ -2397,13 +2397,18 @@ func automationRunPromptSeed(run models.AutomationRun) (string, error) {
 	context := fmt.Sprintf("Automation run context\n- Current automation run triggered at: %s\n- Previous automation run: %s",
 		run.TriggeredAt.UTC().Format(time.RFC3339), previousRunAt)
 	goal := strings.TrimSpace(run.GoalSnapshot)
+	repository := strings.Trim(strings.TrimSpace(snapshot.GitHub.Repository), "/")
+	pullRequestURL := strings.TrimSpace(snapshot.GitHub.PullRequestURL)
+	if pullRequestURL == "" && repository != "" && snapshot.GitHub.PullRequestNumber > 0 {
+		pullRequestURL = fmt.Sprintf("https://github.com/%s/pull/%d", repository, snapshot.GitHub.PullRequestNumber)
+	}
 	if run.TriggeredBy == models.AutomationTriggeredByGitHub &&
-		strings.TrimSpace(snapshot.GitHub.Repository) != "" &&
+		repository != "" &&
 		snapshot.GitHub.PullRequestNumber > 0 &&
-		strings.TrimSpace(snapshot.GitHub.PullRequestURL) != "" {
+		pullRequestURL != "" {
 		reportingContract := prompts.AutomationOutcomeReportingPrompt(prompts.AutomationOutcomeReportingPromptData{
-			Repository: strings.TrimSpace(snapshot.GitHub.Repository), PullRequestNumber: snapshot.GitHub.PullRequestNumber,
-			PullRequestURL: strings.TrimSpace(snapshot.GitHub.PullRequestURL),
+			Repository: repository, PullRequestNumber: snapshot.GitHub.PullRequestNumber,
+			PullRequestURL: pullRequestURL,
 		})
 		if goal == "" {
 			goal = reportingContract

@@ -29,6 +29,16 @@ func TestAutomationRunPromptSeedOutcomeContract(t *testing.T) {
 			wantContract: true,
 		},
 		{
+			name: "github PR run reconstructs missing URL for reporting contract",
+			run: models.AutomationRun{
+				TriggeredAt:    time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC),
+				TriggeredBy:    models.AutomationTriggeredByGitHub,
+				GoalSnapshot:   "Evaluate the pull request.",
+				ConfigSnapshot: json.RawMessage(`{"github":{"repository":"assembledhq/143","pull_request_number":123}}`),
+			},
+			wantContract: true,
+		},
+		{
 			name: "manual run keeps lifecycle context only",
 			run: models.AutomationRun{
 				TriggeredAt:  time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC),

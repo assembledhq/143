@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -180,7 +181,8 @@ type AutomationDecisionFilters struct {
 	PullRequestNumber  int
 }
 
-const automationDecisionTargetCTEs = `WITH raw_targeted AS (
+const (
+	automationDecisionTargetCTEs = `WITH raw_targeted AS (
 	SELECT
 		ar.id AS run_id,
 		ar.automation_id,
@@ -198,9 +200,18 @@ const automationDecisionTargetCTEs = `WITH raw_targeted AS (
 			NULLIF(ar.config_snapshot #>> '{github,pull_request_url}', ''),
 			'https://github.com/' || (ar.config_snapshot #>> '{github,repository}') || '/pull/' || (ar.config_snapshot #>> '{github,pull_request_number}')
 		) AS pull_request_url,
-		NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', '') AS pull_request_title,
-		NULLIF(ar.config_snapshot #>> '{github,head_sha}', '') AS head_sha
+		COALESCE(
+			NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', ''),
+			NULLIF(target_outcome.pull_request_title, '')
+		) AS pull_request_title,
+		COALESCE(
+			NULLIF(ar.config_snapshot #>> '{github,head_sha}', ''),
+			NULLIF(target_outcome.head_sha, '')
+		) AS head_sha
 	FROM automation_runs ar
+	LEFT JOIN automation_run_outcomes target_outcome
+	  ON target_outcome.org_id = ar.org_id
+	 AND target_outcome.automation_run_id = ar.id
 	LEFT JOIN LATERAL (
 		SELECT sal.session_id AS id
 		FROM session_automation_links sal
@@ -226,9 +237,33 @@ const automationDecisionTargetCTEs = `WITH raw_targeted AS (
 ), latest AS (
 	SELECT * FROM ranked WHERE revision_rank = 1
 )`
+	outcomeHistoriesCTE = `, outcome_histories AS (
+	SELECT
+		history_run.repository,
+		history_run.pull_request_number,
+		COALESCE(history_run.head_sha, '') AS head_sha_key,
+		jsonb_agg(
+			to_jsonb(history_outcome) || jsonb_build_object(
+				'external_action', CASE
+					WHEN history_action.id IS NULL THEN 'null'::jsonb
+					ELSE to_jsonb(history_action)
+				END
+			)
+			ORDER BY history_outcome.reported_at DESC, history_outcome.id DESC
+		) AS attempt_outcomes
+	FROM raw_targeted history_run
+	JOIN automation_run_outcomes history_outcome
+	  ON history_outcome.org_id = history_run.org_id
+	 AND history_outcome.automation_run_id = history_run.run_id
+	LEFT JOIN automation_run_external_actions history_action
+	  ON history_action.org_id = history_outcome.org_id
+	 AND history_action.outcome_id = history_outcome.id
+	GROUP BY history_run.repository, history_run.pull_request_number, COALESCE(history_run.head_sha, '')
+)`
+)
 
 func (s *AutomationOutcomeStore) ListDecisions(ctx context.Context, orgID, automationID uuid.UUID, filters AutomationDecisionFilters) ([]models.AutomationDecision, error) {
-	query := automationDecisionTargetCTEs + `
+	query := automationDecisionTargetCTEs + outcomeHistoriesCTE + `
 	SELECT
 		l.automation_id, l.run_id, l.session_id,
 		l.repository, l.pull_request_number, l.pull_request_url, l.pull_request_title, l.head_sha,
@@ -236,19 +271,34 @@ func (s *AutomationOutcomeStore) ListDecisions(ctx context.Context, orgID, autom
 		o.id, o.org_id, o.automation_id, o.automation_run_id, o.session_id,
 		o.repository, o.pull_request_number, o.pull_request_url, o.pull_request_title, o.head_sha,
 		o.decision, o.reason, o.source, o.reported_at, o.created_at,
-		a.id, a.org_id, a.outcome_id, a.provider, a.action_type, a.external_id, a.url, a.verification_status, a.created_at
+		a.id, a.org_id, a.outcome_id, a.provider, a.action_type, a.external_id, a.url, a.verification_status, a.created_at,
+		h.attempt_outcomes
 	FROM latest l
 	LEFT JOIN automation_run_outcomes o
 	  ON o.org_id = l.org_id AND o.automation_run_id = l.run_id
 	LEFT JOIN automation_run_external_actions a
 	  ON a.org_id = o.org_id AND a.outcome_id = o.id
+	LEFT JOIN outcome_histories h
+	  ON h.repository = l.repository
+	 AND h.pull_request_number = l.pull_request_number
+	 AND h.head_sha_key = COALESCE(l.head_sha, '')
 	WHERE true`
 	args := pgx.NamedArgs{"org_id": orgID, "automation_id": automationID}
 	if filters.Decision != nil {
-		query += ` AND o.decision = @decision`
+		query += ` AND EXISTS (
+			SELECT 1
+			FROM raw_targeted filter_run
+			JOIN automation_run_outcomes filter_outcome
+			  ON filter_outcome.org_id = filter_run.org_id
+			 AND filter_outcome.automation_run_id = filter_run.run_id
+			WHERE filter_run.repository = l.repository
+			  AND filter_run.pull_request_number = l.pull_request_number
+			  AND COALESCE(filter_run.head_sha, '') = COALESCE(l.head_sha, '')
+			  AND filter_outcome.decision = @decision
+		)`
 		args["decision"] = *filters.Decision
 	} else if filters.OutcomeNotReported {
-		query += ` AND o.id IS NULL`
+		query += ` AND o.id IS NULL AND l.execution_status NOT IN ('pending', 'running', 'failed')`
 	}
 	if filters.PullRequestNumber > 0 {
 		query += ` AND l.pull_request_number = @pull_request_number`
@@ -299,6 +349,7 @@ func scanAutomationDecision(row pgx.Row) (models.AutomationDecision, error) {
 	var actionID, actionOrgID, actionOutcomeID *uuid.UUID
 	var actionProvider, actionType, actionExternalID, actionURL, actionVerification *string
 	var actionCreatedAt *time.Time
+	var attemptOutcomesJSON []byte
 	err := row.Scan(
 		&decision.AutomationID, &decision.RunID, &decision.SessionID,
 		&decision.Target.Repository, &decision.Target.PullRequestNumber, &decision.Target.PullRequestURL, &decision.Target.PullRequestTitle, &decision.Target.HeadSHA,
@@ -307,6 +358,7 @@ func scanAutomationDecision(row pgx.Row) (models.AutomationDecision, error) {
 		&outcomeRepository, &outcomePRNumber, &outcomeURL, &outcomeTitle, &outcomeHeadSHA,
 		&outcomeDecision, &outcomeReason, &outcomeSource, &outcomeReportedAt, &outcomeCreatedAt,
 		&actionID, &actionOrgID, &actionOutcomeID, &actionProvider, &actionType, &actionExternalID, &actionURL, &actionVerification, &actionCreatedAt,
+		&attemptOutcomesJSON,
 	)
 	if err != nil {
 		return models.AutomationDecision{}, fmt.Errorf("scan automation decision: %w", err)
@@ -331,6 +383,12 @@ func scanAutomationDecision(row pgx.Row) (models.AutomationDecision, error) {
 		}
 		decision.Outcome = outcome
 	}
+	decision.AttemptOutcomes = make([]models.AutomationRunOutcome, 0)
+	if len(attemptOutcomesJSON) > 0 {
+		if err := json.Unmarshal(attemptOutcomesJSON, &decision.AttemptOutcomes); err != nil {
+			return models.AutomationDecision{}, fmt.Errorf("decode automation decision attempt outcomes: %w", err)
+		}
+	}
 	return decision, nil
 }
 
@@ -340,7 +398,7 @@ func (s *AutomationOutcomeStore) GetDecisionStats(ctx context.Context, orgID, au
 		count(DISTINCT (l.repository, l.pull_request_number)),
 		count(*),
 		COALESCE(sum(l.attempt_count), 0)::bigint,
-		count(*) FILTER (WHERE l.execution_status IN ('pending', 'running')),
+		count(*) FILTER (WHERE o.id IS NULL AND l.execution_status IN ('pending', 'running')),
 		count(*) FILTER (WHERE o.decision = 'passed'),
 		count(*) FILTER (WHERE o.decision = 'changes_requested'),
 		count(*) FILTER (WHERE o.decision = 'advisory'),

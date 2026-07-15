@@ -21,9 +21,9 @@ Each GitHub PR automation prompt includes the reporting contract. The Main threa
 
 ## Read API
 
-- `GET /api/v1/automations/{id}/decisions` returns the latest execution per repository, PR number, and head SHA. Headless historical runs are grouped into one unknown-revision bucket per PR.
+- `GET /api/v1/automations/{id}/decisions` returns the latest execution per repository, PR number, and head SHA, plus `attempt_outcomes` containing every structured outcome reported for that revision. Headless historical runs are grouped into one unknown-revision bucket per PR; an outcome-reported head SHA is used when the trigger snapshot predates revision capture.
 - `GET /api/v1/automations/{id}/decision-stats` aggregates unique PRs, unique revisions, raw attempts, typed outcomes, evaluations in progress, unreported outcomes, and execution failures.
-- The decisions list accepts `outcome`, `pr`, `cursor`, and `limit` filters. Grouping happens in Postgres before pagination.
+- The decisions list accepts `outcome`, `pr`, `cursor`, and `limit` filters. An outcome filter matches any reported attempt for the revision, while `outcome_not_reported` is limited to terminal latest executions without an outcome. Grouping happens in Postgres before pagination.
 - `GET /api/v1/automations/{id}/runs` remains the raw execution history.
 
 ## Historical data

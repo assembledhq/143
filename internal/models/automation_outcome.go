@@ -133,6 +133,7 @@ type AutomationDecision struct {
 	CompletedAt     *time.Time               `json:"completed_at,omitempty"`
 	AttemptCount    int                      `json:"attempt_count"`
 	Outcome         *AutomationRunOutcome    `json:"outcome,omitempty"`
+	AttemptOutcomes []AutomationRunOutcome   `json:"attempt_outcomes"`
 }
 
 type AutomationDecisionStats struct {

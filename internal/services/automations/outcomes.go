@@ -130,13 +130,18 @@ func outcomeTargetFromRun(run models.AutomationRun) (githubOutcomeTarget, error)
 		return githubOutcomeTarget{}, fmt.Errorf("decode automation GitHub target: %w", err)
 	}
 	number, err := parseJSONPositiveInt(snapshot.GitHub.PullRequestNumber)
-	if err != nil || strings.TrimSpace(snapshot.GitHub.Repository) == "" || strings.TrimSpace(snapshot.GitHub.PullRequestURL) == "" {
+	repository := strings.Trim(strings.TrimSpace(snapshot.GitHub.Repository), "/")
+	if err != nil || repository == "" {
 		return githubOutcomeTarget{}, ErrOutcomeTargetUnavailable
 	}
+	pullRequestURL := strings.TrimSpace(snapshot.GitHub.PullRequestURL)
+	if pullRequestURL == "" {
+		pullRequestURL = fmt.Sprintf("https://github.com/%s/pull/%d", repository, number)
+	}
 	return githubOutcomeTarget{
-		Repository:        strings.TrimSpace(snapshot.GitHub.Repository),
+		Repository:        repository,
 		PullRequestNumber: number,
-		PullRequestURL:    strings.TrimSpace(snapshot.GitHub.PullRequestURL),
+		PullRequestURL:    pullRequestURL,
 		PullRequestTitle:  strings.TrimSpace(snapshot.GitHub.PullRequestTitle),
 		HeadSHA:           strings.TrimSpace(snapshot.GitHub.HeadSHA),
 	}, nil

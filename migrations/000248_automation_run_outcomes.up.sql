@@ -57,7 +57,8 @@ WITH legacy AS (
         ) AS pull_request_url,
         NULLIF(ar.config_snapshot #>> '{github,pull_request_title}', '') AS pull_request_title,
         NULLIF(ar.config_snapshot #>> '{github,head_sha}', '') AS head_sha,
-        CASE lower((regexp_match(st.result_summary, '^#[0-9]+:[[:space:]]*([[:alpha:]_-]+)'))[1])
+        (regexp_match(st.result_summary, '^#([0-9]+):[[:space:]]*([[:alpha:]_-]+)'))[1] AS summary_pull_request_number,
+        CASE lower((regexp_match(st.result_summary, '^#([0-9]+):[[:space:]]*([[:alpha:]_-]+)'))[2])
             WHEN 'pass' THEN 'passed'
             WHEN 'reject' THEN 'changes_requested'
             WHEN 'advise' THEN 'advisory'
@@ -93,4 +94,5 @@ SELECT
     decision, reason, 'legacy_inferred', reported_at
 FROM legacy
 WHERE decision IS NOT NULL
+  AND summary_pull_request_number = pull_request_number::text
 ON CONFLICT (org_id, automation_run_id) DO NOTHING;
