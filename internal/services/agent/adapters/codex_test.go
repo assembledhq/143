@@ -113,6 +113,21 @@ func TestCodexModelArgs(t *testing.T) {
 		expected       string
 	}{
 		{
+			name:     "adds priority service tier for gpt 5.6 sol fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT56SolFast},
+			expected: ` -m 'gpt-5.6-sol' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds priority service tier for gpt 5.6 terra fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT56TerraFast},
+			expected: ` -m 'gpt-5.6-terra' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "adds priority service tier for gpt 5.6 luna fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT56LunaFast},
+			expected: ` -m 'gpt-5.6-luna' -c 'service_tier="priority"'`,
+		},
+		{
 			name:     "adds priority service tier for gpt 5.5 fast",
 			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT55Fast},
 			expected: ` -m 'gpt-5.5' -c 'service_tier="priority"'`,
