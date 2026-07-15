@@ -85,7 +85,7 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import { RunsTab } from "./runs-tab";
+import { DecisionHistory } from "./decision-history";
 import {
   browserTimezone,
   formatAutomationSchedule,
@@ -1195,12 +1195,7 @@ export default function AutomationDetailPage() {
 
             <LatestRunSummary automationId={automationId} />
 
-            <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Run history
-              </h2>
-              <RunsTab automationId={automationId} />
-            </section>
+            <DecisionHistory automationId={automationId} />
           </main>
 
           <aside className="hidden space-y-4 lg:sticky lg:top-4 lg:block">
@@ -1333,7 +1328,12 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-5">
-      <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
+      <h2 className="text-sm font-semibold text-foreground">
+        Latest execution
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Operational status only. Review outcomes are shown in PR decisions.
+      </p>
       {isLoading ? (
         <p className="mt-3 text-sm text-muted-foreground">
           Loading latest run...
@@ -1357,7 +1357,7 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
-          {statusLabel(run.status)}
+          Execution: {statusLabel(run.status)}
         </Badge>
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
@@ -1381,6 +1381,8 @@ function statusLabel(status: AutomationRun["status"]): string {
     case "completed_noop":
       return "No-op";
     default:
-      return status.replaceAll("_", " ");
+      return status
+        .replaceAll("_", " ")
+        .replace(/^./, (letter) => letter.toUpperCase());
   }
 }

@@ -557,8 +557,12 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "Run history" }),
+      await screen.findByRole("heading", { name: "Execution history" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Latest execution" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Operational status only/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Previous runs" }),
     ).not.toBeInTheDocument();

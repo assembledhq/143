@@ -1301,6 +1301,17 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`);
     },
+    listDecisions: (id: string, params?: { cursor?: string; limit?: number; outcome?: string; pr?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.pr) searchParams.set('pr', params.pr);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AutomationDecision>>(`/api/v1/automations/${id}/decisions${qs ? `?${qs}` : ''}`);
+    },
+    decisionStats: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationDecisionStats>>(`/api/v1/automations/${id}/decision-stats`),
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
     getCapabilities: (id: string) =>

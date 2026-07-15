@@ -1231,6 +1231,57 @@ describe('api client', () => {
         },
       ]);
     });
+
+    it('lists structured decisions with outcome and PR filters', async () => {
+      let capturedURL = '';
+      server.use(
+        http.get('/api/v1/automations/:id/decisions', ({ params, request }) => {
+          expect(params.id).toBe('automation-1');
+          capturedURL = request.url;
+          return HttpResponse.json({ data: [], meta: { next_cursor: '' } });
+        }),
+      );
+
+      const result = await api.automations.listDecisions('automation-1', {
+        limit: 25,
+        cursor: 'run-1',
+        outcome: 'changes_requested',
+        pr: '42',
+      });
+
+      const url = new URL(capturedURL);
+      expect(url.searchParams.get('limit')).toBe('25');
+      expect(url.searchParams.get('cursor')).toBe('run-1');
+      expect(url.searchParams.get('outcome')).toBe('changes_requested');
+      expect(url.searchParams.get('pr')).toBe('42');
+      expect(result.data).toEqual([]);
+    });
+
+    it('gets structured decision totals', async () => {
+      server.use(
+        http.get('/api/v1/automations/:id/decision-stats', ({ params }) => {
+          expect(params.id).toBe('automation-1');
+          return HttpResponse.json({
+            data: {
+              unique_pull_requests: 2,
+              unique_revisions: 3,
+              total_runs: 4,
+              evaluating: 0,
+              passed: 1,
+              changes_requested: 1,
+              advisory: 0,
+              not_applicable: 0,
+              outcome_not_reported: 1,
+              execution_failed: 0,
+            },
+          });
+        }),
+      );
+
+      const result = await api.automations.decisionStats('automation-1');
+      expect(result.data.unique_revisions).toBe(3);
+      expect(result.data.changes_requested).toBe(1);
+    });
   });
 
   describe('memories', () => {
