@@ -2,7 +2,9 @@ package models
 
 import (
 	"testing"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,4 +35,38 @@ func TestSessionStreamEventType_Validate(t *testing.T) {
 			require.NoError(t, err, "Validate should accept known session stream event types")
 		})
 	}
+}
+
+func TestNewThreadRuntimeEventIncludesFailureMetadata(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	explanation := "claude subscription is marked invalid; reconnect required"
+	category := "claude_code_auth_expired"
+	thread := SessionThread{
+		ID:                  uuid.New(),
+		SessionID:           uuid.New(),
+		OrgID:               uuid.New(),
+		Status:              ThreadStatusFailed,
+		CurrentTurn:         1,
+		PendingMessageCount: 2,
+		LastActivityAt:      &now,
+		FailureExplanation:  &explanation,
+		FailureCategory:     &category,
+	}
+
+	actual := NewThreadRuntimeEvent(thread)
+	expected := ThreadRuntimeEvent{
+		SessionID:           thread.SessionID,
+		ThreadID:            thread.ID,
+		OrgID:               thread.OrgID,
+		Status:              ThreadStatusFailed,
+		CurrentTurn:         1,
+		PendingMessageCount: 2,
+		LastActivityAt:      &now,
+		FailureExplanation:  &explanation,
+		FailureCategory:     &category,
+	}
+
+	require.Equal(t, expected, actual, "thread runtime events should carry failure metadata to the live session UI")
 }

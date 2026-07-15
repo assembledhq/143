@@ -463,10 +463,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 		    failure_category = @failure_category
 		WHERE id = @id AND org_id = @org_id`
 
-	var failureExplanation *string
-	if result.Error != nil {
-		failureExplanation = result.Error
-	}
+	failureExplanation := sessionResultFailureExplanation(result)
 
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
 		"id":                  threadID,
@@ -494,7 +491,7 @@ func (s *SessionThreadStore) FailRunningBySession(ctx context.Context, orgID, se
 	var failureExplanation *string
 	var failureCategory *string
 	if result != nil {
-		failureExplanation = result.Error
+		failureExplanation = sessionResultFailureExplanation(result)
 		failureCategory = result.FailureCategory
 	}
 	tag, err := s.db.Exec(ctx, `
@@ -513,6 +510,16 @@ func (s *SessionThreadStore) FailRunningBySession(ctx context.Context, orgID, se
 		return 0, fmt.Errorf("fail running session threads: %w", err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+func sessionResultFailureExplanation(result *models.SessionResult) *string {
+	if result == nil {
+		return nil
+	}
+	if result.FailureExplanation != nil {
+		return result.FailureExplanation
+	}
+	return result.Error
 }
 
 // ListStuckRunningThreads returns threads stuck in status='running' whose
@@ -930,7 +937,9 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
 		    agent_session_id = @agent_session_id,
 		    result_summary = @result_summary,
-		    diff = COALESCE(@diff, diff)
+		    diff = COALESCE(@diff, diff),
+		    failure_explanation = NULL,
+		    failure_category = NULL
 		WHERE id = @id AND org_id = @org_id`
 
 	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{

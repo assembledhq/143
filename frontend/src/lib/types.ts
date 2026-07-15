@@ -1428,6 +1428,8 @@ export interface ThreadRuntimeEvent {
   last_activity_at?: string;
   started_at?: string;
   completed_at?: string;
+  failure_explanation?: string | null;
+  failure_category?: string | null;
 }
 
 export interface SessionWorkspaceGenerationChangedEvent {

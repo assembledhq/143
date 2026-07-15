@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -22,6 +23,31 @@ import (
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
 )
+
+func TestRecordedRunFailureErrorSurvivesWrapping(t *testing.T) {
+	t.Parallel()
+
+	recorded := markRunFailureRecorded(errors.New("categorized auth failure"))
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "direct marker", err: recorded, expected: true},
+		{name: "wrapped marker", err: fmt.Errorf("setup sandbox: %w", recorded), expected: true},
+		{name: "ordinary error", err: errors.New("generic failure"), expected: false},
+		{name: "nil error", err: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, isRunFailureRecorded(tt.err),
+				"recorded failure detection should survive contextual wrapping without matching generic errors")
+		})
+	}
+}
 
 func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	t.Parallel()
@@ -1199,7 +1225,7 @@ func TestEnsureClaudeCodeAuth_SetupTokenInjectsEnvAndSkipsHarvest(t *testing.T) 
 		"CLAUDE_CODE_MAX_THINK": "1",
 	}
 
-	billingMode, err := orch.ensureClaudeCodeAuth(context.Background(), run, sandbox, envVars)
+	billingMode, err := orch.ensureClaudeCodeAuth(context.Background(), run, nil, sandbox, envVars)
 
 	require.NoError(t, err, "setup-token auth should prepare Claude Code without refreshing")
 	require.Equal(t, TokenBillingModeSubscription, billingMode, "setup-token auth should use subscription billing mode")

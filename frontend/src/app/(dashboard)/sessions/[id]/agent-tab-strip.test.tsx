@@ -150,6 +150,34 @@ describe("AgentTabStrip", () => {
     expect(screen.getByRole("button", { name: "Add agent tab" })).toBeDisabled();
   });
 
+  it("marks an idle tab with a recorded failure as needing attention", async () => {
+    const user = userEvent.setup();
+    const thread = makeThread({
+      agent_type: "claude_code",
+      failure_category: "claude_code_auth_expired",
+      failure_explanation: "claude subscription is marked invalid; reconnect required",
+    });
+
+    renderWithProviders(
+      <AgentTabStrip
+        threads={[thread]}
+        activeThreadId={thread.id}
+        viewedThreadIds={new Set([thread.id])}
+        overlapsByThreadId={new Map()}
+        statusConfig={statusConfig}
+        onActiveThreadChange={vi.fn()}
+        onAddTab={vi.fn()}
+        onRevertThread={vi.fn()}
+        onArchiveThread={vi.fn()}
+        archivePendingThreadId={null}
+      />,
+    );
+
+    expect(screen.getByLabelText("Needs attention")).toBeInTheDocument();
+    await user.hover(screen.getByText("Main tab"));
+    expect(await screen.findByRole("tooltip")).not.toHaveTextContent("reconnect required");
+  });
+
   it("shows durable inbox delivery state in the tab tooltip", async () => {
     const user = userEvent.setup();
     const thread = makeThread({

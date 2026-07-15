@@ -1689,10 +1689,10 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    result_summary = @result_summary,
 		    diff = COALESCE(@diff, diff),
 		    error = @error,
-		    failure_explanation = NULL,
-		    failure_category = NULL,
-		    failure_next_steps = NULL,
-		    failure_retry_advised = false,
+		    failure_explanation = @failure_explanation,
+		    failure_category = @failure_category,
+		    failure_next_steps = @failure_next_steps,
+		    failure_retry_advised = @failure_retry_advised,
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
@@ -1700,17 +1700,21 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
-		"id":                runID,
-		"org_id":            orgID,
-		"status":            string(status),
-		"token_usage":       result.TokenUsage,
-		"model_used":        result.ModelUsed,
-		"result_summary":    result.ResultSummary,
-		"diff":              result.Diff,
-		"error":             result.Error,
-		"base_commit_sha":   result.DiffBaseCommitSHA,
-		"diff_collected_at": result.DiffCollectedAt,
-		"diff_stats":        diffStats,
+		"id":                    runID,
+		"org_id":                orgID,
+		"status":                string(status),
+		"token_usage":           result.TokenUsage,
+		"model_used":            result.ModelUsed,
+		"result_summary":        result.ResultSummary,
+		"diff":                  result.Diff,
+		"error":                 result.Error,
+		"failure_explanation":   result.FailureExplanation,
+		"failure_category":      result.FailureCategory,
+		"failure_next_steps":    result.FailureNextSteps,
+		"failure_retry_advised": result.FailureRetryAdvised,
+		"base_commit_sha":       result.DiffBaseCommitSHA,
+		"diff_collected_at":     result.DiffCollectedAt,
+		"diff_stats":            diffStats,
 	})
 	if err != nil {
 		return err
@@ -1862,15 +1866,30 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	args := pgx.NamedArgs{
 		"id":                    runID,
 		"org_id":                orgID,
 		"failure_explanation":   explanation,
 		"failure_category":      category,
 		"failure_next_steps":    nextSteps,
 		"failure_retry_advised": retryAdvised,
-	})
-	return err
+	}
+	if s.streams == nil {
+		_, err := s.db.Exec(ctx, query, args)
+		return err
+	}
+
+	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, args)
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 func (s *SessionStore) UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error {

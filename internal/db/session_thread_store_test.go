@@ -927,6 +927,45 @@ func TestSessionThreadStore_UpdateResult(t *testing.T) {
 	}
 }
 
+func TestSessionResultFailureExplanation(t *testing.T) {
+	t.Parallel()
+
+	rawError := "raw auth failure"
+	userExplanation := "No Claude Code credentials are configured."
+	tests := []struct {
+		name     string
+		result   *models.SessionResult
+		expected *string
+	}{
+		{
+			name: "prefers user-facing explanation",
+			result: &models.SessionResult{
+				Error:              &rawError,
+				FailureExplanation: &userExplanation,
+			},
+			expected: &userExplanation,
+		},
+		{
+			name:     "falls back to raw error",
+			result:   &models.SessionResult{Error: &rawError},
+			expected: &rawError,
+		},
+		{
+			name:     "handles nil result",
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, sessionResultFailureExplanation(tt.result),
+				"thread failure persistence should select the expected explanation")
+		})
+	}
+}
+
 func TestSessionThreadStore_UpdateResult_NilError(t *testing.T) {
 	t.Parallel()
 
@@ -1048,7 +1087,7 @@ func TestSessionThreadStore_UpdateTurnComplete(t *testing.T) {
 				Diff:          &diff,
 			}
 
-			mock.ExpectExec("UPDATE session_threads").
+			mock.ExpectExec(`UPDATE session_threads[\s\S]+failure_explanation = NULL[\s\S]+failure_category = NULL`).
 				WithArgs(anyArgs(6)...).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rowsAffected))
 
