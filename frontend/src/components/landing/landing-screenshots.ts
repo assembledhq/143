@@ -1,7 +1,7 @@
 export const landingScreenshots = {
   context: {
     src: "/product/product-integrations.webp",
-    alt: "143 integrations settings showing GitHub connected and optional team tools available",
+    alt: "143 integrations settings showing the GitHub App and personal GitHub account connected with optional team tools available",
   },
   execution: {
     src: "/product/product-session-overview.webp",
@@ -13,7 +13,7 @@ export const landingScreenshots = {
   },
   preview: {
     src: "/product/product-session-preview.webp",
-    alt: "143 Previews page showing running, resumable, and recent cloud previews with status and open actions",
+    alt: "143 session preview panel showing a running cloud preview with live change detection and shared browser control",
   },
   workspace: {
     src: "/product/product-sessions-list.webp",

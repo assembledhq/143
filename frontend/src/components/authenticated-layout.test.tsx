@@ -203,6 +203,78 @@ describe("AuthenticatedLayout", () => {
     expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("300");
   });
 
+  it("shrinks to an icon-only sidebar while keeping the same navigation rows mounted", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    const handle = container.querySelector("[data-testid='app-sidebar-resize-handle']");
+    const sessionsLink = within(sidebar as HTMLElement).getByRole("link", { name: "Sessions" });
+    expect(handle).not.toBeNull();
+
+    fireEvent.pointerDown(handle!, { clientX: 300, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 0, pointerId: 1 });
+    fireEvent.pointerUp(document, { pointerId: 1 });
+
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "56px" });
+    expect(sidebar).toHaveAttribute("data-collapsed", "true");
+    expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("56");
+    expect(within(sidebar as HTMLElement).getByRole("link", { name: "Sessions" })).toBe(sessionsLink);
+    expect(sessionsLink).toHaveClass("justify-center", "px-0");
+    expect(within(sidebar as HTMLElement).getByText("Sessions")).toHaveClass("max-w-0", "opacity-0");
+    expect(sessionsLink).toHaveAttribute("title", "Sessions");
+    expect(within(sidebar as HTMLElement).getByRole("button", { name: "Settings" })).toHaveClass("justify-center", "px-0");
+  });
+
+  it("snaps out of the collapsed dead zone to the icon-rail width on release", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    const handle = container.querySelector("[data-testid='app-sidebar-resize-handle']");
+    expect(handle).not.toBeNull();
+
+    fireEvent.pointerDown(handle!, { clientX: 236, pointerId: 1, button: 0 });
+    // While the pointer drives the width, the edge tracks the cursor 1:1 (no
+    // width transition) and does not snap yet even inside the collapsed band.
+    expect(sidebar).not.toHaveClass("transition-[width]");
+    fireEvent.pointerMove(document, { clientX: 100, pointerId: 1 });
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "100px" });
+    expect(sidebar).toHaveAttribute("data-collapsed", "true");
+
+    fireEvent.pointerUp(document, { pointerId: 1 });
+    // On release it settles to the icon-rail min width and re-enables the
+    // width transition so the snap animates.
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "56px" });
+    expect(sidebar).toHaveClass("transition-[width]");
+    expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("56");
+  });
+
+  it("does not snap when the drag ends above the collapse threshold", () => {
+    const { container } = renderWithProviders(
+      <AuthenticatedLayout>
+        <div>content</div>
+      </AuthenticatedLayout>
+    );
+
+    const sidebar = container.querySelector("[data-testid='app-sidebar']");
+    const handle = container.querySelector("[data-testid='app-sidebar-resize-handle']");
+
+    fireEvent.pointerDown(handle!, { clientX: 236, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(document, { clientX: 216, pointerId: 1 });
+    fireEvent.pointerUp(document, { pointerId: 1 });
+
+    expect(sidebar).toHaveStyle({ "--app-sidebar-w": "216px" });
+    expect(sidebar).toHaveAttribute("data-collapsed", "false");
+    expect(window.localStorage.getItem("143:app-sidebar-width")).toBe("216");
+  });
+
   it("uses a full-width content area with responsive padding", () => {
     const { container } = renderWithProviders(
       <AuthenticatedLayout>
@@ -368,6 +440,7 @@ describe("AuthenticatedLayout", () => {
     await waitFor(() => {
       expect(container.querySelector('[data-testid="repo-context-switcher"]')).not.toBeInTheDocument();
     });
+    expect(screen.getByTestId("repo-context-switcher-slot")).toHaveClass("empty:hidden");
   });
 
   // --- New nav header tests ---
@@ -385,7 +458,7 @@ describe("AuthenticatedLayout", () => {
     });
   });
 
-  it("shows org name icon with first letter", async () => {
+  it("shows the compact 143 organization mark", async () => {
     renderWithProviders(
       <AuthenticatedLayout>
         <div>content</div>
@@ -393,7 +466,7 @@ describe("AuthenticatedLayout", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("T")).toBeInTheDocument();
+      expect(screen.getByText("143")).toBeInTheDocument();
     });
   });
 

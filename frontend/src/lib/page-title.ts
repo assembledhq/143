@@ -16,7 +16,6 @@ const PAGE_TITLE_RULES: PageTitleRule[] = [
   { pattern: /^\/login$/, title: "Login" },
   { pattern: /^\/invite\/accept$/, title: "Accept invite" },
   { pattern: /^\/onboarding$/, title: "Onboarding" },
-  { pattern: /^\/demo$/, title: "Demo" },
   { pattern: /^\/autopilot$/, title: "Autopilot" },
   { pattern: /^\/autopilot\/decisions$/, title: "Autopilot decisions" },
   { pattern: /^\/sessions$/, title: "Sessions" },

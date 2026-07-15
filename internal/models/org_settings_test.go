@@ -136,6 +136,24 @@ func TestParseOrgSettings_SessionAutomation(t *testing.T) {
 			raw:     json.RawMessage(`{"session_automation":{"automatic_follow_through":{"readiness_after_review_loop_states":["unknown"]}}}`),
 			wantErr: "invalid ReviewLoopStatus",
 		},
+		{
+			name:    "rejects empty allowlist when bot mode is allowlist",
+			raw:     json.RawMessage(`{"session_automation":{"automatic_follow_through":{"pr_feedback_bot_mode":"allowlist"}}}`),
+			wantErr: "pr_feedback_bot_allowlist must not be empty",
+		},
+		{
+			name:    "rejects blank allowlist entries",
+			raw:     json.RawMessage(`{"session_automation":{"automatic_follow_through":{"pr_feedback_bot_mode":"allowlist","pr_feedback_bot_allowlist":["  "]}}}`),
+			wantErr: "pr_feedback_bot_allowlist entries must not be blank",
+		},
+		{
+			name: "parses valid bot allowlist",
+			raw:  json.RawMessage(`{"session_automation":{"automatic_follow_through":{"pr_feedback_bot_mode":"allowlist","pr_feedback_bot_allowlist":["dependabot[bot]"]}}}`),
+			want: AutomaticFollowThroughOrgSettings{
+				PRFeedbackBotMode:      PRFeedbackBotModeAllowlist,
+				PRFeedbackBotAllowlist: []string{"dependabot[bot]"},
+			},
+		},
 	}
 
 	for _, tt := range tests {

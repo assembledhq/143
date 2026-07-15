@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -489,6 +490,10 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 		w.Register("create_branch", newCreateBranchHandler(stores, services, logger))
 		w.Register("push_pr_changes", newPushPRChangesHandler(stores, services, logger))
 		w.Register("run_pr_readiness", newRunPRReadinessHandler(stores, services, logger))
+		w.Register(models.JobTypeMaterializeChangeset, newMaterializeChangesetHandler(stores, services, logger))
+		w.Register(models.JobTypeVerifyChangesetSplit, newVerifyChangesetSplitHandler(stores, services, logger))
+		w.Register(models.JobTypeRestackChangesets, newRestackChangesetsHandler(stores, services, logger))
+		w.Register(models.JobTypePublishChangesetStack, newPublishChangesetStackHandler(stores, services, logger))
 		w.Register("sync_pull_request_state", newSyncPullRequestStateHandler(services, logger))
 		w.Register("reconcile_pull_request_state", newReconcilePullRequestStateHandler(services, logger))
 		w.Register("enrich_pull_request_health", newEnrichPullRequestHealthHandler(services, logger))
@@ -553,6 +558,7 @@ func hasServiceHandlersDependencies(services *Services) bool {
 type Stores struct {
 	Issues              *db.IssueStore
 	Sessions            *db.SessionStore
+	SessionChangesets   *db.SessionChangesetStore
 	Jobs                *db.JobStore
 	Integrations        *db.IntegrationStore
 	Users               *db.UserStore
@@ -623,6 +629,44 @@ func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run mod
 	return nil
 }
 
+func updateChangesetPRCreationState(ctx context.Context, stores *Stores, orgID, sessionID uuid.UUID, changesetID *uuid.UUID, state models.PRCreationState, errMsg string) error {
+	if stores != nil && stores.SessionChangesets != nil {
+		var targetID uuid.UUID
+		var targetIsPrimary bool
+		if changesetID != nil {
+			targetID = *changesetID
+			target, err := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, targetID)
+			if err != nil {
+				return err
+			}
+			targetIsPrimary = target.IsPrimary
+		} else {
+			primary, err := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
+			if err != nil {
+				return err
+			}
+			targetID = primary.ID
+			targetIsPrimary = true
+		}
+		// Publish through SessionStore FIRST so the session-status SSE fires while
+		// the publish-state row is still in its prior value. If the changeset were
+		// written first, its changeset->session_publish_state mirror trigger would
+		// pre-set the terminal 'succeeded' value, tripping UpdatePRCreationState's
+		// `<> 'succeeded'` terminal guard so the guarded upsert matches zero rows
+		// and silently skips publishStatus — dropping the success SSE the one-PR
+		// UI depends on. The changeset write below then reconciles the changeset
+		// row (idempotent under the bidirectional mirror triggers) and remains the
+		// source of truth.
+		if targetIsPrimary {
+			if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg); err != nil {
+				return err
+			}
+		}
+		return stores.SessionChangesets.UpdatePRCreationState(ctx, orgID, sessionID, targetID, state, errMsg)
+	}
+	return stores.Sessions.UpdatePRCreationState(ctx, orgID, sessionID, state, errMsg)
+}
+
 func enqueueRunAgentForSession(ctx context.Context, stores *Stores, session models.Session) error {
 	if stores == nil || stores.Jobs == nil {
 		return errors.New("run_agent enqueue store unavailable")
@@ -672,6 +716,7 @@ type prCreator interface {
 	EnrichPullRequestHealth(ctx context.Context, orgID, pullRequestID uuid.UUID, version int64) error
 	CompletePullRequestRepairRun(ctx context.Context, orgID, pullRequestID, repairRunID uuid.UUID) error
 	MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
+	MaybeStartAutoRepairForPullRequest(ctx context.Context, orgID uuid.UUID, pullRequestID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error)
 	QueueMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	ProcessMergeWhenReady(ctx context.Context, orgID, pullRequestID uuid.UUID) error
 	SyncPRPreviewSurfaces(ctx context.Context, payload ghservice.SyncPRPreviewSurfacesPayload) error
@@ -829,6 +874,297 @@ type orchestratorService interface {
 	RevertThread(ctx context.Context, session *models.Session, thread *models.SessionThread) error
 	ResolveSessionTimeout(ctx context.Context, orgID uuid.UUID) time.Duration
 	ResolveAbsoluteRuntimeCeiling(ctx context.Context, orgID uuid.UUID) time.Duration
+	MaterializeChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, patch string) (agent.ChangesetMaterializationResult, error)
+	CaptureChangesetDiff(ctx context.Context, session *models.Session, changeset models.SessionChangeset) (agent.ChangesetDiffResult, error)
+	CheckpointChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, message string) (agent.ChangesetDiffResult, error)
+	RestackChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, baseRef string) (agent.ChangesetRestackResult, error)
+}
+
+func newMaterializeChangesetHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID       string `json:"org_id"`
+			SessionID   string `json:"session_id"`
+			ChangesetID string `json:"changeset_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal materialize_changeset payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset org ID: %w", err)
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset session ID: %w", err)
+		}
+		changesetID, err := uuid.Parse(input.ChangesetID)
+		if err != nil {
+			return fmt.Errorf("parse materialize changeset ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load materialization session: %w", err)
+		}
+		changeset, err := stores.SessionChangesets.BeginMaterialization(ctx, orgID, sessionID, changesetID)
+		if err != nil {
+			return fmt.Errorf("claim changeset materialization: %w", err)
+		}
+		holderID := uuid.New()
+		if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changesetID, holderID, models.ChangesetLeaseTypeMaterialize, "materialize pull request", 5*time.Minute, true); err != nil {
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to reset changeset materialization after lease failure")
+			}
+			return err
+		}
+		defer func() {
+			if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changesetID, holderID); releaseErr != nil {
+				logger.Warn().Err(releaseErr).Str("changeset_id", changesetID.String()).Msg("failed to release changeset materialization lease")
+			}
+		}()
+		patch, err := stores.SessionChangesets.GetAssignedPatch(ctx, orgID, sessionID, changesetID)
+		if err != nil {
+			// The row was already claimed as 'materializing' above; reset it so the
+			// changeset (and the session's single materialization slot) is not wedged
+			// permanently once the job dead-letters — BeginMaterialization can only
+			// re-claim a 'planned' row.
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to reset changeset materialization after patch load failure")
+			}
+			return err
+		}
+		result, err := services.Orchestrator.MaterializeChangeset(ctx, &session, changeset, patch)
+		if err != nil {
+			if stateErr := stores.SessionChangesets.FailMaterialization(ctx, orgID, sessionID, changesetID, err.Error()); stateErr != nil {
+				logger.Error().Err(stateErr).Str("changeset_id", changesetID.String()).Msg("failed to persist changeset materialization failure")
+			}
+			return err
+		}
+		if err := stores.SessionChangesets.CompleteMaterialization(ctx, orgID, sessionID, changesetID, result.WorkingBranch, result.WorktreePath, result.BaseHeadSHA, result.HeadSHA, result.Diff); err != nil {
+			return fmt.Errorf("persist changeset materialization: %w", err)
+		}
+		return nil
+	}
+}
+
+func newVerifyChangesetSplitHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID     string `json:"org_id"`
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal verify_changeset_split payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse verify split session ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load verify split session: %w", err)
+		}
+		summaries, err := stores.SessionChangesets.ListBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		for _, summary := range summaries {
+			if summary.IsPrimary || summary.WorktreePath == nil {
+				continue
+			}
+			changeset, err := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, summary.ID)
+			if err != nil {
+				return err
+			}
+			captured, err := services.Orchestrator.CaptureChangesetDiff(ctx, &session, changeset)
+			if err != nil {
+				return err
+			}
+			if err := stores.SessionChangesets.RecordMaterializedDiff(ctx, orgID, sessionID, changeset.ID, captured.HeadSHA, captured.Diff); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func newRestackChangesetsHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID           string `json:"org_id"`
+			SessionID       string `json:"session_id"`
+			FromChangesetID string `json:"from_changeset_id"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal restack_changesets payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse restack session ID: %w", err)
+		}
+		fromID, err := uuid.Parse(input.FromChangesetID)
+		if err != nil {
+			return fmt.Errorf("parse restack root changeset ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load restack session: %w", err)
+		}
+		changesets, err := stores.SessionChangesets.ListFullBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		byID := make(map[uuid.UUID]models.SessionChangeset, len(changesets))
+		descendant := map[uuid.UUID]bool{fromID: true}
+		blocked := make(map[uuid.UUID]bool)
+		for _, changeset := range changesets {
+			byID[changeset.ID] = changeset
+			if changeset.StackedOnChangesetID != nil && descendant[*changeset.StackedOnChangesetID] {
+				descendant[changeset.ID] = true
+			}
+			if changeset.Status == models.ChangesetStatusExternalUpdateDetected || changeset.Status == models.ChangesetStatusRestackConflict ||
+				(changeset.StackedOnChangesetID != nil && blocked[*changeset.StackedOnChangesetID]) {
+				blocked[changeset.ID] = true
+			}
+		}
+		for _, changeset := range changesets {
+			if changeset.ID == fromID || !descendant[changeset.ID] || blocked[changeset.ID] || changeset.Status != models.ChangesetStatusNeedsRestack {
+				continue
+			}
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypeRestack, "stack restack", 5*time.Minute, true); err != nil {
+				return err
+			}
+			func() {
+				defer func() {
+					if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+						logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release restack lease")
+					}
+				}()
+				if err = stores.SessionChangesets.MarkRestacking(ctx, orgID, sessionID, changeset.ID); err != nil {
+					return
+				}
+				baseRef := ""
+				if changeset.StackedOnChangesetID != nil {
+					parent := byID[*changeset.StackedOnChangesetID]
+					if parent.Status != models.ChangesetStatusMerged && parent.WorkingBranch != nil {
+						baseRef = *parent.WorkingBranch
+					}
+				}
+				var result agent.ChangesetRestackResult
+				result, err = services.Orchestrator.RestackChangeset(ctx, &session, changeset, baseRef)
+				if err != nil {
+					return
+				}
+				if result.Conflict {
+					err = stores.SessionChangesets.MarkRestackConflict(ctx, orgID, sessionID, changeset.ID, result.Message)
+					if err == nil {
+						err = &FatalError{Err: fmt.Errorf("changeset %s restack requires conflict resolution", changeset.ID)}
+					}
+					return
+				}
+				err = stores.SessionChangesets.CompleteRestack(ctx, orgID, sessionID, changeset.ID, result.BaseHeadSHA, result.HeadSHA, result.Diff)
+				if err == nil {
+					changeset.BaseHeadSHA = &result.BaseHeadSHA
+					changeset.HeadSHA = &result.HeadSHA
+					byID[changeset.ID] = changeset
+				}
+				if err == nil && changeset.ExpectedRemoteHeadSHA != nil {
+					_, err = services.PR.PushChangesToPR(ctx, &session, ghservice.CreatePRParams{ChangesetID: &changeset.ID})
+				}
+			}()
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func newPublishChangesetStackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+		var input struct {
+			OrgID      string `json:"org_id"`
+			SessionID  string `json:"session_id"`
+			AuthorMode string `json:"author_mode"`
+			Draft      *bool  `json:"draft"`
+		}
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal publish_changeset_stack payload: %w", err)
+		}
+		orgID, err := parseOrgID(input.OrgID, ctx)
+		if err != nil {
+			return err
+		}
+		sessionID, err := uuid.Parse(input.SessionID)
+		if err != nil {
+			return fmt.Errorf("parse publish stack session ID: %w", err)
+		}
+		session, err := stores.Sessions.GetByID(ctx, orgID, sessionID)
+		if err != nil {
+			return fmt.Errorf("load publish stack session: %w", err)
+		}
+		changesets, err := stores.SessionChangesets.ListFullBySession(ctx, orgID, sessionID)
+		if err != nil {
+			return err
+		}
+		published := make(map[uuid.UUID]bool, len(changesets))
+		for _, changeset := range changesets {
+			if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
+				published[changeset.ID] = true
+				continue
+			}
+			if changeset.WorktreePath == nil || changeset.WorkingBranch == nil {
+				return fmt.Errorf("changeset %s is not materialized", changeset.ID)
+			}
+			if changeset.RestackConfirmationRequired {
+				return fmt.Errorf("changeset %s has an unconfirmed restack delta", changeset.ID)
+			}
+			if changeset.StackedOnChangesetID != nil && !published[*changeset.StackedOnChangesetID] {
+				return fmt.Errorf("changeset %s appears before its stack parent", changeset.ID)
+			}
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypePublish, "publish stack", 5*time.Minute, true); err != nil {
+				return err
+			}
+			func() {
+				defer func() {
+					if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+						logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release stack publish lease")
+					}
+				}()
+				if err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStatePushing, ""); err != nil {
+					return
+				}
+				_, err = services.PR.CreatePR(ctx, &session, ghservice.CreatePRParams{
+					ChangesetID: &changeset.ID,
+					AuthorMode:  input.AuthorMode,
+					Draft:       input.Draft,
+				})
+				if err != nil {
+					stateErr := updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateFailed, userFacingPRError(err))
+					if stateErr != nil {
+						logger.Error().Err(stateErr).Str("changeset_id", changeset.ID.String()).Msg("failed to persist stack publish failure")
+					}
+					return
+				}
+				err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateSucceeded, "")
+			}()
+			if err != nil {
+				return err
+			}
+			published[changeset.ID] = true
+		}
+		return nil
+	}
 }
 
 // llmClient is the interface for LLM completion calls used by eval graders.
@@ -2419,18 +2755,9 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 				mappedUserID = resolved
 			}
 		}
-		if stores.SlackUserLinks != nil && payload.SlackUserID != "" {
-			link, linkErr := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, payload.TeamID, payload.SlackUserID)
-			if linkErr == nil && link.UserID != nil {
-				if mappedUserID == nil {
-					mappedUserID = link.UserID
-				}
-			} else if linkErr != nil && !errors.Is(linkErr, pgx.ErrNoRows) {
-				logger.Warn().Err(linkErr).Str("slack_user_id", payload.SlackUserID).Msg("failed to resolve Slack user mapping")
-			} else if mappedUserID == nil && errors.Is(linkErr, pgx.ErrNoRows) && stores.Users != nil {
-				if matchedID := resolveSlackUserByEmail(ctx, stores, slackClient, slackCfg.AccessToken, orgID, installationID, payload.TeamID, payload.SlackUserID, logger); matchedID != nil {
-					mappedUserID = matchedID
-				}
+		if mappedUserID == nil && payload.SlackUserID != "" && stores.Users != nil {
+			if matchedID := resolveSlackUserByEmail(ctx, stores, slackClient, slackCfg.AccessToken, orgID, installationID, payload.TeamID, payload.SlackUserID, logger); matchedID != nil {
+				mappedUserID = matchedID
 			}
 		}
 
@@ -2577,11 +2904,19 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 			return fmt.Errorf("persist slack session link: %w", err)
 		}
 		if stores.SessionAttributions != nil {
+			var externalLink *models.ExternalUserLink
+			if stores.ExternalUserLinks != nil && payload.SlackUserID != "" {
+				if resolvedLink, externalErr := stores.ExternalUserLinks.GetActiveByExternal(ctx, orgID, models.ExternalIdentityProviderSlack, payload.TeamID, payload.SlackUserID); externalErr == nil {
+					externalLink = &resolvedLink
+				} else if !errors.Is(externalErr, pgx.ErrNoRows) {
+					logger.Warn().Err(externalErr).Msg("failed to snapshot Slack external identity attribution")
+				}
+			}
 			attribution := &models.SessionAttribution{
 				OrgID:          orgID,
 				SessionID:      session.ID,
 				Source:         models.SessionAttributionSourceSlack,
-				SourceMetadata: slackSessionAttributionMetadata(*link),
+				SourceMetadata: slackSessionAttributionMetadata(*link, externalLink),
 			}
 			if err := stores.SessionAttributions.Create(ctx, attribution); err != nil {
 				logger.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to persist Slack session attribution")
@@ -2610,7 +2945,7 @@ func newSlackStartOrContinueSessionHandler(stores *Stores, services *Services, l
 	}
 }
 
-func slackSessionAttributionMetadata(link models.SlackSessionLink) json.RawMessage {
+func slackSessionAttributionMetadata(link models.SlackSessionLink, externalLink *models.ExternalUserLink) json.RawMessage {
 	metadata := map[string]any{
 		"slack_team_id":           link.SlackTeamID,
 		"slack_channel_id":        link.SlackChannelID,
@@ -2622,6 +2957,11 @@ func slackSessionAttributionMetadata(link models.SlackSessionLink) json.RawMessa
 	}
 	if link.MappedUserID != nil {
 		metadata["mapped_user_id"] = link.MappedUserID.String()
+	}
+	if externalLink != nil {
+		metadata["external_user_link_id"] = externalLink.ID.String()
+		metadata["attribution_source"] = externalLink.Source
+		metadata["attribution_confidence"] = externalLink.Confidence
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
@@ -2849,6 +3189,8 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 	memberships := []models.MembershipSummary{}
 	var botSettings *models.SlackBotSettings
 	var defaultRepo *models.Repository
+	var mappedUserID *uuid.UUID
+	var mappedUserName string
 	if stores != nil && stores.SlackSessionLinks != nil {
 		var err error
 		pending, err = stores.SlackSessionLinks.ListPendingHumanInputsForSlackUser(ctx, orgID, teamID, slackUserID, 5)
@@ -2869,7 +3211,6 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 		}
 	}
 	if stores != nil && stores.Memberships != nil {
-		var mappedUserID *uuid.UUID
 		if stores.ExternalUserLinks != nil {
 			if externalUserID, externalErr := lookupExternalSlackMappedUserID(ctx, stores.ExternalUserLinks, orgID, teamID, slackUserID); externalErr == nil && externalUserID != nil {
 				mappedUserID = externalUserID
@@ -2877,14 +3218,14 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 				logger.Warn().Err(externalErr).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home external org memberships")
 			}
 		}
-		if stores.SlackUserLinks != nil {
-			if link, err := stores.SlackUserLinks.GetBySlackUser(ctx, orgID, teamID, slackUserID); err == nil && link.UserID != nil {
-				if mappedUserID == nil {
-					mappedUserID = link.UserID
+		if mappedUserID != nil {
+			if stores.Users != nil {
+				if mappedUser, userErr := stores.Users.GetByID(ctx, orgID, *mappedUserID); userErr == nil {
+					mappedUserName = strings.TrimSpace(mappedUser.Name)
+				} else if !errors.Is(userErr, pgx.ErrNoRows) {
+					logger.Warn().Err(userErr).Msg("failed to load Slack App Home mapped user")
 				}
 			}
-		}
-		if mappedUserID != nil {
 			if userMemberships, membershipErr := stores.Memberships.ListByUser(ctx, *mappedUserID); membershipErr == nil {
 				memberships = userMemberships
 			} else {
@@ -2906,6 +3247,12 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to load Slack App Home defaults")
 		}
 	}
+	accountText := "Connect account"
+	accountAction := "slack_link_account"
+	if mappedUserID != nil {
+		accountText = "Account connected"
+		accountAction = "slack_account_connected"
+	}
 	blocks := []ingestion.SlackBlock{
 		{
 			Type: "header",
@@ -2919,9 +3266,12 @@ func slackHomeView(ctx context.Context, stores *Stores, services *Services, logg
 			Type: "actions",
 			Elements: []map[string]any{
 				{"type": "button", "action_id": "slack_start_from_home", "text": map[string]string{"type": "plain_text", "text": "Start session"}, "value": "{}"},
-				{"type": "button", "action_id": "slack_link_account", "text": map[string]string{"type": "plain_text", "text": "Link account"}, "value": "{}"},
+				{"type": "button", "action_id": accountAction, "text": map[string]string{"type": "plain_text", "text": accountText}, "value": "{}"},
 			},
 		},
+	}
+	if mappedUserName != "" {
+		blocks = append(blocks, ingestion.SlackBlock{Type: "section", Text: &ingestion.SlackTextObject{Type: "mrkdwn", Text: "*Connected 143 account*\n" + mappedUserName}})
 	}
 	blocks = append(blocks, slackHomePendingBlocks(services, pending)...)
 	blocks = append(blocks, slackHomePersonalDefaultsBlock(botSettings, defaultRepo))
@@ -3397,6 +3747,10 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			return nil
 		}
 		state := slackLifecycleStateForProgress(progress)
+		var statusActions []slackbotsvc.SlackAction
+		if link.TeamSession && progress.Terminal {
+			statusActions = append(statusActions, slackbotsvc.SlackAction{Text: "Connect account", ActionID: "slack_link_account", Value: "{}"})
+		}
 		rendered := slackbotsvc.RenderSessionStatus(slackbotsvc.SlackSessionRenderInput{
 			Session:    models.Session{ID: sessionID},
 			Link:       link,
@@ -3404,6 +3758,7 @@ func newSlackPostRunUpdateHandler(stores *Stores, services *Services, logger zer
 			Title:      progress.Title,
 			Summary:    progress.Summary,
 			SessionURL: slackSessionURL(services, sessionID),
+			Actions:    statusActions,
 		})
 		text := rendered.Text
 		channelID, threadTS := slackDeliveryTarget(ctx, stores, slackClient, slackCfg.AccessToken, logger, link, slackReplyThreadTS(link.SlackThreadTS))
@@ -3589,12 +3944,17 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 func newSlackSendNotificationHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	slackClient := ingestion.NewSlackAPIClient(logger)
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		if stores == nil || stores.Credentials == nil {
-			return fmt.Errorf("slack notification dependencies are not configured")
-		}
 		var input models.SlackSendNotificationJobPayload
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal slack notification payload: %w", err)
+		}
+		// Drop retired events at delivery time too, so jobs queued before a
+		// deployment cannot leak obsolete channel notifications afterward.
+		if slackNotificationEventDisabled(input.Kind) {
+			return nil
+		}
+		if stores == nil || stores.Credentials == nil {
+			return fmt.Errorf("slack notification dependencies are not configured")
 		}
 		orgID, err := uuid.Parse(input.OrgID)
 		if err != nil {
@@ -3842,6 +4202,9 @@ type slackNotificationSubscriptionConfig struct {
 func slackNotificationEventDisabled(eventKind string) bool {
 	switch eventKind {
 	case string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationSessionFailed),
+		string(models.SlackNotificationAutomationFailed),
+		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationPROpened),
 		string(models.SlackNotificationPreviewReady),
 		string(models.SlackNotificationPreviewFailed),
@@ -3883,16 +4246,10 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 	switch *preset {
 	case models.SlackNotificationPresetQuiet:
 		return []string{
-			string(models.SlackNotificationSessionFailed),
-			string(models.SlackNotificationAutomationFailed),
-			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetBalanced:
 		return []string{
-			string(models.SlackNotificationSessionFailed),
-			string(models.SlackNotificationAutomationFailed),
-			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetVerbose:
@@ -4060,7 +4417,7 @@ func notifyPRAutoRepairAttention(ctx context.Context, stores *Stores, logger zer
 func notifyPRAutoReadinessAttention(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, status models.PRReadinessRunStatus, summary string) {
 	var pullRequestID *uuid.UUID
 	if stores != nil && stores.PullRequests != nil {
-		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 		if err == nil {
 			id := pr.ID
 			pullRequestID = &id
@@ -4107,6 +4464,11 @@ func recordSlackMessageUpdateLatency(ctx context.Context, services *Services, me
 }
 
 func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, automationRunID *uuid.UUID, eventKind, title, body string) {
+	// Session failures stay in 143 (and in the originating Slack thread for
+	// Slack-started work) instead of being broadcast into notification channels.
+	if eventKind == string(models.SlackNotificationSessionFailed) {
+		return
+	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind: eventKind,
 		Title:     title,
@@ -4325,7 +4687,19 @@ func slackHumanInputDeliveryTarget(ctx context.Context, stores *Stores, slackCli
 	if req.AssignedUserID != nil {
 		needsDM = true
 		slackUserID = ""
-		if stores != nil && stores.SlackUserLinks != nil {
+		if stores != nil && stores.ExternalUserLinks != nil {
+			assignedLinks, err := stores.ExternalUserLinks.ListActiveByUser(ctx, req.OrgID, *req.AssignedUserID)
+			if err == nil {
+				for _, assignedLink := range assignedLinks {
+					if assignedLink.Provider == models.ExternalIdentityProviderSlack && assignedLink.ProviderWorkspaceID == link.SlackTeamID {
+						slackUserID = assignedLink.ProviderUserID
+						break
+					}
+				}
+			} else {
+				logger.Warn().Err(err).Str("assigned_user_id", req.AssignedUserID.String()).Msg("failed to resolve assigned external Slack identity")
+			}
+		} else if stores != nil && stores.SlackUserLinks != nil {
 			assignedLink, err := stores.SlackUserLinks.GetByUser(ctx, req.OrgID, *req.AssignedUserID, link.SlackTeamID)
 			if err == nil {
 				slackUserID = assignedLink.SlackUserID
@@ -4460,6 +4834,8 @@ func newSlackHandleInteractionHandler(stores *Stores, services *Services, logger
 			return handleSlackStartFromHome(ctx, stores, slackClient, input)
 		case "slack_link_account":
 			return handleSlackLinkAccount(ctx, stores, services, slackClient, input)
+		case "slack_account_connected":
+			return handleSlackAccountConnected(ctx, stores, services, slackClient, input)
 		case "slack_select_org":
 			return handleSlackSelectOrg(ctx, stores, services, slackClient, input)
 		case "slack_select_repository":
@@ -4722,7 +5098,7 @@ func slackModalSelectedValues(raw json.RawMessage, blockID, actionID string) []s
 }
 
 func handleSlackLinkAccount(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
-	if stores == nil || stores.Credentials == nil {
+	if stores == nil || stores.Credentials == nil || stores.ExternalUserLinks == nil {
 		return fmt.Errorf("slack account-link dependencies are not configured")
 	}
 	orgID, err := uuid.Parse(input.OrgID)
@@ -4737,10 +5113,48 @@ func handleSlackLinkAccount(ctx context.Context, stores *Stores, services *Servi
 	if !ok {
 		return fmt.Errorf("unexpected slack credential type")
 	}
-	integrationsURL := slackFrontendURL(services, "/integrations?slack_user_id="+url.QueryEscape(input.UserID))
+	sourceContext, err := json.Marshal(map[string]string{"surface": "slack", "channel_id": input.ChannelID})
+	if err != nil {
+		return fmt.Errorf("marshal slack identity claim context: %w", err)
+	}
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, stores.ExternalUserLinks, stores.Users, externalidentity.Options{})
+	_, rawToken, err := resolver.CreateSelfLinkClaim(ctx, orgID, externalidentity.ExternalActorInput{
+		Provider: models.ExternalIdentityProviderSlack, ProviderWorkspaceID: input.TeamID, ProviderUserID: input.UserID,
+	}, sourceContext)
+	if err != nil {
+		return fmt.Errorf("create slack account claim: %w", err)
+	}
+	integrationsURL := slackFrontendURL(services, "/external-identities/claim?token="+url.QueryEscape(rawToken))
 	text := "Link your Slack account from 143 to enable personal approvals, DMs, and user-specific defaults.\n\nOpen 143: " + integrationsURL
 	if input.TriggerID != "" {
 		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackLinkAccountModal(integrationsURL))
+	}
+	if input.ChannelID != "" && input.UserID != "" {
+		return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
+	}
+	return nil
+}
+
+func handleSlackAccountConnected(ctx context.Context, stores *Stores, services *Services, slackClient *ingestion.SlackAPIClient, input models.SlackInteractionJobPayload) error {
+	if stores == nil || stores.Credentials == nil {
+		return fmt.Errorf("slack account status dependencies are not configured")
+	}
+	orgID, err := uuid.Parse(input.OrgID)
+	if err != nil {
+		return fmt.Errorf("parse org_id: %w", err)
+	}
+	cred, err := stores.Credentials.Get(ctx, orgID, models.ProviderSlack)
+	if err != nil {
+		return fmt.Errorf("get slack credentials: %w", err)
+	}
+	slackCfg, ok := cred.Config.(models.SlackConfig)
+	if !ok {
+		return fmt.Errorf("unexpected slack credential type")
+	}
+	accountURL := slackFrontendURL(services, "/settings/account#external-identities")
+	text := "Your Slack account is connected to 143. Manage or disconnect it from account settings.\n\nOpen 143: " + accountURL
+	if input.TriggerID != "" {
+		return slackClient.OpenView(ctx, slackCfg.AccessToken, input.TriggerID, slackInfoModal("Account connected", text))
 	}
 	if input.ChannelID != "" && input.UserID != "" {
 		return slackClient.PostEphemeral(ctx, slackCfg.AccessToken, input.ChannelID, input.UserID, text)
@@ -5623,14 +6037,33 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		if stores == nil || stores.Jobs == nil {
 			return fmt.Errorf("slack PR creation dependencies are not configured")
 		}
+		changesetID := sessionID
+		if stores.SessionChangesets != nil {
+			primary, primaryErr := stores.SessionChangesets.GetPrimary(ctx, orgID, sessionID)
+			if primaryErr != nil {
+				return fmt.Errorf("resolve Slack PR primary changeset: %w", primaryErr)
+			}
+			changesetID = primary.ID
+		}
 		payload := map[string]string{
 			"org_id":               orgID.String(),
 			"session_id":           sessionID.String(),
+			"changeset_id":         changesetID.String(),
 			"requested_by_user_id": auth.ActorUserID.String(),
 		}
-		dedupeKey := "slack_create_pr:" + sessionID.String()
-		if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
-			return fmt.Errorf("enqueue Slack PR creation: %w", err)
+		if stores.SessionChangesets != nil {
+			_, queued, queueErr := stores.Jobs.QueueChangesetPRCreation(ctx, orgID, sessionID, changesetID, "default", payload, 5)
+			if queueErr != nil {
+				return fmt.Errorf("enqueue Slack PR creation: %w", queueErr)
+			}
+			if !queued {
+				return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation is already in progress for this branch.")
+			}
+		} else {
+			dedupeKey := "slack_create_pr:" + changesetID.String()
+			if _, err := stores.Jobs.Enqueue(ctx, orgID, "default", "open_pr", payload, 5, &dedupeKey); err != nil {
+				return fmt.Errorf("enqueue Slack PR creation: %w", err)
+			}
 		}
 		return postSlackEphemeralIfPossible(ctx, stores, slackClient, orgID, input, "Pull request creation requested for this session.")
 	case "slack_repair_pr", "slack_start_work":
@@ -5654,7 +6087,7 @@ func handleSlackSpecializedSessionAction(ctx context.Context, stores *Stores, se
 		if stores == nil || stores.PullRequests == nil || services == nil || services.PR == nil {
 			return fmt.Errorf("slack PR merge dependencies are not configured")
 		}
-		pr, err := stores.PullRequests.GetBySessionID(ctx, orgID, sessionID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, orgID, sessionID)
 		if err != nil {
 			return fmt.Errorf("load pull request for Slack merge: %w", err)
 		}
@@ -5778,6 +6211,9 @@ func authorizeSlackSessionAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	if stores.ExternalUserLinks != nil {
+		authorizer = slackbotsvc.NewAuthorizerWithExternal(stores.ExternalUserLinks, stores.Memberships, stores.SlackChannels)
+	}
 	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
@@ -5824,6 +6260,9 @@ func authorizeSlackPreviewAction(ctx context.Context, stores *Stores, input mode
 		}
 	}
 	authorizer := slackbotsvc.NewAuthorizer(stores.SlackUserLinks, stores.Memberships, stores.SlackChannels)
+	if stores.ExternalUserLinks != nil {
+		authorizer = slackbotsvc.NewAuthorizerWithExternal(stores.ExternalUserLinks, stores.Memberships, stores.SlackChannels)
+	}
 	decision, err := authorizer.Authorize(ctx, slackbotsvc.ActionRequest{
 		OrgID:                    orgID,
 		TeamID:                   input.TeamID,
@@ -6400,7 +6839,7 @@ func loadSlackSessionOutcomeDetails(ctx context.Context, stores *Stores, service
 		return details
 	}
 	if stores.PullRequests != nil {
-		pr, err := stores.PullRequests.GetBySessionID(ctx, session.OrgID, session.ID)
+		pr, err := stores.PullRequests.GetPrimaryBySessionID(ctx, session.OrgID, session.ID)
 		if err == nil {
 			details.PullRequest = &pr
 		} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -6453,6 +6892,9 @@ func appendSlackSessionOutcomeDetails(text string, details slackSessionOutcomeDe
 func slackTeamSessionLine(link models.SlackSessionLink) string {
 	if !link.TeamSession {
 		return ""
+	}
+	if strings.TrimSpace(link.SlackUserID) != "" {
+		return fmt.Sprintf("_Slack <@%s> started this team session without a connected 143 account._", link.SlackUserID)
 	}
 	return slackbotsvc.TeamSessionLine()
 }
@@ -7069,43 +7511,23 @@ func resolveSlackUserByEmail(ctx context.Context, stores *Stores, slackClient *i
 	} else if resolved != nil {
 		return resolved
 	}
-	user, err := stores.Users.GetByEmail(ctx, email)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to resolve Slack email to 143 user")
-		}
-		return nil
-	}
-	if user.OrgID != orgID {
-		return nil
-	}
-	link := &models.SlackUserLink{
-		OrgID:               orgID,
-		SlackInstallationID: installationID,
-		UserID:              &user.ID,
-		SlackTeamID:         teamID,
-		SlackUserID:         slackUserID,
-		SlackEmail:          &email,
-		SlackDisplayName:    displayName,
-	}
-	if err := stores.SlackUserLinks.UpsertEmailMatch(ctx, link); err != nil {
-		logger.Warn().Err(err).Str("slack_user_id", slackUserID).Msg("failed to persist Slack email match")
-	}
-	return &user.ID
+	return nil
 }
 
 func resolveExternalSlackUser(ctx context.Context, stores *Stores, orgID uuid.UUID, teamID, slackUserID string, email, displayName *string, logger zerolog.Logger) (*uuid.UUID, error) {
 	if stores == nil || stores.ExternalUserLinks == nil || stores.Users == nil {
 		return nil, nil
 	}
-	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, nil, stores.Users, externalidentity.Options{})
+	resolver := externalidentity.NewResolver(stores.ExternalUserLinks, stores.ExternalSuggestions, stores.ExternalUserLinks, stores.Users, externalidentity.Options{AllowVerifiedEmailAutoLink: email != nil})
 	input := externalidentity.ExternalActorInput{
 		Provider:            models.ExternalIdentityProviderSlack,
 		ProviderWorkspaceID: strings.TrimSpace(teamID),
 		ProviderUserID:      strings.TrimSpace(slackUserID),
 		Email:               email,
-		EmailVerified:       false,
-		DisplayName:         displayName,
+		// Slack's authenticated users.info response is the authoritative workspace
+		// profile source; unlike display names, its email is safe for exact matching.
+		EmailVerified: email != nil,
+		DisplayName:   displayName,
 	}
 	resolution, err := resolver.ResolveExternalActor(ctx, orgID, input)
 	if err != nil {
@@ -7183,6 +7605,9 @@ func slackSessionAckBlocks(ctx context.Context, stores *Stores, services *Servic
 		URL:  slackSessionURL(services, sessionID),
 	}}
 	if session != nil {
+		if session.TriggeredByUserID == nil {
+			actions = append(actions, slackbotsvc.SlackAction{Text: "Connect account", ActionID: "slack_link_account", Value: "{}"})
+		}
 		actions = append(actions, slackbotsvc.SlackAction{
 			Text:     "Change repo",
 			ActionID: "slack_configure_channel",
@@ -8970,21 +9395,23 @@ func answerQueuedHumanInputForContinue(ctx context.Context, stores *Stores, orgI
 func newContinueSessionHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID             string `json:"session_id"`
-			OrgID                 string `json:"org_id"`
-			ThreadID              string `json:"thread_id"`
-			PullRequestID         string `json:"pull_request_id"`
-			RepairRunID           string `json:"repair_run_id"`
-			CommandType           string `json:"command_type"`
-			HealthVersion         int64  `json:"health_version"`
-			HeadSHA               string `json:"head_sha"`
-			WorkspaceMode         string `json:"workspace_mode"`
-			PullRequestNumber     int    `json:"pull_request_number"`
-			AutoAttempt           bool   `json:"auto_attempt"`
-			HumanInputRequestID   string `json:"human_input_request_id"`
-			QueuedMessageID       string `json:"queued_message_id"`
-			PostSuccessAction     string `json:"post_success_action"`
-			PostSuccessAuthorMode string `json:"post_success_author_mode"`
+			SessionID              string `json:"session_id"`
+			OrgID                  string `json:"org_id"`
+			ThreadID               string `json:"thread_id"`
+			ChangesetID            string `json:"changeset_id"`
+			ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
+			PullRequestID          string `json:"pull_request_id"`
+			RepairRunID            string `json:"repair_run_id"`
+			CommandType            string `json:"command_type"`
+			HealthVersion          int64  `json:"health_version"`
+			HeadSHA                string `json:"head_sha"`
+			WorkspaceMode          string `json:"workspace_mode"`
+			PullRequestNumber      int    `json:"pull_request_number"`
+			AutoAttempt            bool   `json:"auto_attempt"`
+			HumanInputRequestID    string `json:"human_input_request_id"`
+			QueuedMessageID        string `json:"queued_message_id"`
+			PostSuccessAction      string `json:"post_success_action"`
+			PostSuccessAuthorMode  string `json:"post_success_author_mode"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal continue_session payload: %w", err)
@@ -9006,7 +9433,6 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
 		}
-
 		// Apply the per-session wall-clock timeout (see newRunAgentHandler for
 		// rationale). HandlerCleanupBuffer lets the orchestrator clean up
 		// after the timeout fires without racing the handler context.
@@ -9032,6 +9458,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		var resultAgentSessionID string
 		var humanInputRequestID *uuid.UUID
 		var queuedMessageID *int64
+		var targetChangeset *models.SessionChangeset
 		if input.HumanInputRequestID != "" {
 			parsedHumanInputRequestID, parseErr := uuid.Parse(input.HumanInputRequestID)
 			if parseErr != nil {
@@ -9045,6 +9472,23 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				return fmt.Errorf("parse queued message ID: %w", parseErr)
 			}
 			queuedMessageID = &parsedQueuedMessageID
+		}
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse target changeset ID: %w", parseErr)
+			}
+			if stores.SessionChangesets == nil {
+				return errors.New("target changeset store unavailable")
+			}
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, orgID, sessionID, changesetID)
+			if loadErr != nil {
+				return fmt.Errorf("load target changeset: %w", loadErr)
+			}
+			if changeset.WorktreePath == nil {
+				return errors.New("target changeset is not materialized")
+			}
+			targetChangeset = &changeset
 		}
 		// Captured by the OnTurnComplete callback so the post-success block
 		// below can persist per-thread result metadata (diff, summary,
@@ -9158,6 +9602,55 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				continueOpts.HumanInputRequestID = humanInputRequestID
 			}
 			continueOpts.QueuedMessageID = queuedMessageID
+		}
+		if targetChangeset != nil {
+			if continueOpts == nil {
+				continueOpts = &agent.ContinueSessionOptions{}
+			}
+			changesetID := targetChangeset.ID
+			continueOpts.ChangesetID = &changesetID
+		}
+
+		var stopLeaseHeartbeat context.CancelFunc
+		if targetChangeset != nil {
+			holderID := uuid.New()
+			if input.ChangesetLeaseHolderID != "" {
+				parsedHolderID, parseErr := uuid.Parse(input.ChangesetLeaseHolderID)
+				if parseErr != nil {
+					return fmt.Errorf("parse changeset lease holder ID: %w", parseErr)
+				}
+				holderID = parsedHolderID
+			}
+			const leaseTTL = 2 * time.Minute
+			label := "session turn"
+			if input.ThreadID != "" {
+				label = "tab " + input.ThreadID
+			}
+			if _, leaseErr := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, targetChangeset.ID, holderID, models.ChangesetLeaseTypeAgentTurn, label, leaseTTL, true); leaseErr != nil {
+				return leaseErr
+			}
+			heartbeatCtx, cancelHeartbeat := context.WithCancel(context.WithoutCancel(ctx))
+			stopLeaseHeartbeat = cancelHeartbeat
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-heartbeatCtx.Done():
+						return
+					case <-ticker.C:
+						if heartbeatErr := stores.SessionChangesets.HeartbeatLease(heartbeatCtx, orgID, sessionID, targetChangeset.ID, holderID, leaseTTL); heartbeatErr != nil {
+							logger.Warn().Err(heartbeatErr).Str("changeset_id", targetChangeset.ID.String()).Msg("changeset turn lease heartbeat failed")
+						}
+					}
+				}
+			}()
+			defer func() {
+				cancelHeartbeat()
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, targetChangeset.ID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", targetChangeset.ID.String()).Msg("failed to release changeset turn lease")
+				}
+			}()
 		}
 
 		var dispatchThreadID *uuid.UUID
@@ -9343,6 +9836,18 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			return err
 		}
+		if stopLeaseHeartbeat != nil {
+			stopLeaseHeartbeat()
+		}
+		if targetChangeset != nil {
+			captured, captureErr := services.Orchestrator.CheckpointChangeset(ctx, &session, *targetChangeset, "Agent update: "+targetChangeset.Title)
+			if captureErr != nil {
+				return fmt.Errorf("capture targeted changeset turn: %w", captureErr)
+			}
+			if recordErr := stores.SessionChangesets.RecordLocalHead(ctx, orgID, sessionID, targetChangeset.ID, captured.HeadSHA, captured.Diff); recordErr != nil {
+				return fmt.Errorf("record targeted changeset turn: %w", recordErr)
+			}
+		}
 
 		if hasThread {
 			// The user message was inserted at thread.CurrentTurn + 1, so the
@@ -9392,15 +9897,16 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 		}
 
-		// Regenerate title if due (every 3 turns). Non-fatal — log and continue.
+		// Conservatively check for an explicit title pivot every ten turns.
+		// Non-fatal — title maintenance must not fail the agent run.
 		if services.TitleService != nil {
 			var completedThreadID *uuid.UUID
 			if hasThread {
 				threadIDLocal := threadID
 				completedThreadID = &threadIDLocal
 			}
-			if titleErr := services.TitleService.MaybeRegenerateTitle(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
-				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to regenerate session title")
+			if titleErr := services.TitleService.MaybeUpdateTitleForPivot(ctx, orgID, sessionID, completedThreadID); titleErr != nil {
+				logger.Warn().Err(titleErr).Str("session_id", sessionID.String()).Msg("failed to evaluate session title pivot")
 			}
 		}
 		autoRepairAfterContinue := true
@@ -10103,6 +10609,23 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 			}
 			return err
 		}
+		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_health_updated")
+		if autoRepairErr != nil {
+			logger.Warn().
+				Err(autoRepairErr).
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Msg("failed to evaluate automatic pull request repair after GitHub health update")
+			return nil
+		}
+		if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
+			logger.Info().
+				Str("org_id", orgID.String()).
+				Str("pull_request_id", pullRequestID.String()).
+				Str("auto_repair_action", string(decision.Action)).
+				Str("head_sha", decision.HeadSHA).
+				Msg("started automatic pull request repair after GitHub health update")
+		}
 		return nil
 	}
 }
@@ -10226,6 +10749,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
 			SessionID         string `json:"session_id"`
+			ChangesetID       string `json:"changeset_id,omitempty"`
 			OrgID             string `json:"org_id"`
 			IssueSnapshotID   string `json:"issue_snapshot_id,omitempty"`
 			Draft             *bool  `json:"draft,omitempty"`
@@ -10251,7 +10775,24 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if err != nil {
 			return fmt.Errorf("fetch agent run: %w", err)
 		}
-		if run.SnapshotKey == nil || *run.SnapshotKey == "" {
+		var changesetID *uuid.UUID
+		var targetChangeset models.SessionChangeset
+		if stores.SessionChangesets != nil {
+			if input.ChangesetID != "" {
+				parsed, parseErr := uuid.Parse(input.ChangesetID)
+				if parseErr != nil {
+					return fmt.Errorf("parse changeset ID: %w", parseErr)
+				}
+				targetChangeset, err = stores.SessionChangesets.GetByID(ctx, orgID, runID, parsed)
+			} else {
+				targetChangeset, err = stores.SessionChangesets.GetPrimary(ctx, orgID, runID)
+			}
+			if err != nil {
+				return fmt.Errorf("resolve open_pr changeset: %w", err)
+			}
+			changesetID = &targetChangeset.ID
+		}
+		if (changesetID == nil || targetChangeset.WorktreePath == nil) && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
 			if run.Status == models.SessionStatusRunning {
 				logger.Info().
 					Str("session_id", runID.String()).
@@ -10277,8 +10818,8 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		}
 
 		if input.RequestedRole == string(models.RoleBuilder) {
-			if err := ensureBuilderReadinessFresh(ctx, stores, run); err != nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
+			if err := ensureBuilderReadinessFresh(ctx, stores, run, changesetID); err != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "PR readiness blockers must pass before creating a PR."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation blocked by readiness")
 				}
 				return err
@@ -10320,7 +10861,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			}
 		}
 
-		if err := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStatePushing, ""); err != nil {
+		if err := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStatePushing, ""); err != nil {
 			logger.Error().Err(err).Msg("failed to mark PR creation as pushing")
 		}
 
@@ -10331,14 +10872,18 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if input.AuthorMode != "" {
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
 		}
+		if changesetID != nil {
+			params = append(params, ghservice.CreatePRParams{ChangesetID: changesetID})
+		}
 
 		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
+			noChanges := errors.Is(createErr, ghservice.ErrNoChanges)
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
 			// a real-error signal that dashboards/alerts can key off without
 			// false positives.
-			if errors.Is(createErr, ghservice.ErrNoChanges) {
+			if noChanges {
 				logger.Info().
 					Str("session_id", runID.String()).
 					Msg("open_pr: no changes to push")
@@ -10349,19 +10894,31 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					Str("session_id", runID.String()).
 					Msg("open_pr failed")
 			}
+			if noChanges && run.AutomationRunID != nil {
+				if stores.AutomationRuns != nil {
+					if _, stateErr := stores.AutomationRuns.MarkCompletedNoop(ctx, orgID, *run.AutomationRunID, run.ResultSummary); stateErr != nil {
+						return fmt.Errorf("mark automation run completed no-op: %w", stateErr)
+					}
+				}
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateIdle, ""); stateErr != nil {
+					return fmt.Errorf("clear automation PR creation state after no-op: %w", stateErr)
+				}
+				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
+				return nil
+			}
 			msg := userFacingPRError(createErr)
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, msg); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 			}
 			// PR creation failures happen after the agent run has already
 			// completed, so failRun will not fire for them. Tell the Linear
 			// linker about terminal outcomes here so agent-triggered sessions
 			// do not stay in-progress forever after a dead-lettered open_pr.
-			if errors.Is(createErr, ghservice.ErrNoChanges) {
+			if noChanges {
 				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
 			}
 			if shouldDeadLetterPRError(createErr) {
-				if !errors.Is(createErr, ghservice.ErrNoChanges) {
+				if !noChanges {
 					linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "failed", 0)
 				}
 				return &FatalError{Err: createErr}
@@ -10372,7 +10929,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		if input.MergeWhenReady {
 			if pr == nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return fmt.Errorf("open_pr merge_when_ready requested but PRService returned nil pull request")
@@ -10380,19 +10937,19 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			requestedByUserID, err := uuid.Parse(input.RequestedByUserID)
 			if err != nil {
 				queueErr := fmt.Errorf("parse merge_when_ready requesting user id: %w", err)
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return queueErr
 			}
 			if _, err := services.PR.QueueMergeWhenReady(ctx, orgID, pr.ID, requestedByUserID); err != nil {
-				if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, "Could not enable auto-merge for this pull request."); stateErr != nil {
 					logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
 				}
 				return fmt.Errorf("queue merge when ready after open_pr: %w", err)
 			}
 		}
-		if stateErr := stores.Sessions.UpdatePRCreationState(ctx, orgID, runID, models.PRCreationStateSucceeded, ""); stateErr != nil {
+		if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateSucceeded, ""); stateErr != nil {
 			logger.Error().Err(stateErr).Msg("failed to mark PR creation as succeeded")
 		}
 		if services.PagerDutyWrites != nil && pr != nil {
@@ -10426,7 +10983,7 @@ func registerOpenPRDeadLetterMilestone(ctx context.Context, stores *Stores, logg
 	})
 }
 
-func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models.Session) error {
+func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models.Session, changesetID *uuid.UUID) error {
 	if stores == nil || stores.PRReadiness == nil {
 		return fmt.Errorf("PR readiness policy is not configured")
 	}
@@ -10437,7 +10994,12 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if !resolved.Config.RequiresRoleReadiness(models.RoleBuilder) {
 		return nil
 	}
-	readinessRun, err := stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	var readinessRun *models.PRReadinessRun
+	if changesetID != nil {
+		readinessRun, err = stores.PRReadiness.GetLatestByChangeset(ctx, run.OrgID, run.ID, *changesetID)
+	} else {
+		readinessRun, err = stores.PRReadiness.GetLatestBySession(ctx, run.OrgID, run.ID)
+	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("PR readiness is required before builder PR creation")
@@ -10447,7 +11009,15 @@ func ensureBuilderReadinessFresh(ctx context.Context, stores *Stores, run models
 	if readinessRun.Status == models.PRReadinessRunStatusQueued || readinessRun.Status == models.PRReadinessRunStatusRunning {
 		return fmt.Errorf("PR readiness is still running")
 	}
-	if readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey) {
+	stale := readinessRun.EvaluatedWorkspaceRevision != run.WorkspaceRevision || stringValue(readinessRun.EvaluatedSnapshotKey) != stringValue(run.SnapshotKey)
+	if changesetID != nil && stores.SessionChangesets != nil {
+		changeset, loadErr := stores.SessionChangesets.GetByID(ctx, run.OrgID, run.ID, *changesetID)
+		if loadErr != nil {
+			return fmt.Errorf("load changeset for builder readiness: %w", loadErr)
+		}
+		stale = stringValue(readinessRun.EvaluatedHeadSHA) != stringValue(changeset.HeadSHA)
+	}
+	if stale {
 		return fmt.Errorf("PR readiness is stale for current workspace revision")
 	}
 	if readinessRun.Status == models.PRReadinessRunStatusFailed {
@@ -10513,27 +11083,54 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		if err != nil {
 			return fmt.Errorf("load readiness session: %w", err)
 		}
-		if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
-			return err
-		} else if loop != nil {
-			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+		changeset := models.SessionChangeset{ID: run.ChangesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true}
+		if stores.SessionChangesets != nil && run.ChangesetID != uuid.Nil {
+			changeset, err = stores.SessionChangesets.GetByID(ctx, orgID, sessionID, run.ChangesetID)
+			if err != nil {
+				return fmt.Errorf("load readiness changeset: %w", err)
 			}
-			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+		}
+		if !changeset.IsPrimary && changeset.WorktreePath != nil {
+			holderID := uuid.New()
+			if _, err := stores.SessionChangesets.AcquireLease(ctx, orgID, sessionID, changeset.ID, holderID, models.ChangesetLeaseTypeReadiness, "pull request readiness", 10*time.Minute, true); err != nil {
+				return err
+			}
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, sessionID, changeset.ID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release changeset readiness lease")
+				}
+			}()
+		}
+		if run.EvaluatedHeadSHA != nil && (changeset.HeadSHA == nil || *run.EvaluatedHeadSHA != *changeset.HeadSHA) {
+			return stores.PRReadiness.MarkFailed(ctx, orgID, readinessID, "Readiness became stale after pull request changes")
+		}
+		if changeset.IsPrimary {
+			if loop, err := runningReadinessReviewLoop(ctx, stores, session); err != nil {
+				return err
+			} else if loop != nil {
+				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+				}
+				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			}
 		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, session); err != nil {
 			return err
 		}
 
-		latestLoop, reviewReady, err := ensureReadinessReviewLoop(ctx, stores, services, session, stringValue(run.EvaluatedSnapshotKey))
-		if err != nil {
-			return err
-		}
-		if !reviewReady {
-			if time.Since(run.CreatedAt) > prePRReviewMaxWait {
-				return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+		var latestLoop *models.SessionReviewLoop
+		if changeset.IsPrimary {
+			var reviewReady bool
+			latestLoop, reviewReady, err = ensureReadinessReviewLoop(ctx, stores, services, session, stringValue(run.EvaluatedSnapshotKey))
+			if err != nil {
+				return err
 			}
-			return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			if !reviewReady {
+				if time.Since(run.CreatedAt) > prePRReviewMaxWait {
+					return failReadinessReviewWaitTimeout(ctx, stores, logger, orgID, readinessID, sessionID)
+				}
+				return retryPRReadinessReviewLoop(logger, sessionID, readinessID)
+			}
 		}
 
 		logs := []models.SessionLog{}
@@ -10545,7 +11142,9 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			}
 		}
 		changedFiles := []string{}
-		if stores.ThreadFileEvents != nil {
+		if !changeset.IsPrimary && changeset.MaterializedDiff != nil {
+			changedFiles = changedPathsFromPatch(*changeset.MaterializedDiff)
+		} else if stores.ThreadFileEvents != nil {
 			events, err := stores.ThreadFileEvents.ListBySession(ctx, orgID, sessionID, nil)
 			if err != nil {
 				return fmt.Errorf("load readiness changed files: %w", err)
@@ -10618,6 +11217,7 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 			result.Checks[i].OrgID = orgID
 			result.Checks[i].RunID = readinessID
 			result.Checks[i].SessionID = sessionID
+			result.Checks[i].ChangesetID = run.ChangesetID
 		}
 		if err := stores.PRReadiness.CompleteRunWithChecks(ctx, orgID, readinessID, completed, result.Checks); err != nil {
 			return err
@@ -10628,6 +11228,24 @@ func newRunPRReadinessHandler(stores *Stores, services *Services, logger zerolog
 		}
 		return nil
 	}
+}
+
+func changedPathsFromPatch(diff string) []string {
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(diff, "\n") {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		if marker := strings.LastIndex(line, " b/"); marker >= 0 {
+			seen[strings.TrimSpace(line[marker+3:])] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 type customReadinessLLMResponse struct {
@@ -10935,9 +11553,10 @@ func ensureReadinessReviewLoop(ctx context.Context, stores *Stores, services *Se
 func newCreateBranchHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID  string `json:"session_id"`
-			OrgID      string `json:"org_id"`
-			AuthorMode string `json:"author_mode,omitempty"`
+			SessionID   string `json:"session_id"`
+			OrgID       string `json:"org_id"`
+			ChangesetID string `json:"changeset_id,omitempty"`
+			AuthorMode  string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal create_branch payload: %w", err)
@@ -11046,12 +11665,12 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 				RetryAfter: &retryAfter,
 			}
 		case models.ReviewLoopStatusNeedsHumanDecision:
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, nil, models.PRCreationStateFailed, "Pre-PR review needs human decision."); stateErr != nil {
 				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
 			}
 			return false, nil
 		default:
-			if stateErr := stores.Sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
+			if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, nil, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
 				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
 			}
 			return false, nil
@@ -11130,7 +11749,7 @@ func userFacingPRError(err error) string {
 		return "This PR predates branch tracking; create a new PR to push follow-up changes."
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return ghservice.PushRejectedPRMessage
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return ghservice.PushBranchDivergedPRMessage
 	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return ghservice.BaseBranchUnrelatedPRMessage
@@ -11143,7 +11762,7 @@ func userFacingPRError(err error) string {
 
 func prPushErrorCode(err error) models.PRPushErrorCode {
 	switch {
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return models.PRPushErrorCodeBranchDiverged
 	case errors.Is(err, ghservice.ErrPushRejected):
 		return models.PRPushErrorCodePushRejected
@@ -11209,7 +11828,7 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 
 	var repo, headRef string
 	if stores.PullRequests != nil {
-		pr, prErr := stores.PullRequests.GetBySessionID(ctx, run.OrgID, run.ID)
+		pr, prErr := stores.PullRequests.GetPrimaryBySessionID(ctx, run.OrgID, run.ID)
 		if prErr != nil {
 			if !errors.Is(prErr, pgx.ErrNoRows) {
 				logger.Warn().Err(prErr).
@@ -11275,9 +11894,10 @@ func prPushReconciliationMessage(repo, headRef string, pushErr error) string {
 func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input struct {
-			SessionID  string `json:"session_id"`
-			OrgID      string `json:"org_id"`
-			AuthorMode string `json:"author_mode,omitempty"`
+			SessionID   string `json:"session_id"`
+			OrgID       string `json:"org_id"`
+			ChangesetID string `json:"changeset_id,omitempty"`
+			AuthorMode  string `json:"author_mode,omitempty"`
 		}
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal push_pr_changes payload: %w", err)
@@ -11296,7 +11916,28 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("fetch session: %w", err)
 		}
-		if run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
+		mirrorSessionState := input.ChangesetID == ""
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse push changeset ID: %w", parseErr)
+			}
+			changeset, loadErr := stores.SessionChangesets.GetByID(ctx, orgID, runID, changesetID)
+			if loadErr != nil {
+				return fmt.Errorf("load push changeset: %w", loadErr)
+			}
+			mirrorSessionState = changeset.IsPrimary
+			holderID := uuid.New()
+			if _, leaseErr := stores.SessionChangesets.AcquireLease(ctx, orgID, runID, changesetID, holderID, models.ChangesetLeaseTypePublish, "push pull request", 5*time.Minute, true); leaseErr != nil {
+				return leaseErr
+			}
+			defer func() {
+				if releaseErr := stores.SessionChangesets.ReleaseLease(context.WithoutCancel(ctx), orgID, runID, changesetID, holderID); releaseErr != nil {
+					logger.Warn().Err(releaseErr).Str("changeset_id", changesetID.String()).Msg("failed to release changeset push lease")
+				}
+			}()
+		}
+		if input.ChangesetID == "" && run.PendingSnapshotKey != nil && *run.PendingSnapshotKey != "" {
 			logger.Info().
 				Str("session_id", runID.String()).
 				Str("pending_snapshot_key", *run.PendingSnapshotKey).
@@ -11324,13 +11965,22 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			Str("org_id", orgID.String()).
 			Msg("starting push_pr_changes job")
 
-		if err := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStatePushing, ""); err != nil {
-			logger.Error().Err(err).Msg("failed to mark PR push as pushing")
+		if mirrorSessionState {
+			if err := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStatePushing, ""); err != nil {
+				logger.Error().Err(err).Msg("failed to mark PR push as pushing")
+			}
 		}
 
 		var params []ghservice.CreatePRParams
 		if input.AuthorMode != "" {
 			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+		}
+		if input.ChangesetID != "" {
+			changesetID, parseErr := uuid.Parse(input.ChangesetID)
+			if parseErr != nil {
+				return fmt.Errorf("parse push changeset ID: %w", parseErr)
+			}
+			params = append(params, ghservice.CreatePRParams{ChangesetID: &changesetID})
 		}
 
 		_, pushErr := services.PR.PushChangesToPR(ctx, &run, params...)
@@ -11347,8 +11997,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				logger.Info().
 					Str("session_id", runID.String()).
 					Msg("push_pr_changes: nothing to push (already up to date)")
-				if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
-					logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+				if mirrorSessionState {
+					if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+						logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+					}
 				}
 				return nil
 			}
@@ -11356,8 +12008,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 				Str("session_id", runID.String()).
 				Msg("push_pr_changes failed")
 			msg := userFacingPRError(pushErr)
-			if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
-				logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+			if mirrorSessionState {
+				if stateErr := stores.Sessions.UpdatePRPushStateWithCode(ctx, orgID, runID, models.PRPushStateFailed, msg, prPushErrorCode(pushErr)); stateErr != nil {
+					logger.Error().Err(stateErr).Msg("failed to mark PR push as failed")
+				}
 			}
 			if shouldAutoReconcilePRPushError(pushErr) {
 				if reconcileErr := enqueuePRPushReconciliation(ctx, stores, logger, run, pushErr, input.AuthorMode); reconcileErr != nil {
@@ -11377,8 +12031,10 @@ func newPushPRChangesHandler(stores *Stores, services *Services, logger zerolog.
 			return pushErr
 		}
 
-		if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
-			logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+		if mirrorSessionState {
+			if stateErr := stores.Sessions.UpdatePRPushState(ctx, orgID, runID, models.PRPushStateSucceeded, ""); stateErr != nil {
+				logger.Error().Err(stateErr).Msg("failed to mark PR push as succeeded")
+			}
 		}
 		return nil
 	}
@@ -11400,7 +12056,7 @@ func shouldDeadLetterPRError(err error) bool {
 		return true
 	case errors.Is(err, ghservice.ErrLegacyPRMissingHeadRef):
 		return true
-	case errors.Is(err, ghservice.ErrPushBranchDiverged):
+	case errors.Is(err, ghservice.ErrPushBranchDiverged), errors.Is(err, db.ErrChangesetRemoteChanged):
 		return true
 	case errors.Is(err, ghservice.ErrBaseBranchUnrelated):
 		return true

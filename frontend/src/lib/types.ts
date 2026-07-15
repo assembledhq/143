@@ -49,6 +49,49 @@ export interface User {
   created_at: string;
 }
 
+export type ExternalIdentityProvider = "slack" | "linear";
+export type ExternalUserLinkSource = "self_linked" | "admin_linked" | "email_match" | "directory";
+
+export interface ExternalUserLink {
+  id: string;
+  org_id: string;
+  provider: ExternalIdentityProvider;
+  provider_workspace_id: string;
+  provider_user_id: string;
+  user_id: string;
+  source: ExternalUserLinkSource;
+  status: "active" | "revoked";
+  confidence: number;
+  external_email?: string;
+  external_handle?: string;
+  external_display_name?: string;
+  linked_by_user_id?: string;
+  created_at: string;
+  revoked_at?: string;
+}
+
+export interface ExternalUserLinkSuggestion {
+  id: string;
+  org_id: string;
+  provider: ExternalIdentityProvider;
+  provider_workspace_id: string;
+  provider_user_id: string;
+  suggested_user_id: string;
+  reason: string;
+  confidence: number;
+  external_email?: string;
+  external_handle?: string;
+  external_display_name?: string;
+  last_seen_at: string;
+}
+
+export interface ExternalUserObservation {
+  id: string; org_id: string; provider: ExternalIdentityProvider;
+  provider_workspace_id: string; provider_user_id: string;
+  external_email?: string; external_handle?: string; external_display_name?: string;
+  last_seen_at: string;
+}
+
 export interface UserSettings {
   coding_agent_model_default?: string;
   coding_agent_reasoning_defaults?: Partial<
@@ -372,33 +415,8 @@ export interface AuthProviders {
   google: boolean;
   email: boolean;
   demo?: boolean;
-  demo_read_only?: boolean;
-}
-
-export interface DemoManifest {
-  org: {
-    id: string;
-    name: string;
-  };
-  primary: {
-    session_id: string;
-    preview_group_id: string;
-    preview_target_id: string;
-  };
-  pull_request: {
-    id: string;
-    repository: string;
-    number: number;
-    url: string;
-  };
-  routes: {
-    demo: string;
-    sessions: string;
-    primary_session: string;
-    primary_preview: string;
-    pull_request: string;
-  };
-  read_only: boolean;
+  demo_email?: string;
+  demo_password?: string;
 }
 
 export type RepositoryStatus = "active" | "paused" | "disconnected";
@@ -1477,10 +1495,12 @@ export interface PRReadinessRun {
   id: string;
   org_id: string;
   session_id: string;
+  changeset_id?: string;
   repository_id?: string;
   status: PRReadinessRunStatus;
   evaluated_workspace_revision: number;
   evaluated_snapshot_key?: string;
+  evaluated_head_sha?: string;
   summary?: string;
   review_packet?: unknown;
   triggered_by_user_id?: string;
@@ -1636,6 +1656,48 @@ export interface ForkResult {
 
 export interface SessionDetail extends Session {
   threads: SessionThread[];
+  changesets: ChangesetSummary[];
+  changeset_stack_state?: ChangesetStackState;
+}
+
+export type ChangesetStackState = "one-pr" | "draft-stack" | "published" | "coherent" | "needs-restack" | "restacking" | "blocked" | "external-update-detected" | "partially-merged" | "merged";
+
+export type ChangesetStatus =
+  | "planned"
+  | "materializing"
+  | "published_branch"
+  | "pr_open"
+  | "needs_restack"
+  | "restacking"
+  | "restack_conflict"
+  | "external_update_detected"
+  | "ready"
+  | "merged"
+  | "abandoned";
+
+export interface ChangesetSummary {
+  id: string;
+  is_primary: boolean;
+  order_index: number;
+  title: string;
+  summary: string;
+  status: ChangesetStatus;
+  target_branch: string;
+  base_branch: string;
+  working_branch?: string;
+  stacked_on_changeset_id?: string;
+  head_sha?: string;
+  worktree_path?: string;
+  materialization_error?: string;
+  has_unpushed_changes?: boolean;
+  restack_delta_kind?: "clean_replay" | "mechanical_fallout" | "semantic_change";
+  restack_delta_summary?: string;
+  restack_confirmation_required?: boolean;
+  active_lease_holder_type?: "agent_turn" | "materialize" | "publish" | "restack" | "readiness" | "preview";
+  active_lease_holder_label?: string;
+  pull_request?: PullRequest;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SessionDiff {
@@ -1887,6 +1949,7 @@ export interface SessionTranscriptWindowResponse {
 export interface PullRequest {
   id: string;
   session_id: string;
+  changeset_id?: string;
   org_id: string;
   github_pr_number: number;
   github_pr_url: string;
@@ -3354,6 +3417,7 @@ export type AutomationRunStatus =
   | "failed"
   | "skipped";
 export type AutomationIdentityScope = "org" | "personal";
+export type AutomationPublishPolicy = "pull_request" | "none";
 export type AutomationGitHubEvent =
   | "github.pull_request.opened"
   | "github.pull_request.updated"
@@ -3364,7 +3428,7 @@ export type AutomationGitHubEvent =
   | "github.pull_request_review.submitted"
   | "github.pull_request_review_comment.created";
 
-export type AutomationEventProvider = "pagerduty" | "linear";
+export type AutomationEventProvider = "github" | "pagerduty" | "linear";
 export type PagerDutyEventType =
   | "incident.triggered"
   | "incident.acknowledged"
@@ -3482,6 +3546,7 @@ export interface Automation {
   max_concurrent: number;
   base_branch: string;
   identity_scope: AutomationIdentityScope;
+  publish_policy: AutomationPublishPolicy;
   pre_pr_review_loops: number;
   schedule_type: AutomationScheduleType;
   interval_value?: number;
@@ -3548,6 +3613,9 @@ export interface AutomationRun {
   triggered_by: "schedule" | "manual" | "github";
   triggered_by_user_id?: string;
   scheduled_time?: string;
+  provider?: AutomationEventProvider;
+  provider_event_id?: string;
+  trigger_context?: Record<string, unknown>;
   goal_snapshot: string;
   config_snapshot?: Record<string, unknown>;
   status: AutomationRunStatus;
@@ -3561,6 +3629,100 @@ export interface AutomationRun {
   // when the run hasn't spawned a session yet (pending/skipped, or
   // mid-flight before the worker creates the session).
   session?: AutomationRunSession;
+  trigger_target?: AutomationRunTriggerTarget;
+  trigger_details?: AutomationRunTriggerDetails;
+}
+
+export interface AutomationRunTriggerTarget {
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+}
+
+export interface AutomationRunTriggerDetails {
+  event: AutomationGitHubEvent;
+  provider_event_id?: string;
+  event_id?: string;
+  dedupe_group_id?: string;
+  actor?: string;
+  actor_type?: string;
+  bot_triggered: boolean;
+}
+
+export type AutomationOutcomeDecision =
+  | "passed"
+  | "changes_requested"
+  | "advisory"
+  | "not_applicable";
+
+export type AutomationOutcomeSource = "agent_reported" | "legacy_inferred";
+
+export type AutomationExternalActionType =
+  | "github_review_changes_requested"
+  | "github_review_approved"
+  | "github_comment";
+
+export type AutomationExternalActionVerificationStatus =
+  | "reported"
+  | "verified"
+  | "unavailable";
+
+export interface AutomationRunExternalAction {
+  id: string;
+  org_id: string;
+  outcome_id: string;
+  provider: string;
+  action_type: AutomationExternalActionType;
+  external_id?: string;
+  url: string;
+  verification_status: AutomationExternalActionVerificationStatus;
+  created_at: string;
+}
+
+export interface AutomationRunOutcome {
+  id: string;
+  org_id: string;
+  automation_id: string;
+  automation_run_id: string;
+  session_id: string;
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+  decision: AutomationOutcomeDecision;
+  reason: string;
+  source: AutomationOutcomeSource;
+  reported_at: string;
+  created_at: string;
+  external_action?: AutomationRunExternalAction;
+}
+
+export interface AutomationDecision {
+  automation_id: string;
+  run_id: string;
+  session_id?: string;
+  target: AutomationRunTriggerTarget;
+  execution_status: AutomationRunStatus;
+  triggered_at: string;
+  completed_at?: string;
+  attempt_count: number;
+  outcome?: AutomationRunOutcome;
+}
+
+export interface AutomationDecisionStats {
+  unique_pull_requests: number;
+  unique_revisions: number;
+  total_runs: number;
+  evaluating: number;
+  passed: number;
+  changes_requested: number;
+  advisory: number;
+  not_applicable: number;
+  outcome_not_reported: number;
+  execution_failed: number;
 }
 
 // Mirrors the session publish lifecycle enums in internal/models/session_enums.go.

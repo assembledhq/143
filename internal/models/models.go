@@ -430,11 +430,43 @@ type Session struct {
 	CreatedAt         time.Time          `db:"created_at" json:"created_at"`
 }
 
+// SessionTitleSource identifies who owns the current session title. Manual
+// titles are sticky and must not be replaced by background title generation.
+type SessionTitleSource string
+
+const (
+	SessionTitleSourceLegacy    SessionTitleSource = "legacy"
+	SessionTitleSourceGenerated SessionTitleSource = "generated"
+	SessionTitleSourceIssue     SessionTitleSource = "issue"
+	SessionTitleSourceManual    SessionTitleSource = "manual"
+)
+
+func (s SessionTitleSource) Validate() error {
+	switch s {
+	case SessionTitleSourceLegacy, SessionTitleSourceGenerated, SessionTitleSourceIssue, SessionTitleSourceManual:
+		return nil
+	default:
+		return fmt.Errorf("invalid SessionTitleSource: %q", s)
+	}
+}
+
+// SessionTitleState is the minimal state needed by background title updates.
+type SessionTitleState struct {
+	Title              *string            `db:"title"`
+	TitleSource        SessionTitleSource `db:"title_source"`
+	TitleIntent        *string            `db:"title_intent"`
+	TitlePivotedAtTurn *int               `db:"title_pivoted_at_turn"`
+	TitleGeneratedAt   *time.Time         `db:"title_generated_at"`
+	CurrentTurn        int                `db:"current_turn"`
+}
+
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	RepositoryFullName *string         `json:"repository_full_name,omitempty"`
-	Threads            []SessionThread `json:"threads"`
+	RepositoryFullName  *string             `json:"repository_full_name,omitempty"`
+	Threads             []SessionThread     `json:"threads"`
+	Changesets          []ChangesetSummary  `json:"changesets"`
+	ChangesetStackState ChangesetStackState `json:"changeset_stack_state"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -724,6 +756,7 @@ func (s PullRequestCIStatus) Validate() error {
 type PullRequest struct {
 	ID             uuid.UUID               `db:"id" json:"id"`
 	SessionID      *uuid.UUID              `db:"session_id" json:"session_id,omitempty"`
+	ChangesetID    *uuid.UUID              `db:"changeset_id" json:"changeset_id,omitempty"`
 	OrgID          uuid.UUID               `db:"org_id" json:"org_id"`
 	GitHubPRNumber int                     `db:"github_pr_number" json:"github_pr_number"`
 	GitHubPRURL    string                  `db:"github_pr_url" json:"github_pr_url"`
@@ -756,6 +789,9 @@ type PullRequest struct {
 	MergeWhenReadyHealthVersion *int64                         `db:"merge_when_ready_health_version" json:"merge_when_ready_health_version,omitempty"`
 	MergeWhenReadyError         string                         `db:"merge_when_ready_error" json:"merge_when_ready_error,omitempty"`
 	MergeWhenReadyUpdatedAt     *time.Time                     `db:"merge_when_ready_updated_at" json:"merge_when_ready_updated_at,omitempty"`
+	FeedbackMonitoring          PRFeedbackMonitoring           `db:"feedback_monitoring" json:"feedback_monitoring"`
+	FeedbackBotEpoch            int64                          `db:"feedback_bot_epoch" json:"feedback_bot_epoch"`
+	FeedbackBotCyclesInEpoch    int                            `db:"feedback_bot_cycles_in_epoch" json:"feedback_bot_cycles_in_epoch"`
 	MergedAt                    *time.Time                     `db:"merged_at" json:"merged_at,omitempty"`
 	CreatedAt                   time.Time                      `db:"created_at" json:"created_at"`
 	UpdatedAt                   time.Time                      `db:"updated_at" json:"updated_at"`
@@ -809,11 +845,12 @@ type SessionMessageSource string
 const (
 	SessionMessageSourceAgentTool        SessionMessageSource = "agent_tool"
 	SessionMessageSourceSystemAutoRepair SessionMessageSource = "system_auto_repair"
+	SessionMessageSourceGitHubPRFeedback SessionMessageSource = "github_pr_feedback"
 )
 
 func (s SessionMessageSource) Validate() error {
 	switch s {
-	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair:
+	case "", SessionMessageSourceAgentTool, SessionMessageSourceSystemAutoRepair, SessionMessageSourceGitHubPRFeedback:
 		return nil
 	default:
 		return fmt.Errorf("invalid SessionMessageSource: %q", s)
@@ -1047,6 +1084,10 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypeMaterializeChangeset          = "materialize_changeset"
+	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
+	JobTypeRestackChangesets             = "restack_changesets"
+	JobTypePublishChangesetStack         = "publish_changeset_stack"
 )
 
 // Job represents an async work queue item.

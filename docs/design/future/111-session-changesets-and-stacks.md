@@ -1,6 +1,38 @@
 # Design: Session Changesets and Stacked PRs
 
-> **Status:** Future
+> **Status:** Partially Implemented
+
+> **Implementation note (2026-07-11):** Phases 1 and 2 are complete. Session
+> detail exposes ordered, PR-hydrated changeset summaries and shows a pull
+> request selector only for multi-PR sessions. PR-native actions (health,
+> repair, and merge) follow the selected PR. Until Phase 3 materializes a
+> non-primary branch/worktree, its Changes, Preview, readiness, Create PR, and
+> push surfaces are explicitly unavailable rather than falling back to the
+> primary session workspace. The one-PR compatibility path is unchanged.
+>
+> **Implementation note (2026-07-12):** Phase 3 is complete for independent
+> changesets. Split planning freezes an immutable `session_diff_snapshots`
+> source, supports file assignment, confirmed omissions, ordering and folding,
+> applies assigned patches into disk-budgeted sandbox worktrees, and verifies
+> the resulting Git diffs for missing, duplicate, conflicting, or unexpected
+> changes. Readiness runs/checks/bypasses are changeset-scoped and pin the
+> evaluated branch head. Accepting a verified split archives the source, moves
+> the primary flag, and rebuilds the session rollup. The PR details UI and
+> `143-tools changesets` expose the flow. Targeted editing and publishing remain
+> Phase 4; stacked worktrees remain Phase 5.
+>
+> **Implementation note (2026-07-13):** Phases 4 and 5 and the Phase 6 stack
+> safety path are implemented. Composer turns can target a materialized pull
+> request worktree, with durable heartbeat leases and per-turn Git checkpoints.
+> Publishing and pushing are changeset-scoped and guarded by the expected
+> remote head. Stacked worktrees materialize and publish in topology order;
+> lower edits invalidate descendants; clean restacks replay and push in order;
+> merge attempts are blocked behind an unmerged parent. Parent merges retarget
+> the stored child base, invalidate the complete descendant chain, and enqueue
+> restacking on the sandbox-owning worker. Conflicts stop automatic replay and
+> surface an explicitly targeted agent-resolution flow whose result is not
+> pushed until the user confirms it. Stack health remains derived rather than
+> stored.
 
 ## Summary
 
@@ -59,6 +91,12 @@ All threads in a session can see the changeset list. A thread can work on the
 whole session or a specific changeset, but mutating actions must have an explicit
 target.
 
+### Naming
+
+"Changeset" is an internal schema, API, and tooling term only. User-facing copy
+uses pull request and branch language: "Pull requests", "PR 2 of 3", "stacked
+on #101". Users think in PRs; the word changeset should not appear in the UI.
+
 ### Branch Terms
 
 Use separate names for the two branch relationships a stacked PR needs:
@@ -97,8 +135,11 @@ Changeset 2: API integration   branch 143/api         base 143/foundation
 Changeset 3: UI wiring         branch 143/ui          base 143/api
 ```
 
-Independent branches can still exist in one session when they share planning
-context, but stacked branches are the main design center.
+Independent branches that share planning context are the v1 design center:
+they deliver a complete multi-PR product without any restack machinery.
+Stacked branches are a fast follow for splits with real dependency chains; the
+data model treats stacking as first-class from day one so the follow-on does
+not require a migration.
 
 ## Required Invariants
 
@@ -117,6 +158,10 @@ Required invariants:
   changes, descendants become `needs_restack`.
 - **Parent merges have a clear next action.** When a parent PR merges,
   descendants need retarget/rebase help.
+- **Stacked merges respect stack order.** Merging a stacked changeset whose
+  parent PR is unmerged would land the child into the parent branch, not the
+  target branch. Plain merge is blocked in that state; the only paths are
+  merging the parent first or an explicit "fold into parent" action.
 - **Stack health is visible.** The UI summarizes whether the stack is coherent,
   stale, blocked, externally changed, partially merged, or ready.
 - **Split source stays stable until accepted.** While breaking a large diff into
@@ -233,6 +278,11 @@ session -> primary changeset -> branch -> optional PR
    changeset diffs and shows unassigned or duplicate/conflicting changes.
 8. 143 runs readiness/build checks per branch or stack prefix.
 9. The user publishes one changeset or the whole stack.
+10. When the user accepts the split, the split source is frozen and archived:
+    the primary flag moves to the first changeset (the stack root when
+    stacked), the session rollup diff becomes the combined changeset diffs, and
+    the archived split source stays viewable for audit but is no longer an
+    editable target.
 
 The split does not need a durable hunk database in v1. The agent can use Git
 diffs, worktrees, split-status, and user feedback to make clean branches. If this
@@ -328,24 +378,50 @@ Only one mutating lease may exist for a changeset worktree at a time. Read-only
 diff, status, and PR views may attach concurrently. Restacking or pushing a
 descendant is blocked while another thread is actively editing that descendant.
 
+Leases are enforced by the turn scheduler for the full duration of a mutating
+agent turn, not only inside push and restack jobs. Leases carry a heartbeat and
+expiry so a crashed turn cannot strand a changeset, and an expired lease can be
+explicitly taken over.
+
 The lease is a coordination primitive, not a user-facing workflow. Users should
 see plain language such as "API integration is being edited in Tab 2" or
 "Restack is waiting for UI wiring edits to finish."
+
+### Worktree Resources
+
+`git worktree` shares the Git object store, but dependencies and build
+artifacts do not. Each materialized changeset that runs readiness, builds, or
+previews needs usable dependency installs, and a four-changeset split must not
+quadruple sandbox disk or build time by accident.
+
+Materialization therefore includes an explicit resource strategy:
+
+- Materialization is lazy. A worktree gets dependencies installed the first
+  time an agent turn, readiness run, or preview actually needs them.
+- Dependency installs reuse the session install via hardlinks or copy-on-write
+  where the toolchain supports it, with a full install as the fallback.
+- Readiness and build checks across changesets in one sandbox run serially by
+  default. Parallelism is an optimization, not an assumption.
+- Each materialized worktree is a first-class disk cost. If the sandbox cannot
+  hold another worktree plus its installs, materialization fails with a clear
+  message instead of an opaque disk error.
 
 ### Parent Merge
 
 When a parent PR merges:
 
 1. Mark descendants as `needs_restack`.
-2. Retarget the immediate child PR to the merged parent's base branch, usually
-   trunk.
+2. Ensure the immediate child PR is retargeted to the merged parent's base
+   branch, usually trunk. GitHub retargets child PRs automatically when the
+   merged parent's head branch is deleted, so an already-retargeted child is
+   the expected case, not an anomaly; 143 retargets only when GitHub has not.
 3. Rebuild the child's branch so the merged parent commits disappear from the
    child diff while the child's own changes remain.
 4. Repeat down the stack.
 5. Refresh PR metadata, previews, readiness, and stack health.
 
-If GitHub state conflicts with 143's stored branch expectations, pause and
-reconcile rather than guessing.
+If GitHub state conflicts with 143's stored branch expectations in ways beyond
+the known auto-retarget behavior, pause and reconcile rather than guessing.
 
 ## UI
 
@@ -362,7 +438,7 @@ Repository: assembledhq/143        Target: main
 Stack health: 2 descendants need restack after #101 changed
 
 +------------------------------+---------------------------------------------+
-| Changesets                   | Selected: #102 API integration              |
+| Pull requests                | Selected: #102 API integration              |
 |                              | Base: 143/foundation  Head: 143/api         |
 | 1  #101 Foundation   open    | State: open            CI: passing          |
 | 2  #102 API          active  | Review: changes       Tests: failing       |
@@ -386,14 +462,19 @@ Selecting a row scopes the rest of the session details view:
 
 - **Create PR** creates or updates the PR for the selected changeset. In a
   one-PR session, this is the primary changeset and behaves exactly as today.
-- **Preview** opens the selected changeset preview by default. If the selected
-  changeset is stacked, the preview target should be explicit: selected
-  changeset, stack through selected changeset, or stack top.
-- **Changes/Diff** filters to the selected changeset's owned files/hunks. A user
-  can still switch back to the whole session or stack diff.
+- **Preview** opens the selected changeset's branch preview by default. A
+  stacked branch already contains its ancestors, so "this changeset" and "stack
+  through this changeset" are the same commit; the only other explicit target
+  is stack top.
+- **Changes/Diff** shows `base_branch...working_branch` for the selected
+  changeset — plain Git, with no durable ownership records. Owned files/hunks
+  exist only inside split-status while a split is in progress. A user can still
+  switch back to the whole session or stack diff.
 - **Readiness/Fix tests** runs against the selected changeset branch head.
 - **Merge** applies to the selected changeset PR and uses the repository's normal
-  GitHub merge rules.
+  GitHub merge rules. If the selected changeset is stacked on an unmerged
+  parent, plain merge is blocked per the stack-order invariant; the UI offers
+  "merge the parent first" or an explicit fold-into-parent action instead.
 - **Restack** remains a stack/session-level action, surfaced in stack health or
   affected-descendant panels rather than replacing the PR details card actions.
 
@@ -414,17 +495,20 @@ Duplicate/conflicting: 1 file
 
 Preview targets:
 
-- one changeset branch
-- stack prefix through a selected changeset
+- one changeset branch (a stacked branch already contains its ancestors, so a
+  separate "stack prefix" target would be the same commit)
 - stack top
 
-The UI must make the target explicit: "Preview PR 2," "Preview stack through PR
-2," or "Preview stack top."
+The UI must make the target explicit: "Preview PR 2" or "Preview stack top."
 
 Readiness is branch/scoped evidence:
 
 - independent changeset: check that branch against trunk
 - stacked changeset: check the stack prefix through that changeset
+
+Readiness runs, checks, and bypasses are session-scoped today. Rescoping them
+to changesets is a schema migration owned by the split/materialization phase,
+not a display-only change.
 
 Published GitHub CI remains authoritative after PR creation. 143 readiness is
 preflight evidence and reviewer handoff, not a replacement for repository CI.
@@ -445,7 +529,9 @@ Important changeset states:
 - `merged`
 - `abandoned`
 
-Stack-level state should summarize the graph:
+Changeset status is stored durable state. Stack-level state is never stored:
+it is derived as a pure function of the changeset rows, so changeset and stack
+state cannot diverge. Derived stack-level states:
 
 - one-pr
 - draft-stack
@@ -484,14 +570,33 @@ Minimum columns:
 - `created_at`
 - `updated_at`
 
+The SHA columns follow a fixed update protocol, because `needs_restack`
+detection is only as reliable as these fields:
+
+- `head_sha` updates at the end of every mutating agent turn and after every
+  restack.
+- `expected_remote_head_sha` updates only when 143 pushes the branch or imports
+  the remote branch.
+- `base_head_sha` records the parent head the branch was last based on and
+  updates only on materialize and restack. A child needs restack when its
+  parent's current `head_sha` no longer matches the child's `base_head_sha`.
+
 Every existing session gets one primary changeset during backfill. That primary
 changeset adopts the session's current branch and owns the default one-PR path.
 
 ### `pull_requests`
 
 Add nullable `changeset_id` while keeping `session_id` for back-compat and
-session-level rollups. PR creation idempotency moves from per-session to
-per-changeset.
+session-level rollups.
+
+PR creation idempotency is several layered mechanisms today, and all of them
+move to changeset scope together:
+
+- the DB uniqueness key stays `(org_id, github_repo, github_pr_number)`
+- the PR-creation job dedup key moves from per-session to per-changeset
+- the PR creation state machine moves from session-scoped to changeset-scoped
+- call sites that fetch a PR by session id and assume zero-or-one result are
+  audited in the same change
 
 ### Existing Session Branch Fields
 
@@ -521,8 +626,10 @@ the existing scalar PR summary for one-PR UI compatibility.
 
 ## Rollout
 
-Break implementation into four handoff-sized phases. Each phase should preserve
-the existing one-PR session behavior.
+Break implementation into six handoff-sized phases. Each phase preserves the
+existing one-PR session behavior. Phases 1-4 deliver a complete independent
+multi-PR product with no restack machinery; stacking lands in phases 5-6 on
+top of the same substrate.
 
 ### Phase 1: Primary Changeset Substrate
 
@@ -538,8 +645,10 @@ Tasks:
   it.
 - Keep `sessions.working_branch` and `sessions.target_branch` as mirrors of the
   primary changeset.
-- Move PR creation idempotency from session-scoped to changeset-scoped while
-  making existing `POST /sessions/{id}/pr` default to the primary changeset.
+- Move every PR-creation idempotency mechanism from session scope to changeset
+  scope: the PR-creation job dedup key, the PR creation state machine, and an
+  audit of call sites that fetch a PR by session id and assume zero-or-one
+  result. Existing `POST /sessions/{id}/pr` defaults to the primary changeset.
 - Add tests for backfill, per-org filtering, primary uniqueness, and "one-PR
   session behaves as today."
 
@@ -547,6 +656,13 @@ Tasks:
 
 Goal: let the app represent multiple changesets, but avoid branch splitting and
 restack behavior.
+
+Phase 2 selection is deliberately safe for planned, non-primary changesets:
+PR-native read/actions that already have a PR identity follow the selected
+changeset, while Changes, Preview, readiness, review, push, and Create PR show
+an explicit materialization-required state. They must never fall through to the
+primary session workspace. Making those branch-backed actions executable is
+owned by Phases 3 and 4.
 
 Tasks:
 
@@ -565,49 +681,94 @@ Tasks:
 
 ### Phase 3: Split Proposal And Materialization
 
-Goal: support "split this large diff" before publishing multiple PRs.
+Goal: support "split this large diff" into independent changesets before
+publishing multiple PRs. Stacked materialization is deferred to Phase 5.
 
 Tasks:
 
 - Store the original session diff as the split source.
-- Track per-changeset owned paths/hunks enough to detect unassigned and duplicate
-  ownership.
+- Track per-changeset owned paths/hunks during the split, enough to detect
+  unassigned and duplicate ownership. Ownership records exist only for split
+  progress; steady-state diffs come from Git.
 - Add split-status APIs for assigned, unassigned, duplicate, and conflicting
   changes.
-- Add one worktree per materialized changeset inside the session sandbox.
-- Add materialization for stacked changesets in topology order.
-- Run readiness/build checks against the selected changeset branch head.
+- Add one worktree per materialized changeset inside the session sandbox,
+  implementing the worktree resource strategy: lazy materialization,
+  dependency-install reuse, serial readiness by default, and explicit
+  disk-budget failures.
+- Materialize independent changesets from `target_branch`.
+- Rescope readiness runs, checks, and bypasses from session scope to changeset
+  scope (schema migration) and run readiness against the selected changeset
+  branch head.
+- Implement the accepted-split transition: freeze and archive the split source,
+  move the primary flag to the first changeset, and switch the session rollup
+  diff to the combined changeset diffs.
 - Add split proposal UI with file/hunk movement, fold, split, reorder, verify,
   and publish-green actions.
-- Add tests for split status, materialization failure, and readiness scoping.
+- Add tests for split status, materialization failure, resource-limit failures,
+  and readiness scoping.
 
-### Phase 4: Multi-PR Publish, Targeted Edits, And Restack
+### Phase 4: Independent Multi-PR Publish And Targeted Edits
 
-Goal: publish and maintain multiple PRs from one session.
+Goal: publish and maintain multiple independent PRs from one session. This
+phase completes a shippable multi-PR product.
 
 Tasks:
 
-- Add `POST /sessions/{id}/changesets/{changeset_id}/publish` and
-  `POST /sessions/{id}/changesets/publish-stack`.
-- Publish stacked PRs in topology order with correct base branches and PR body
-  stack context.
-- Add composer targeting for whole session, one changeset, changeset plus
-  descendants, and stack.
-- Mark descendants `needs_restack` when a lower changeset changes or merges.
+- Add `POST /sessions/{id}/changesets/{changeset_id}/publish`.
+- Add composer targeting for the whole session or one changeset, with the
+  explicit target chip.
+- Enforce worktree leases in the turn scheduler for the full duration of a
+  mutating turn, with lease heartbeat, expiry, and explicit takeover.
+- Add expected remote-head checks before pushing changeset branches.
+- Update session list and sidebar surfaces that assume one scalar PR summary
+  per session.
+- Add tests for per-changeset publish, targeted edits, safe push checks, and
+  lease contention.
+
+### Phase 5: Stacked Publish And Clean Restack
+
+Goal: support dependent splits as stacks.
+
+Tasks:
+
+- Add materialization for stacked changesets in topology order, starting each
+  worktree from its direct `base_branch`.
+- Add `POST /sessions/{id}/changesets/publish-stack`; publish stacked PRs in
+  topology order with correct base branches and PR body stack context.
+- Block plain merge of a stacked changeset with an unmerged parent; offer
+  "merge the parent first" and an explicit fold-into-parent action instead.
+- Extend composer targeting to changeset plus descendants and stack.
+- Mark descendants `needs_restack` when a lower changeset changes, using the
+  SHA update protocol.
 - Add clean restack with expected remote-head checks before push.
+- Add stack-top preview and stack-prefix readiness targets.
+- Add restack delta UI for clean replays.
+- Add tests for stacked publish, stale descendants, merge-order guards, and
+  clean restack.
+
+### Phase 6: Conflict Restack And Parent Merge
+
+Goal: keep stacks healthy through conflicts and merges.
+
+Tasks:
+
 - Add agent-assisted conflict resolution for restacks that preserve descendant
   intent.
-- Add restack delta UI showing clean replay, mechanical fallout, or semantic
-  changes.
-- Add parent-merge handling: retarget child PRs, rebuild descendants, refresh
-  previews/readiness, and pause on unexpected GitHub state.
-- Add tests for stacked publish, selected changeset edits, stale descendants,
-  safe push checks, parent merge handling, and semantic-edit confirmation.
+- Extend the restack delta UI to distinguish clean replay, mechanical fallout,
+  and semantic changes, with confirmation required for semantic changes.
+- Add parent-merge handling: treat GitHub's automatic child-PR retargeting as
+  the expected case, retarget only when GitHub has not, rebuild descendants,
+  refresh previews/readiness, and pause on unexpected GitHub state.
+- Add tests for parent merge handling, GitHub auto-retarget races, conflict
+  restack, and semantic-edit confirmation.
 
 ## Open Tensions
 
-- **Independent sibling PRs.** They can be changesets when shared session context
-  matters, but separate sessions remain better for truly independent work.
+- **Independent sibling PRs vs separate sessions.** Independent changesets are
+  the v1 center when the work shares session context; separate sessions remain
+  better for truly unrelated work. The line between the two is judgment, not
+  policy.
 - **Split quality.** The first version relies on agents, Git diffs, user review,
   and readiness/build failures to make good splits. Rich patch ownership can
   wait.

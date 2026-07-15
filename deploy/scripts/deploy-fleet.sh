@@ -4,9 +4,10 @@ set -euo pipefail
 # Deploy to all nodes in the fleet.
 # Usage: ./deploy-fleet.sh <ssh-key-path> [image-tag] [roles]
 #
-# Routine fleet deploys intentionally default to app+worker only. Deploying
-# db/redis/logging recreates stateful or operator-facing services and should be
-# an explicit maintenance action:
+# Routine fleet deploys intentionally default to app+worker only. The app role
+# is a hard barrier: its migrations and health checks must complete before any
+# worker starts the new image. Deploying db/redis/logging recreates stateful or
+# operator-facing services and should be an explicit maintenance action:
 #   ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] all
 #   ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] app,worker,redis
 #   DEPLOY_JOBS=1 ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] app,worker
@@ -104,8 +105,9 @@ if [ -n "${DEPLOY_FLEET_LOG_DIR:-}" ]; then
 else
   LOG_DIR="$(mktemp -d /tmp/deploy-fleet.XXXXXX)"
 fi
-HOSTS=()
-HOST_GROUP_FILES=()
+APP_TARGETS=()
+POST_APP_HOSTS=()
+POST_APP_GROUP_FILES=()
 TARGET_COUNT=0
 IFS=',' read -ra ENTRIES <<< "$FLEET_HOSTS"
 for entry in "${ENTRIES[@]}"; do
@@ -119,18 +121,23 @@ for entry in "${ENTRIES[@]}"; do
     echo "Skipping $ROLE@$IP (not in requested roles: $REQUESTED_ROLES)."
     continue
   fi
+  if [ "$ROLE" = "app" ]; then
+    APP_TARGETS+=("$ROLE:$IP")
+    TARGET_COUNT=$((TARGET_COUNT + 1))
+    continue
+  fi
   group_file=""
-  for i in "${!HOSTS[@]}"; do
-    if [ "${HOSTS[$i]}" = "$IP" ]; then
-      group_file="${HOST_GROUP_FILES[$i]}"
+  for i in "${!POST_APP_HOSTS[@]}"; do
+    if [ "${POST_APP_HOSTS[$i]}" = "$IP" ]; then
+      group_file="${POST_APP_GROUP_FILES[$i]}"
       break
     fi
   done
   if [ -z "$group_file" ]; then
     safe_host="${IP//[^A-Za-z0-9_.-]/_}"
-    group_file="$LOG_DIR/host-$safe_host.targets"
-    HOSTS+=("$IP")
-    HOST_GROUP_FILES+=("$group_file")
+    group_file="$LOG_DIR/host-$safe_host.post-app.targets"
+    POST_APP_HOSTS+=("$IP")
+    POST_APP_GROUP_FILES+=("$group_file")
   fi
   printf '%s:%s\n' "$ROLE" "$IP" >> "$group_file"
   TARGET_COUNT=$((TARGET_COUNT + 1))
@@ -138,6 +145,10 @@ done
 
 if [ "$TARGET_COUNT" -eq 0 ]; then
   echo "ERROR: No fleet hosts matched requested roles: $REQUESTED_ROLES." >&2
+  exit 1
+fi
+if should_deploy_role app && [ "${#APP_TARGETS[@]}" -eq 0 ]; then
+  echo "ERROR: The app role was requested, but no app host exists in FLEET_HOSTS; refusing to deploy post-app nodes without the migration barrier." >&2
   exit 1
 fi
 
@@ -216,11 +227,25 @@ export -f deploy_one
 export -f deploy_group
 export SCRIPT_DIR SSH_KEY TAG LOG_DIR
 
-echo "Deploying ${#HOST_GROUP_FILES[@]} node(s), $DEPLOY_JOBS at a time (logs: $LOG_DIR)."
-if printf '%s\n' "${HOST_GROUP_FILES[@]}" | xargs -n1 -P "$DEPLOY_JOBS" bash -c 'deploy_group "$1"' deploy-group; then
-  echo "Fleet deployment complete."
-else
-  dump_failed_logs
-  echo "FAILED: one or more deploys failed; see logs in $LOG_DIR." >&2
-  exit 1
+if [ "${#APP_TARGETS[@]}" -gt 0 ]; then
+  echo "Deploying ${#APP_TARGETS[@]} app node(s) serially before the worker fleet (logs: $LOG_DIR)."
+  for target in "${APP_TARGETS[@]}"; do
+    if ! deploy_one "$target"; then
+      dump_failed_logs
+      echo "FAILED: app deployment or database migrations failed; worker deployment was not started." >&2
+      exit 1
+    fi
+  done
+  echo "App deployment barrier passed; database migrations and app health checks succeeded."
 fi
+
+if [ "${#POST_APP_GROUP_FILES[@]}" -gt 0 ]; then
+  echo "Deploying ${#POST_APP_GROUP_FILES[@]} post-app node(s), $DEPLOY_JOBS at a time (logs: $LOG_DIR)."
+  if ! printf '%s\n' "${POST_APP_GROUP_FILES[@]}" | xargs -n1 -P "$DEPLOY_JOBS" bash -c 'deploy_group "$1"' deploy-group; then
+    dump_failed_logs
+    echo "FAILED: one or more deploys failed; see logs in $LOG_DIR." >&2
+    exit 1
+  fi
+fi
+
+echo "Fleet deployment complete."

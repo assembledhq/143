@@ -7,7 +7,7 @@ function Table({ className, ...props }: React.ComponentProps<"table">) {
     <div data-slot="table-wrapper" className="relative w-full overflow-x-auto overflow-y-visible">
       <table
         data-slot="table"
-        className={cn("w-full caption-bottom text-xs", className)}
+        className={cn("w-full caption-bottom type-dense", className)}
         {...props}
       />
     </div>
@@ -52,7 +52,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        "border-b border-border/50 transition-colors hover:bg-muted/40 dark:hover:bg-primary/[0.03] data-[state=selected]:bg-muted",
+        "border-b border-border/70 transition-colors duration-[175ms] hover:bg-accent/25 data-[state=selected]:bg-accent/55",
         className
       )}
       {...props}
@@ -65,7 +65,7 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        "text-muted-foreground h-9 px-3 text-left align-middle font-medium whitespace-nowrap text-xs tracking-wider [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+        "text-muted-foreground h-9 px-3 text-left align-middle font-medium whitespace-nowrap text-xs tracking-[0.04em] [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
       )}
       {...props}

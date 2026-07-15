@@ -157,7 +157,7 @@ function DaySeparator({ dateStr }: { dateStr: string }) {
   return (
     <div className="my-4 flex items-center gap-3 px-1">
       <Separator className="flex-1 bg-border/70" />
-      <div className="rounded-full border border-border/60 bg-muted/35 px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground shadow-xs">
+      <div className="rounded-full bg-surface-recessed px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
         {label}
       </div>
       <Separator className="flex-1 bg-border/70" />
@@ -187,14 +187,14 @@ const ToolGroupEntry = memo(function ToolGroupEntry({ toolUse, toolResult }: { t
       {open && (
         <div className="ml-7 mt-1 mb-2 space-y-1.5 min-w-0">
           {inputDetail && (
-            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+            <div className="rounded-lg bg-surface-recessed p-2.5 min-w-0 max-w-full">
               <pre className="text-xs font-mono whitespace-pre-wrap break-all text-foreground/80 max-w-full">
                 {inputDetail}
               </pre>
             </div>
           )}
           {toolResult ? (
-            <div className="rounded-md border border-border bg-muted/30 p-2 min-w-0 max-w-full">
+            <div className="rounded-lg bg-surface-recessed p-2.5 min-w-0 max-w-full">
               <LogMessageDetail
                 log={toolResult}
                 className="text-xs font-mono whitespace-pre-wrap break-all text-muted-foreground max-w-full"
@@ -314,7 +314,7 @@ function HiddenLogsGroup({ logs }: { logs: SessionLog[] }) {
         />
       </button>
       {open && (
-        <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-md border border-border bg-muted/30 py-1 max-h-[300px] overflow-y-auto">
+        <div className="ml-7 mt-1 mb-2 min-w-0 max-w-full rounded-lg bg-surface-recessed py-1 max-h-[300px] overflow-y-auto">
           {logs.map((log) => (
             <HiddenLogEntry key={log.id} log={log} />
           ))}
@@ -420,7 +420,7 @@ export const AttachmentGrid = memo(function AttachmentGrid({ attachments }: { at
 function AssistantBubble({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex justify-start">
-      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-muted break-words`}>
+      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 px-1 py-2 text-sm leading-6 text-foreground break-words`}>
         {children}
       </div>
     </div>
@@ -450,17 +450,17 @@ const ReferenceTags = memo(function ReferenceTags({ references }: { references: 
           <Badge
             key={key}
             variant="secondary"
-            className="gap-1.5 rounded-full border border-white/20 bg-white/12 px-2 py-0.5 text-xs font-medium text-white"
+            className="gap-1.5 border-primary/15 bg-primary/8 px-2 py-0.5 text-xs font-medium text-primary"
           >
             {isLinear ? (
               <>
                 <LinearIcon className="h-3 w-3 shrink-0 dark:invert-0" />
-                <span className="uppercase tracking-wide text-white/80">Linear</span>
+                <span className="uppercase tracking-wide text-primary/80">Linear</span>
               </>
             ) : reference.kind === "directory" ? (
-              <FolderTree className="h-3 w-3 shrink-0 text-white/80" />
+              <FolderTree className="h-3 w-3 shrink-0 text-primary/80" />
             ) : (
-              <FileCode2 className="h-3 w-3 shrink-0 text-white/80" />
+              <FileCode2 className="h-3 w-3 shrink-0 text-primary/80" />
             )}
             <span className="max-w-[14rem] truncate">{label}</span>
           </Badge>
@@ -481,17 +481,17 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
   if (msg.role === "user") {
     return (
       <div className="flex justify-end">
-        <div className={`chat-user-bubble ${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg px-3 py-2 text-sm bg-primary bg-[image:var(--gradient-primary)] text-white shadow-sm break-words`}>
+        <div className={`chat-user-bubble ${BUBBLE_MAX_WIDTH} min-w-0 rounded-xl border border-primary/15 bg-accent/70 px-3.5 py-2.5 text-sm leading-5 text-foreground break-words`}>
           {isPlanModeUser && (
             <div className="flex items-center gap-1.5 mb-1.5">
-              <ClipboardList className="h-3 w-3 text-white/80" />
-              <span className="text-xs font-medium text-white/80 uppercase tracking-wide">Plan Mode</span>
+              <ClipboardList className="h-3 w-3 text-primary" />
+              <span className="text-xs font-medium text-primary uppercase tracking-wide">Plan mode</span>
             </div>
           )}
           {isSystemAutoRepair && (
             <div className="flex items-center gap-1.5 mb-1.5">
-              <PenLine className="h-3 w-3 text-white/80" />
-              <span className="text-xs font-medium text-white/80 uppercase tracking-wide">143 auto-repair</span>
+              <PenLine className="h-3 w-3 text-primary" />
+              <span className="text-xs font-medium text-primary uppercase tracking-wide">143 auto-repair</span>
             </div>
           )}
           {displayContent && <p className="whitespace-pre-wrap break-words">{displayContent}</p>}
@@ -505,12 +505,12 @@ const MessageBubble = memo(function MessageBubble({ msg }: { msg: SessionMessage
             <TimestampLabel
               dateStr={msg.created_at}
               formatter={formatMessageTime}
-              className="block text-xs text-white/70"
+              className="block text-xs text-muted-foreground"
             />
             <CopyButton
               value={displayContent}
               label="Copy prompt"
-              className="-mr-1 h-6 w-6 text-white/70 hover:bg-white/10 hover:text-white disabled:text-white/40"
+              className="-mr-1 h-6 w-6 text-muted-foreground hover:bg-primary/8 hover:text-foreground disabled:text-muted-foreground/40"
             />
           </div>
         </div>
@@ -553,14 +553,14 @@ function PlanOutputBubble({
 }) {
   return (
     <div className="flex justify-start">
-      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-lg text-sm bg-muted border border-amber-200 dark:border-amber-800/50 break-words`}>
+      <div className={`${BUBBLE_MAX_WIDTH} min-w-0 rounded-xl border border-warning/20 bg-warning/7 text-sm break-words`}>
         <div className="flex items-center gap-1.5 px-3 pt-2 pb-1">
-          <ClipboardList className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-          <span className="text-xs font-medium text-amber-700 dark:text-amber-400">Implementation Plan</span>
+          <ClipboardList className="h-3.5 w-3.5 text-warning" />
+          <span className="text-xs font-medium text-warning">Implementation plan</span>
         </div>
         <div className="px-3 py-2">{children}</div>
         {(onApprove || onAdjust) && !isRunning && (
-          <div className="flex items-center gap-2 px-3 pb-2.5 pt-1 border-t border-amber-200/50 dark:border-amber-800/30">
+          <div className="flex items-center gap-2 border-t border-warning/15 px-3 pb-2.5 pt-2">
             {onApprove && (
               <Button
                 size="sm"
@@ -606,7 +606,7 @@ const CodeDiffSummary = memo(function CodeDiffSummary({
       <Button
         variant="ghost"
         onClick={onClick}
-        className="flex items-center gap-3 rounded-lg border border-border bg-muted/50 px-4 py-2.5 text-sm hover:bg-muted group text-left h-auto"
+        className="flex h-auto items-center gap-3 rounded-lg border border-border bg-surface-raised px-4 py-2.5 text-left text-sm hover:bg-accent/35 group"
       >
         <FileCode2 className="h-4 w-4 text-muted-foreground shrink-0" />
         <span className="font-mono text-xs flex items-center gap-1.5">
@@ -820,7 +820,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
   if (isRunning && stoppingLabel) {
     rendered.push(
       <div key="stopping" className="flex justify-start">
-        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+        <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
             {stoppingLabel}
@@ -831,7 +831,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
   } else if (isRunning && recoveryActive) {
     rendered.push(
       <div key="recovering" className="flex justify-start">
-        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+        <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
             Resuming after maintenance...
@@ -842,7 +842,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
   } else if (isRunning) {
     rendered.push(
       <div key="working" className="flex justify-start">
-        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+        <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75" />
@@ -856,7 +856,7 @@ function ChatTimelineImpl({ entries, isRunning, recoveryActive = false, stopping
   } else if (stoppedLabel) {
     rendered.push(
       <div key="stopped" className="flex justify-start">
-        <div className="bg-muted rounded-lg px-3 py-2 text-sm">
+        <div className="rounded-lg bg-surface-recessed px-3 py-2 text-sm">
           <span className="flex items-center gap-2 text-muted-foreground">
             <Square className="h-2.5 w-2.5 fill-current" aria-hidden />
             {stoppedLabel}

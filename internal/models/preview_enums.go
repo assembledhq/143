@@ -661,3 +661,20 @@ func (r PreviewReadiness) Validate() error {
 		return fmt.Errorf("invalid PreviewReadiness: %q", r)
 	}
 }
+
+type PreviewBrowserControlState string
+
+const (
+	PreviewBrowserControlAgent   PreviewBrowserControlState = "agent_control"
+	PreviewBrowserControlHuman   PreviewBrowserControlState = "human_control"
+	PreviewBrowserControlWaiting PreviewBrowserControlState = "waiting_for_handoff"
+)
+
+func (s PreviewBrowserControlState) Validate() error {
+	switch s {
+	case PreviewBrowserControlAgent, PreviewBrowserControlHuman, PreviewBrowserControlWaiting:
+		return nil
+	default:
+		return fmt.Errorf("invalid PreviewBrowserControlState: %q", s)
+	}
+}

@@ -14,15 +14,15 @@ import {
   DEFAULT_PM_MODEL,
   DEFAULT_LLM_MODEL,
   CLAUDE_CODE_MODEL_OPUS_48,
-  CODEX_MODEL_GPT_5_5,
+  CODEX_MODEL_GPT_5_6_SOL,
   LLM_PROVIDER_INFO,
   LLM_MODELS_BY_PROVIDER,
   ownerProviderForModel,
 } from "./model-constants";
 
 describe("model constants", () => {
-  it("uses GPT 5.5 as the Codex and PM default", () => {
-    expect(DEFAULT_CODEX_MODEL).toBe(CODEX_MODEL_GPT_5_5);
+  it("uses GPT 5.6 Sol as the Codex and PM default", () => {
+    expect(DEFAULT_CODEX_MODEL).toBe(CODEX_MODEL_GPT_5_6_SOL);
     expect(DEFAULT_PM_MODEL).toBe(DEFAULT_CODEX_MODEL);
   });
 

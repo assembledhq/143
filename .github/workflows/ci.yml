@@ -312,6 +312,9 @@ jobs:
       - name: Wait for Postgres
         run: go run ./cmd/wait-postgres
 
+      - name: Validate migration filenames
+        run: go test ./cmd/migrate -run TestMigrationVersionsAreUnique -count=1
+
       - name: Migrate up
         run: go run cmd/migrate/main.go up
 

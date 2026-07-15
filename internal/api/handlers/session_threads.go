@@ -48,9 +48,14 @@ type ThreadService interface {
 
 type SessionThreadHandler struct {
 	svc          ThreadService
+	changesets   *db.SessionChangesetStore
 	audit        *db.AuditEmitter
 	logger       zerolog.Logger
 	linearLinker atomic.Pointer[linearLinkerHolder]
+}
+
+func (h *SessionThreadHandler) SetChangesetStore(store *db.SessionChangesetStore) {
+	h.changesets = store
 }
 
 func NewSessionThreadHandler(svc ThreadService) *SessionThreadHandler {
@@ -513,6 +518,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 
 	var body struct {
 		Message                 string                        `json:"message"`
+		ChangesetID             string                        `json:"changeset_id"`
 		ClientMessageID         string                        `json:"client_message_id"`
 		Images                  []string                      `json:"images"`
 		References              models.SessionInputReferences `json:"references"`
@@ -545,11 +551,34 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	if user != nil {
 		userID = &user.ID
 	}
+	var targetChangesetID *uuid.UUID
+	if strings.TrimSpace(body.ChangesetID) != "" {
+		changesetID, parseErr := uuid.Parse(body.ChangesetID)
+		if parseErr != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target")
+			return
+		}
+		if h.changesets == nil {
+			writeError(w, r, http.StatusNotImplemented, "CHANGESETS_NOT_CONFIGURED", "pull request targeting is not configured")
+			return
+		}
+		changeset, loadErr := h.changesets.GetByID(r.Context(), orgID, sessionID, changesetID)
+		if loadErr != nil {
+			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+			return
+		}
+		if changeset.WorktreePath == nil || strings.TrimSpace(*changeset.WorktreePath) == "" {
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request must be materialized before the agent can edit it")
+			return
+		}
+		targetChangesetID = &changeset.ID
+	}
 
 	result, err := h.svc.SendMessage(r.Context(), thread.SendMessageInput{
 		SessionID:               sessionID,
 		OrgID:                   orgID,
 		ThreadID:                threadID,
+		ChangesetID:             targetChangesetID,
 		ClientMessageID:         strings.TrimSpace(body.ClientMessageID),
 		UserID:                  userID,
 		Message:                 body.Message,

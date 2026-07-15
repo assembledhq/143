@@ -16,36 +16,36 @@ export type PlaneTheme = {
 };
 
 export const DARK: PlaneTheme = {
-  bg: "#08080f",
-  planeFill: (a: number) => `rgba(210, 218, 230, ${a})`,
-  planeStroke: (a: number) => `rgba(255, 255, 255, ${a * 0.3})`,
-  planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.25})`,
+  bg: "#11110f",
+  planeFill: (a: number) => `rgba(221, 219, 212, ${a})`,
+  planeStroke: (a: number) => `rgba(244, 243, 238, ${a * 0.3})`,
+  planeHighlight: (a: number) => `rgba(244, 243, 238, ${a * 0.25})`,
   planeShadow: (a: number) => `rgba(0, 0, 0, ${a * 0.3})`,
-  canopy: (a: number) => `rgba(140, 180, 255, ${a * 0.5})`,
-  canopyEdge: (a: number) => `rgba(200, 220, 255, ${a * 0.3})`,
-  panelLine: (a: number) => `rgba(255, 255, 255, ${a * 0.08})`,
-  trail: (a: number) => `rgba(180, 195, 220, ${a})`,
-  star: (a: number) => `rgba(255, 255, 255, ${a})`,
+  canopy: (a: number) => `rgba(121, 146, 255, ${a * 0.58})`,
+  canopyEdge: (a: number) => `rgba(200, 210, 255, ${a * 0.32})`,
+  panelLine: (a: number) => `rgba(244, 243, 238, ${a * 0.08})`,
+  trail: (a: number) => `rgba(200, 210, 255, ${a})`,
+  star: (a: number) => `rgba(244, 243, 238, ${a})`,
   orbs: [
-    { color: "rgba(30, 40, 80, 0.15)" },
-    { color: "rgba(50, 30, 70, 0.1)" },
+    { color: "rgba(80, 108, 255, 0.14)" },
+    { color: "rgba(121, 146, 255, 0.08)" },
   ],
 };
 
 export const LIGHT: PlaneTheme = {
-  bg: "#d4e6f5",
-  planeFill: (a: number) => `rgba(45, 55, 70, ${a})`,
-  planeStroke: (a: number) => `rgba(25, 30, 40, ${a * 0.25})`,
+  bg: "#f6f5f0",
+  planeFill: (a: number) => `rgba(52, 52, 48, ${a})`,
+  planeStroke: (a: number) => `rgba(27, 27, 25, ${a * 0.25})`,
   planeHighlight: (a: number) => `rgba(255, 255, 255, ${a * 0.2})`,
-  planeShadow: (a: number) => `rgba(15, 20, 35, ${a * 0.25})`,
-  canopy: (a: number) => `rgba(120, 170, 230, ${a * 0.6})`,
-  canopyEdge: (a: number) => `rgba(80, 130, 190, ${a * 0.35})`,
+  planeShadow: (a: number) => `rgba(27, 27, 25, ${a * 0.22})`,
+  canopy: (a: number) => `rgba(49, 92, 232, ${a * 0.62})`,
+  canopyEdge: (a: number) => `rgba(35, 59, 145, ${a * 0.35})`,
   panelLine: (a: number) => `rgba(0, 0, 0, ${a * 0.06})`,
-  trail: (a: number) => `rgba(255, 255, 255, ${a})`,
+  trail: (a: number) => `rgba(255, 255, 255, ${a * 0.95})`,
   star: () => "transparent",
   orbs: [
-    { color: "rgba(255, 255, 255, 0.3)" },
-    { color: "rgba(200, 220, 255, 0.2)" },
+    { color: "rgba(49, 92, 232, 0.12)" },
+    { color: "rgba(255, 255, 255, 0.24)" },
   ],
 };
 

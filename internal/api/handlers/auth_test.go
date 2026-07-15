@@ -15,7 +15,6 @@ import (
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
-	"github.com/assembledhq/143/internal/demoseed"
 	"github.com/assembledhq/143/internal/models"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
@@ -868,33 +867,35 @@ func TestAuthHandler_Providers(t *testing.T) {
 				GitHubOAuthClientID: "gh-id",
 				GoogleOAuthClientID: "g-id",
 			},
-			expected: map[string]any{"github": true, "google": true, "email": true, "demo": false, "demo_read_only": false},
+			expected: map[string]any{"github": true, "google": true, "email": true, "demo": false},
 		},
 		{
 			name: "only github configured",
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 			},
-			expected: map[string]any{"github": true, "google": false, "email": true, "demo": false, "demo_read_only": false},
+			expected: map[string]any{"github": true, "google": false, "email": true, "demo": false},
 		},
 		{
 			name:     "no oauth configured",
 			cfg:      &config.Config{},
-			expected: map[string]any{"github": false, "google": false, "email": true, "demo": false, "demo_read_only": false},
+			expected: map[string]any{"github": false, "google": false, "email": true, "demo": false},
 		},
 		{
-			name: "demo mode hides github oauth and advertises direct entry",
+			name: "demo mode hides github oauth and advertises seeded credentials",
 			cfg: &config.Config{
 				GitHubOAuthClientID: "gh-id",
 				DemoMode:            true,
-				DemoReadOnly:        true,
+				DemoEmail:           "preview-admin@143.dev",
+				DemoPassword:        "preview",
 			},
 			expected: map[string]any{
-				"github":         false,
-				"google":         false,
-				"email":          false,
-				"demo":           true,
-				"demo_read_only": true,
+				"github":        false,
+				"google":        false,
+				"email":         true,
+				"demo":          true,
+				"demo_email":    "preview-admin@143.dev",
+				"demo_password": "preview",
 			},
 		},
 	}
@@ -915,163 +916,6 @@ func TestAuthHandler_Providers(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 			require.Equal(t, tt.expected, resp.Data)
-		})
-	}
-}
-
-func TestAuthHandler_Providers_NeverExposesDemoCredentials(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{
-		DemoMode: true,
-	}
-	handler := NewAuthHandler(cfg, nil, nil, nil, nil, nil)
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil)
-	w := httptest.NewRecorder()
-
-	handler.Providers(w, req)
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var resp struct {
-		Data map[string]any `json:"data"`
-	}
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	require.NotContains(t, resp.Data, "demo_email", "must not expose demo_email")
-	require.NotContains(t, resp.Data, "demo_password", "must not expose demo_password")
-}
-
-func TestAuthHandler_DemoLogin(t *testing.T) {
-	t.Parallel()
-
-	userColumns := []string{"id", "org_id", "email", "name", "role", "github_id", "github_login", "github_noreply_email", "avatar_url", "password_hash", "google_id", "created_at"}
-	userID := uuid.MustParse("00000000-0000-4000-a000-000000000005")
-	orgID := uuid.MustParse(demoseed.DemoOrgID)
-
-	tests := []struct {
-		name         string
-		cfg          *config.Config
-		setupMock    func(mock pgxmock.PgxPoolIface)
-		expectedCode int
-		expectedBody string
-	}{
-		{
-			name: "disabled outside demo mode",
-			cfg:  &config.Config{},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-			},
-			expectedCode: http.StatusNotFound,
-			expectedBody: "NOT_FOUND",
-		},
-		{
-			name: "signs in seeded viewer without credentials",
-			cfg: &config.Config{
-				DemoMode:           true,
-				DemoEntryEmail:     demoseed.DemoViewerEmail,
-				CSRFSigningKey:     "test-csrf-key",
-				SessionSecret:      "test-session-secret",
-				FrontendURL:        "http://localhost:3000",
-				CORSAllowedOrigins: []string{"http://localhost:3000"},
-			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Dennis Ritchie", "viewer", nil, nil, nil, nil, nil, nil, time.Now()),
-					)
-				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
-					WithArgs(userID, orgID).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
-							AddRow(userID, orgID, models.RoleViewer, time.Now()),
-					)
-				expectUserLastOrgLookup(mock, userID, nil)
-				mock.ExpectQuery("INSERT INTO auth_sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"id", "created_at"}).
-							AddRow(uuid.New(), time.Now()),
-					)
-			},
-			expectedCode: http.StatusOK,
-			expectedBody: demoseed.DemoViewerEmail,
-		},
-		{
-			name: "rejects non-viewer demo entry user",
-			cfg: &config.Config{
-				DemoMode:       true,
-				DemoEntryEmail: demoseed.DemoAdminEmail,
-			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoAdminEmail, "Ada Lovelace", "admin", nil, nil, nil, nil, nil, nil, time.Now()),
-					)
-				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
-					WithArgs(userID, orgID).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
-							AddRow(userID, orgID, models.RoleAdmin, time.Now()),
-					)
-			},
-			expectedCode: http.StatusForbidden,
-			expectedBody: "DEMO_ENTRY_REQUIRES_VIEWER",
-		},
-		{
-			name: "rejects password-enabled viewer",
-			cfg: &config.Config{
-				DemoMode:       true,
-				DemoEntryEmail: demoseed.DemoViewerEmail,
-			},
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				passwordHash := "$2a$10$hash"
-				mock.ExpectQuery("(?s)SELECT .+ FROM users WHERE LOWER\\(email\\)").
-					WithArgs(pgxmock.AnyArg()).
-					WillReturnRows(
-						pgxmock.NewRows(userColumns).
-							AddRow(userID, orgID, demoseed.DemoViewerEmail, "Dennis Ritchie", "viewer", nil, nil, nil, nil, &passwordHash, nil, time.Now()),
-					)
-				mock.ExpectQuery("SELECT user_id, org_id, role, created_at FROM organization_memberships").
-					WithArgs(userID, orgID).
-					WillReturnRows(
-						pgxmock.NewRows([]string{"user_id", "org_id", "role", "created_at"}).
-							AddRow(userID, orgID, models.RoleViewer, time.Now()),
-					)
-			},
-			expectedCode: http.StatusForbidden,
-			expectedBody: "DEMO_ENTRY_REQUIRES_PASSWORDLESS",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "pgxmock pool should initialize")
-			defer mock.Close()
-			tt.setupMock(mock)
-
-			handler := NewAuthHandler(
-				tt.cfg,
-				mock,
-				db.NewUserStore(mock),
-				db.NewAuthSessionStore(mock),
-				nil,
-				db.NewOrganizationMembershipStore(mock),
-			)
-			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/demo", nil)
-			w := httptest.NewRecorder()
-
-			handler.DemoLogin(w, req)
-			require.Equal(t, tt.expectedCode, w.Code, "DemoLogin should return expected status")
-			require.Contains(t, w.Body.String(), tt.expectedBody, "DemoLogin response should identify expected outcome")
-			if tt.expectedCode == http.StatusOK {
-				require.NotEmpty(t, w.Result().Cookies(), "DemoLogin should set session and CSRF cookies")
-			}
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}
 }

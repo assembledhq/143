@@ -1,8 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
 import { MessageSquareText } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { EmptyState } from "@/components/empty-state";
 import { ManualSessionCreatePageContent } from "./new/manual-session-create-page-content";
 import { SessionDetailPageClient } from "./[id]/session-detail-page-client";
@@ -14,15 +12,8 @@ import type { SessionsRouteState } from "./sessions-route-state";
 // always actionable.
 
 export function SessionsShellContent({ routeState }: { routeState: SessionsRouteState }) {
-  const router = useRouter();
   const { user } = useAuth();
   const isViewer = user?.role === "viewer";
-
-  useEffect(() => {
-    if (isViewer && routeState.mode === "create") {
-      router.replace("/demo");
-    }
-  }, [isViewer, routeState.mode, router]);
 
   if (routeState.isUnsupportedRoute) {
     return (
@@ -48,9 +39,9 @@ export function SessionsShellContent({ routeState }: { routeState: SessionsRoute
         <EmptyState
           variant="inline"
           icon={MessageSquareText}
-          title="Choose a seeded session"
-          description="The public demo is read-only. Pick a session from the list, or open the guided demo replay."
-          action={{ label: "Open demo", href: "/demo" }}
+          title="Choose a session"
+          description="Viewer accounts can inspect existing sessions but cannot create new ones."
+          action={{ label: "Sessions", href: "/sessions" }}
         />
       </div>
     );

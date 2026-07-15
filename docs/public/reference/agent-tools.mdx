@@ -54,7 +54,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `github` | `list_recent_prs`, `get_pr_reviews` |
 | `circleci` | `list_flaky_tests`, `get_job_test_results`, `get_recent_test_failures` |
 | `logs` | `query`, `context`, `fields`, `stats` |
-| `preview` | `create`, `status`, `list`, `stop`, `restart`, `update`, `screenshot`, `console`, `inspect`, `interact`, `multi_viewport`, `visual_diff`, `assert` |
+| `preview` | `create`, `ensure`, `status`, `list`, `stop`, `restart`, `update`, `observe`, `act`, `control`, `request_handoff`, `screenshot`, `console`, `inspect`, `interact`, `multi_viewport`, `visual_diff`, `assert` |
 | `slack` | `search_messages`, `get_thread`, `send` |
 | `issue` | `create` |
 | `pr` | `create` |
@@ -434,6 +434,41 @@ Create or reuse a preview.
 143-tools preview create --session-id "$143_SESSION_ID" --wait
 143-tools preview create --repository example-org/example-app --branch feature/foo --wait
 ```
+
+### `preview ensure`, `preview observe`, and `preview act`
+
+Coding-agent sessions can use the native verification loop without passing a
+preview or session ID:
+
+```bash
+143-tools preview ensure --wait
+143-tools preview observe --path /
+143-tools preview act --steps '[{"action":"click","role":"button","name":"Save"}]'
+143-tools preview update --wait
+```
+
+`observe` returns screenshot artifact metadata, URL, title, viewport, capture
+time, a bounded accessibility tree, optional bounded DOM, readiness and browser
+restoration status, and error-level console messages after the supplied cursor. Pass
+`--output path/to/image.png` to write the image into the workspace without
+keeping base64 in command output. `act` accepts structured actions such
+as navigate, click, fill/type, select, check/uncheck, press, hover, scroll,
+wait for selector/URL/text/readiness/network idle, coordinate click, and
+viewport changes, then returns the action result and a fresh observation.
+Navigation is restricted to the active preview origin and the repository's
+`browser.allowed_paths` policy.
+
+Use `preview control` to inspect whether the agent, a human, or a pending
+handoff owns browser input. When login, MFA, CAPTCHA, or human judgment is
+required, call:
+
+```bash
+143-tools preview request_handoff --reason "MFA approval required"
+```
+
+This pauses agent actions until an authorized user takes control in the session
+preview panel and returns it. The browser URL, cookies, and local storage remain
+on the same session-owned context throughout the handoff.
 
 ### `preview status`
 

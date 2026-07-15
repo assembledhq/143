@@ -486,10 +486,12 @@ type PRReadinessRun struct {
 	ID                         uuid.UUID            `db:"id" json:"id"`
 	OrgID                      uuid.UUID            `db:"org_id" json:"org_id"`
 	SessionID                  uuid.UUID            `db:"session_id" json:"session_id"`
+	ChangesetID                uuid.UUID            `db:"changeset_id" json:"changeset_id"`
 	RepositoryID               *uuid.UUID           `db:"repository_id" json:"repository_id,omitempty"`
 	Status                     PRReadinessRunStatus `db:"status" json:"status"`
 	EvaluatedWorkspaceRevision int64                `db:"evaluated_workspace_revision" json:"evaluated_workspace_revision"`
 	EvaluatedSnapshotKey       *string              `db:"evaluated_snapshot_key" json:"evaluated_snapshot_key,omitempty"`
+	EvaluatedHeadSHA           *string              `db:"evaluated_head_sha" json:"evaluated_head_sha,omitempty"`
 	Summary                    string               `db:"summary" json:"summary,omitempty"`
 	ReviewPacket               json.RawMessage      `db:"review_packet" json:"review_packet,omitempty"`
 	TriggeredByUserID          *uuid.UUID           `db:"triggered_by_user_id" json:"triggered_by_user_id,omitempty"`
@@ -506,6 +508,7 @@ type PRReadinessCheck struct {
 	OrgID                uuid.UUID                    `db:"org_id" json:"org_id"`
 	RunID                uuid.UUID                    `db:"run_id" json:"run_id"`
 	SessionID            uuid.UUID                    `db:"session_id" json:"session_id"`
+	ChangesetID          uuid.UUID                    `db:"changeset_id" json:"changeset_id"`
 	CheckKey             string                       `db:"check_key" json:"check_key,omitempty"`
 	CheckType            PRReadinessCheckType         `db:"check_type" json:"check_type"`
 	Status               PRReadinessCheckStatus       `db:"status" json:"status"`
@@ -607,6 +610,7 @@ type PRReadinessBypass struct {
 	OrgID            uuid.UUID  `db:"org_id" json:"org_id"`
 	ReadinessRunID   uuid.UUID  `db:"readiness_run_id" json:"readiness_run_id"`
 	SessionID        uuid.UUID  `db:"session_id" json:"session_id"`
+	ChangesetID      uuid.UUID  `db:"changeset_id" json:"changeset_id"`
 	RepositoryID     *uuid.UUID `db:"repository_id" json:"repository_id,omitempty"`
 	PullRequestID    *uuid.UUID `db:"pull_request_id" json:"pull_request_id,omitempty"`
 	BypassedByUserID uuid.UUID  `db:"bypassed_by_user_id" json:"bypassed_by_user_id"`

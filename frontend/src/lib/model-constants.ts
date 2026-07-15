@@ -52,7 +52,7 @@ export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_5_3_CODEX_SPARK,
 ] as const;
 
-export const DEFAULT_CODEX_MODEL = CODEX_MODEL_GPT_5_5;
+export const DEFAULT_CODEX_MODEL = CODEX_MODEL_GPT_5_6_SOL;
 
 // Amp uses agent "modes" instead of model names; each mode bundles a model,
 // system prompt, and tool set on Sourcegraph's side.

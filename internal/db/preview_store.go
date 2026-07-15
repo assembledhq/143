@@ -25,6 +25,11 @@ import (
 // run but the repository has no successful preview recorded yet.
 var ErrPreviewNotReady = errors.New("repository preview is not ready")
 
+// ErrPreviewReservationNotStarting is returned when a retry-only startup reset
+// cannot claim the reservation because another lifecycle transition already
+// moved it out of the starting state.
+var ErrPreviewReservationNotStarting = errors.New("branch preview reservation not found or no longer starting")
+
 // PreviewStore manages preview_instances and related tables.
 // It uses TxStarter because stop operations need transactional consistency
 // (stop preview + revoke all access sessions atomically).
@@ -95,6 +100,7 @@ const previewInstanceColumns = `id, COALESCE(session_id, '00000000-0000-0000-000
 	provider, worker_node_id, preview_handle, primary_service, port,
 	config_digest, base_commit_sha, last_accessed_at, expires_at, stopped_at,
 	last_path, memory_limit_mb, cpu_limit_millis, disk_limit_mb, recycle_config, recycle_sandbox,
+	peak_memory_bytes, peak_memory_sampled_at, peak_memory_phase,
 	current_phase, request_id, error, created_at, updated_at, recycled_at, recycle_scheduled_at,
 	source_workspace_revision, source_workspace_revision_updated_at,
 	runtime_workspace_revision, runtime_workspace_revision_updated_at, runtime_workspace_revision_source,
@@ -1278,7 +1284,7 @@ func (s *PreviewStore) ResetStartingBranchPreviewForRetry(ctx context.Context, o
 		return fmt.Errorf("reset branch preview reservation: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("branch preview reservation not found or no longer starting")
+		return ErrPreviewReservationNotStarting
 	}
 
 	if _, err := tx.Exec(ctx,
@@ -4557,6 +4563,95 @@ func (s *PreviewStore) UpdatePreviewCachePrewarmRunStatus(ctx context.Context, o
 		return fmt.Errorf("update preview cache prewarm run status: %w", err)
 	}
 	return nil
+}
+
+func (s *PreviewStore) RecordPreviewResourceSample(ctx context.Context, orgID uuid.UUID, sample *models.PreviewResourceSample) error {
+	if sample == nil {
+		return fmt.Errorf("preview resource sample is nil")
+	}
+	processes := sample.Processes
+	if len(processes) == 0 {
+		processes = json.RawMessage(`[]`)
+	}
+	sampledAt := sample.SampledAt
+	if sampledAt.IsZero() {
+		sampledAt = time.Now()
+	}
+	_, err := s.db.Exec(ctx, `
+		WITH inserted AS (
+			INSERT INTO preview_resource_samples (
+				org_id, preview_instance_id, worker_node_id, phase,
+				memory_bytes, memory_limit_bytes, cpu_cores, cpu_limit_millis,
+				processes, sampled_at
+			)
+			SELECT
+				@org_id, @preview_instance_id, @worker_node_id, @phase,
+				@memory_bytes, @memory_limit_bytes, @cpu_cores, @cpu_limit_millis,
+				@processes, @sampled_at
+			WHERE EXISTS (
+				SELECT 1
+				FROM preview_instances
+				WHERE id = @preview_instance_id AND org_id = @org_id
+			)
+			RETURNING preview_instance_id, memory_bytes, sampled_at, phase
+		)
+		UPDATE preview_instances p
+		SET peak_memory_bytes = inserted.memory_bytes,
+			peak_memory_sampled_at = inserted.sampled_at,
+			peak_memory_phase = inserted.phase,
+			updated_at = now()
+		FROM inserted
+		WHERE p.id = inserted.preview_instance_id
+			AND p.org_id = @org_id
+			AND inserted.memory_bytes > p.peak_memory_bytes`,
+		pgx.NamedArgs{
+			"org_id":              orgID,
+			"preview_instance_id": sample.PreviewInstanceID,
+			"worker_node_id":      sample.WorkerNodeID,
+			"phase":               sample.Phase,
+			"memory_bytes":        sample.MemoryBytes,
+			"memory_limit_bytes":  sample.MemoryLimitBytes,
+			"cpu_cores":           sample.CPUCores,
+			"cpu_limit_millis":    sample.CPULimitMillis,
+			"processes":           processes,
+			"sampled_at":          sampledAt,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("record preview resource sample: %w", err)
+	}
+	return nil
+}
+
+// DeleteExpiredPreviewResourceSamples removes old resource samples in bounded batches.
+// lint:allow-no-orgid reason="system-wide retention cleanup across all orgs"
+func (s *PreviewStore) DeleteExpiredPreviewResourceSamples(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	if cutoff.IsZero() {
+		return 0, fmt.Errorf("preview resource sample retention cutoff is zero")
+	}
+	if limit <= 0 {
+		limit = 10000
+	}
+	tag, err := s.db.Exec(ctx, `
+		WITH expired AS (
+			SELECT id
+			FROM preview_resource_samples
+			WHERE sampled_at < @cutoff
+			ORDER BY sampled_at ASC
+			LIMIT @limit
+		)
+		DELETE FROM preview_resource_samples prs
+		USING expired
+		WHERE prs.id = expired.id`,
+		pgx.NamedArgs{
+			"cutoff": cutoff,
+			"limit":  limit,
+		},
+	)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired preview resource samples: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // =============================================================================

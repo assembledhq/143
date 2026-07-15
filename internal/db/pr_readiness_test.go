@@ -35,8 +35,8 @@ func TestPRReadinessStore_CreateRun(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
-		WillReturnRows(pgxmock.NewRows([]string{"id", "started_at", "created_at", "updated_at"}).
-			AddRow(runID, now, now, now))
+		WillReturnRows(pgxmock.NewRows([]string{"id", "changeset_id", "started_at", "created_at", "updated_at"}).
+			AddRow(runID, uuid.Nil, now, now, now))
 
 	run := &models.PRReadinessRun{
 		OrgID:                      orgID,

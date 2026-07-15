@@ -14,6 +14,228 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSessionChangesetsMigrationPinsPrimaryCompatibilityContract(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000238_session_changesets.up.sql")
+	require.NoError(t, err, "test should read the session changesets migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "CREATE UNIQUE INDEX session_changesets_one_primary", "migration should enforce one primary changeset per session")
+	require.Contains(t, sql, "FOREIGN KEY (session_id, org_id)", "changesets should enforce tenant ownership of their parent session")
+	require.Contains(t, sql, "trg_session_changesets_require_primary", "migration should prevent a session from losing its primary changeset")
+	require.Contains(t, sql, "INSERT INTO session_changesets", "migration should backfill primary changesets for existing sessions")
+	require.Contains(t, sql, "trg_sessions_create_primary_changeset", "migration should atomically create primaries for future sessions")
+	require.Contains(t, sql, "trg_sessions_mirror_primary_changeset_branches", "migration should mirror legacy session branch writes")
+	require.Contains(t, sql, "trg_primary_changeset_mirror_session_branches", "migration should mirror primary changeset branch writes")
+	require.Contains(t, sql, "trg_pull_requests_assign_primary_changeset", "migration should support rolling workers by assigning session-backed PRs to their primary")
+	require.Contains(t, sql, "trg_pull_requests_sync_changeset_state", "migration should keep primary status and head state aligned with its PR")
+	require.Contains(t, sql, "pr_creation_state text NOT NULL DEFAULT 'idle'", "PR creation state machine should be changeset-scoped")
+	require.Contains(t, sql, "ORDER BY canonical.created_at DESC, canonical.id DESC", "backfill should attach only the canonical latest legacy PR")
+	require.NotContains(t, sql, "pull_requests_one_per_changeset", "revised design should retain GitHub PR identity as the database uniqueness mechanism")
+	require.NotContains(t, sql, "changeset_worktree_leases", "Phase 1 should not introduce premature worktree lease state")
+}
+
+func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("../../migrations/000242_session_changeset_split_plans.up.sql")
+	require.NoError(t, err, "test should read the changeset split migration")
+	sql := string(body)
+	require.Contains(t, sql, "source_diff_snapshot_id uuid NOT NULL", "split plans should freeze an immutable diff snapshot")
+	require.Contains(t, sql, "FOREIGN KEY (changeset_id, org_id, session_id)", "split ownership and readiness should enforce tenant and session ownership")
+	require.Contains(t, sql, "session_changeset_split_omissions", "confirmed omissions should remain auditable")
+	require.Contains(t, sql, "session_changesets_one_materializing_per_session", "worktree materialization should serialize per session")
+	require.Contains(t, sql, "pr_readiness_runs_changeset_scope_fkey", "readiness runs should be changeset scoped")
+	require.Contains(t, sql, "pr_readiness_checks_changeset_scope_fkey", "readiness checks should be changeset scoped")
+	require.Contains(t, sql, "pr_readiness_bypasses_changeset_scope_fkey", "readiness bypasses should be changeset scoped")
+}
+
+func TestAutomationNoChangeBackfillPinsSafeNoopPredicates(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000248_automation_no_change_noop.up.sql")
+	require.NoError(t, err, "test should read the automation no-change backfill migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "SET status = 'completed_noop'", "backfill should reclassify eligible automation runs as no-ops")
+	require.Contains(t, sql, "target_sessions AS MATERIALIZED", "backfill should resolve its narrow target set once before applying updates")
+	require.Contains(t, sql, "ar.org_id = sal.org_id", "automation run backfill should preserve tenant ownership")
+	require.Contains(t, sql, "s.id = sal.session_id", "backfill should resolve the session through its durable automation link")
+	require.Contains(t, sql, "COALESCE(s.diff, '') = ''", "backfill should only touch sessions with no captured changes")
+	require.Contains(t, sql, "pr_creation_error = 'No changes to push.'", "backfill should require the exact historical no-change outcome")
+	require.Contains(t, sql, "NOT EXISTS", "backfill should exclude sessions that already have pull requests")
+	require.Contains(t, sql, "UPDATE session_publish_state", "backfill should clear the session publish read model")
+	require.Contains(t, sql, "pr_creation_state = 'idle'", "historical no-op sessions should no longer display a failed PR state")
+	require.Contains(t, sql, "session_publish_state update trigger mirrors this reset", "migration should document the existing primary-changeset mirror contract")
+}
+
+func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to run the Postgres migration behavior test")
+	}
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, databaseURL)
+	require.NoError(t, err, "test should connect to TEST_DATABASE_URL")
+	defer func() {
+		require.NoError(t, conn.Close(context.Background()), "test should close the PostgreSQL connection")
+	}()
+
+	schema := "test_session_changesets_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err = conn.Exec(ctx, `CREATE SCHEMA `+schema)
+	require.NoError(t, err, "test should create an isolated schema")
+	defer func() {
+		_, cleanupErr := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+schema+` CASCADE`)
+		require.NoError(t, cleanupErr, "test should remove the isolated schema")
+	}()
+	_, err = conn.Exec(ctx, `SET search_path TO `+schema+`, public`)
+	require.NoError(t, err, "test should isolate migration objects to the test schema")
+
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE organizations (id uuid PRIMARY KEY);
+		CREATE TABLE sessions (
+			id uuid PRIMARY KEY,
+			org_id uuid NOT NULL REFERENCES organizations(id),
+			title text,
+			result_summary text,
+			target_branch text,
+			working_branch text,
+			base_commit_sha text
+		);
+		CREATE TABLE pull_requests (
+			id uuid PRIMARY KEY,
+			session_id uuid REFERENCES sessions(id),
+			org_id uuid NOT NULL REFERENCES organizations(id),
+			status text NOT NULL,
+			head_sha text,
+			created_at timestamptz NOT NULL
+		);
+		CREATE TABLE session_publish_state (
+			session_id uuid PRIMARY KEY REFERENCES sessions(id),
+			org_id uuid NOT NULL REFERENCES organizations(id),
+			pr_creation_state text NOT NULL DEFAULT 'idle',
+			pr_creation_error text,
+			updated_at timestamptz NOT NULL DEFAULT now()
+		);
+	`)
+	require.NoError(t, err, "test should create the pre-migration session and PR schema")
+
+	orgID := uuid.New()
+	existingSessionID := uuid.New()
+	olderPRID := uuid.New()
+	latestPRID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO organizations (id) VALUES ($1)`, orgID)
+	require.NoError(t, err, "test should seed the organization")
+	_, err = conn.Exec(ctx, `INSERT INTO sessions
+		(id, org_id, title, result_summary, target_branch, working_branch, base_commit_sha)
+		VALUES ($1, $2, 'Existing session', 'Done', 'develop', '143/existing', 'base-1')`, existingSessionID, orgID)
+	require.NoError(t, err, "test should seed the existing session")
+	_, err = conn.Exec(ctx, `INSERT INTO pull_requests (id, session_id, org_id, status, head_sha, created_at)
+		VALUES ($1, $3, $4, 'closed', 'old-head', now() - interval '1 hour'),
+		       ($2, $3, $4, 'open', 'new-head', now())`, olderPRID, latestPRID, existingSessionID, orgID)
+	require.NoError(t, err, "test should seed legacy pull requests")
+	_, err = conn.Exec(ctx, `INSERT INTO session_publish_state
+		(session_id, org_id, pr_creation_state, pr_creation_error)
+		VALUES ($1, $2, 'queued', NULL)`, existingSessionID, orgID)
+	require.NoError(t, err, "test should seed legacy PR creation state")
+
+	body, err := os.ReadFile("../../migrations/000238_session_changesets.up.sql")
+	require.NoError(t, err, "test should read the session changesets migration")
+	_, err = conn.Exec(ctx, string(body))
+	require.NoError(t, err, "session changesets migration should apply to the legacy schema")
+
+	var primaryID uuid.UUID
+	var status, targetBranch, workingBranch, expectedHead, creationState string
+	err = conn.QueryRow(ctx, `SELECT id, status, target_branch, working_branch, expected_remote_head_sha, pr_creation_state
+		FROM session_changesets WHERE org_id = $1 AND session_id = $2 AND is_primary`, orgID, existingSessionID).
+		Scan(&primaryID, &status, &targetBranch, &workingBranch, &expectedHead, &creationState)
+	require.NoError(t, err, "backfill should create the existing session primary changeset")
+	require.Equal(t, "pr_open", status, "backfill should derive primary status from the canonical PR")
+	require.Equal(t, "develop", targetBranch, "backfill should preserve the session target branch")
+	require.Equal(t, "143/existing", workingBranch, "backfill should preserve the session working branch")
+	require.Equal(t, "new-head", expectedHead, "backfill should record the expected remote head")
+	require.Equal(t, "queued", creationState, "backfill should preserve the legacy PR creation state")
+
+	var attachedPRID uuid.UUID
+	err = conn.QueryRow(ctx, `SELECT id FROM pull_requests WHERE changeset_id = $1`, primaryID).Scan(&attachedPRID)
+	require.NoError(t, err, "backfill should attach one canonical PR to the primary changeset")
+	require.Equal(t, latestPRID, attachedPRID, "backfill should attach the latest legacy PR")
+
+	newSessionID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO sessions (id, org_id, title, target_branch)
+		VALUES ($1, $2, 'New session', 'main')`, newSessionID, orgID)
+	require.NoError(t, err, "new session insert should atomically create a primary changeset")
+	var newPrimaryID uuid.UUID
+	var newWorkingBranch *string
+	err = conn.QueryRow(ctx, `SELECT id, working_branch FROM session_changesets
+		WHERE org_id = $1 AND session_id = $2 AND is_primary`, orgID, newSessionID).Scan(&newPrimaryID, &newWorkingBranch)
+	require.NoError(t, err, "new sessions should always have a primary changeset")
+	require.Nil(t, newWorkingBranch, "planned primary should preserve a missing session working branch")
+
+	_, err = conn.Exec(ctx, `UPDATE sessions SET working_branch = '143/new' WHERE org_id = $1 AND id = $2`, orgID, newSessionID)
+	require.NoError(t, err, "legacy session branch updates should succeed")
+	err = conn.QueryRow(ctx, `SELECT working_branch, status FROM session_changesets WHERE id = $1`, newPrimaryID).
+		Scan(&workingBranch, &status)
+	require.NoError(t, err, "primary changeset should reflect the legacy branch update")
+	require.Equal(t, "143/new", workingBranch, "session working branch should mirror to the primary changeset")
+	require.Equal(t, "published_branch", status, "first working branch should advance the primary changeset state")
+
+	_, err = conn.Exec(ctx, `UPDATE session_changesets SET working_branch = '143/renamed' WHERE id = $1`, newPrimaryID)
+	require.NoError(t, err, "primary changeset branch updates should succeed")
+	err = conn.QueryRow(ctx, `SELECT working_branch FROM sessions WHERE id = $1`, newSessionID).Scan(&workingBranch)
+	require.NoError(t, err, "session should reflect the primary changeset branch update")
+	require.Equal(t, "143/renamed", workingBranch, "primary working branch should mirror to the legacy session field")
+
+	_, err = conn.Exec(ctx, `INSERT INTO pull_requests
+		(id, session_id, org_id, status, head_sha, created_at)
+		VALUES ($1, $2, $3, 'open', 'published-head', now())`, uuid.New(), newSessionID, orgID)
+	require.NoError(t, err, "legacy pull request insert should resolve the session primary changeset")
+	err = conn.QueryRow(ctx, `SELECT status, head_sha, expected_remote_head_sha
+		FROM session_changesets WHERE id = $1`, newPrimaryID).Scan(&status, &expectedHead, &workingBranch)
+	require.NoError(t, err, "changeset should reflect its pull request lifecycle")
+	require.Equal(t, "pr_open", status, "open pull request should advance the changeset state")
+	require.Equal(t, "published-head", expectedHead, "pull request head should update changeset head state")
+	require.Equal(t, "published-head", workingBranch, "pull request head should establish the expected remote head")
+
+	_, err = conn.Exec(ctx, `UPDATE pull_requests SET head_sha = 'external-head' WHERE changeset_id = $1`, newPrimaryID)
+	require.NoError(t, err, "external pull request head update should succeed")
+	err = conn.QueryRow(ctx, `SELECT expected_remote_head_sha FROM session_changesets WHERE id = $1`, newPrimaryID).Scan(&expectedHead)
+	require.NoError(t, err, "changeset expected remote head should remain readable")
+	require.Equal(t, "published-head", expectedHead, "ordinary PR updates must not advance the platform push expectation")
+
+	_, err = conn.Exec(ctx, `UPDATE session_changesets
+		SET pr_creation_state = 'failed', pr_creation_error = 'publish failed' WHERE id = $1`, newPrimaryID)
+	require.NoError(t, err, "changeset PR state update should succeed")
+	var mirroredState string
+	var mirroredError *string
+	err = conn.QueryRow(ctx, `SELECT pr_creation_state, pr_creation_error FROM session_publish_state WHERE session_id = $1`, newSessionID).
+		Scan(&mirroredState, &mirroredError)
+	require.NoError(t, err, "legacy session publish state should mirror the primary changeset")
+	require.Equal(t, "failed", mirroredState, "legacy state should reflect the changeset state machine")
+	require.NotNil(t, mirroredError, "legacy publish error should be populated for failed changeset state")
+	require.Equal(t, "publish failed", *mirroredError, "legacy error should reflect the changeset error")
+
+	otherOrgID := uuid.New()
+	_, err = conn.Exec(ctx, `INSERT INTO organizations (id) VALUES ($1)`, otherOrgID)
+	require.NoError(t, err, "test should seed a second organization")
+	_, err = conn.Exec(ctx, `INSERT INTO session_changesets (
+		org_id, session_id, is_primary, order_index, title, target_branch, base_branch
+	) VALUES ($1, $2, false, 1, 'Cross-tenant', 'main', 'main')`, otherOrgID, newSessionID)
+	require.Error(t, err, "changesets should reject a session owned by another organization")
+
+	_, err = conn.Exec(ctx, `DELETE FROM session_changesets WHERE id = $1`, newPrimaryID)
+	require.Error(t, err, "a session should not be allowed to lose its primary changeset")
+	var primaryStillExists bool
+	err = conn.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM session_changesets WHERE id = $1 AND is_primary
+	)`, newPrimaryID).Scan(&primaryStillExists)
+	require.NoError(t, err, "test should verify the rejected primary deletion")
+	require.True(t, primaryStillExists, "deferred primary invariant should roll back the invalid deletion")
+}
+
 func TestCopyCodingCredentialsMigrationFiltersUserCredentialProviders(t *testing.T) {
 	t.Parallel()
 

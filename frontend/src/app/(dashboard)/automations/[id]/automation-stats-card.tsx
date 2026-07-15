@@ -185,10 +185,10 @@ export function AutomationStatsCard({ automationId }: AutomationStatsCardProps) 
       <CardContent className="p-4">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h3 className="text-sm font-medium">Runs · last {STATS_WINDOW_DAYS} days</h3>
+            <h3 className="text-sm font-medium">Execution runs · last {STATS_WINDOW_DAYS} days</h3>
             {stats && (
               <p className="text-xs text-muted-foreground tabular-nums mt-0.5">
-                {stats.totals.total} total · {successPct}% success · avg {formatDuration(stats.totals.avg_duration_seconds)}
+                {stats.totals.total} total · {successPct}% completed/no-op · avg {formatDuration(stats.totals.avg_duration_seconds)}
               </p>
             )}
           </div>

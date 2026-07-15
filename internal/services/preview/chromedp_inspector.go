@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -13,14 +14,18 @@ import (
 	"image/png"
 	"math"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/accessibility"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -81,11 +86,14 @@ type ChromeDPInspectorConfig struct {
 
 // previewContext tracks a per-preview browser context.
 type previewContext struct {
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx      context.Context
+	cancel   context.CancelFunc
+	lastUsed time.Time
 
-	mu       sync.Mutex
-	messages []ConsoleMessage
+	mu         sync.Mutex
+	messages   []ConsoleMessage
+	nextCursor int64
+	readCursor int64
 }
 
 // screencastSession tracks an active screencast recording.
@@ -122,6 +130,7 @@ type ChromeDPInspector struct {
 	running       bool
 
 	previews    map[string]*previewContext
+	contextKeys map[string]string
 	screencasts map[string]*screencastSession
 	closed      bool
 }
@@ -135,8 +144,42 @@ func NewChromeDPInspector(cfg ChromeDPInspectorConfig, logger zerolog.Logger) *C
 		cfg:         cfg,
 		logger:      logger.With().Str("component", "chromedp_inspector").Logger(),
 		previews:    make(map[string]*previewContext),
+		contextKeys: make(map[string]string),
 		screencasts: make(map[string]*screencastSession),
 	}
+}
+
+// BindSessionBrowser makes preview lifecycle replacements reuse the browser
+// context owned by the session without changing preview-origin URL routing.
+func (c *ChromeDPInspector) BindSessionBrowser(previewID, sessionID string) {
+	if strings.TrimSpace(previewID) == "" || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	sessionKey := "session:" + sessionID
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.contextKeys[previewID] == sessionKey {
+		return
+	}
+	c.contextKeys[previewID] = sessionKey
+	// A context may already have been created under the raw previewID key by a
+	// path that touched this preview before it was session-bound (HMR watcher,
+	// console/inspect). Once bound, getOrCreatePreviewCtx resolves to sessionKey,
+	// so that raw-keyed context (with its own Chrome tab and console listener)
+	// would otherwise be orphaned and leak. Reconcile it here.
+	raw, hasRaw := c.previews[previewID]
+	if !hasRaw {
+		return
+	}
+	if _, bound := c.previews[sessionKey]; bound {
+		// A session-keyed context already exists; the raw one is a stale
+		// leftover — release it instead of leaking it.
+		raw.cancel()
+		delete(c.previews, previewID)
+		return
+	}
+	c.previews[sessionKey] = raw
+	delete(c.previews, previewID)
 }
 
 // =============================================================================
@@ -175,6 +218,13 @@ func sameOrigin(rawURL, expectedURL string) bool {
 		return false
 	}
 	return target.Scheme == expected.Scheme && target.Host == expected.Host
+}
+
+func validateObservationOrigin(rawURL, expectedURL string) error {
+	if !sameOrigin(rawURL, expectedURL) {
+		return fmt.Errorf("%w: browser left the authorized preview origin: %q", ErrNavigationNotAllowed, rawURL)
+	}
+	return nil
 }
 
 // =============================================================================
@@ -236,6 +286,18 @@ func (c *ChromeDPInspector) resetIdleTimer() {
 	c.idleTimer = time.AfterFunc(browserIdleTimeout, func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		cutoff := time.Now().Add(-browserIdleTimeout)
+		for key, pc := range c.previews {
+			if pc.lastUsed.Before(cutoff) {
+				pc.cancel()
+				delete(c.previews, key)
+			}
+		}
+		for previewID, key := range c.contextKeys {
+			if _, ok := c.previews[key]; !ok {
+				delete(c.contextKeys, previewID)
+			}
+		}
 		if len(c.previews) == 0 && len(c.screencasts) == 0 {
 			c.shutdownBrowserLocked()
 		} else {
@@ -273,8 +335,13 @@ func (c *ChromeDPInspector) shutdownBrowserLocked() {
 func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewContext, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	contextKey := previewID
+	if bound := c.contextKeys[previewID]; bound != "" {
+		contextKey = bound
+	}
 
-	if pc, ok := c.previews[previewID]; ok {
+	if pc, ok := c.previews[contextKey]; ok {
+		pc.lastUsed = time.Now()
 		c.resetIdleTimer()
 		return pc, nil
 	}
@@ -287,8 +354,9 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 	ctx, cancel := chromedp.NewContext(c.browserCtx)
 
 	pc := &previewContext{
-		ctx:    ctx,
-		cancel: cancel,
+		ctx:      ctx,
+		cancel:   cancel,
+		lastUsed: time.Now(),
 	}
 
 	// Listen for console API calls to buffer console messages.
@@ -320,6 +388,8 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 				msg.Line = int(frame.LineNumber)
 			}
 			pc.mu.Lock()
+			pc.nextCursor++
+			msg.Cursor = pc.nextCursor
 			pc.messages = append(pc.messages, msg)
 			if len(pc.messages) > maxConsoleMessages {
 				pc.messages = pc.messages[len(pc.messages)-maxConsoleMessages:]
@@ -328,7 +398,7 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 		}
 	})
 
-	c.previews[previewID] = pc
+	c.previews[contextKey] = pc
 	return pc, nil
 }
 
@@ -337,6 +407,9 @@ func (c *ChromeDPInspector) getOrCreatePreviewCtx(previewID string) (*previewCon
 // =============================================================================
 
 func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID string, opts models.ScreenshotOpts) (*models.ScreenshotResult, error) {
+	if opts.Path == "" && !opts.CurrentPage {
+		opts.Path = "/"
+	}
 	if opts.ViewportW == 0 {
 		opts.ViewportW = 1280
 	}
@@ -354,19 +427,22 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	timeoutCtx, cancel := context.WithTimeout(merged, defaultOpTimeout)
 	defer cancel()
 
-	url, err := c.previewURL(previewID, opts.Path)
-	if err != nil {
-		return nil, fmt.Errorf("invalid path: %w", err)
-	}
-
 	// Build the action chain.
 	var pngData []byte
 	var title string
+	var pageURL string
 
 	actions := []chromedp.Action{
 		chromedp.EmulateViewport(int64(opts.ViewportW), int64(opts.ViewportH)),
-		chromedp.Navigate(url),
-		chromedp.WaitReady("body", chromedp.ByQuery),
+	}
+	if opts.Path != "" {
+		url, urlErr := c.previewURL(previewID, opts.Path)
+		if urlErr != nil {
+			return nil, fmt.Errorf("invalid path: %w", urlErr)
+		}
+		actions = append(actions, chromedp.Navigate(url), chromedp.WaitReady("body", chromedp.ByQuery))
+	} else {
+		actions = append(actions, chromedp.WaitReady("body", chromedp.ByQuery))
 	}
 
 	if opts.Delay > 0 {
@@ -374,6 +450,7 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 	}
 
 	actions = append(actions, chromedp.Title(&title))
+	actions = append(actions, chromedp.Location(&pageURL))
 
 	if opts.FullPage {
 		actions = append(actions, chromedp.FullScreenshot(&pngData, 100))
@@ -405,7 +482,7 @@ func (c *ChromeDPInspector) CaptureScreenshot(ctx context.Context, previewID str
 		PNG:           pngData,
 		PageTitle:     title,
 		ConsoleErrors: consoleErrors,
-		URL:           url,
+		URL:           pageURL,
 		Viewport:      models.ViewportSpec{Width: opts.ViewportW, Height: opts.ViewportH},
 		CapturedAt:    time.Now(),
 	}, nil
@@ -494,7 +571,11 @@ func (c *ChromeDPInspector) CaptureDOM(ctx context.Context, previewID string, op
 
 func (c *ChromeDPInspector) ReadConsole(ctx context.Context, previewID string) ([]ConsoleMessage, error) {
 	c.mu.Lock()
-	pc, ok := c.previews[previewID]
+	contextKey := previewID
+	if bound := c.contextKeys[previewID]; bound != "" {
+		contextKey = bound
+	}
+	pc, ok := c.previews[contextKey]
 	c.mu.Unlock()
 
 	if !ok {
@@ -504,11 +585,293 @@ func (c *ChromeDPInspector) ReadConsole(ctx context.Context, previewID string) (
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
-	msgs := make([]ConsoleMessage, len(pc.messages))
-	copy(msgs, pc.messages)
-	pc.messages = pc.messages[:0]
+	msgs := make([]ConsoleMessage, 0, len(pc.messages))
+	for _, msg := range pc.messages {
+		if msg.Cursor > pc.readCursor {
+			msgs = append(msgs, msg)
+		}
+	}
+	pc.readCursor = pc.nextCursor
 
 	return msgs, nil
+}
+
+func (c *ChromeDPInspector) Observe(ctx context.Context, target models.BrowserTarget, opts models.PreviewObservationOpts) (*models.PreviewObservation, error) {
+	if target.ContextKey == "" {
+		target.ContextKey = target.PreviewID
+	}
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	c.mu.Lock()
+	_, reused := c.previews[target.ContextKey]
+	c.mu.Unlock()
+	if opts.ViewportW == 0 {
+		opts.ViewportW = 1440
+	}
+	if opts.ViewportH == 0 {
+		opts.ViewportH = 900
+	}
+	if opts.MaxSemanticBytes <= 0 || opts.MaxSemanticBytes > 64*1024 {
+		opts.MaxSemanticBytes = 32 * 1024
+	}
+	if opts.Path == "" {
+		opts.CurrentPage = true
+	}
+	screenshot, err := c.CaptureScreenshot(ctx, target.PreviewID, opts.ScreenshotOpts)
+	if err != nil {
+		return nil, err
+	}
+	expectedOrigin, err := c.previewURL(target.PreviewID, "/")
+	if err != nil {
+		return nil, fmt.Errorf("resolve authorized preview origin: %w", err)
+	}
+	if err := validateObservationOrigin(screenshot.URL, expectedOrigin); err != nil {
+		if pc, contextErr := c.getOrCreatePreviewCtx(target.PreviewID); contextErr == nil {
+			merged, cancel := mergeContexts(pc.ctx, ctx)
+			blankErr := chromedp.Run(merged, chromedp.Navigate("about:blank"))
+			cancel()
+			if blankErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("reset browser after unauthorized navigation: %w", blankErr))
+			}
+		}
+		return nil, err
+	}
+	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)
+	if err != nil {
+		return nil, err
+	}
+	merged, cancel := mergeContexts(pc.ctx, ctx)
+	defer cancel()
+	var semantic, dom string
+	if !opts.SkipSemantic {
+		var axNodes []*accessibility.Node
+		if err := chromedp.Run(merged, chromedp.ActionFunc(func(runCtx context.Context) error {
+			var axErr error
+			axNodes, axErr = accessibility.GetFullAXTree().WithDepth(8).Do(runCtx)
+			return axErr
+		})); err != nil {
+			return nil, fmt.Errorf("capture semantic state: %w", err)
+		}
+		semanticNodes := make([]map[string]any, 0, len(axNodes))
+		for _, node := range axNodes {
+			if len(semanticNodes) >= 500 {
+				break
+			}
+			if node == nil || node.Ignored || node.Role == nil {
+				continue
+			}
+			item := map[string]any{"node_id": node.NodeID, "parent_id": node.ParentID, "child_ids": node.ChildIDs, "role": node.Role.Value}
+			if node.Name != nil {
+				item["name"] = node.Name.Value
+			}
+			semanticNodes = append(semanticNodes, item)
+		}
+		axJSON, err := json.Marshal(semanticNodes)
+		if err != nil {
+			return nil, fmt.Errorf("marshal semantic state: %w", err)
+		}
+		semantic = string(axJSON)
+	}
+	if opts.IncludeDOM {
+		selector := opts.Selector
+		if selector == "" {
+			selector = "body"
+		}
+		script := fmt.Sprintf(`(() => { const source = document.querySelector(%s); if (!source) return ''; const clone = source.cloneNode(true); clone.querySelectorAll('input,textarea').forEach(el => { el.removeAttribute('value'); el.textContent = ''; }); return clone.outerHTML.slice(0, %d); })()`, strconv.Quote(selector), opts.MaxSemanticBytes)
+		if err := chromedp.Run(merged, chromedp.Evaluate(script, &dom)); err != nil {
+			return nil, fmt.Errorf("capture DOM excerpt: %w", err)
+		}
+	}
+	semantic = redactBrowserText(truncateUTF8(semantic, opts.MaxSemanticBytes))
+	dom = redactBrowserText(truncateUTF8(dom, opts.MaxSemanticBytes))
+	pc.mu.Lock()
+	cursor := pc.nextCursor
+	console := consoleMessagesAfter(pc.messages, opts.ConsoleCursor)
+	for i := range console {
+		console[i].Text = redactBrowserText(console[i].Text)
+	}
+	pc.mu.Unlock()
+	return &models.PreviewObservation{Screenshot: screenshot, URL: screenshot.URL, Title: screenshot.PageTitle, Viewport: screenshot.Viewport, CapturedAt: screenshot.CapturedAt, SemanticState: semantic, DOMExcerpt: dom, Console: console, ConsoleCursor: cursor, Ready: true, Context: models.PreviewBrowserContextStatus{ContextKey: target.ContextKey, Reused: reused, Restoration: models.PreviewBrowserRestorationPreserved}}, nil
+}
+
+var (
+	browserBearerPattern = regexp.MustCompile(`(?i)(bearer\s+)([^\s"',}]+)`)
+	browserSecretPattern = regexp.MustCompile(`(?i)((?:token|secret|password|authorization)["'=:\s]+)((?:bearer\s+)?[^\s"',}]+)`)
+)
+
+func redactBrowserText(value string) string {
+	value = browserSecretPattern.ReplaceAllString(value, `${1}[REDACTED]`)
+	return browserBearerPattern.ReplaceAllString(value, `${1}[REDACTED]`)
+}
+
+func consoleMessagesAfter(messages []ConsoleMessage, cursor int64) []models.ConsoleMessage {
+	result := make([]models.ConsoleMessage, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Cursor <= cursor || msg.Level != "error" {
+			continue
+		}
+		result = append(result, models.ConsoleMessage{Cursor: msg.Cursor, Level: msg.Level, Text: msg.Text, Source: msg.Source, LineNo: msg.Line, Time: msg.Timestamp})
+	}
+	return result
+}
+
+func (c *ChromeDPInspector) HasContext(target models.BrowserTarget) bool {
+	key := target.ContextKey
+	if key == "" && target.SessionID != "" {
+		key = "session:" + target.SessionID
+	}
+	if key == "" {
+		key = target.PreviewID
+	}
+	c.mu.Lock()
+	_, ok := c.previews[key]
+	c.mu.Unlock()
+	return ok
+}
+
+func (c *ChromeDPInspector) Act(ctx context.Context, target models.BrowserTarget, steps []models.InteractionStep, opts models.PreviewObservationOpts) (*models.PreviewActResult, error) {
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	interaction, err := c.ExecuteInteraction(ctx, target.PreviewID, steps)
+	if err != nil {
+		return nil, err
+	}
+	opts.Path = ""
+	observation, observeErr := c.Observe(ctx, target, opts)
+	if observeErr != nil {
+		return nil, fmt.Errorf("observe after interaction: %w", observeErr)
+	}
+	return &models.PreviewActResult{Interaction: interaction, Observation: observation}, nil
+}
+
+type browserStorageState struct {
+	Cookies      []*network.Cookie `json:"cookies"`
+	LocalStorage map[string]string `json:"local_storage"`
+	URL          string            `json:"url"`
+}
+
+func (c *ChromeDPInspector) ExportStorage(ctx context.Context, target models.BrowserTarget) (json.RawMessage, error) {
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)
+	if err != nil {
+		return nil, err
+	}
+	merged, cancel := mergeContexts(pc.ctx, ctx)
+	defer cancel()
+	var state browserStorageState
+	if err := chromedp.Run(merged, chromedp.Location(&state.URL), chromedp.Evaluate(`Object.fromEntries(Object.entries(localStorage))`, &state.LocalStorage), chromedp.ActionFunc(func(runCtx context.Context) error {
+		cookies, cookieErr := network.GetCookies().Do(runCtx)
+		state.Cookies = cookies
+		return cookieErr
+	})); err != nil {
+		return nil, fmt.Errorf("export browser storage: %w", err)
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("marshal browser storage: %w", err)
+	}
+	return raw, nil
+}
+
+func (c *ChromeDPInspector) RestoreStorage(ctx context.Context, target models.BrowserTarget, raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "{}" {
+		return nil
+	}
+	var state browserStorageState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return fmt.Errorf("decode browser storage: %w", err)
+	}
+	expectedURL, err := c.previewURL(target.PreviewID, "/")
+	if err != nil {
+		return fmt.Errorf("resolve preview origin: %w", err)
+	}
+	compatible, destinationURL := compatiblePreviewRestoreURL(state.URL, expectedURL)
+	if !compatible {
+		return fmt.Errorf("stored browser origin is incompatible with active preview origin")
+	}
+	if target.SessionID != "" {
+		c.BindSessionBrowser(target.PreviewID, target.SessionID)
+	}
+	pc, err := c.getOrCreatePreviewCtx(target.PreviewID)
+	if err != nil {
+		return err
+	}
+	merged, cancel := mergeContexts(pc.ctx, ctx)
+	defer cancel()
+	storageJSON, err := json.Marshal(state.LocalStorage)
+	if err != nil {
+		return fmt.Errorf("marshal local storage: %w", err)
+	}
+	storageScript := fmt.Sprintf(`(values => { localStorage.clear(); for (const [key,value] of Object.entries(values)) localStorage.setItem(key,value) })(%s)`, storageJSON)
+	oldURL, _ := url.Parse(state.URL)
+	newURL, _ := url.Parse(destinationURL)
+	err = chromedp.Run(merged, chromedp.ActionFunc(func(runCtx context.Context) error {
+		for _, cookie := range state.Cookies {
+			domain := cookie.Domain
+			if strings.TrimPrefix(domain, ".") == oldURL.Hostname() {
+				domain = newURL.Hostname()
+			}
+			params := network.SetCookie(cookie.Name, cookie.Value).WithDomain(domain).WithPath(cookie.Path).WithSecure(cookie.Secure).WithHTTPOnly(cookie.HTTPOnly).WithSameSite(cookie.SameSite).WithPriority(cookie.Priority).WithSourceScheme(cookie.SourceScheme).WithSourcePort(cookie.SourcePort)
+			if err := params.Do(runCtx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}), chromedp.Navigate(destinationURL), chromedp.WaitReady("body", chromedp.ByQuery), chromedp.Evaluate(storageScript, nil))
+	if err != nil {
+		c.dropBrowserContext(target)
+		return err
+	}
+	return nil
+}
+
+func (c *ChromeDPInspector) dropBrowserContext(target models.BrowserTarget) {
+	key := target.ContextKey
+	if key == "" && target.SessionID != "" {
+		key = "session:" + target.SessionID
+	}
+	if key == "" {
+		key = target.PreviewID
+	}
+	c.mu.Lock()
+	if pc := c.previews[key]; pc != nil {
+		pc.cancel()
+		delete(c.previews, key)
+	}
+	c.mu.Unlock()
+}
+
+func compatiblePreviewRestoreURL(stored, active string) (bool, string) {
+	oldURL, oldErr := url.Parse(stored)
+	newURL, newErr := url.Parse(active)
+	if oldErr != nil || newErr != nil || oldURL.Scheme != newURL.Scheme {
+		return false, ""
+	}
+	oldHost, newHost := oldURL.Hostname(), newURL.Hostname()
+	compatibleHost := oldHost == newHost
+	oldParts, newParts := strings.Split(oldHost, "."), strings.Split(newHost, ".")
+	if !compatibleHost && len(oldParts) >= 3 && len(oldParts) == len(newParts) {
+		compatibleHost = strings.Join(oldParts[1:], ".") == strings.Join(newParts[1:], ".")
+	}
+	if !compatibleHost {
+		return false, ""
+	}
+	newURL.Path, newURL.RawQuery, newURL.Fragment = oldURL.Path, oldURL.RawQuery, oldURL.Fragment
+	return true, newURL.String()
+}
+
+func truncateUTF8(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	for limit > 0 && (value[limit]&0xc0) == 0x80 {
+		limit--
+	}
+	return value[:limit]
 }
 
 // =============================================================================
@@ -883,6 +1246,135 @@ func gifPalette() color.Palette {
 // ExecuteInteraction
 // =============================================================================
 
+func semanticRoleXPath(role, name string) string {
+	role = strings.ToLower(strings.TrimSpace(role))
+	native := map[string]string{"button": "self::button", "link": "self::a[@href]", "textbox": "self::input[not(@type) or @type='text' or @type='email' or @type='password'] or self::textarea", "checkbox": "self::input[@type='checkbox']", "combobox": "self::select"}
+	condition := fmt.Sprintf("@role=%s", xpathLiteral(role))
+	if check := native[role]; check != "" {
+		condition += " or " + check
+	}
+	selector := "//*[(" + condition + ")]"
+	if strings.TrimSpace(name) != "" {
+		literal := xpathLiteral(strings.TrimSpace(name))
+		selector += fmt.Sprintf("[@aria-label=%s or normalize-space(string(.))=%s or @value=%s or @id=//label[normalize-space(string(.))=%s]/@for or @aria-labelledby=//*[@id and normalize-space(string(.))=%s]/@id]", literal, literal, literal, literal, literal)
+	}
+	return selector
+}
+
+func xpathLiteral(value string) string {
+	if !strings.Contains(value, "'") {
+		return "'" + value + "'"
+	}
+	if !strings.Contains(value, `"`) {
+		return `"` + value + `"`
+	}
+	parts := strings.Split(value, "'")
+	quoted := make([]string, 0, len(parts)*2-1)
+	for i, part := range parts {
+		if i > 0 {
+			quoted = append(quoted, `"'"`)
+		}
+		quoted = append(quoted, "'"+part+"'")
+	}
+	return "concat(" + strings.Join(quoted, ",") + ")"
+}
+
+func browserElementExpression(selector string, xpath bool) string {
+	if xpath {
+		return fmt.Sprintf(`document.evaluate(%s, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue`, strconv.Quote(selector))
+	}
+	return fmt.Sprintf(`document.querySelector(%s)`, strconv.Quote(selector))
+}
+
+func setCheckedScript(selector string, xpath, checked bool) string {
+	return fmt.Sprintf(`(() => { const el = %s; if (!el) throw new Error("element not found"); if (el.checked !== %t) el.click(); return el.checked; })()`, browserElementExpression(selector, xpath), checked)
+}
+
+func hoverScript(selector string, xpath bool) string {
+	return fmt.Sprintf(`(() => { const el = %s; if (!el) throw new Error("element not found"); el.dispatchEvent(new MouseEvent("mouseover", {bubbles:true})); el.dispatchEvent(new MouseEvent("mouseenter", {bubbles:false})); })()`, browserElementExpression(selector, xpath))
+}
+
+func matchCountScript(selector string, xpath bool) string {
+	if xpath {
+		return fmt.Sprintf(`document.evaluate(%s, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null).snapshotLength`, strconv.Quote(selector))
+	}
+	return fmt.Sprintf(`document.querySelectorAll(%s).length`, strconv.Quote(selector))
+}
+
+func ensureUniqueBrowserTarget(selector string, semantic bool) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		if !semantic {
+			return nil
+		}
+		var count int
+		if err := chromedp.Evaluate(matchCountScript(selector, true), &count).Do(ctx); err != nil {
+			return err
+		}
+		if count != 1 {
+			return fmt.Errorf("semantic target matched %d elements", count)
+		}
+		return nil
+	})
+}
+
+func browserKey(value string) string {
+	keys := map[string]string{"Enter": kb.Enter, "Escape": kb.Escape, "Tab": kb.Tab, "Backspace": kb.Backspace, "ArrowUp": kb.ArrowUp, "ArrowDown": kb.ArrowDown, "ArrowLeft": kb.ArrowLeft, "ArrowRight": kb.ArrowRight}
+	if key := keys[value]; key != "" {
+		return key
+	}
+	return value
+}
+
+func validateInteractionStep(step models.InteractionStep) error {
+	hasTarget := strings.TrimSpace(step.Selector) != "" || strings.TrimSpace(step.Role) != ""
+	switch step.Action {
+	case "click":
+		if (step.X == nil) != (step.Y == nil) {
+			return fmt.Errorf("click coordinates require both x and y")
+		}
+		if step.X != nil && (*step.X < 0 || *step.X > 10000 || *step.Y < 0 || *step.Y > 10000) {
+			return fmt.Errorf("click coordinates must be between 0 and 10000")
+		}
+		if !hasTarget && step.X == nil {
+			return fmt.Errorf("click requires selector, role, or coordinates")
+		}
+	case "type", "fill", "select", "check", "uncheck", "hover":
+		if !hasTarget {
+			return fmt.Errorf("%s requires selector or role", step.Action)
+		}
+	case "navigate":
+		if strings.TrimSpace(step.Value) == "" {
+			return fmt.Errorf("navigate requires a path")
+		}
+	case "press":
+		if strings.TrimSpace(step.Value) == "" {
+			return fmt.Errorf("press requires a key")
+		}
+	case "viewport":
+		if _, _, err := parseViewportValue(step.Value); err != nil {
+			return err
+		}
+	case "wait", "scroll":
+		return nil
+	default:
+		return fmt.Errorf("unknown action: %q", step.Action)
+	}
+	return nil
+}
+
+func parseViewportValue(value string) (int, int, error) {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(value)), "x")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("viewport value must be WIDTHxHEIGHT")
+	}
+	width, widthErr := strconv.Atoi(parts[0])
+	height, heightErr := strconv.Atoi(parts[1])
+	if widthErr != nil || heightErr != nil || width < 240 || width > 7680 || height < 240 || height > 4320 {
+		return 0, 0, fmt.Errorf("viewport must be between 240x240 and 7680x4320")
+	}
+	return width, height, nil
+}
+
 func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID string, steps []models.InteractionStep) (*models.InteractionResult, error) {
 	if len(steps) > maxInteractionSteps {
 		return nil, fmt.Errorf("too many interaction steps: %d (max %d)", len(steps), maxInteractionSteps)
@@ -909,97 +1401,145 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		}
 
 		var stepErr error
-		switch step.Action {
-		case "click":
-			stepErr = chromedp.Run(timeoutCtx,
-				chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
-				chromedp.Click(step.Selector, chromedp.ByQuery),
-			)
-		case "type":
-			stepErr = chromedp.Run(timeoutCtx,
-				chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
-				chromedp.Clear(step.Selector, chromedp.ByQuery),
-				chromedp.SendKeys(step.Selector, step.Value, chromedp.ByQuery),
-			)
-		case "navigate":
-			url := step.Value
-			if !strings.HasPrefix(url, "http") {
-				var urlErr error
-				url, urlErr = c.previewURL(previewID, step.Value)
-				if urlErr != nil {
-					stepErr = fmt.Errorf("invalid navigate path: %w", urlErr)
-					break
-				}
-			} else {
-				// Validate that absolute URLs point to the expected preview origin
-				// to prevent SSRF through the server-side headless browser.
-				expectedURL, urlErr := c.previewURL(previewID, "/")
-				if urlErr != nil {
-					stepErr = fmt.Errorf("invalid navigate URL: %w", urlErr)
-					break
-				}
-				if !sameOrigin(url, expectedURL) {
-					stepErr = fmt.Errorf("navigate URL must match preview origin, got %q", url)
-					break
-				}
+		selector := step.Selector
+		queryOption := chromedp.ByQuery
+		semanticTarget := false
+		if selector == "" && step.Role != "" {
+			selector = semanticRoleXPath(step.Role, step.Name)
+			queryOption = chromedp.BySearch
+			semanticTarget = true
+		}
+		runStep := func(actions ...chromedp.Action) error {
+			stepCtx := timeoutCtx
+			cancelStep := func() {}
+			if step.Timeout > 0 {
+				stepCtx, cancelStep = context.WithTimeout(timeoutCtx, step.Timeout)
 			}
-			stepErr = chromedp.Run(timeoutCtx,
-				chromedp.Navigate(url),
-				chromedp.WaitReady("body", chromedp.ByQuery),
-			)
-		case "wait":
-			if step.WaitFor != "" {
-				switch step.WaitFor {
-				case "load":
-					stepErr = chromedp.Run(timeoutCtx,
-						chromedp.WaitReady("body", chromedp.ByQuery),
+			defer cancelStep()
+			return chromedp.Run(stepCtx, actions...)
+		}
+		if validationErr := validateInteractionStep(step); validationErr != nil {
+			stepErr = validationErr
+		} else {
+			switch step.Action {
+			case "click":
+				if step.X != nil && step.Y != nil {
+					stepErr = runStep(chromedp.MouseClickXY(float64(*step.X), float64(*step.Y)))
+				} else {
+					stepErr = runStep(chromedp.WaitVisible(selector, queryOption), ensureUniqueBrowserTarget(selector, semanticTarget), chromedp.Click(selector, queryOption))
+				}
+			case "type", "fill":
+				stepErr = runStep(
+					chromedp.WaitVisible(selector, queryOption),
+					ensureUniqueBrowserTarget(selector, semanticTarget),
+					chromedp.Clear(selector, queryOption),
+					chromedp.SendKeys(selector, step.Value, queryOption),
+				)
+			case "navigate":
+				url := step.Value
+				if !strings.HasPrefix(url, "http") {
+					var urlErr error
+					url, urlErr = c.previewURL(previewID, step.Value)
+					if urlErr != nil {
+						stepErr = fmt.Errorf("invalid navigate path: %w", urlErr)
+						break
+					}
+				} else {
+					// Validate that absolute URLs point to the expected preview origin
+					// to prevent SSRF through the server-side headless browser.
+					expectedURL, urlErr := c.previewURL(previewID, "/")
+					if urlErr != nil {
+						stepErr = fmt.Errorf("invalid navigate URL: %w", urlErr)
+						break
+					}
+					if !sameOrigin(url, expectedURL) {
+						stepErr = fmt.Errorf("navigate URL must match preview origin, got %q", url)
+						break
+					}
+				}
+				stepErr = runStep(
+					chromedp.Navigate(url),
+					chromedp.WaitReady("body", chromedp.ByQuery),
+				)
+			case "wait":
+				if step.URL != "" {
+					stepErr = runStep(chromedp.Poll(fmt.Sprintf(`location.href.includes(%s)`, strconv.Quote(step.URL)), nil))
+				} else if step.Text != "" {
+					stepErr = runStep(chromedp.WaitVisible(fmt.Sprintf(`//*[contains(normalize-space(.), %s)]`, xpathLiteral(step.Text)), chromedp.BySearch))
+				} else if step.WaitFor != "" {
+					switch step.WaitFor {
+					case "load", "readiness":
+						stepErr = runStep(
+							chromedp.WaitReady("body", chromedp.ByQuery),
+						)
+					case "networkidle":
+						stepErr = runStep(
+							chromedp.WaitReady("body", chromedp.ByQuery),
+							chromedp.Poll(`performance.getEntriesByType('resource').every(entry => entry.responseEnd > 0)`, nil),
+							chromedp.Sleep(500*time.Millisecond),
+						)
+					default:
+						// Treat as CSS selector to wait for.
+						stepErr = runStep(
+							chromedp.WaitVisible(step.WaitFor, chromedp.ByQuery),
+						)
+					}
+				} else if step.Selector != "" {
+					stepErr = runStep(
+						chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
 					)
-				case "networkidle":
-					// Approximate network idle with a short sleep after load.
+				} else {
+					waitDur := step.Timeout
+					if waitDur <= 0 {
+						waitDur = time.Second
+					}
 					stepErr = chromedp.Run(timeoutCtx,
-						chromedp.WaitReady("body", chromedp.ByQuery),
-						chromedp.Sleep(500*time.Millisecond),
-					)
-				default:
-					// Treat as CSS selector to wait for.
-					stepErr = chromedp.Run(timeoutCtx,
-						chromedp.WaitVisible(step.WaitFor, chromedp.ByQuery),
+						chromedp.Sleep(waitDur),
 					)
 				}
-			} else if step.Selector != "" {
-				stepErr = chromedp.Run(timeoutCtx,
-					chromedp.WaitVisible(step.Selector, chromedp.ByQuery),
-				)
-			} else {
-				waitDur := step.Timeout
-				if waitDur <= 0 {
-					waitDur = time.Second
+			case "scroll":
+				var js string
+				if step.Value == "" {
+					js = `window.scrollTo(0, document.body.scrollHeight)`
+				} else {
+					pixels, parseErr := strconv.Atoi(step.Value)
+					if parseErr != nil {
+						stepErr = fmt.Errorf("scroll value must be an integer, got %q", step.Value)
+						break
+					}
+					js = fmt.Sprintf(`window.scrollBy(0, %d)`, pixels)
 				}
-				stepErr = chromedp.Run(timeoutCtx,
-					chromedp.Sleep(waitDur),
+				if stepErr == nil {
+					stepErr = runStep(chromedp.Evaluate(js, nil))
+				}
+			case "select":
+				stepErr = runStep(
+					chromedp.WaitVisible(selector, queryOption),
+					ensureUniqueBrowserTarget(selector, semanticTarget),
+					chromedp.SetValue(selector, step.Value, queryOption),
 				)
-			}
-		case "scroll":
-			var js string
-			if step.Value == "" {
-				js = `window.scrollTo(0, document.body.scrollHeight)`
-			} else {
-				pixels, parseErr := strconv.Atoi(step.Value)
+			case "check", "uncheck":
+				wantChecked := step.Action == "check"
+				var checked bool
+				stepErr = runStep(chromedp.WaitVisible(selector, queryOption), ensureUniqueBrowserTarget(selector, semanticTarget), chromedp.EvaluateAsDevTools(setCheckedScript(selector, semanticTarget, wantChecked), &checked))
+			case "press":
+				if selector == "" {
+					stepErr = runStep(chromedp.KeyEvent(browserKey(step.Value)))
+				} else {
+					stepErr = runStep(ensureUniqueBrowserTarget(selector, semanticTarget), chromedp.SendKeys(selector, browserKey(step.Value), queryOption))
+				}
+			case "hover":
+				stepErr = runStep(chromedp.WaitVisible(selector, queryOption), ensureUniqueBrowserTarget(selector, semanticTarget), chromedp.EvaluateAsDevTools(hoverScript(selector, semanticTarget), nil))
+			case "viewport":
+				width, height, parseErr := parseViewportValue(step.Value)
 				if parseErr != nil {
-					stepErr = fmt.Errorf("scroll value must be an integer, got %q", step.Value)
-					break
+					stepErr = parseErr
+				} else {
+					stepErr = runStep(chromedp.EmulateViewport(int64(width), int64(height)))
 				}
-				js = fmt.Sprintf(`window.scrollBy(0, %d)`, pixels)
+			default:
+				stepErr = fmt.Errorf("unknown action: %q", step.Action)
 			}
-			if stepErr == nil {
-				stepErr = chromedp.Run(timeoutCtx, chromedp.Evaluate(js, nil))
-			}
-		case "select":
-			stepErr = chromedp.Run(timeoutCtx,
-				chromedp.SetValue(step.Selector, step.Value, chromedp.ByQuery),
-			)
-		default:
-			stepErr = fmt.Errorf("unknown action: %q", step.Action)
 		}
 
 		// Wait for an element if specified.
@@ -1018,15 +1558,26 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 		var currentURL string
 		_ = chromedp.Run(timeoutCtx, chromedp.Location(&currentURL))
 		sr.URL = currentURL
+		if stepErr == nil && currentURL != "" {
+			expectedOrigin, originErr := c.previewURL(previewID, "/")
+			if originErr != nil || !sameOrigin(currentURL, expectedOrigin) {
+				stepErr = fmt.Errorf("browser left the authorized preview origin: %q", currentURL)
+				_ = chromedp.Run(timeoutCtx, chromedp.Navigate("about:blank"))
+			}
+		}
 
 		if stepErr != nil {
 			sr.Error = stepErr.Error()
+			if selector != "" {
+				_ = chromedp.Run(timeoutCtx, chromedp.Evaluate(matchCountScript(selector, semanticTarget), &sr.MatchCount))
+			}
+			sr.ErrorCode = interactionStepErrorCode(stepErr, selector != "", sr.MatchCount)
 		} else {
 			sr.Success = true
 		}
 
 		// Optional screenshot at this step.
-		if step.Screenshot && stepErr == nil {
+		if step.Screenshot || stepErr != nil {
 			var pngData []byte
 			if err := chromedp.Run(timeoutCtx, chromedp.CaptureScreenshot(&pngData)); err == nil {
 				var title string
@@ -1072,6 +1623,26 @@ func (c *ChromeDPInspector) ExecuteInteraction(ctx context.Context, previewID st
 	pc.mu.Unlock()
 
 	return result, nil
+}
+
+func interactionStepErrorCode(err error, targeted bool, matchCount int) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "STEP_TIMEOUT"
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "authorized preview origin") || strings.Contains(message, "navigate url must match") {
+		return "NAVIGATION_NOT_ALLOWED"
+	}
+	if strings.Contains(message, "semantic target matched") && matchCount > 1 {
+		return "AMBIGUOUS_TARGET"
+	}
+	if targeted && matchCount == 0 {
+		return "TARGET_NOT_FOUND"
+	}
+	if strings.Contains(message, "requires") || strings.Contains(message, "unknown action") || strings.Contains(message, "coordinates") || strings.Contains(message, "viewport") {
+		return "INVALID_STEP"
+	}
+	return "BROWSER_ERROR"
 }
 
 // =============================================================================

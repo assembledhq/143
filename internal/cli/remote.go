@@ -32,6 +32,11 @@ func newPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.Tool
 	return &previewAugmentedToolSource{base: base, preview: preview}
 }
 
+func newInternalPreviewAugmentedToolSource(base mcp.ToolSource, client *Client) mcp.ToolSource {
+	preview := &previewToolExecutor{client: client, internal: true}
+	return &previewAugmentedToolSource{base: base, preview: preview}
+}
+
 func (s *previewAugmentedToolSource) ListTools() []mcp.Tool {
 	return append(s.base.ListTools(), s.preview.tools()...)
 }

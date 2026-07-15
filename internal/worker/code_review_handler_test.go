@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,13 +307,16 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	t.Parallel()
 
-	prompt := "/review"
+	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
 
-	require.Equal(t, "/review", codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil), "code review reviewer prompt should stay as the bare native review command")
-	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke only native /review")
-	require.Len(t, codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt), 1, "native reviewer command metadata should be persisted")
-	require.Equal(t, "", codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)[0].Arguments, "native reviewer command should not carry extra review arguments")
-	require.Equal(t, "/review", codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
+	require.True(t, strings.HasPrefix(prompt, "/review"), "code review reviewer prompt should invoke the native review command")
+	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
+	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
+	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
+	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
+	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
+	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
@@ -457,7 +461,101 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should keep code review moving after a read-only violation")
 }
 
-func TestFailCodeReviewIfParentSessionTerminalFailsMetadata(t *testing.T) {
+func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing.T) {
+	t.Parallel()
+
+	authError := "no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key"
+	tests := []struct {
+		name            string
+		failure         string
+		failureCategory string
+		assistantOutput string
+		expectedStatus  models.CodeReviewAgentResultStatus
+	}{
+		{
+			name:            "keeps auth error failed",
+			failure:         authError,
+			failureCategory: "claude_code_auth_expired",
+			assistantOutput: authError,
+			expectedStatus:  models.CodeReviewAgentResultStatusFailed,
+		},
+		{
+			name:            "keeps a completed review after bookkeeping failure",
+			failure:         "update interactive turn result: connection reset",
+			failureCategory: "turn_persistence_failed",
+			assistantOutput: "No actionable issues found.",
+			expectedStatus:  models.CodeReviewAgentResultStatusCompleted,
+		},
+		{
+			name:            "rejects assistant text from an operational failure",
+			failure:         "sandbox capacity stayed full until the retry window expired",
+			failureCategory: "sandbox_capacity",
+			assistantOutput: "The sandbox is unavailable; retry this review later.",
+			expectedStatus:  models.CodeReviewAgentResultStatusFailed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			threadID := uuid.New()
+			resultID := uuid.New()
+			now := time.Now().UTC()
+			state := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+				ReviewerKey:   codeReviewReviewerKey(1, models.AgentTypeClaudeCode),
+				ReviewerIndex: 1,
+				ThreadID:      threadID.String(),
+				ReadOnly:      true,
+			})
+
+			mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "claude_code", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+				WillReturnRows(newSessionThreadRows().
+					AddRow(threadID, sessionID, orgID, models.AgentTypeClaudeCode, nil,
+						"Code review: claude_code", nil, []string{"internal/db/users.go"}, models.ThreadStatusFailed,
+						nil, 1, &now, nil, nil, &tt.failure, &tt.failureCategory,
+						&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+						nil, 0.0, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+						models.ThreadExecutionModeReview, models.ThreadFilesystemModeReadOnly))
+			mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+				WillReturnRows(newSessionMessageRows().
+					AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, tt.assistantOutput, nil, nil, nil, nil, "", now))
+			mock.ExpectQuery("UPDATE code_review_agent_results").
+				WithArgs(tt.expectedStatus, &tt.assistantOutput, pgxmock.AnyArg(), orgID, resultID).
+				WillReturnRows(newCodeReviewAgentResultRows().
+					AddRow(resultID, orgID, sessionID, "claude_code", nil, models.CodeReviewAgentRoleReviewer, tt.expectedStatus, &tt.assistantOutput, state, now))
+
+			cfg := models.DefaultCodeReviewPolicyConfig()
+			policy := codeReviewPolicyRecordForTest(cfg)
+			stores := &Stores{
+				CodeReviews:     db.NewCodeReviewStore(mock),
+				SessionThreads:  db.NewSessionThreadStore(mock),
+				SessionMessages: db.NewSessionMessageStore(mock),
+			}
+			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+				OrgID:     orgID,
+				SessionID: sessionID,
+			}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+
+			require.NoError(t, err, "failed reviewer output should be classified without stopping the harvest")
+			require.NoError(t, mock.ExpectationsWereMet(), "failed reviewer output should use valid completed reviews but reject operational error text")
+		})
+	}
+}
+
+func TestFailCodeReviewWithoutReviewerOutputFailsMetadata(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -471,17 +569,107 @@ func TestFailCodeReviewIfParentSessionTerminalFailsMetadata(t *testing.T) {
 	policyID := uuid.New()
 	metadataID := uuid.New()
 	now := time.Now().UTC()
-	failure := "This session was unable to start within the expected time."
-	reason := "parent code review session is terminal: failed: " + failure
+	reason := "no code review reviewer produced usable output: codex failed, claude_code failed"
 	decision := models.CodeReviewDecisionBlocked
 	acceptable := false
-	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusFailed, 0, nil, nil)
-	for i, col := range workerSessionColumns {
-		if col == "failure_explanation" {
-			sessionRow[i] = &failure
-			break
-		}
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+
+	err = failCodeReviewWithoutReviewerOutput(context.Background(), &Stores{
+		CodeReviews: db.NewCodeReviewStore(mock),
+	}, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, models.PullRequest{}, []models.CodeReviewAgentResult{
+		{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusFailed},
+		{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed},
+	})
+
+	require.NoError(t, err, "missing reviewer output should terminate the code review cleanly")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing reviewer output should fail the code review metadata")
+}
+
+func TestRunCodeReviewHandlerReconcilesTerminalFailedMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	reason := "no code review reviewer produced usable output: claude_code failed"
+
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows())
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusFailed, nil, nil, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+
+	pendingRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusPending, 0, nil, nil)
+	setWorkerSessionColumn(pendingRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(pendingRow...))
+	failedRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusFailed, 0, nil, nil)
+	setWorkerSessionColumn(failedRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(failedRow...))
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	job := runCodeReviewPayload{
+		OrgID:         orgID,
+		SessionID:     sessionID,
+		RepositoryID:  repositoryID,
+		PullRequestID: pullRequestID,
+		PolicyID:      policyID,
 	}
+	payload, err := json.Marshal(job)
+	require.NoError(t, err, "code review job payload should marshal")
+	err = newRunCodeReviewHandler(&Stores{
+		CodeReviews: db.NewCodeReviewStore(mock),
+		Sessions:    db.NewSessionStore(mock),
+	}, nil, zerolog.Nop())(context.Background(), "run_code_review", payload)
+
+	require.NoError(t, err, "terminal failed metadata should reconcile a parent left non-terminal by a prior transient failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "terminal failed metadata should retry parent failure reconciliation")
+}
+
+func TestStopCodeReviewIfParentSessionCancelledCancelsMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Now().UTC()
+	reason := "parent code review session was cancelled"
+	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCancelled, 0, nil, nil)
+	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
 
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
 		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
@@ -491,10 +679,10 @@ func TestFailCodeReviewIfParentSessionTerminalFailsMetadata(t *testing.T) {
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
-				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				models.CodeReviewSessionStatusCancelled, nil, nil, false, nil,
 				"output-key", nil, nil, nil, nil, &reason, &now, now))
 
-	terminal, err := failCodeReviewIfParentSessionTerminal(context.Background(), &Stores{
+	stopped, err := stopCodeReviewIfParentSessionCancelled(context.Background(), &Stores{
 		Sessions:    db.NewSessionStore(mock),
 		CodeReviews: db.NewCodeReviewStore(mock),
 	}, nil, zerolog.Nop(), runCodeReviewPayload{
@@ -502,9 +690,61 @@ func TestFailCodeReviewIfParentSessionTerminalFailsMetadata(t *testing.T) {
 		SessionID: sessionID,
 	}, models.PullRequest{})
 
-	require.NoError(t, err, "terminal parent session should not return an error")
-	require.True(t, terminal, "terminal parent session should stop the code review job")
-	require.NoError(t, mock.ExpectationsWereMet(), "terminal parent guard should fail the code review metadata")
+	require.NoError(t, err, "parent cancellation should stop the code review cleanly")
+	require.True(t, stopped, "parent cancellation should prevent any later orchestrator or GitHub submission")
+	require.NoError(t, mock.ExpectationsWereMet(), "parent cancellation should persist cancelled code review metadata")
+}
+
+func TestReconcileCodeReviewSessionSuccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		status       models.SessionStatus
+		origin       models.SessionOrigin
+		stale        bool
+		expectUpdate bool
+	}{
+		{name: "completes a failed code review parent after degraded success", status: models.SessionStatusFailed, origin: models.SessionOriginCodeReview, expectUpdate: true},
+		{name: "preserves a failed code review parent when the review becomes stale", status: models.SessionStatusFailed, origin: models.SessionOriginCodeReview, stale: true, expectUpdate: false},
+		{name: "preserves a cancelled code review parent", status: models.SessionStatusCancelled, origin: models.SessionOriginCodeReview, expectUpdate: false},
+		{name: "preserves a failed non-code-review parent", status: models.SessionStatusFailed, origin: models.SessionOriginManual, expectUpdate: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, tt.status, 0, nil, nil)
+			setWorkerSessionColumn(sessionRow, "origin", tt.origin)
+			mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+				WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+			if tt.expectUpdate {
+				completedRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusCompleted, 0, nil, nil)
+				setWorkerSessionColumn(completedRow, "origin", tt.origin)
+				mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now").
+					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
+			}
+
+			stores := &Stores{Sessions: db.NewSessionStore(mock)}
+			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID}
+			if tt.stale {
+				reconcileCodeReviewSessionStale(context.Background(), stores, zerolog.Nop(), job)
+			} else {
+				reconcileCodeReviewSessionSuccess(context.Background(), stores, zerolog.Nop(), job)
+			}
+
+			require.NoError(t, mock.ExpectationsWereMet(), "review reconciliation should recover failed parents only after successful completion")
+		})
+	}
 }
 
 func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
@@ -588,20 +828,63 @@ func (s *codeReviewDescriptionLLMStub) Complete(context.Context, string, string)
 	return s.response, nil
 }
 
-func TestBuildUnavailableCodeReviewOutcome(t *testing.T) {
+func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
 	t.Parallel()
 
 	policy := models.DefaultCodeReviewPolicyConfig()
-	policy.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
-	job := runCodeReviewPayload{PolicyVersion: 7, HeadSHA: "abc123"}
+	codexState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{ReviewerKey: codeReviewReviewerKey(0, models.AgentTypeCodex)})
+	claudeState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{ReviewerKey: codeReviewReviewerKey(1, models.AgentTypeClaudeCode)})
+	noOutputState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey:       codeReviewReviewerKey(0, models.AgentTypeCodex),
+		ReadOnlyViolation: true,
+		Error:             "reviewer produced no assistant output",
+	})
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		expected bool
+	}{
+		{
+			name: "continues with one successful reviewer",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted, StructuredResult: codexState},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: claudeState},
+			},
+			expected: false,
+		},
+		{
+			name: "fails when all reviewers fail",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: codexState},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusTimedOut, StructuredResult: claudeState},
+			},
+			expected: true,
+		},
+		{
+			name: "waits while a reviewer is still running",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusRunning, StructuredResult: codexState},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: claudeState},
+			},
+			expected: false,
+		},
+		{
+			name: "fails when completed output is unusable",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted, StructuredResult: noOutputState},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: claudeState},
+			},
+			expected: true,
+		},
+	}
 
-	decision, body := buildUnavailableCodeReviewOutcome(policy, job)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Equal(t, models.CodeReviewDecisionNeedsHumanReview, decision.Decision, "unavailable live reviewer evidence should require human review")
-	require.False(t, decision.Acceptable, "unavailable live reviewer evidence should not be acceptable risk")
-	require.Contains(t, decision.RiskReasons, "Automated reviewer agents are not configured for this worker.", "decision should explain missing live reviewers")
-	require.Contains(t, body, "Policy version: 7", "final body should include captured policy version")
-	require.Contains(t, body, "Reviewed head: abc123", "final body should include reviewed head")
+			require.Equal(t, tt.expected, codeReviewReviewerExecutionFailed(policy, tt.results), "review execution should fail only when every configured reviewer is terminal without usable output")
+		})
+	}
 }
 
 func TestCodeReviewReviewerAgentModel(t *testing.T) {
@@ -849,7 +1132,7 @@ func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
 		"nil orchestrator model should fall back to the per-agent default")
 }
 
-func TestCodeReviewStatusTargetURL(t *testing.T) {
+func TestCodeReviewSessionURL(t *testing.T) {
 	t.Parallel()
 
 	sessionID := uuid.New()
@@ -859,7 +1142,7 @@ func TestCodeReviewStatusTargetURL(t *testing.T) {
 		frontendURL string
 		expected    string
 	}{
-		{name: "empty frontend URL omits target", expected: ""},
+		{name: "empty frontend URL omits link", expected: ""},
 		{name: "trims trailing slash", frontendURL: "https://143.dev/", expected: "https://143.dev/sessions/" + sessionID.String()},
 		{name: "uses base URL", frontendURL: "https://app.143.dev", expected: "https://app.143.dev/sessions/" + sessionID.String()},
 	}
@@ -868,9 +1151,9 @@ func TestCodeReviewStatusTargetURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := codeReviewStatusTargetURL(tt.frontendURL, sessionID)
+			actual := codeReviewSessionURL(tt.frontendURL, sessionID)
 
-			require.Equal(t, tt.expected, actual, "codeReviewStatusTargetURL should build stable session links")
+			require.Equal(t, tt.expected, actual, "codeReviewSessionURL should build stable session links")
 		})
 	}
 }
@@ -991,6 +1274,37 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected: models.CodeReviewDecisionNeedsHumanReview,
 			reason:   "reviewer quorum 1 is below policy requirement 2",
+		},
+		{
+			name: "uses successful reviewer output when a sibling reviewer fails",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					MergeState:      models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected:     models.CodeReviewDecisionNeedsHumanReview,
+			reason:       "reviewer quorum 1 is below policy requirement 2",
+			bodyContains: "Review agents: codex clean, claude_code failed",
 		},
 		{
 			name: "withholds approval when completed read-only reviewer has no usable output",

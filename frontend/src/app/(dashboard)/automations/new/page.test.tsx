@@ -431,6 +431,7 @@ describe("NewAutomationPage", () => {
       max_concurrent: 1,
       base_branch: "main",
       identity_scope: "org",
+      publish_policy: "pull_request",
       pre_pr_review_loops: 1,
       schedule_type: "interval",
       interval_value: 1,
@@ -1639,10 +1640,17 @@ describe("NewAutomationPage", () => {
     await user.click(screen.getByText("Advanced options"));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal"));
+    await user.click(
+      screen.getByRole("combobox", { name: "After a successful run" }),
+    );
+    await user.click(await screen.findByText("Do not publish"));
     await user.click(screen.getByRole("button", { name: "Create automation" }));
 
     await waitFor(() => {
-      expect(requestBody).toMatchObject({ identity_scope: "personal" });
+      expect(requestBody).toMatchObject({
+        identity_scope: "personal",
+        publish_policy: "none",
+      });
     });
   }, 20000);
 

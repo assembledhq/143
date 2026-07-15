@@ -7,6 +7,17 @@ const apiTarget = process.env.API_PROXY_TARGET || "http://localhost:8080";
 const frontendRoot = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(frontendRoot, "..");
 
+// Dogfood previews (143.dev) build inside a memory-capped sandbox whose cgroup
+// is shared by the frontend build, the Go server, and the DB seed. The platform
+// sets ONEFORTYTHREE_ENV=preview (reserved; repos can't override it). In that
+// mode we trim the build's peak RSS: type checking and ESLint each spawn their
+// own long-lived process/heap during `next build`, and the Sentry webpack
+// plugin instruments the whole graph. The branch is already typechecked and
+// linted in CI, and preview builds upload no source maps, so none of that work
+// needs to run again on the launch hot path — skipping it keeps the build under
+// the sandbox cap.
+const isPreview = process.env.ONEFORTYTHREE_ENV === "preview";
+
 // Baseline security headers applied to every app response. These are
 // defense-in-depth: the app sanitizes rendered content, but a CSP frame-ancestors
 // directive plus X-Frame-Options prevents clickjacking, nosniff blocks MIME
@@ -35,6 +46,14 @@ const securityHeaders = [
 const nextConfig = {
   output: process.env.NODE_ENV === "production" ? "standalone" : undefined,
   allowedDevOrigins: ["*.ngrok.dev", "localhost", "127.0.0.1"],
+  // Preview-only: skip the type-check and lint passes during `next build` to
+  // cut build-time memory (they already ran in CI). No effect on real builds.
+  ...(isPreview
+    ? {
+        typescript: { ignoreBuildErrors: true },
+        eslint: { ignoreDuringBuilds: true },
+      }
+    : {}),
   turbopack: {
     root: repoRoot,
   },
@@ -68,13 +87,19 @@ const nextConfig = {
 
 const withMDX = createMDX();
 
-export default withSentryConfig(withMDX(nextConfig), {
-  // Suppress Sentry CLI logs during build.
-  silent: true,
+// In dogfood previews, skip the Sentry webpack plugin entirely: it instruments
+// the whole module graph at build time (memory + wall-clock) and uploads no
+// source maps here anyway (no SENTRY_AUTH_TOKEN), so it is pure build overhead
+// in the memory-capped sandbox. Real builds keep full Sentry instrumentation.
+export default isPreview
+  ? withMDX(nextConfig)
+  : withSentryConfig(withMDX(nextConfig), {
+      // Suppress Sentry CLI logs during build.
+      silent: true,
 
-  // Upload source maps for readable stack traces.
-  // Requires SENTRY_AUTH_TOKEN, SENTRY_ORG, and SENTRY_PROJECT env vars at build time.
-  sourcemaps: {
-    disable: !process.env.SENTRY_AUTH_TOKEN,
-  },
-});
+      // Upload source maps for readable stack traces.
+      // Requires SENTRY_AUTH_TOKEN, SENTRY_ORG, and SENTRY_PROJECT env vars at build time.
+      sourcemaps: {
+        disable: !process.env.SENTRY_AUTH_TOKEN,
+      },
+    });

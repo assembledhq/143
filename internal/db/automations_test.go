@@ -19,7 +19,7 @@ func automationColumnSlice() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope", "pre_pr_review_loops",
+		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
@@ -40,7 +40,7 @@ func addAutomationRow(rows *pgxmock.Rows, a models.Automation) *pgxmock.Rows {
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
-		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
+		a.IdentityScope.OrDefault(), a.PublishPolicy.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		automationGitHubEventsToStrings(a.GitHubEventTriggers), githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,
@@ -86,7 +86,7 @@ func TestAutomationStore_Create(t *testing.T) {
 	}
 
 	mock.ExpectQuery("INSERT INTO automations").
-		WithArgs(anyArgs(28)...).
+		WithArgs(anyArgs(29)...).
 		WillReturnRows(
 			pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).
 				AddRow(newID, now, now),
@@ -165,8 +165,8 @@ func TestAutomationStore_ListEnabledByGitHubEvent(t *testing.T) {
 		ID: orgID, OrgID: orgID, RepositoryID: &repoID, Name: "Review PR", Goal: "Review every PR",
 		IconType: models.AutomationIconTypeEmoji, IconValue: "🔁",
 		ExecutionMode: "sequential", MaxConcurrent: 1, BaseBranch: "main",
-		IdentityScope: models.AutomationIdentityScopeOrg,
-		ScheduleType:  models.AutomationScheduleInterval, Timezone: "UTC",
+		IdentityScope: models.AutomationIdentityScopeOrg, PublishPolicy: models.AutomationPublishPolicyPullRequest,
+		ScheduleType: models.AutomationScheduleInterval, Timezone: "UTC",
 		GitHubEventTriggers: []models.AutomationGitHubEvent{models.AutomationGitHubEventPullRequestOpened},
 		GitHubEventFilters:  json.RawMessage(`{}`),
 		Enabled:             true, Priority: 50, ExternalMetadata: json.RawMessage(`{}`), CreatedAt: now, UpdatedAt: now,
@@ -251,7 +251,7 @@ func TestAutomationStore_Update(t *testing.T) {
 	}
 
 	mock.ExpectExec("UPDATE automations SET").
-		WithArgs(anyArgs(30)...).
+		WithArgs(anyArgs(31)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	require.NoError(t, store.Update(context.Background(), a))
@@ -907,6 +907,41 @@ func TestAutomationRunStore_UpdateStatus(t *testing.T) {
 	err = store.UpdateStatus(context.Background(), uuid.New(), uuid.New(), models.AutomationRunStatusCompleted, &now, &summary)
 	require.NoError(t, err)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutomationRunStore_MarkCompletedNoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rows     int64
+		expected bool
+	}{
+		{name: "marks active or completed run", rows: 1, expected: true},
+		{name: "already terminal no-op", rows: 0, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create an isolated database mock")
+			defer mock.Close()
+
+			store := NewAutomationRunStore(mock)
+			summary := "No safe maintenance change was needed."
+			mock.ExpectExec("UPDATE automation_runs").
+				WithArgs(anyArgs(3)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			updated, err := store.MarkCompletedNoop(context.Background(), uuid.New(), uuid.New(), &summary)
+
+			require.NoError(t, err, "no-op terminalization should update the automation run without error")
+			require.Equal(t, tt.expected, updated, "no-op terminalization should report whether an eligible row changed")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
 }
 
 func TestAutomationStore_CountInFlightRuns(t *testing.T) {

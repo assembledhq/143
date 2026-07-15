@@ -44,6 +44,7 @@ type AutomaticPRFollowThroughSettings struct {
 	ReadinessAfterReviewLoop AutomaticFollowThroughPreference `json:"readiness_after_review_loop,omitempty"`
 	ResolveConflictsWhenIdle AutomaticFollowThroughPreference `json:"resolve_conflicts_when_idle,omitempty"`
 	FixTestsWhenIdle         AutomaticFollowThroughPreference `json:"fix_tests_when_idle,omitempty"`
+	RespondToPRFeedback      AutomaticFollowThroughPreference `json:"respond_to_pr_feedback,omitempty"`
 }
 
 // Validate returns an error when any automatic follow-through preference is
@@ -57,6 +58,9 @@ func (s AutomaticPRFollowThroughSettings) Validate() error {
 	}
 	if err := s.FixTestsWhenIdle.Validate(); err != nil {
 		return fmt.Errorf("automatic_pr_follow_through.fix_tests_when_idle: %w", err)
+	}
+	if err := s.RespondToPRFeedback.Validate(); err != nil {
+		return fmt.Errorf("automatic_pr_follow_through.respond_to_pr_feedback: %w", err)
 	}
 	return nil
 }

@@ -284,6 +284,7 @@ export default function NewAutomationPage() {
     baseBranchByRepoId,
     model,
     identityScope,
+    publishPolicy,
     prePRReviewLoops,
     reasoningEffort,
     priority,
@@ -605,6 +606,7 @@ export default function NewAutomationPage() {
           : {}),
         model,
         identity_scope: identityScope,
+        publish_policy: publishPolicy,
         pre_pr_review_loops: effectivePrePRReviewLoops,
         ...(showReasoningSelector && reasoningEffort
           ? { reasoning_effort: reasoningEffort }
@@ -711,6 +713,7 @@ export default function NewAutomationPage() {
                   showReasoningSelector && reasoningEffort
                     ? reasoningEffort
                     : undefined,
+                publish_policy: publishPolicy,
                 pre_pr_review_loops: effectivePrePRReviewLoops,
               }}
               disabled={createMutation.isPending || redirecting}
@@ -1299,6 +1302,30 @@ export default function NewAutomationPage() {
                           buttonClassName="w-full justify-between"
                           contentClassName="w-[var(--radix-popover-trigger-width)]"
                         />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>After a successful run</Label>
+                        <Select
+                          value={publishPolicy}
+                          onValueChange={(value) => {
+                            if (value === "pull_request" || value === "none") {
+                              setFormField("publishPolicy", value);
+                            }
+                          }}
+                        >
+                          <SelectTrigger aria-label="After a successful run">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="pull_request">
+                              Open a pull request
+                            </SelectItem>
+                            <SelectItem value="none">Do not publish</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          Pull requests are also skipped when the run produces no diff.
+                        </p>
                       </div>
                       <div className="space-y-1.5">
                         <Label>Priority</Label>

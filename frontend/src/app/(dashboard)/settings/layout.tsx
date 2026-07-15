@@ -96,7 +96,7 @@ export default function SettingsLayout({
   return (
     <div
       data-slot="settings-layout-padding-scope"
-      className="[&_[data-slot=page-container]]:pb-24 md:[&_[data-slot=page-container]]:pb-20"
+      className="settings-readable-copy [&_[data-slot=page-container]]:pb-24 md:[&_[data-slot=page-container]]:pb-20"
     >
       {children}
     </div>

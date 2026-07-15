@@ -312,6 +312,60 @@ func TestFinalizeTokenUsage_DerivesPublishedRateModels(t *testing.T) {
 	}
 }
 
+func TestFinalizeTokenUsage_DerivesGPT56PublishedRates(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		model                 string
+		expectedAPIAmount     float64
+		expectedCreditsAmount float64
+	}{
+		{name: "sol", model: models.CodexModelGPT56Sol, expectedAPIAmount: 41.75, expectedCreditsAmount: 887.5},
+		{name: "terra", model: models.CodexModelGPT56Terra, expectedAPIAmount: 20.875, expectedCreditsAmount: 443.75},
+		{name: "luna", model: models.CodexModelGPT56Luna, expectedAPIAmount: 8.35, expectedCreditsAmount: 177.5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			usage := TokenUsage{
+				InputTokens:         1_000_000,
+				CachedInputTokens:   1_000_000,
+				CacheCreationTokens: 1_000_000,
+				OutputTokens:        1_000_000,
+			}
+			apiUsage := FinalizeTokenUsage(usage, TokenUsageHint{
+				AgentType:      models.AgentTypeCodex,
+				EffectiveModel: tt.model,
+				BillingMode:    TokenBillingModeAPIKey,
+			})
+
+			require.NotNil(t, apiUsage.Cost, "GPT-5.6 API-key usage should derive a published USD cost")
+			require.Equal(t, TokenCostUnitUSD, apiUsage.Cost.Unit, "GPT-5.6 API-key cost should use USD")
+			require.Equal(t, TokenCostSourceDerived, apiUsage.Cost.Source, "GPT-5.6 API-key cost should be marked derived")
+			require.InDelta(t, tt.expectedAPIAmount, apiUsage.Cost.Amount, 0.0001, "GPT-5.6 API cost should include input, cache read, cache write, and output pricing")
+			require.InDelta(t, tt.expectedAPIAmount, apiUsage.TotalCostUSD, 0.0001, "GPT-5.6 total_cost_usd should mirror the derived amount")
+
+			subscriptionUsage := FinalizeTokenUsage(TokenUsage{
+				InputTokens:       1_000_000,
+				CachedInputTokens: 1_000_000,
+				OutputTokens:      1_000_000,
+			}, TokenUsageHint{
+				AgentType:      models.AgentTypeCodex,
+				EffectiveModel: tt.model,
+				BillingMode:    TokenBillingModeSubscription,
+			})
+
+			require.NotNil(t, subscriptionUsage.NativeCost, "GPT-5.6 subscription usage should derive published Codex credits")
+			require.Equal(t, TokenCostUnitCredits, subscriptionUsage.NativeCost.Unit, "GPT-5.6 subscription cost should use credits")
+			require.Equal(t, TokenCostSourceDerived, subscriptionUsage.NativeCost.Source, "GPT-5.6 subscription cost should be marked derived")
+			require.InDelta(t, tt.expectedCreditsAmount, subscriptionUsage.NativeCost.Amount, 0.0001, "GPT-5.6 subscription cost should include input, cache read, and output credit rates")
+		})
+	}
+}
+
 func TestFinalizeTokenUsage_CodexSparkLeavesCostUnavailable(t *testing.T) {
 	t.Parallel()
 

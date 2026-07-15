@@ -31,7 +31,12 @@ type SuggestionStore interface {
 	UpsertOpen(ctx context.Context, suggestion models.ExternalUserLinkSuggestion) (models.ExternalUserLinkSuggestion, error)
 }
 
+type unmappedObserver interface {
+	ObserveUnmapped(ctx context.Context, observation models.ExternalUserObservation) error
+}
+
 type ClaimStore interface {
+	CreateClaim(ctx context.Context, claim models.ExternalUserLinkClaim, tokenHash []byte) (models.ExternalUserLinkClaim, error)
 }
 
 type UserLookup interface {
@@ -73,7 +78,6 @@ type ExternalActorResolution struct {
 	TeamFallback    bool
 	LinkRequiredFor []string
 	SuggestedUserID *uuid.UUID
-	ClaimURL        *string
 }
 
 func (r *Resolver) ResolveExternalActor(ctx context.Context, orgID uuid.UUID, input ExternalActorInput) (ExternalActorResolution, error) {
@@ -113,6 +117,22 @@ func (r *Resolver) ResolveExternalActor(ctx context.Context, orgID uuid.UUID, in
 			return ExternalActorResolution{}, fmt.Errorf("lookup external actor by verified email: %w", err)
 		}
 	}
+	if !r.options.AllowVerifiedEmailAutoLink && input.EmailVerified && input.Email != nil && strings.TrimSpace(*input.Email) != "" && r.suggestions != nil {
+		user, lookupErr := r.users.GetByOrgAndEmail(ctx, orgID, strings.TrimSpace(*input.Email))
+		if lookupErr == nil {
+			suggestion, err := r.suggestions.UpsertOpen(ctx, models.ExternalUserLinkSuggestion{OrgID: orgID, Provider: input.Provider, ProviderWorkspaceID: input.ProviderWorkspaceID, ProviderUserID: input.ProviderUserID, SuggestedUserID: user.ID, Reason: "exact_verified_email", Confidence: ConfidenceEmailMatch, ExternalEmail: normalizedPtr(input.Email), ExternalHandle: normalizedPtr(input.Handle), ExternalDisplayName: normalizedPtr(input.DisplayName)})
+			if err != nil {
+				return ExternalActorResolution{}, fmt.Errorf("persist verified-email external actor suggestion: %w", err)
+			}
+			if err := r.observeUnmapped(ctx, orgID, input); err != nil {
+				return ExternalActorResolution{}, err
+			}
+			return ExternalActorResolution{TeamFallback: true, LinkRequiredFor: defaultLinkRequiredCapabilities(), SuggestedUserID: &suggestion.SuggestedUserID}, nil
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			return ExternalActorResolution{}, fmt.Errorf("lookup external actor verified email suggestion: %w", lookupErr)
+		}
+	}
 
 	if r.suggestions != nil && (input.Handle != nil || input.DisplayName != nil) {
 		suggestedUserID, err := r.users.SuggestByOrgHint(ctx, orgID, deref(input.Handle), deref(input.DisplayName))
@@ -135,6 +155,9 @@ func (r *Resolver) ResolveExternalActor(ctx context.Context, orgID uuid.UUID, in
 			if err != nil {
 				return ExternalActorResolution{}, fmt.Errorf("persist external actor suggestion: %w", err)
 			}
+			if err := r.observeUnmapped(ctx, orgID, input); err != nil {
+				return ExternalActorResolution{}, err
+			}
 			return ExternalActorResolution{
 				TeamFallback:    true,
 				LinkRequiredFor: defaultLinkRequiredCapabilities(),
@@ -142,11 +165,25 @@ func (r *Resolver) ResolveExternalActor(ctx context.Context, orgID uuid.UUID, in
 			}, nil
 		}
 	}
+	if err := r.observeUnmapped(ctx, orgID, input); err != nil {
+		return ExternalActorResolution{}, err
+	}
 
 	return ExternalActorResolution{
 		TeamFallback:    true,
 		LinkRequiredFor: defaultLinkRequiredCapabilities(),
 	}, nil
+}
+
+func (r *Resolver) observeUnmapped(ctx context.Context, orgID uuid.UUID, input ExternalActorInput) error {
+	observer, ok := r.suggestions.(unmappedObserver)
+	if !ok {
+		return nil
+	}
+	if err := observer.ObserveUnmapped(ctx, models.ExternalUserObservation{OrgID: orgID, Provider: input.Provider, ProviderWorkspaceID: input.ProviderWorkspaceID, ProviderUserID: input.ProviderUserID, ExternalEmail: normalizedPtr(input.Email), ExternalHandle: normalizedPtr(input.Handle), ExternalDisplayName: normalizedPtr(input.DisplayName)}); err != nil {
+		return fmt.Errorf("record unmapped external actor: %w", err)
+	}
+	return nil
 }
 
 func resolutionFromLink(link models.ExternalUserLink) ExternalActorResolution {
@@ -213,4 +250,32 @@ func HashClaimToken(token string) []byte {
 
 func ClaimExpiresAt(now time.Time) time.Time {
 	return now.Add(30 * time.Minute)
+}
+
+func (r *Resolver) CreateSelfLinkClaim(ctx context.Context, orgID uuid.UUID, input ExternalActorInput, sourceContext []byte) (models.ExternalUserLinkClaim, string, error) {
+	if err := validateExternalActorInput(input); err != nil {
+		return models.ExternalUserLinkClaim{}, "", err
+	}
+	if r.claims == nil {
+		return models.ExternalUserLinkClaim{}, "", errors.New("external identity claim store is not configured")
+	}
+	if len(sourceContext) == 0 {
+		sourceContext = []byte(`{}`)
+	}
+	rawToken, tokenHash, err := GenerateClaimToken()
+	if err != nil {
+		return models.ExternalUserLinkClaim{}, "", err
+	}
+	claim, err := r.claims.CreateClaim(ctx, models.ExternalUserLinkClaim{
+		OrgID:               orgID,
+		Provider:            input.Provider,
+		ProviderWorkspaceID: strings.TrimSpace(input.ProviderWorkspaceID),
+		ProviderUserID:      strings.TrimSpace(input.ProviderUserID),
+		SourceContext:       sourceContext,
+		ExpiresAt:           ClaimExpiresAt(time.Now().UTC()),
+	}, tokenHash)
+	if err != nil {
+		return models.ExternalUserLinkClaim{}, "", fmt.Errorf("create external identity claim: %w", err)
+	}
+	return claim, rawToken, nil
 }

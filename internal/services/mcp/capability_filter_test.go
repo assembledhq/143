@@ -10,7 +10,8 @@ import (
 )
 
 type staticToolSource struct {
-	tools []Tool
+	tools  []Tool
+	result *ToolCallResult
 }
 
 func (s staticToolSource) ListTools() []Tool {
@@ -18,6 +19,9 @@ func (s staticToolSource) ListTools() []Tool {
 }
 
 func (s staticToolSource) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
+	if s.result != nil {
+		return s.result
+	}
 	return TextResult("called " + name)
 }
 
@@ -59,6 +63,12 @@ func TestCapabilityFilteredToolSourceAllowsAutomationGoalImprovementComplete(t *
 	require.Equal(t, []Tool{{Name: "automation_goal_improvement_complete"}}, source.ListTools(), "goal improvement sessions should keep their scoped completion tool visible")
 	result := source.CallTool(context.Background(), "automation_goal_improvement_complete", json.RawMessage(`{}`))
 	require.False(t, result.IsError, "goal improvement completion should remain callable after capability filtering")
+}
+
+func TestCapabilityFilteredToolSourceAllowsSessionPreviewTools(t *testing.T) {
+	t.Parallel()
+	source := NewCapabilityFilteredToolSource(staticToolSource{tools: []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}}, ToolCapabilityPolicy{})
+	require.Equal(t, []Tool{{Name: "preview_ensure"}, {Name: "preview_observe"}, {Name: "preview_act"}}, source.ListTools(), "session preview tools should remain available under capability filtering")
 }
 
 func TestCapabilityFilteredToolSourceSeparatesPagerDutyReadsAndWrites(t *testing.T) {

@@ -1,6 +1,11 @@
 import { toCodingAgentReasoningEffort, type CodingAgentReasoningEffort } from "@/lib/coding-agent-reasoning";
 import type { AutomationProductTrigger } from "@/lib/automation-triggers";
-import type { AgentCapabilityGrant, LinearEventType, PagerDutyEventType } from "@/lib/types";
+import type {
+  AgentCapabilityGrant,
+  AutomationPublishPolicy,
+  LinearEventType,
+  PagerDutyEventType,
+} from "@/lib/types";
 
 const STORAGE_KEY = "143:new-automation-draft";
 const SCHEMA_VERSION = 1;
@@ -46,6 +51,7 @@ export type AutomationFormState = {
   baseBranchByRepoId: Record<string, string>;
   model: string | undefined;
   identityScope: "org" | "personal";
+  publishPolicy: AutomationPublishPolicy;
   prePRReviewLoops: number;
   reasoningEffort: CodingAgentReasoningEffort;
   priority: number;
@@ -139,6 +145,7 @@ export function defaultAutomationFormState(
     baseBranchByRepoId: {},
     model: undefined,
     identityScope: "org",
+    publishPolicy: "pull_request",
     prePRReviewLoops: 1,
     reasoningEffort: "",
     priority: 50,
@@ -203,6 +210,7 @@ export function automationFormStateFromDraft(
       : {},
     model: typeof parsed.model === "string" ? parsed.model : undefined,
     identityScope: parsed.identityScope === "personal" ? "personal" : "org",
+    publishPolicy: parsed.publishPolicy === "none" ? "none" : "pull_request",
     prePRReviewLoops: clampInteger(parsed.prePRReviewLoops, 0, 5, 1),
     reasoningEffort: toCodingAgentReasoningEffort(
       typeof parsed.reasoningEffort === "string" ? parsed.reasoningEffort : "",

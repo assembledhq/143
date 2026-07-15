@@ -182,6 +182,7 @@ Only routes in this table accept external API tokens. Other protected app/admin 
 | `/api/v1/sessions/{id}` and nested read routes | `GET` | `sessions:read` | `sessions:all` |
 | `/api/v1/sessions` | `POST` | `sessions:create` | `sessions:all` |
 | `/api/v1/sessions/{id}/messages` | `POST` | `sessions:write` | `sessions:all` |
+| `/api/v1/sessions/{id}/title/regenerate` | `POST` | `sessions:write` | `sessions:all` |
 | `/api/v1/sessions/{id}/retry` | `POST` | `sessions:write` | `sessions:all` |
 | `/api/v1/sessions/{id}/cancel` | `POST` | `sessions:cancel` | `sessions:all` |
 | `/api/v1/sessions/{id}/end` | `POST` | `sessions:cancel` | `sessions:all` |
@@ -218,6 +219,8 @@ Create a session:
 
 Required scope: `sessions:create` or `sessions:all`.
 
+To explicitly regenerate a session title from its original primary-thread request, call `POST /api/v1/sessions/{id}/title/regenerate`. This intentionally replaces protected legacy, manual, or issue-derived title ownership. Required scope: `sessions:write` or `sessions:all`.
+
 ## Automations
 
 Create an automation:
@@ -233,6 +236,7 @@ Create an automation:
     "timezone": "UTC"
   },
   "identity": {"scope": "org"},
+  "pull_request": {"publish_policy": "pull_request"},
   "metadata": {
     "caller": "platform",
     "workflow_id": "deps-nightly"
@@ -241,6 +245,8 @@ Create an automation:
 ```
 
 Required scope: `automations:create` or `automations:all`. External API automations must use `identity.scope=org`.
+
+`pull_request.publish_policy` accepts only `pull_request` (the default) or `none`. Use `none` for review/reporting automations that must never publish. Even with `pull_request`, the platform skips PR creation when the run produces no diff; there is no branch-only automation publish policy.
 
 ## Previews
 
