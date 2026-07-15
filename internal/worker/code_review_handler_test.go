@@ -930,7 +930,7 @@ func TestCodeReviewOrchestratorAgentModel(t *testing.T) {
 		"nil orchestrator model should fall back to the per-agent default")
 }
 
-func TestCodeReviewStatusTargetURL(t *testing.T) {
+func TestCodeReviewSessionURL(t *testing.T) {
 	t.Parallel()
 
 	sessionID := uuid.New()
@@ -940,7 +940,7 @@ func TestCodeReviewStatusTargetURL(t *testing.T) {
 		frontendURL string
 		expected    string
 	}{
-		{name: "empty frontend URL omits target", expected: ""},
+		{name: "empty frontend URL omits link", expected: ""},
 		{name: "trims trailing slash", frontendURL: "https://143.dev/", expected: "https://143.dev/sessions/" + sessionID.String()},
 		{name: "uses base URL", frontendURL: "https://app.143.dev", expected: "https://app.143.dev/sessions/" + sessionID.String()},
 	}
@@ -949,9 +949,9 @@ func TestCodeReviewStatusTargetURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := codeReviewStatusTargetURL(tt.frontendURL, sessionID)
+			actual := codeReviewSessionURL(tt.frontendURL, sessionID)
 
-			require.Equal(t, tt.expected, actual, "codeReviewStatusTargetURL should build stable session links")
+			require.Equal(t, tt.expected, actual, "codeReviewSessionURL should build stable session links")
 		})
 	}
 }

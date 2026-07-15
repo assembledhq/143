@@ -111,7 +111,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
-		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStatePending, "143 Code Reviewer is running")
 		health, err := loadStoredCodeReviewHealth(ctx, stores, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review health: %w", err)
@@ -132,7 +131,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed after review started"); staleErr != nil {
 				return fmt.Errorf("mark code review stale: %w", staleErr)
 			}
-			publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateFailure, "143 Code Reviewer stopped because the PR head changed")
 			logger.Info().
 				Str("org_id", job.OrgID.String()).
 				Str("session_id", job.SessionID.String()).
@@ -204,7 +202,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
 			Policy:                 policy.Config(),
 			Job:                    job,
-			SessionURL:             codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
+			SessionURL:             codeReviewSessionURL(services.FrontendURL, job.SessionID),
 			PullRequest:            pr,
 			Health:                 health,
 			AgentResults:           agentResults,
@@ -245,7 +243,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if submission.GitHubReviewID != nil {
 			event = event.Int64("github_review_id", *submission.GitHubReviewID)
 		}
-		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
 		reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 		return nil
@@ -272,7 +269,6 @@ func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores,
 			return false, fmt.Errorf("cancel code review after parent cancellation: %w", err)
 		}
 	}
-	publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateError, "143 Code Reviewer was cancelled")
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	logger.Info().
 		Str("session_id", job.SessionID.String()).
@@ -285,7 +281,6 @@ func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, se
 	if _, err := stores.CodeReviews.FailReview(ctx, job.OrgID, job.SessionID, reason); err != nil {
 		return fmt.Errorf("fail code review without usable reviewer output: %w", err)
 	}
-	publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateFailure, "143 Code Reviewer failed: no reviewer completed")
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	if err := reconcileCodeReviewSessionFailure(ctx, stores, job, reason); err != nil {
 		return err
@@ -1708,10 +1703,6 @@ type codeReviewSubmission struct {
 	GitHubReviewURL *string
 }
 
-type codeReviewStatusPublisher interface {
-	PublishCommitStatus(ctx context.Context, req codereviewsvc.CommitStatusRequest) error
-}
-
 type codeReviewRequestedReviewerRemover interface {
 	RemoveRequestedReviewers(ctx context.Context, req codereviewsvc.RequestedReviewersRequest) error
 }
@@ -1796,44 +1787,6 @@ type codeReviewContextLister interface {
 	ListReviewContext(ctx context.Context, req codereviewsvc.ReviewContextRequest) (codereviewsvc.ReviewContext, error)
 }
 
-func publishCodeReviewStatus(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, state codereviewsvc.CommitStatusState, description string) {
-	if services == nil || services.CodeReviews == nil {
-		return
-	}
-	publisher, ok := services.CodeReviews.(codeReviewStatusPublisher)
-	if !ok {
-		return
-	}
-	if stores == nil || stores.Repositories == nil {
-		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository store unavailable")
-		return
-	}
-	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
-	if err != nil {
-		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load repository for code review status")
-		return
-	}
-	if repo.InstallationID == 0 {
-		logger.Warn().Str("repository_id", repo.ID.String()).Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository has no GitHub installation id")
-		return
-	}
-	repository := strings.TrimSpace(pr.GitHubRepo)
-	if repository == "" {
-		repository = strings.TrimSpace(repo.FullName)
-	}
-	if err := publisher.PublishCommitStatus(ctx, codereviewsvc.CommitStatusRequest{
-		InstallationID: repo.InstallationID,
-		Repository:     repository,
-		SHA:            job.HeadSHA,
-		State:          state,
-		Context:        "143 Code Reviewer",
-		Description:    description,
-		TargetURL:      codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
-	}); err != nil {
-		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Str("state", string(state)).Msg("failed to publish code review status")
-	}
-}
-
 func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) {
 	reviewer := strings.TrimSpace(job.RequestedReviewerLogin)
 	team := strings.TrimSpace(job.RequestedTeamSlug)
@@ -1880,19 +1833,12 @@ func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, serv
 	}
 }
 
-func codeReviewStatusTargetURL(frontendURL string, sessionID uuid.UUID) string {
+func codeReviewSessionURL(frontendURL string, sessionID uuid.UUID) string {
 	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
 	if base == "" || sessionID == uuid.Nil {
 		return ""
 	}
 	return base + "/sessions/" + sessionID.String()
-}
-
-func codeReviewFinalStatusDescription(decision models.CodeReviewDecision) string {
-	if decision == models.CodeReviewDecisionApproved {
-		return "143 Code Reviewer approved this PR"
-	}
-	return "143 Code Reviewer completed without approval"
 }
 
 func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) ([]codereviewsvc.PullRequestFile, bool, error) {
@@ -2392,10 +2338,9 @@ func codeReviewChecksPassing(policy models.CodeReviewPolicyConfig, health *model
 }
 
 // codeReviewExternalChecks drops 143's own non-CI status contexts before the
-// checks-passing gate is evaluated. The code reviewer publishes its own
-// "143 Code Reviewer" commit status (and the preview integration publishes
-// "preview/143"); both are pending by construction while the review runs, so
-// counting them would make the reviewer block its own approval.
+// checks-passing gate is evaluated. Historical "143 Code Reviewer" statuses
+// and current "preview/143" statuses are not CI signals and must not affect
+// the reviewer's approval decision.
 func codeReviewExternalChecks(checks []models.PullRequestCheckSummary) []models.PullRequestCheckSummary {
 	filtered := make([]models.PullRequestCheckSummary, 0, len(checks))
 	for _, check := range checks {
