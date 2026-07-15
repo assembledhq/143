@@ -28,7 +28,7 @@ Each GitHub PR automation prompt includes the reporting contract. The Main threa
 
 ## Historical data
 
-Migration 247 performs a conservative one-time backfill from Main-thread summaries whose entire leading token matches the legacy `#<pr>: pass|reject|advise|skipped — ...` format. It maps those tokens to typed outcomes and marks them `legacy_inferred`. Historical snapshots that contain a repository and PR number but omit the URL use the canonical `https://github.com/{repository}/pull/{number}` target. The backfill does not inspect session-level `REVIEW_CLEAN`, invent external actions, or classify any other free-form summary.
+Migration 248 performs a conservative one-time backfill from Main-thread summaries whose entire leading token matches the legacy `#<pr>: pass|reject|advise|skipped — ...` format. It maps those tokens to typed outcomes and marks them `legacy_inferred`. Historical snapshots that contain a repository and PR number but omit the URL use the canonical `https://github.com/{repository}/pull/{number}` target. The backfill does not inspect session-level `REVIEW_CLEAN`, invent external actions, or classify any other free-form summary.
 
 ## Tenancy and durability
 
