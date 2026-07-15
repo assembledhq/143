@@ -191,7 +191,7 @@ describe("agentTypeForModel", () => {
     expect(agentTypeForModel("openrouter/~z-ai/glm-5.2")).toBe("opencode");
     // Bare names owned by a first-party agent keep that owner.
     expect(agentTypeForModel("gpt-5.6-sol")).toBe("codex");
-    expect(agentTypeForModel("gpt-5.6-luna-fast")).toBe("codex");
+    expect(agentTypeForModel("gpt-5.6-luna")).toBe("codex");
     expect(agentTypeForModel("gpt-5.5")).toBe("codex");
     expect(agentTypeForModel("claude-fable-5")).toBe("claude_code");
   });
