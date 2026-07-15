@@ -1842,15 +1842,30 @@ func (s *SessionStore) UpdateFailure(ctx context.Context, orgID, runID uuid.UUID
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
-	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	args := pgx.NamedArgs{
 		"id":                    runID,
 		"org_id":                orgID,
 		"failure_explanation":   explanation,
 		"failure_category":      category,
 		"failure_next_steps":    nextSteps,
 		"failure_retry_advised": retryAdvised,
-	})
-	return err
+	}
+	if s.streams == nil {
+		_, err := s.db.Exec(ctx, query, args)
+		return err
+	}
+
+	rows, err := s.db.Query(ctx, query+` RETURNING `+sessionSelectColumns, args)
+	if err != nil {
+		return err
+	}
+	session, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Session])
+	if err != nil {
+		return err
+	}
+	hydrateSessionPolicy(&session)
+	s.publishStatus(ctx, &session)
+	return nil
 }
 
 func (s *SessionStore) UpdateRevisionContext(ctx context.Context, orgID, sessionID uuid.UUID, revisionContext []byte) error {

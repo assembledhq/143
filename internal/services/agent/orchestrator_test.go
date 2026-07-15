@@ -1340,6 +1340,11 @@ type mockSessionThreadStore struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}
+	updateResultCalls []struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+		result   models.SessionResult
+	}
 	completeTurnCalls []struct {
 		threadID uuid.UUID
 		turn     int
@@ -1375,13 +1380,20 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uui
 	return nil
 }
 
-func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, _ *models.SessionResult) error {
+func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.updateStatusCalls = append(m.updateStatusCalls, struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}{threadID: threadID, status: status})
+	if result != nil {
+		m.updateResultCalls = append(m.updateResultCalls, struct {
+			threadID uuid.UUID
+			status   models.ThreadStatus
+			result   models.SessionResult
+		}{threadID: threadID, status: status, result: *result})
+	}
 	return nil
 }
 
@@ -1410,6 +1422,18 @@ func (m *mockSessionThreadStore) statusesForThread(threadID uuid.UUID) []models.
 	for _, c := range m.updateStatusCalls {
 		if c.threadID == threadID {
 			out = append(out, c.status)
+		}
+	}
+	return out
+}
+
+func (m *mockSessionThreadStore) resultsForThread(threadID uuid.UUID) []models.SessionResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.SessionResult, 0)
+	for _, call := range m.updateResultCalls {
+		if call.threadID == threadID {
+			out = append(out, call.result)
 		}
 	}
 	return out
@@ -6223,6 +6247,8 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
 
 	d := defaultDeps()
 	// No usable credential anywhere, but the org holds a Claude subscription
@@ -6231,6 +6257,8 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 	// credentials are configured".
 	d.creds = &mockCredentialProvider{}
 	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSub: true}
+	threadStore := &mockSessionThreadStore{}
+	d.sessionThreads = threadStore
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
@@ -6246,6 +6274,14 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 		"the explanation should tell the user to reconnect")
 	require.NotContains(t, failures[0].explanation, "No Claude Code credentials are configured",
 		"a user who connected a subscription must not be told nothing is configured")
+	threadResults := threadStore.resultsForThread(threadID)
+	require.NotEmpty(t, threadResults, "the failed Claude tab should receive terminal result metadata")
+	require.NotNil(t, threadResults[len(threadResults)-1].FailureCategory, "the failed Claude tab should carry the auth category")
+	require.Equal(t, agent.FailureCategoryClaudeCodeAuth, *threadResults[len(threadResults)-1].FailureCategory,
+		"the thread category should let the session UI render reconnect guidance even if the parent session later completes")
+	require.NotNil(t, threadResults[len(threadResults)-1].FailureExplanation, "the failed Claude tab should carry the user-facing explanation")
+	require.Contains(t, *threadResults[len(threadResults)-1].FailureExplanation, "no longer valid",
+		"the thread explanation should preserve the actionable reconnect guidance instead of the raw auth error")
 }
 
 func TestRunAgent_InvalidSubscriptionProbeErrorFallsBackToGenericFailure(t *testing.T) {
@@ -6694,6 +6730,60 @@ func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
 	require.NotContains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusCompleted, "continue_session should not mark an errored secondary thread completed")
 	require.Empty(t, d.sessions.getTurnUpdates(), "continue_session should not persist a successful turn for an adapter result error")
 	require.Len(t, d.messages.getMessages(), 1, "continue_session should not append an assistant success message for an adapter result error")
+}
+
+func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	activeThreadID := uuid.New()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.PrimaryThreadID = &primaryThreadID
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.creds = &mockCredentialProvider{}
+	d.codingCreds = &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
+	d.sessionThreads = &mockSessionThreadStore{}
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &activeThreadID,
+		TurnNumber: 1,
+		Role:       models.MessageRoleUser,
+		Content:    "/review",
+	}}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &activeThreadID,
+	})
+	require.Error(t, err, "continue_session should fail when the Claude reviewer has no credentials")
+	require.Contains(t, err.Error(), "no credentials for claude code agent", "continue_session should preserve the Claude auth failure")
+
+	sessionResults := d.sessions.getResultUpdates()
+	require.Len(t, sessionResults, 1, "categorized auth failure should terminalize the session exactly once")
+	require.NotNil(t, sessionResults[0].result.FailureExplanation, "the session result should retain its user-facing auth explanation")
+	require.Contains(t, *sessionResults[0].result.FailureExplanation, "No Claude Code credentials are configured",
+		"fresh-sandbox error handling should not replace the categorized session failure with a wrapped raw error")
+	primaryResults := d.sessionThreads.resultsForThread(primaryThreadID)
+	require.Len(t, primaryResults, 1, "session-level failure bookkeeping should terminalize the primary thread exactly once")
+	require.NotNil(t, primaryResults[0].FailureExplanation, "the primary thread should retain the categorized explanation")
+	require.Contains(t, *primaryResults[0].FailureExplanation, "No Claude Code credentials are configured",
+		"fresh-sandbox error handling should not overwrite the primary thread with a raw error")
+	activeResults := d.sessionThreads.resultsForThread(activeThreadID)
+	require.Len(t, activeResults, 1, "the executing reviewer thread should receive one categorized failure result")
+	require.NotNil(t, activeResults[0].FailureCategory, "the executing reviewer thread should carry the Claude auth category")
+	require.Equal(t, agent.FailureCategoryClaudeCodeAuth, *activeResults[0].FailureCategory,
+		"the executing reviewer thread should be identifiable as a Claude auth failure")
+	require.NotNil(t, activeResults[0].FailureExplanation, "the executing reviewer thread should carry the user-facing explanation")
+	require.Contains(t, *activeResults[0].FailureExplanation, "No Claude Code credentials are configured",
+		"the reviewer thread should show actionable setup guidance instead of the raw orchestrator error")
 }
 
 func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {

@@ -257,12 +257,38 @@ describe("thread SSE event reducers", () => {
       current_turn: 2,
       pending_message_count: 0,
       last_activity_at: "2026-01-01T00:05:00.000Z",
+      failure_explanation: "Claude Code credentials are unavailable",
+      failure_category: "claude_code_auth_expired",
     });
 
     expect(next[0].status).toBe("idle");
     expect(next[0].current_turn).toBe(2);
     expect(next[0].last_activity_at).toBe("2026-01-01T00:05:00.000Z");
+    expect(next[0].failure_explanation).toBe("Claude Code credentials are unavailable");
+    expect(next[0].failure_category).toBe("claude_code_auth_expired");
     expect(next[1]).toBe(threads[1]);
+  });
+
+  it("clears stale thread failure fields when the runtime event reports a successful turn", () => {
+    const failedThread: SessionThread = {
+      ...threads[0],
+      failure_explanation: "Previous failure",
+      failure_category: "tooling",
+    };
+
+    const next = applyThreadRuntimeEventToThreads([failedThread], {
+      session_id: "session-1",
+      thread_id: "thread-1",
+      org_id: "org-1",
+      status: "idle",
+      current_turn: 2,
+      pending_message_count: 0,
+      failure_explanation: null,
+      failure_category: null,
+    });
+
+    expect(next[0].failure_explanation).toBeUndefined();
+    expect(next[0].failure_category).toBeUndefined();
   });
 });
 

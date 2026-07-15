@@ -2,6 +2,7 @@
 
 import { forwardRef, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -255,6 +256,7 @@ function PreviewTabErrorFallback() {
 }
 
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
+const FAILURE_CATEGORY_CLAUDE_CODE_AUTH = "claude_code_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
@@ -641,7 +643,74 @@ function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boole
   return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
+function hasVisibleThreadFailure(thread?: SessionThread | null): thread is SessionThread {
+  return !!thread &&
+    !workingStatusesSet.has(thread.status) &&
+    !!(thread.failure_explanation?.trim() || thread.failure_category?.trim());
+}
+
+function isClaudeCodeAuthFailure(thread: SessionThread): boolean {
+  if (thread.failure_category === FAILURE_CATEGORY_CLAUDE_CODE_AUTH) {
+    return true;
+  }
+  if (thread.agent_type !== "claude_code") {
+    return false;
+  }
+  const explanation = thread.failure_explanation?.toLowerCase() ?? "";
+  return [
+    "claude subscription",
+    "claude code auth",
+    "no credentials for claude code",
+    "no claude code credentials",
+    "anthropic api key",
+  ].some((signal) => explanation.includes(signal));
+}
+
+function threadFailureDescription(thread: SessionThread): string {
+  const explanation = thread.failure_explanation?.trim() ?? "";
+  if (!isClaudeCodeAuthFailure(thread)) {
+    return explanation || "This tab stopped before the agent produced a response.";
+  }
+  if (/no credentials|credentials (?:are )?not configured/i.test(explanation)) {
+    return "No Claude Code credentials are configured. Connect a Claude subscription or add an Anthropic API key in Account settings, then retry the tab.";
+  }
+  if (/marked invalid|no longer valid|reconnect required/i.test(explanation)) {
+    return "Your Claude subscription is no longer valid. Reconnect Claude Code in Account settings, then retry the tab.";
+  }
+  return explanation || "Claude Code authentication failed before this tab could start.";
+}
+
+function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
+  const description = threadFailureDescription(thread);
+  const showClaudeSettingsAction = isClaudeCodeAuthFailure(thread) &&
+    /no credentials|not configured|connect|reconnect|revoked|expired|no longer valid/i.test(description);
+
+  return (
+    <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
+      <CardHeader className="pb-0">
+        <CardTitle className="flex items-center gap-2 text-xs text-destructive">
+          <XCircle className="h-3.5 w-3.5" />
+          Failure details
+          {thread.failure_category ? (
+            <Badge variant="secondary" className="border-destructive/20 bg-destructive/10 text-xs text-destructive">
+              {thread.failure_category}
+            </Badge>
+          ) : null}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 pt-0">
+        <p className="break-words text-xs">{description}</p>
+        {showClaudeSettingsAction ? (
+          <Button asChild size="sm" variant="outline">
+            <Link href="/settings/account">Open Account settings</Link>
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -663,6 +732,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     },
   });
   const recoveryActive = isRuntimeRecoveryActive(session);
+  const showThreadFailureDetails = session.status !== "failed" && hasVisibleThreadFailure(activeThread);
   const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
   const status = getDisplayStatus(session.status, prStatus);
@@ -718,6 +788,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
       {/* Failure card — shown prominently at top for failed sessions */}
       {recoveryActive && <RuntimeRecoveryNotice border="border" />}
+      {showThreadFailureDetails && activeThread ? <ThreadFailureDetailsCard thread={activeThread} /> : null}
       {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-0">
@@ -2534,12 +2605,14 @@ function ChatPanel({
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
     (!hasLoadedTimelineInputs || expectingMoreContent);
+  const hasThreadFailure = hasVisibleThreadFailure(activeThread);
   const showFreshThreadShell =
     !!activeThread &&
     activeThread.status === "idle" &&
     activeThread.current_turn === 0 &&
     timelineEntries.length === 0 &&
-    !showLoadingSkeleton;
+    !showLoadingSkeleton &&
+    !hasThreadFailure;
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -3292,7 +3365,10 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
     previous.activeThread?.id === next.activeThread?.id &&
     previous.activeThread?.status === next.activeThread?.status &&
     previous.activeThread?.current_turn === next.activeThread?.current_turn &&
-    previous.activeThread?.label === next.activeThread?.label;
+    previous.activeThread?.label === next.activeThread?.label &&
+    previous.activeThread?.agent_type === next.activeThread?.agent_type &&
+    previous.activeThread?.failure_explanation === next.activeThread?.failure_explanation &&
+    previous.activeThread?.failure_category === next.activeThread?.failure_category;
 }
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
@@ -6613,7 +6689,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} prStatus={prStatus} />
+          <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">

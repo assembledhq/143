@@ -208,6 +208,194 @@ describe('SessionDetailPage agent tabs and threads', () => {
     expect(sessionMessagePosted).toBe(false);
   }, 10000);
 
+  it('explains how to reconnect Claude Code when an idle reviewer tab failed authentication', async () => {
+    const sessionId = 'session-claude-auth-failure';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-07-15T18:24:22Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-claude',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Code review: claude_code',
+        status: 'idle',
+        current_turn: 0,
+        failure_explanation: 'claude subscription is marked invalid; reconnect required',
+        created_at: '2026-07-15T18:24:27Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'completed',
+            sandbox_state: 'destroyed',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Code review: claude_code/ }));
+
+    expect(await screen.findByText('Failure details')).toBeInTheDocument();
+    expect(screen.getByText(/Claude subscription is no longer valid/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Account settings' })).toHaveAttribute('href', '/settings/account');
+    expect(within(screen.getByLabelText('Session conversation')).queryByText('Failure details')).not.toBeInTheDocument();
+    expect(screen.queryByText('No context in this tab yet.')).not.toBeInTheDocument();
+  });
+
+  it('preserves configured Claude credential setup errors in the Overview failure card', async () => {
+    const sessionId = 'session-claude-auth-setup-failure';
+    const setupFailure = 'The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.';
+    const threads: SessionThread[] = [
+      {
+        id: 'thread-main',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'codex',
+        label: 'Main',
+        status: 'idle',
+        current_turn: 1,
+        created_at: '2026-07-15T18:24:22Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+      {
+        id: 'thread-claude',
+        session_id: sessionId,
+        org_id: 'org-1',
+        agent_type: 'claude_code',
+        label: 'Code review: claude_code',
+        status: 'idle',
+        current_turn: 0,
+        failure_category: 'claude_code_auth_expired',
+        failure_explanation: setupFailure,
+        created_at: '2026-07-15T18:24:27Z',
+        cost_cents: 0,
+        pending_message_count: 0,
+      },
+    ];
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            status: 'completed',
+            sandbox_state: 'destroyed',
+            threads,
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
+      }),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+
+    await user.click(await screen.findByRole('tab', { name: /Code review: claude_code/ }));
+
+    expect(await screen.findByText(setupFailure)).toBeInTheDocument();
+    expect(screen.queryByText(/No Claude Code credentials are configured/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open Account settings' })).not.toBeInTheDocument();
+    expect(within(screen.getByLabelText('Session conversation')).queryByText(setupFailure)).not.toBeInTheDocument();
+  });
+
+  it('replaces a raw terminal auth error when the structured failure status arrives', async () => {
+    const sessionId = 'session-live-claude-auth-failure';
+    const rawError = 'setup fresh sandbox: claude code auth injection: no credentials for claude code agent';
+    const explanation = 'No Claude Code credentials are configured. Connect your Claude subscription or add an Anthropic API key from Account settings.';
+    const thread: SessionThread = {
+      id: 'thread-claude',
+      session_id: sessionId,
+      org_id: 'org-1',
+      agent_type: 'claude_code',
+      label: 'Claude Code',
+      status: 'running',
+      current_turn: 1,
+      created_at: '2026-07-15T18:24:27Z',
+      cost_cents: 0,
+      pending_message_count: 0,
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({
+          data: {
+            ...mockSessions[0],
+            id: sessionId,
+            agent_type: 'claude_code',
+            status: 'running',
+            sandbox_state: 'running',
+            threads: [thread],
+          },
+        } satisfies SingleResponse<Session & { threads: SessionThread[] }>);
+      }),
+      http.get('/api/v1/sessions/:id/threads/:threadId/transcript', () => {
+        return HttpResponse.json(makeTranscriptWindow([], []));
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id={sessionId} />);
+    await waitFor(() => {
+      expect(MockEventSource.instances.length).toBeGreaterThan(0);
+    });
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        agent_type: 'claude_code',
+        status: 'failed',
+        error: rawError,
+      });
+    });
+    expect(await screen.findByText(rawError)).toBeInTheDocument();
+
+    act(() => {
+      MockEventSource.instances[0].emit('status', {
+        ...mockSessions[0],
+        id: sessionId,
+        agent_type: 'claude_code',
+        status: 'failed',
+        error: rawError,
+        failure_explanation: explanation,
+        failure_category: 'claude_code_auth_expired',
+        failure_next_steps: ['Open Account settings'],
+        failure_retry_advised: true,
+      });
+    });
+
+    expect(await screen.findByText(explanation)).toBeInTheDocument();
+    expect(screen.queryByText(rawError)).not.toBeInTheDocument();
+  });
+
   it('lets a blank new tab switch from Claude Code to Codex before the first message', async () => {
     const sessionId = 'session-switch-agent-before-send';
     const threads: SessionThread[] = [

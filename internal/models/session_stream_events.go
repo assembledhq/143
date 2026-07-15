@@ -53,6 +53,8 @@ type ThreadRuntimeEvent struct {
 	LastActivityAt      *time.Time   `json:"last_activity_at,omitempty"`
 	StartedAt           *time.Time   `json:"started_at,omitempty"`
 	CompletedAt         *time.Time   `json:"completed_at,omitempty"`
+	FailureExplanation  *string      `json:"failure_explanation"`
+	FailureCategory     *string      `json:"failure_category"`
 }
 
 type SessionWorkspaceGenerationChangedEvent struct {
@@ -84,5 +86,7 @@ func NewThreadRuntimeEvent(thread SessionThread) ThreadRuntimeEvent {
 		LastActivityAt:      thread.LastActivityAt,
 		StartedAt:           thread.StartedAt,
 		CompletedAt:         thread.CompletedAt,
+		FailureExplanation:  thread.FailureExplanation,
+		FailureCategory:     thread.FailureCategory,
 	}
 }

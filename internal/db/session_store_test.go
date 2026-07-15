@@ -1911,18 +1911,48 @@ func TestSessionStore_UpdateFailure(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	defer client.Close()
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
 
-	mock.ExpectExec("UPDATE sessions.+SET failure_explanation").
+	now := time.Now()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	orgID := uuid.New()
+	explanation := "No Claude Code credentials are configured."
+	category := "claude_code_auth_expired"
+	nextSteps := []string{"Open Account settings"}
+	row := newAgentSessionRow(sessionID, issueID, orgID, now)
+	setSessionTestColumnValue(row, "status", string(models.SessionStatusFailed))
+	setSessionTestColumnValue(row, "failure_explanation", &explanation)
+	setSessionTestColumnValue(row, "failure_category", &category)
+	setSessionTestColumnValue(row, "failure_next_steps", nextSteps)
+	setSessionTestColumnValue(row, "failure_retry_advised", true)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET failure_explanation[\s\S]+RETURNING`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
 
-	err = store.UpdateFailure(context.Background(), uuid.New(), uuid.New(), "test failure", "runtime", []string{"retry"}, true)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	err = store.UpdateFailure(context.Background(), orgID, sessionID, explanation, category, nextSteps, true)
+	require.NoError(t, err, "UpdateFailure should persist structured failure metadata")
+
+	entries, err := mr.Stream("143:stream:{ses:" + sessionID.String() + "}:status")
+	require.NoError(t, err, "structured failure should publish a live session status update")
+	require.Len(t, entries, 1, "structured failure should publish exactly one session status update")
+	var published models.Session
+	require.NoError(t, json.Unmarshal([]byte(entries[0].Values[1]), &published), "published status should contain valid session JSON")
+	require.Equal(t, &explanation, published.FailureExplanation, "live session status should include the actionable failure explanation")
+	require.Equal(t, &category, published.FailureCategory, "live session status should include the failure category")
+	require.Equal(t, nextSteps, published.FailureNextSteps, "live session status should include the recommended next steps")
+	require.True(t, published.FailureRetryAdvised, "live session status should include the retry recommendation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateRevisionContext(t *testing.T) {

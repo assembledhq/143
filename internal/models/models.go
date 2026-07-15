@@ -620,6 +620,7 @@ type SessionResult struct {
 	ResultSummary                   *string           `json:"result_summary,omitempty"`
 	Diff                            *string           `json:"diff,omitempty"`
 	Error                           *string           `json:"error,omitempty"`
+	FailureExplanation              *string           `json:"failure_explanation,omitempty"`
 	FailureCategory                 *string           `json:"failure_category,omitempty"`
 	DiffBaseCommitSHA               *string           `json:"-"`
 	DiffHeadCommitSHA               *string           `json:"-"`
