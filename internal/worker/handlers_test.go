@@ -3873,7 +3873,7 @@ func TestLinearJobHandlers(t *testing.T) {
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 		mock.ExpectQuery("(?s).*UPDATE sessions.*RETURNING.*").
-			WithArgs(workerAnyArgs(11)...).
+			WithArgs(workerAnyArgs(15)...).
 			WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 				workerSessionRowWithLinearPrepareState(sessionID, issueID, orgID, models.SessionStatusFailed, "failed")...,
 			))
@@ -9739,7 +9739,7 @@ func TestRunAgentHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t *testi
 	require.Equal(t, 1, orch.recoverSessionCalls, "running sessions should use the recovery path")
 
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
@@ -9850,7 +9850,7 @@ func TestRunAgentHandler_SystemInterruptDeadLetterFailsSessionAndThread(t *testi
 	// primary thread failed, project-task and automation-run completion, and a
 	// failed Linear milestone job.
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
@@ -10021,7 +10021,7 @@ func TestRunAgentHandler_StaleSandboxClearRetriesPastJobAgeAndFailsOnDeadLetter(
 
 	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
 			workerSessionRow(runID, issueID, orgID, models.SessionStatusFailed, 0, nil, nil)...,
 		))
@@ -10881,7 +10881,7 @@ func TestContinueSessionHandler_SandboxCapacityDeadLetterFailsSessionAndThread(t
 	require.ErrorAs(t, err, &retryable, "sandbox capacity should remain retryable before queue exhaustion")
 
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
@@ -10974,7 +10974,7 @@ func TestContinueSessionHandler_SystemInterruptDeadLetterFailsSessionAndThread(t
 	require.ErrorAs(t, err, &retryable, "system interruptions should remain retryable before dead-letter")
 
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,
@@ -11054,7 +11054,7 @@ func TestContinueSessionHandler_StaleSandboxClearDeadLetterFailsSessionAndThread
 
 	errMsg := "Session stopped after cleaning up a stale sandbox but the retry could not be scheduled."
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(workerAnyArgs(11)...).
+		WithArgs(workerAnyArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(workerSessionColumns).AddRow(
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusFailed, 2, nil, nil)...,

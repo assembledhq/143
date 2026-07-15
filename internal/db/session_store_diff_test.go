@@ -83,7 +83,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
@@ -163,7 +163,7 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotDoesNotPublishWorkspaceEventO
 
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
@@ -217,7 +217,7 @@ func TestSessionStore_UpdateResult_WithHeadAndNoDiffIsAtomic(t *testing.T) {
 	now := time.Now()
 	mock.ExpectBegin()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
 	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -375,7 +375,7 @@ func TestSessionStore_UpdateResult_PreservesDiffWhenNil(t *testing.T) {
 	// leaves the existing value intact. Same for diff_stats and
 	// diff_collected_at to keep them consistent with the preserved diff.
 	mock.ExpectQuery(`UPDATE sessions[\s\S]+diff = COALESCE\(@diff, diff\)[\s\S]+diff_collected_at = COALESCE\(@diff_collected_at, diff_collected_at\)[\s\S]+diff_stats = COALESCE\(@diff_stats, diff_stats\)`).
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
