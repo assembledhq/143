@@ -10873,11 +10873,12 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 
 		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
 		if createErr != nil {
+			noChanges := errors.Is(createErr, ghservice.ErrNoChanges)
 			// ErrNoChanges is a benign terminal outcome (session ran fine
 			// but produced no diff), so log at info to keep `open_pr failed`
 			// a real-error signal that dashboards/alerts can key off without
 			// false positives.
-			if errors.Is(createErr, ghservice.ErrNoChanges) {
+			if noChanges {
 				logger.Info().
 					Str("session_id", runID.String()).
 					Msg("open_pr: no changes to push")
@@ -10888,6 +10889,18 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					Str("session_id", runID.String()).
 					Msg("open_pr failed")
 			}
+			if noChanges && run.AutomationRunID != nil {
+				if stores.AutomationRuns != nil {
+					if _, stateErr := stores.AutomationRuns.MarkCompletedNoop(ctx, orgID, *run.AutomationRunID, run.ResultSummary); stateErr != nil {
+						return fmt.Errorf("mark automation run completed no-op: %w", stateErr)
+					}
+				}
+				if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateIdle, ""); stateErr != nil {
+					return fmt.Errorf("clear automation PR creation state after no-op: %w", stateErr)
+				}
+				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
+				return nil
+			}
 			msg := userFacingPRError(createErr)
 			if stateErr := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStateFailed, msg); stateErr != nil {
 				logger.Error().Err(stateErr).Msg("failed to mark PR creation as failed")
@@ -10896,11 +10909,11 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			// completed, so failRun will not fire for them. Tell the Linear
 			// linker about terminal outcomes here so agent-triggered sessions
 			// do not stay in-progress forever after a dead-lettered open_pr.
-			if errors.Is(createErr, ghservice.ErrNoChanges) {
+			if noChanges {
 				linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "ended_no_pr", 0)
 			}
 			if shouldDeadLetterPRError(createErr) {
-				if !errors.Is(createErr, ghservice.ErrNoChanges) {
+				if !noChanges {
 					linear.EnqueueMilestone(ctx, stores.Jobs, logger, orgID, runID, "failed", 0)
 				}
 				return &FatalError{Err: createErr}
