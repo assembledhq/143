@@ -5293,6 +5293,114 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_AutomationNoChangesCompletesAsNoop(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-automation-noop"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"pre_pr_review_loops":0}`),
+			models.AutomationRunStatusCompleted, nil, &now, nil, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "automation open_pr should treat no changes as a successful no-op")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation no-op should clear PR state, terminalize the run, and emit its milestone")
+}
+
+func TestOpenPRHandler_AutomationNoChangesRetriesPRStateCleanup(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-automation-noop-cleanup-error"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	cleanupErr := errors.New("publish state unavailable")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"pre_pr_review_loops":0}`),
+			models.AutomationRunStatusCompleted, nil, &now, nil, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(cleanupErr)
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.ErrorIs(t, err, cleanupErr, "automation no-op should retry when clearing PR creation state fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation no-op retry should stop before emitting its terminal milestone")
+}
+
 func TestOpenPRHandler_RetryablePRErrorEnqueuesFailedMilestoneOnDeadLetter(t *testing.T) {
 	t.Parallel()
 

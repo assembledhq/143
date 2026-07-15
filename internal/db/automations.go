@@ -1123,6 +1123,27 @@ func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runI
 	return tag.RowsAffected() > 0, nil
 }
 
+// MarkCompletedNoop records the authoritative no-changes outcome reported by
+// PR creation. It accepts both running and completed because open_pr can race
+// the session-completion hook: whichever worker arrives first must prevent a
+// later generic completed transition from misclassifying the run.
+func (s *AutomationRunStore) MarkCompletedNoop(ctx context.Context, orgID, runID uuid.UUID, resultSummary *string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE automation_runs
+		SET status = 'completed_noop',
+			completed_at = COALESCE(completed_at, now()),
+			result_summary = COALESCE(@result_summary, result_summary),
+			updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status IN ('running', 'completed')`, pgx.NamedArgs{
+		"id":             runID,
+		"org_id":         orgID,
+		"result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // ListOrgsWithStuckRuns returns the distinct org_ids that have at least one
 // pending/running run older than threshold. The scheduler uses this to fan the
 // reaper out to one UPDATE per org, so every reap query carries an explicit

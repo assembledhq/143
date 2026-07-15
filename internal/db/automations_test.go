@@ -909,6 +909,41 @@ func TestAutomationRunStore_UpdateStatus(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAutomationRunStore_MarkCompletedNoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rows     int64
+		expected bool
+	}{
+		{name: "marks active or completed run", rows: 1, expected: true},
+		{name: "already terminal no-op", rows: 0, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create an isolated database mock")
+			defer mock.Close()
+
+			store := NewAutomationRunStore(mock)
+			summary := "No safe maintenance change was needed."
+			mock.ExpectExec("UPDATE automation_runs").
+				WithArgs(anyArgs(3)...).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
+
+			updated, err := store.MarkCompletedNoop(context.Background(), uuid.New(), uuid.New(), &summary)
+
+			require.NoError(t, err, "no-op terminalization should update the automation run without error")
+			require.Equal(t, tt.expected, updated, "no-op terminalization should report whether an eligible row changed")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
 func TestAutomationStore_CountInFlightRuns(t *testing.T) {
 	t.Parallel()
 

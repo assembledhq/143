@@ -3485,6 +3485,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
+	// Completion hooks consume the in-memory session after UpdateResult.
+	// Keep it aligned with the persisted terminal result so automation runs
+	// can distinguish a shippable change from a clean no-op and retain the
+	// agent's actual summary instead of a generic fallback.
+	run.Status = status
+	run.ResultSummary = runResult.ResultSummary
+	run.Diff = runResult.Diff
+	run.Error = runResult.Error
 	o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 	if primaryThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
