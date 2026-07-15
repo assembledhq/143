@@ -131,6 +131,7 @@ export interface UserSettingsUpdateRequest {
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
 export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
 export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
+export type CodeReviewListOutcome = "automatically_approved" | "completed_not_approved";
 export type CodeReviewDescriptionApplicabilityKind =
   | "all"
   | "nontrivial"
