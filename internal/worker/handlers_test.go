@@ -3412,6 +3412,10 @@ func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *mode
 	return r.err
 }
 
+func (r *sessionCompleteRecorder) AutomaticPublishPolicy(context.Context, uuid.UUID, uuid.UUID) (models.AutomationPublishPolicy, error) {
+	return models.AutomationPublishPolicyPullRequest, nil
+}
+
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
 	s.runAgentCalls++
 	if s.runAgentFn != nil {
@@ -7501,7 +7505,7 @@ func automationRowColumns() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope", "pre_pr_review_loops",
+		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
@@ -7590,7 +7594,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7678,7 +7682,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &automationRepoID, "incident", "fix incident", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7754,7 +7758,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7891,7 +7895,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, false, nil, nil, nil,
@@ -7946,7 +7950,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -8019,7 +8023,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &clickerID, nil, nil,
@@ -8098,7 +8102,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -8169,7 +8173,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,

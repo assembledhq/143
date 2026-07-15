@@ -14,6 +14,7 @@ function automation(overrides: Partial<Automation>): Automation {
     max_concurrent: 1,
     base_branch: "main",
     identity_scope: "org",
+    publish_policy: "pull_request",
     pre_pr_review_loops: 0,
     schedule_type: "interval",
     enabled: true,
