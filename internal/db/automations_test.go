@@ -893,6 +893,7 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 
 func TestAutomationRunStore_ListByAutomationProjectsGitHubTriggerContext(t *testing.T) {
 	t.Parallel()
+	require.Contains(t, listByAutomationSelectColumns, "IN ('bot', 'system')", "run projection should classify GitHub system deliveries as automated triggers")
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgx mock should initialize")
@@ -912,8 +913,8 @@ func TestAutomationRunStore_ListByAutomationProjectsGitHubTriggerContext(t *test
 	event := string(models.AutomationGitHubEventPullRequestUpdated)
 	eventID := "pull_request:synchronize:1846"
 	dedupeGroupID := "review:42"
-	actor := "assembled-dev[bot]"
-	actorType := "Bot"
+	actor := "github"
+	actorType := "System"
 	botTriggered := true
 	row := []any{
 		runID, automationID, orgID, now, models.AutomationTriggeredByGitHub,

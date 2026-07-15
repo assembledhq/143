@@ -2781,8 +2781,38 @@ func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automation
 	}
 	req.OrgID = repo.OrgID
 	req.RepositoryID = repo.ID
+	s.populateGitHubAutomationHead(ctx, &repo, &req)
 	if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, req); err != nil {
 		s.logger.Warn().Err(err).Str("repo", req.Repository).Str("github_event", string(req.Event)).Msg("failed to trigger github event automations")
+	}
+}
+
+// populateGitHubAutomationHead fills revision context for webhook payloads,
+// such as issue_comment, that identify a pull request without embedding its
+// current head SHA. The lookup is best-effort so a temporary GitHub API error
+// does not discard an otherwise valid automation event.
+func (s *PRService) populateGitHubAutomationHead(ctx context.Context, repo *models.Repository, req *automationevents.GitHubEventTriggerRequest) {
+	if req.HeadSHA != "" || req.PullRequestNumber <= 0 || s.tokenProvider == nil {
+		return
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		s.logger.Warn().Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("cannot resolve pull request head for malformed repository name")
+		return
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, repo.OrgID, repo)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to get installation token for github automation revision lookup")
+		return
+	}
+	head, err := s.GetPullRequestHead(ctx, token, owner, repoName, req.PullRequestNumber)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to resolve pull request head for github automation trigger")
+		return
+	}
+	req.HeadSHA = head.SHA
+	if req.PullRequestURL == "" {
+		req.PullRequestURL = head.HTMLURL
 	}
 }
 

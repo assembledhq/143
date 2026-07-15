@@ -671,7 +671,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantActor:   "commenter",
 			wantBody:    "Can you handle this?",
 			wantEventID: "issue_comment:901",
-			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantActorType: "User",
+			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
 		},
 		{
 			name:   "pull request review submitted",
@@ -731,6 +731,13 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			githubAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/repos/acme/app/pulls/42", r.URL.Path, "revision lookup should request the triggering pull request")
+				require.Equal(t, "token installation-token", r.Header.Get("Authorization"), "revision lookup should use the repository installation token")
+				_, err := fmt.Fprint(w, `{"number":42,"html_url":"https://github.com/acme/app/pull/42","state":"open","head":{"ref":"feature","sha":"head-123"}}`)
+				require.NoError(t, err, "GitHub test response should be written")
+			}))
+			t.Cleanup(githubAPI.Close)
 
 			orgID := uuid.New()
 			repoID := uuid.New()
@@ -745,10 +752,15 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			}
 
 			svc := &PRService{
+				tokenProvider: &Service{cache: map[int64]*cachedToken{
+					456: {Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour)},
+				}},
 				repos:                   db.NewRepositoryStore(repoMock),
 				pullRequests:            db.NewPullRequestStore(prMock),
 				automationEventTriggers: triggerer,
 				logger:                  zerolog.Nop(),
+				baseURL:                 githubAPI.URL,
+				httpClient:              githubAPI.Client(),
 			}
 
 			tt.run(t, svc, orgID, githubRepoID, fullName)

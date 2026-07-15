@@ -17,6 +17,8 @@ Webhook handlers copy GitHub's `X-GitHub-Delivery` header into the typed event p
 
 Before creating a run, the trigger service trims the fields, constructs a canonical PR URL when GitHub omitted one, infers `Bot` for logins ending in `[bot]`, and scopes the provider event key to the pull request as `<delivery-id>:pr:<number>`. The suffix is required because one check delivery can reference multiple pull requests while the run idempotency index is keyed by automation and provider event ID.
 
+Some GitHub payloads, notably `issue_comment`, identify the pull request but omit its head revision. After resolving the repository, `PRService` uses its installation token to fetch the current pull request head before triggering the automation. This enrichment is best-effort: an API failure is logged, but the webhook event still triggers rather than being discarded.
+
 The normalized fields are stored in the existing run columns and snapshots:
 
 - `provider = github` and `provider_event_id` identify the delivery/target pair;
@@ -31,11 +33,10 @@ No new table or migration is required.
 `AutomationRunStore.ListByAutomation` projects two compact optional objects from the snapshot while continuing to omit the full `config_snapshot` from the polling payload:
 
 - `trigger_target`: repository, PR number, canonical URL, optional title, and optional head SHA;
-- `trigger_details`: GitHub event, provider event ID, logical event ID, dedupe group, actor, actor type, and a normalized `bot_triggered` flag.
+- `trigger_details`: GitHub event, provider event ID, logical event ID, dedupe group, actor, actor type, and a normalized `bot_triggered` flag. The flag is true for GitHub `Bot` actors, 143's `System` actors (including check-suite and check-run deliveries), and logins ending in `[bot]`.
 
 The SQL projection also constructs canonical PR URLs for historical GitHub runs that have a repository and PR number but no stored URL. Scheduled, manual, and non-GitHub runs leave both objects absent, preserving the existing additive API shape.
 
 ## Boundaries
 
 This context describes what caused a run and what it evaluated. It does not claim that the run approved, rejected, or advised on the PR. Review decisions are a separate structured outcome contract, and raw execution status remains a statement about whether the automation infrastructure completed successfully.
-

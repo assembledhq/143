@@ -911,7 +911,7 @@ const listByAutomationSelectColumns = `ar.id, ar.automation_id, ar.org_id, ar.tr
 	NULLIF(ar.config_snapshot #>> '{github,actor}', '') AS trigger_actor,
 	NULLIF(ar.config_snapshot #>> '{github,actor_type}', '') AS trigger_actor_type,
 	CASE WHEN ar.triggered_by = 'github' THEN
-		lower(COALESCE(ar.config_snapshot #>> '{github,actor_type}', '')) = 'bot'
+		lower(COALESCE(ar.config_snapshot #>> '{github,actor_type}', '')) IN ('bot', 'system')
 		OR lower(COALESCE(ar.config_snapshot #>> '{github,actor}', '')) ~ '\[bot\]$'
 	END AS trigger_bot,
 	ar.status, ar.completed_at, ar.result_summary, ar.created_at, ar.updated_at,
