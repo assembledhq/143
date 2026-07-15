@@ -69,6 +69,10 @@ When Slack asks for durable coding work, 143 resolves the repository in this ord
 
 Reply in the same Slack thread to continue the linked 143 session. 143 reuses the Slack thread as long as the session can be continued; if the previous session is already in a terminal non-resumable state, a new session is started and linked back to the thread.
 
+## Notifications
+
+New Slack integrations default to the **Quiet** notification preset. Notification channels are reserved for lightweight, actionable updates such as human-input requests; session failures, automation failures, and repeated-failure streaks stay in 143 instead of being broadcast into Slack channels. Sessions started from Slack still report their outcome in the originating thread.
+
 ## How it works
 
 When the Slack agent receives a mention, DM, App Home start, or slash command, it creates or continues a normal 143 session with `origin = slack`. The bot posts a quick acknowledgement with the session link, sends sparse progress updates, then posts the final answer and useful outcome links such as branch, PR, preview, CI state, diff stats, or required next action.

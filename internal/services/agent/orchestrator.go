@@ -570,6 +570,7 @@ type ProjectTaskUpdater interface {
 // consistent with whatever the orchestrator persisted to the session.
 type AutomationRunUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
+	AutomaticPublishPolicy(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationPublishPolicy, error)
 }
 
 type AutomationGoalImprovementUpdater interface {
@@ -3524,7 +3525,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Str("status", string(status))
 	})
 
-	if run.Origin != models.SessionOriginAutomationGoalImprovement {
+	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		payload := map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -3582,6 +3583,49 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	o.notifyPagerDutySessionComplete(ctx, run, status, pagerDutySessionCompletionSummary(run))
 
 	return nil
+}
+
+func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.Session, result *models.SessionResult, log zerolog.Logger) bool {
+	if run.Origin == models.SessionOriginAutomationGoalImprovement {
+		return false
+	}
+	if result == nil || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
+		log.Info().Msg("skipping automatic PR creation because the session produced no diff")
+		o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneEndedNoPR))
+		return false
+	}
+	if run.AutomationRunID == nil {
+		return true
+	}
+	if o.automationRuns == nil {
+		log.Warn().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy is unavailable")
+		return false
+	}
+	policy, err := o.automationRuns.AutomaticPublishPolicy(ctx, run.OrgID, *run.AutomationRunID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy could not be resolved")
+		return false
+	}
+	switch policy {
+	case models.AutomationPublishPolicyPullRequest:
+		return true
+	case models.AutomationPublishPolicyNone:
+		log.Info().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy is none")
+		return false
+	default:
+		log.Error().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Str("publish_policy", string(policy)).
+			Msg("skipping automatic PR creation because automation publish policy is invalid")
+		return false
+	}
 }
 
 // ContinueSession handles a follow-up turn in a multi-turn session.

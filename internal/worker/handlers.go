@@ -3958,12 +3958,17 @@ func newSlackDeliverHumanInputHandler(stores *Stores, services *Services, logger
 func newSlackSendNotificationHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	slackClient := ingestion.NewSlackAPIClient(logger)
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
-		if stores == nil || stores.Credentials == nil {
-			return fmt.Errorf("slack notification dependencies are not configured")
-		}
 		var input models.SlackSendNotificationJobPayload
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal slack notification payload: %w", err)
+		}
+		// Drop retired events at delivery time too, so jobs queued before a
+		// deployment cannot leak obsolete channel notifications afterward.
+		if slackNotificationEventDisabled(input.Kind) {
+			return nil
+		}
+		if stores == nil || stores.Credentials == nil {
+			return fmt.Errorf("slack notification dependencies are not configured")
 		}
 		orgID, err := uuid.Parse(input.OrgID)
 		if err != nil {
@@ -4211,6 +4216,9 @@ type slackNotificationSubscriptionConfig struct {
 func slackNotificationEventDisabled(eventKind string) bool {
 	switch eventKind {
 	case string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationSessionFailed),
+		string(models.SlackNotificationAutomationFailed),
+		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationPROpened),
 		string(models.SlackNotificationPreviewReady),
 		string(models.SlackNotificationPreviewFailed),
@@ -4252,16 +4260,10 @@ func slackNotificationPresetEvents(preset *models.SlackNotificationPreset) []str
 	switch *preset {
 	case models.SlackNotificationPresetQuiet:
 		return []string{
-			string(models.SlackNotificationSessionFailed),
-			string(models.SlackNotificationAutomationFailed),
-			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetBalanced:
 		return []string{
-			string(models.SlackNotificationSessionFailed),
-			string(models.SlackNotificationAutomationFailed),
-			string(models.SlackNotificationAutomationFailureStreak),
 			string(models.SlackNotificationHumanInputRequested),
 		}
 	case models.SlackNotificationPresetVerbose:
@@ -4476,6 +4478,11 @@ func recordSlackMessageUpdateLatency(ctx context.Context, services *Services, me
 }
 
 func enqueueSlackSessionNotifications(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID, automationRunID *uuid.UUID, eventKind, title, body string) {
+	// Session failures stay in 143 (and in the originating Slack thread for
+	// Slack-started work) instead of being broadcast into notification channels.
+	if eventKind == string(models.SlackNotificationSessionFailed) {
+		return
+	}
 	enqueueSlackNotificationSubscribers(ctx, stores, logger, orgID, slackNotificationFanoutInput{
 		EventKind: eventKind,
 		Title:     title,

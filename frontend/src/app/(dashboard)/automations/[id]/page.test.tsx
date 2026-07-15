@@ -844,10 +844,18 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal automation"));
+    await user.click(screen.getByText("Advanced settings"));
+    await user.click(
+      screen.getByRole("combobox", { name: "After a successful run" }),
+    );
+    await user.click(await screen.findByText("Do not publish"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ identity_scope: "personal" });
+      expect(updateBody).toMatchObject({
+        identity_scope: "personal",
+        publish_policy: "none",
+      });
     });
   });
 

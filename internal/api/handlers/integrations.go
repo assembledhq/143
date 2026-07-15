@@ -2503,7 +2503,7 @@ func defaultSlackBotSettings(orgID, installationID uuid.UUID) models.SlackBotSet
 		RoutingMode:               models.SlackRoutingModeAuto,
 		ResponseVisibility:        models.SlackResponseVisibilityThread,
 		AllowedActions:            []string{string(models.SlackChannelActionSession), string(models.SlackChannelActionPreview)},
-		NotificationPreset:        models.SlackNotificationPresetBalanced,
+		NotificationPreset:        models.SlackNotificationPresetQuiet,
 		NotificationSubscriptions: json.RawMessage(`{}`),
 		Active:                    true,
 	}
