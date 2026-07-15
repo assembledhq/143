@@ -764,7 +764,7 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 ::code-comment{title="[P2] Missing regression coverage" body="The parser behavior changed without a direct regression test." file="internal/worker/code_review_handler.go" start=42 priority=2}
 
 ` + "```json" + `
-{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","risk_notes":["tests needed"]}
+{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"Adds review handling.","review_summary":"The parser change is focused, but it needs direct regression coverage before approval.","risk_notes":["tests needed"]}
 ` + "```"
 	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID: threadID.String(),
@@ -816,6 +816,38 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 
 	require.NoError(t, err, "orchestrator harvest should persist directive-backed findings")
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should parse findings and mark the result completed")
+}
+
+func TestCodeReviewOrchestratorReviewSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		synthesis codeReviewOrchestratorSynthesis
+		expected  string
+	}{
+		{
+			name: "prefers reviewer-facing generated summary",
+			synthesis: codeReviewOrchestratorSynthesis{
+				Summary:       "Changes the parser.",
+				ReviewSummary: "The parser change is focused, but it needs direct regression coverage before approval.",
+			},
+			expected: "The parser change is focused, but it needs direct regression coverage before approval.",
+		},
+		{
+			name:      "falls back to legacy generated summary",
+			synthesis: codeReviewOrchestratorSynthesis{Summary: "Changes the parser."},
+			expected:  "Changes the parser.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codeReviewOrchestratorReviewSummary(tt.synthesis), "final review should use the best available LLM-generated summary")
+		})
+	}
 }
 
 type codeReviewDescriptionLLMStub struct {
@@ -1205,9 +1237,12 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
 				},
 				ChangedFilesAvailable: true,
+				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
+					ReviewSummary: "The router update is focused, and both review agents found no blocking issues.",
+				},
 			},
 			expected:     models.CodeReviewDecisionApproved,
-			bodyContains: "[View the full review](https://143.dev/sessions/" + sessionID.String() + ")",
+			bodyContains: "Why: The router update is focused, and both review agents found no blocking issues.",
 		},
 		{
 			name: "uses queued GitHub author login for eligible author policy",

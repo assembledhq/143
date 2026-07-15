@@ -8,7 +8,8 @@ import (
 type CodeReviewFinalReviewInput struct {
 	Decision                  CodeReviewDecision
 	Acceptable                bool
-	RiskReasons               []string
+	RiskReasons               []CodeReviewRiskReason
+	GeneratedSummary          string
 	SessionURL                string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
@@ -29,7 +30,7 @@ func BuildCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
 }
 
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
-	paragraphs := make([]string, 0, 6)
+	paragraphs := make([]string, 0, 9)
 	if input.Decision == CodeReviewDecisionApproved {
 		paragraphs = append(paragraphs, "143 Code Reviewer approved this PR")
 	} else if input.Acceptable {
@@ -38,14 +39,35 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		paragraphs = append(paragraphs, "143 Code Reviewer did not approve this PR")
 	}
 
-	explanation := codeReviewDecisionExplanation(input)
+	generatedSummary := codeReviewGeneratedSummary(input.GeneratedSummary)
+	explanation := generatedSummary
+	if explanation == "" {
+		explanation = codeReviewDecisionExplanation(input)
+	}
+	paragraphs = append(paragraphs, "Why: "+explanation)
+
+	if generatedSummary != "" && !input.Acceptable {
+		if blockers := codeReviewRiskReasonExplanations(input.RiskReasons, input.DescriptionIssues); len(blockers) > 0 {
+			var policyBlockers strings.Builder
+			policyBlockers.WriteString("Policy blockers:\n")
+			for _, blocker := range blockers {
+				policyBlockers.WriteString("- " + blocker + "\n")
+			}
+			paragraphs = append(paragraphs, strings.TrimSpace(policyBlockers.String()))
+		}
+	}
+
+	if generatedSummary != "" {
+		if facts := codeReviewFacts(input); len(facts) > 0 {
+			paragraphs = append(paragraphs, "Review facts: "+strings.Join(facts, " · "))
+		}
+	}
 	if agentSummaries := nonEmptyStrings(input.AgentSummaries); len(agentSummaries) > 0 {
 		for i := range agentSummaries {
 			agentSummaries[i] = strings.TrimRight(agentSummaries[i], ".")
 		}
-		explanation += " Reviewer evidence: " + strings.Join(agentSummaries, "; ") + "."
+		paragraphs = append(paragraphs, "Reviewer evidence: "+strings.Join(agentSummaries, "; ")+".")
 	}
-	paragraphs = append(paragraphs, "Why: "+explanation)
 
 	if len(input.Findings) > 0 {
 		var findings strings.Builder
@@ -62,13 +84,39 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	if reviewers := nonEmptyStrings(input.RecommendedHumanReviewers); len(reviewers) > 0 {
 		paragraphs = append(paragraphs, "Suggested human reviewers: "+strings.Join(reviewers, ", "))
 	}
-	if !input.Acceptable {
+	if !input.Acceptable && generatedSummary == "" {
 		paragraphs = append(paragraphs, "Address the items above and request another review, or ask a human reviewer to decide.")
 	}
 	if input.SessionURL != "" {
 		paragraphs = append(paragraphs, "[View the full review]("+input.SessionURL+")")
 	}
 	return strings.Join(paragraphs, "\n\n")
+}
+
+func codeReviewGeneratedSummary(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func codeReviewFacts(input CodeReviewFinalReviewInput) []string {
+	facts := make([]string, 0, 3)
+	if input.ChangeStatsAvailable {
+		facts = append(facts, fmt.Sprintf(
+			"%d changed %s across %d %s",
+			input.LinesChanged,
+			pluralizeCodeReviewWord(input.LinesChanged, "line", "lines"),
+			input.FilesChanged,
+			pluralizeCodeReviewWord(input.FilesChanged, "file", "files"),
+		))
+	}
+	if input.Acceptable && input.ChecksRequired {
+		facts = append(facts, "required checks passed")
+	}
+	if input.Acceptable && input.ReviewerQuorumWaived {
+		facts = append(facts, "reviewer quorum waived for this low-risk change")
+	} else if input.Acceptable && input.RequiredReviewerQuorum > 0 {
+		facts = append(facts, fmt.Sprintf("reviewer quorum %d/%d", input.ReviewerQuorum, input.RequiredReviewerQuorum))
+	}
+	return facts
 }
 
 func codeReviewDecisionExplanation(input CodeReviewFinalReviewInput) string {
@@ -111,92 +159,85 @@ func codeReviewDecisionExplanation(input CodeReviewFinalReviewInput) string {
 		return result
 	}
 
-	reasons := make([]string, 0, len(input.RiskReasons))
-	for _, reason := range input.RiskReasons {
-		if reason = strings.TrimSpace(reason); reason != "" {
-			reasons = append(reasons, humanizeCodeReviewRiskReason(reason, input.DescriptionIssues))
-		}
-	}
+	reasons := codeReviewRiskReasonExplanations(input.RiskReasons, input.DescriptionIssues)
 	if len(reasons) == 0 {
 		return "The available review evidence did not meet the configured approval policy."
-	}
-	const maxReasonsInReviewBody = 4
-	if len(reasons) > maxReasonsInReviewBody {
-		additional := len(reasons) - maxReasonsInReviewBody
-		reasons = append(
-			reasons[:maxReasonsInReviewBody],
-			fmt.Sprintf("%d more %s listed in the full review.", additional, pluralizeCodeReviewWord(additional, "blocker is", "blockers are")),
-		)
 	}
 	return strings.Join(reasons, " ")
 }
 
-func humanizeCodeReviewRiskReason(reason string, descriptionIssues []string) string {
-	switch reason {
-	case "code reviewer is disabled by policy":
+func codeReviewRiskReasonExplanations(reasons []CodeReviewRiskReason, descriptionIssues []string) []string {
+	explanations := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if explanation := humanizeCodeReviewRiskReason(reason, descriptionIssues); explanation != "" {
+			explanations = append(explanations, explanation)
+		}
+	}
+	const maxReasonsInReviewBody = 4
+	if len(explanations) > maxReasonsInReviewBody {
+		additional := len(explanations) - maxReasonsInReviewBody
+		explanations = append(
+			explanations[:maxReasonsInReviewBody],
+			fmt.Sprintf("%d more %s listed in the full review.", additional, pluralizeCodeReviewWord(additional, "blocker is", "blockers are")),
+		)
+	}
+	return explanations
+}
+
+func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues []string) string {
+	switch reason.Code {
+	case CodeReviewRiskReasonReviewerDisabled:
 		return "Automated code review is disabled by policy."
-	case "required PR context could not be fetched":
+	case CodeReviewRiskReasonContextUnavailable:
 		return "Required PR context could not be fetched."
-	case "PR head changed after review started":
+	case CodeReviewRiskReasonHeadChanged:
 		return "The PR changed after this review started, so the result may be stale."
-	case "required GitHub checks are not passing":
+	case CodeReviewRiskReasonFilesLimitExceeded:
+		return fmt.Sprintf("This change touches %d files; the policy limit is %d.", reason.Actual, reason.Limit)
+	case CodeReviewRiskReasonLinesLimitExceeded:
+		return fmt.Sprintf("This change has %d changed lines; the policy limit is %d.", reason.Actual, reason.Limit)
+	case CodeReviewRiskReasonChecksFailing:
 		return "Required GitHub checks are not passing."
-	case "PR description policy did not pass":
+	case CodeReviewRiskReasonRequiredCheckFailing:
+		return fmt.Sprintf("The required check `%s` is not passing.", reason.Subject)
+	case CodeReviewRiskReasonDescriptionFailed:
 		if issues := nonEmptyStrings(descriptionIssues); len(issues) > 0 {
 			return "The PR description did not meet the configured requirements: " + strings.Join(issues, "; ") + "."
 		}
 		return "The PR description did not meet the configured requirements."
-	case "PR branch is not up to date":
+	case CodeReviewRiskReasonBranchOutOfDate:
 		return "The PR branch is not up to date."
-	case "fork PRs are not eligible for approval":
+	case CodeReviewRiskReasonForkIneligible:
 		return "Repository policy does not allow automated approval for fork PRs."
-	case "PR author is not eligible for automated approval":
+	case CodeReviewRiskReasonAuthorIneligible:
 		return "The PR author is not eligible for automated approval under repository policy."
-	case "unresolved human review threads are present":
+	case CodeReviewRiskReasonUnresolvedHumanReview:
 		return "Human review threads or change requests are still unresolved."
-	case "review agents reported blocking findings":
+	case CodeReviewRiskReasonBlockingFindings:
 		return "Review agents reported blocking findings."
-	case "reviewer agents disagreed on material risk":
+	case CodeReviewRiskReasonReviewerDisagreement:
 		return "Review agents disagreed about a material risk."
-	case "orchestrator reported the change may not match the stated intent":
+	case CodeReviewRiskReasonScopeMismatch:
 		return "The change may not match the intent stated in the PR."
-	case "orchestrator reported unresolved uncertainty":
+	case CodeReviewRiskReasonUnresolvedUncertainty:
 		return "The automated review could not resolve a material uncertainty."
-	case "possible prompt-injection attempt found in PR content":
+	case CodeReviewRiskReasonPromptInjection:
 		return "The PR contains content that may be attempting to manipulate the automated review."
-	case "Automated reviewer agents are not configured for this worker.":
-		return "Automated reviewer agents are not available on this worker."
+	case CodeReviewRiskReasonSensitivePath:
+		return fmt.Sprintf("The change touches the sensitive path `%s`, which requires human review.", reason.Subject)
+	case CodeReviewRiskReasonPathOutsideScope:
+		return fmt.Sprintf("The path `%s` is outside the scope allowed for automated approval.", reason.Subject)
+	case CodeReviewRiskReasonBlockedPath:
+		return fmt.Sprintf("Repository policy blocks automated approval for changes to `%s`.", reason.Subject)
+	case CodeReviewRiskReasonPolicyPathChanged:
+		return fmt.Sprintf("The change modifies code-review policy or configuration at `%s`, which requires human review.", reason.Subject)
+	case CodeReviewRiskReasonExcludedCategory:
+		return fmt.Sprintf("The change falls into the `%s` risk category, which requires human review.", reason.Subject)
+	case CodeReviewRiskReasonReviewerQuorum:
+		return fmt.Sprintf("Only %d of %d required review agents completed a usable review.", reason.Actual, reason.Limit)
 	}
 
-	var actual, limit int
-	if _, err := fmt.Sscanf(reason, "changed files %d exceeds policy limit %d", &actual, &limit); err == nil {
-		return fmt.Sprintf("This change touches %d files; the policy limit is %d.", actual, limit)
-	}
-	if _, err := fmt.Sscanf(reason, "changed lines %d exceeds policy limit %d", &actual, &limit); err == nil {
-		return fmt.Sprintf("This change has %d changed lines; the policy limit is %d.", actual, limit)
-	}
-	if _, err := fmt.Sscanf(reason, "reviewer quorum %d is below policy requirement %d", &actual, &limit); err == nil {
-		return fmt.Sprintf("Only %d of %d required review agents completed a usable review.", actual, limit)
-	}
-
-	prefixes := []struct {
-		prefix  string
-		message string
-	}{
-		{prefix: "required check is not passing: ", message: "The required check `%s` is not passing."},
-		{prefix: "sensitive path changed: ", message: "The change touches the sensitive path `%s`, which requires human review."},
-		{prefix: "path is outside allowed policy scope: ", message: "The path `%s` is outside the scope allowed for automated approval."},
-		{prefix: "blocked path changed: ", message: "Repository policy blocks automated approval for changes to `%s`."},
-		{prefix: "code review policy/config path changed: ", message: "The change modifies code-review policy or configuration at `%s`, which requires human review."},
-		{prefix: "excluded risk category changed: ", message: "The change falls into the `%s` risk category, which requires human review."},
-	}
-	for _, candidate := range prefixes {
-		if value, ok := strings.CutPrefix(reason, candidate.prefix); ok {
-			return fmt.Sprintf(candidate.message, strings.TrimSpace(value))
-		}
-	}
-
-	return codeReviewSentence(reason)
+	return codeReviewSentence(reason.Message())
 }
 
 func codeReviewEnglishList(values []string) string {

@@ -71,5 +71,8 @@ Return concise Markdown, then include a final JSON object fenced as ```json with
   "reviewer_disagreement": true|false,
   "prompt_injection_detected": true|false,
   "summary": "one sentence summary of what changed",
+  "review_summary": "two to four concise reviewer-facing sentences explaining the evidence, policy blockers, and the most useful next step",
   "risk_notes": ["short note"]
 }
+
+The `review_summary` is used as the main prose in the final GitHub review. Ground it in the supplied evidence, write it as one paragraph, and make it useful to the PR author. Do not say that the PR was approved or rejected; deterministic backend policy makes that decision and adds the final status separately.

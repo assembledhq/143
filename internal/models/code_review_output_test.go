@@ -20,11 +20,15 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "explains non-approval in plain language",
+			name: "uses generated narrative with typed policy blockers",
 			input: CodeReviewFinalReviewInput{
-				Decision:          CodeReviewDecisionNeedsHumanReview,
-				Acceptable:        false,
-				RiskReasons:       []string{"PR description policy did not pass", "reviewer quorum 1 is below policy requirement 2"},
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				RiskReasons: []CodeReviewRiskReason{
+					{Code: CodeReviewRiskReasonDescriptionFailed},
+					{Code: CodeReviewRiskReasonReviewerQuorum, Actual: 1, Limit: 2},
+				},
+				GeneratedSummary:  "The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.",
 				SessionURL:        "https://143.dev/sessions/sess_123",
 				DescriptionPassed: &descriptionFailed,
 				DescriptionIssues: []string{
@@ -35,17 +39,22 @@ func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 			},
 			expected: `143 Code Reviewer did not approve this PR
 
-Why: The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot). Only 1 of 2 required review agents completed a usable review. Reviewer evidence: Codex found no blocking issues; Claude Code timed out.
+Why: The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
 
-Address the items above and request another review, or ask a human reviewer to decide.
+Policy blockers:
+- The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot).
+- Only 1 of 2 required review agents completed a usable review.
+
+Reviewer evidence: Codex found no blocking issues; Claude Code timed out.
 
 [View the full review](https://143.dev/sessions/sess_123)`,
 		},
 		{
-			name: "explains approval with concrete policy evidence",
+			name: "uses generated approval narrative with compact review facts",
 			input: CodeReviewFinalReviewInput{
 				Decision:               CodeReviewDecisionApproved,
 				Acceptable:             true,
+				GeneratedSummary:       "The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.",
 				SessionURL:             "https://143.dev/sessions/sess_approved",
 				DescriptionPassed:      &descriptionPassed,
 				AgentSummaries:         []string{"Codex found no blocking issues", "Claude Code found no blocking issues"},
@@ -58,7 +67,11 @@ Address the items above and request another review, or ask a human reviewer to d
 			},
 			expected: `143 Code Reviewer approved this PR
 
-Why: It met the configured policy: 180 changed lines across 4 files, the PR description passed, required checks passed, and 2 usable reviewer reports met the required quorum of 2. Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking issues.
+Why: The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.
+
+Review facts: 180 changed lines across 4 files · required checks passed · reviewer quorum 2/2
+
+Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking issues.
 
 [View the full review](https://143.dev/sessions/sess_approved)`,
 		},
@@ -80,7 +93,7 @@ Why: It met the configured policy: the PR description passed and 1 usable review
 			input: CodeReviewFinalReviewInput{
 				Decision:    CodeReviewDecisionNeedsHumanReview,
 				Acceptable:  false,
-				RiskReasons: []string{"review agents reported blocking findings"},
+				RiskReasons: []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockingFindings}},
 				Findings: []CodeReviewFinding{{
 					Severity:  CodeReviewFindingSeverityHigh,
 					Path:      &path,
@@ -103,9 +116,12 @@ Address the items above and request another review, or ask a human reviewer to d
 		{
 			name: "makes scope limits easy to compare",
 			input: CodeReviewFinalReviewInput{
-				Decision:    CodeReviewDecisionNeedsHumanReview,
-				Acceptable:  false,
-				RiskReasons: []string{"changed lines 1842 exceeds policy limit 1000", "changed files 34 exceeds policy limit 20"},
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				RiskReasons: []CodeReviewRiskReason{
+					{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 1842, Limit: 1000},
+					{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 34, Limit: 20},
+				},
 			},
 			expected: `143 Code Reviewer did not approve this PR
 
