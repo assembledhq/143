@@ -3427,7 +3427,7 @@ export type AutomationGitHubEvent =
   | "github.pull_request_review.submitted"
   | "github.pull_request_review_comment.created";
 
-export type AutomationEventProvider = "pagerduty" | "linear";
+export type AutomationEventProvider = "github" | "pagerduty" | "linear";
 export type PagerDutyEventType =
   | "incident.triggered"
   | "incident.acknowledged"
@@ -3611,6 +3611,9 @@ export interface AutomationRun {
   triggered_by: "schedule" | "manual" | "github";
   triggered_by_user_id?: string;
   scheduled_time?: string;
+  provider?: AutomationEventProvider;
+  provider_event_id?: string;
+  trigger_context?: Record<string, unknown>;
   goal_snapshot: string;
   config_snapshot?: Record<string, unknown>;
   status: AutomationRunStatus;
@@ -3624,6 +3627,100 @@ export interface AutomationRun {
   // when the run hasn't spawned a session yet (pending/skipped, or
   // mid-flight before the worker creates the session).
   session?: AutomationRunSession;
+  trigger_target?: AutomationRunTriggerTarget;
+  trigger_details?: AutomationRunTriggerDetails;
+}
+
+export interface AutomationRunTriggerTarget {
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+}
+
+export interface AutomationRunTriggerDetails {
+  event: AutomationGitHubEvent;
+  provider_event_id?: string;
+  event_id?: string;
+  dedupe_group_id?: string;
+  actor?: string;
+  actor_type?: string;
+  bot_triggered: boolean;
+}
+
+export type AutomationOutcomeDecision =
+  | "passed"
+  | "changes_requested"
+  | "advisory"
+  | "not_applicable";
+
+export type AutomationOutcomeSource = "agent_reported" | "legacy_inferred";
+
+export type AutomationExternalActionType =
+  | "github_review_changes_requested"
+  | "github_review_approved"
+  | "github_comment";
+
+export type AutomationExternalActionVerificationStatus =
+  | "reported"
+  | "verified"
+  | "unavailable";
+
+export interface AutomationRunExternalAction {
+  id: string;
+  org_id: string;
+  outcome_id: string;
+  provider: string;
+  action_type: AutomationExternalActionType;
+  external_id?: string;
+  url: string;
+  verification_status: AutomationExternalActionVerificationStatus;
+  created_at: string;
+}
+
+export interface AutomationRunOutcome {
+  id: string;
+  org_id: string;
+  automation_id: string;
+  automation_run_id: string;
+  session_id: string;
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+  decision: AutomationOutcomeDecision;
+  reason: string;
+  source: AutomationOutcomeSource;
+  reported_at: string;
+  created_at: string;
+  external_action?: AutomationRunExternalAction;
+}
+
+export interface AutomationDecision {
+  automation_id: string;
+  run_id: string;
+  session_id?: string;
+  target: AutomationRunTriggerTarget;
+  execution_status: AutomationRunStatus;
+  triggered_at: string;
+  completed_at?: string;
+  attempt_count: number;
+  outcome?: AutomationRunOutcome;
+}
+
+export interface AutomationDecisionStats {
+  unique_pull_requests: number;
+  unique_revisions: number;
+  total_runs: number;
+  evaluating: number;
+  passed: number;
+  changes_requested: number;
+  advisory: number;
+  not_applicable: number;
+  outcome_not_reported: number;
+  execution_failed: number;
 }
 
 // Mirrors the session publish lifecycle enums in internal/models/session_enums.go.

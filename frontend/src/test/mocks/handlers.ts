@@ -1120,6 +1120,24 @@ export const handlers = [
     });
   }),
 
+  // The decision-first automation UI is independently deployable from the
+  // structured-outcomes backend. Default to the pre-outcomes response so
+  // existing page tests exercise its raw-run fallback; focused tests override
+  // these handlers with decision data.
+  http.get('/api/v1/automations/:id/decisions', () => {
+    return HttpResponse.json(
+      { error: { code: 'NOT_FOUND', message: 'Decisions not available' } },
+      { status: 404 },
+    );
+  }),
+
+  http.get('/api/v1/automations/:id/decision-stats', () => {
+    return HttpResponse.json(
+      { error: { code: 'NOT_FOUND', message: 'Decision stats not available' } },
+      { status: 404 },
+    );
+  }),
+
   http.get('/api/v1/pm/documents', () => {
     return HttpResponse.json({
       data: [],
