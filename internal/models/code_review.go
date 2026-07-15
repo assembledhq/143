@@ -986,23 +986,161 @@ type CodeReviewRiskInput struct {
 	HeadSHAChanged         bool
 }
 
+type CodeReviewRiskReasonCode string
+
+const (
+	CodeReviewRiskReasonReviewerDisabled      CodeReviewRiskReasonCode = "reviewer_disabled"
+	CodeReviewRiskReasonContextUnavailable    CodeReviewRiskReasonCode = "context_unavailable"
+	CodeReviewRiskReasonHeadChanged           CodeReviewRiskReasonCode = "head_changed"
+	CodeReviewRiskReasonFilesLimitExceeded    CodeReviewRiskReasonCode = "files_limit_exceeded"
+	CodeReviewRiskReasonLinesLimitExceeded    CodeReviewRiskReasonCode = "lines_limit_exceeded"
+	CodeReviewRiskReasonChecksFailing         CodeReviewRiskReasonCode = "checks_failing"
+	CodeReviewRiskReasonRequiredCheckFailing  CodeReviewRiskReasonCode = "required_check_failing"
+	CodeReviewRiskReasonDescriptionFailed     CodeReviewRiskReasonCode = "description_failed"
+	CodeReviewRiskReasonBranchOutOfDate       CodeReviewRiskReasonCode = "branch_out_of_date"
+	CodeReviewRiskReasonForkIneligible        CodeReviewRiskReasonCode = "fork_ineligible"
+	CodeReviewRiskReasonAuthorIneligible      CodeReviewRiskReasonCode = "author_ineligible"
+	CodeReviewRiskReasonUnresolvedHumanReview CodeReviewRiskReasonCode = "unresolved_human_review"
+	CodeReviewRiskReasonBlockingFindings      CodeReviewRiskReasonCode = "blocking_findings"
+	CodeReviewRiskReasonReviewerDisagreement  CodeReviewRiskReasonCode = "reviewer_disagreement"
+	CodeReviewRiskReasonScopeMismatch         CodeReviewRiskReasonCode = "scope_mismatch"
+	CodeReviewRiskReasonUnresolvedUncertainty CodeReviewRiskReasonCode = "unresolved_uncertainty"
+	CodeReviewRiskReasonPromptInjection       CodeReviewRiskReasonCode = "prompt_injection"
+	CodeReviewRiskReasonSensitivePath         CodeReviewRiskReasonCode = "sensitive_path"
+	CodeReviewRiskReasonPathOutsideScope      CodeReviewRiskReasonCode = "path_outside_scope"
+	CodeReviewRiskReasonBlockedPath           CodeReviewRiskReasonCode = "blocked_path"
+	CodeReviewRiskReasonPolicyPathChanged     CodeReviewRiskReasonCode = "policy_path_changed"
+	CodeReviewRiskReasonExcludedCategory      CodeReviewRiskReasonCode = "excluded_category"
+	CodeReviewRiskReasonReviewerQuorum        CodeReviewRiskReasonCode = "reviewer_quorum"
+)
+
+func (c CodeReviewRiskReasonCode) Validate() error {
+	switch c {
+	case CodeReviewRiskReasonReviewerDisabled,
+		CodeReviewRiskReasonContextUnavailable,
+		CodeReviewRiskReasonHeadChanged,
+		CodeReviewRiskReasonFilesLimitExceeded,
+		CodeReviewRiskReasonLinesLimitExceeded,
+		CodeReviewRiskReasonChecksFailing,
+		CodeReviewRiskReasonRequiredCheckFailing,
+		CodeReviewRiskReasonDescriptionFailed,
+		CodeReviewRiskReasonBranchOutOfDate,
+		CodeReviewRiskReasonForkIneligible,
+		CodeReviewRiskReasonAuthorIneligible,
+		CodeReviewRiskReasonUnresolvedHumanReview,
+		CodeReviewRiskReasonBlockingFindings,
+		CodeReviewRiskReasonReviewerDisagreement,
+		CodeReviewRiskReasonScopeMismatch,
+		CodeReviewRiskReasonUnresolvedUncertainty,
+		CodeReviewRiskReasonPromptInjection,
+		CodeReviewRiskReasonSensitivePath,
+		CodeReviewRiskReasonPathOutsideScope,
+		CodeReviewRiskReasonBlockedPath,
+		CodeReviewRiskReasonPolicyPathChanged,
+		CodeReviewRiskReasonExcludedCategory,
+		CodeReviewRiskReasonReviewerQuorum:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
+	}
+}
+
+type CodeReviewRiskReason struct {
+	Code    CodeReviewRiskReasonCode `json:"code"`
+	Actual  int                      `json:"actual,omitempty"`
+	Limit   int                      `json:"limit,omitempty"`
+	Subject string                   `json:"subject,omitempty"`
+}
+
+func (r CodeReviewRiskReason) Message() string {
+	switch r.Code {
+	case CodeReviewRiskReasonReviewerDisabled:
+		return "code reviewer is disabled by policy"
+	case CodeReviewRiskReasonContextUnavailable:
+		return "required PR context could not be fetched"
+	case CodeReviewRiskReasonHeadChanged:
+		return "PR head changed after review started"
+	case CodeReviewRiskReasonFilesLimitExceeded:
+		return fmt.Sprintf("changed files %d exceeds policy limit %d", r.Actual, r.Limit)
+	case CodeReviewRiskReasonLinesLimitExceeded:
+		return fmt.Sprintf("changed lines %d exceeds policy limit %d", r.Actual, r.Limit)
+	case CodeReviewRiskReasonChecksFailing:
+		return "required GitHub checks are not passing"
+	case CodeReviewRiskReasonRequiredCheckFailing:
+		return "required check is not passing: " + r.Subject
+	case CodeReviewRiskReasonDescriptionFailed:
+		return "PR description policy did not pass"
+	case CodeReviewRiskReasonBranchOutOfDate:
+		return "PR branch is not up to date"
+	case CodeReviewRiskReasonForkIneligible:
+		return "fork PRs are not eligible for approval"
+	case CodeReviewRiskReasonAuthorIneligible:
+		return "PR author is not eligible for automated approval"
+	case CodeReviewRiskReasonUnresolvedHumanReview:
+		return "unresolved human review threads are present"
+	case CodeReviewRiskReasonBlockingFindings:
+		return "review agents reported blocking findings"
+	case CodeReviewRiskReasonReviewerDisagreement:
+		return "reviewer agents disagreed on material risk"
+	case CodeReviewRiskReasonScopeMismatch:
+		return "orchestrator reported the change may not match the stated intent"
+	case CodeReviewRiskReasonUnresolvedUncertainty:
+		return "orchestrator reported unresolved uncertainty"
+	case CodeReviewRiskReasonPromptInjection:
+		return "possible prompt-injection attempt found in PR content"
+	case CodeReviewRiskReasonSensitivePath:
+		return "sensitive path changed: " + r.Subject
+	case CodeReviewRiskReasonPathOutsideScope:
+		return "path is outside allowed policy scope: " + r.Subject
+	case CodeReviewRiskReasonBlockedPath:
+		return "blocked path changed: " + r.Subject
+	case CodeReviewRiskReasonPolicyPathChanged:
+		return "code review policy/config path changed: " + r.Subject
+	case CodeReviewRiskReasonExcludedCategory:
+		return "excluded risk category changed: " + r.Subject
+	case CodeReviewRiskReasonReviewerQuorum:
+		return fmt.Sprintf("reviewer quorum %d is below policy requirement %d", r.Actual, r.Limit)
+	default:
+		return string(r.Code)
+	}
+}
+
+func CodeReviewRiskReasonMessages(reasons []CodeReviewRiskReason) []string {
+	messages := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if message := strings.TrimSpace(reason.Message()); message != "" {
+			messages = append(messages, message)
+		}
+	}
+	return messages
+}
+
 type CodeReviewRiskEvaluation struct {
-	Acceptable bool     `json:"acceptable"`
-	Reasons    []string `json:"reasons"`
+	Acceptable    bool                   `json:"acceptable"`
+	Reasons       []string               `json:"reasons"`
+	ReasonDetails []CodeReviewRiskReason `json:"reason_details,omitempty"`
+}
+
+func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
+	e.Acceptable = false
+	e.Reasons = append(e.Reasons, reason.Message())
+	e.ReasonDetails = append(e.ReasonDetails, reason)
 }
 
 type CodeReviewDecisionEvaluation struct {
-	Decision    CodeReviewDecision `json:"decision"`
-	Acceptable  bool               `json:"acceptable"`
-	RiskReasons []string           `json:"risk_reasons,omitempty"`
+	Decision          CodeReviewDecision     `json:"decision"`
+	Acceptable        bool                   `json:"acceptable"`
+	RiskReasons       []string               `json:"risk_reasons,omitempty"`
+	RiskReasonDetails []CodeReviewRiskReason `json:"risk_reason_details,omitempty"`
 }
 
 func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRiskEvaluation) CodeReviewDecisionEvaluation {
 	if !risk.Acceptable {
 		return CodeReviewDecisionEvaluation{
-			Decision:    CodeReviewDecisionNeedsHumanReview,
-			Acceptable:  false,
-			RiskReasons: append([]string(nil), risk.Reasons...),
+			Decision:          CodeReviewDecisionNeedsHumanReview,
+			Acceptable:        false,
+			RiskReasons:       append([]string(nil), risk.Reasons...),
+			RiskReasonDetails: append([]CodeReviewRiskReason(nil), risk.ReasonDetails...),
 		}
 	}
 	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
@@ -1013,100 +1151,97 @@ func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRi
 
 func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) CodeReviewRiskEvaluation {
 	policy = ResolveCodeReviewPolicyConfig(&policy)
-	reasons := make([]string, 0)
+	risk := CodeReviewRiskEvaluation{Acceptable: true}
 	if !policy.Enabled {
-		reasons = append(reasons, "code reviewer is disabled by policy")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisabled})
 	}
 	if input.ContextFetchFailed {
-		reasons = append(reasons, "required PR context could not be fetched")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonContextUnavailable})
 	}
 	if input.HeadSHAChanged {
-		reasons = append(reasons, "PR head changed after review started")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
 	lowRisk := CodeReviewLowRiskLaneApplies(policy.RiskPolicy.LowRiskLane, input.Categories)
 	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
-		reasons = append(reasons, fmt.Sprintf("changed files %d exceeds policy limit %d", input.FilesChanged, policy.RiskPolicy.MaxFilesChanged))
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
 	}
 	maxLinesChanged := policy.RiskPolicy.MaxLinesChanged
 	if lowRisk && policy.RiskPolicy.LowRiskLane.MaxLinesChanged > maxLinesChanged {
 		maxLinesChanged = policy.RiskPolicy.LowRiskLane.MaxLinesChanged
 	}
 	if input.LinesChanged > maxLinesChanged {
-		reasons = append(reasons, fmt.Sprintf("changed lines %d exceeds policy limit %d", input.LinesChanged, maxLinesChanged))
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: input.LinesChanged, Limit: maxLinesChanged})
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
-		reasons = append(reasons, "required GitHub checks are not passing")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing})
 	}
 	for _, check := range policy.RiskPolicy.RequiredChecks {
 		if !input.RequiredChecksPassing[check] {
-			reasons = append(reasons, "required check is not passing: "+check)
+			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonRequiredCheckFailing, Subject: check})
 		}
 	}
 	if !input.DescriptionPassed {
-		reasons = append(reasons, "PR description policy did not pass")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed})
 	}
 	if policy.RiskPolicy.RequireUpToDate && !input.UpToDate {
-		reasons = append(reasons, "PR branch is not up to date")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBranchOutOfDate})
 	}
 	if input.FromFork && !policy.RiskPolicy.AllowForks {
-		reasons = append(reasons, "fork PRs are not eligible for approval")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible})
 	}
 	if len(policy.RiskPolicy.EligibleAuthors) > 0 && !codeReviewAuthorAllowed(input.Author, input.AuthorClass, policy.RiskPolicy.EligibleAuthors) {
-		reasons = append(reasons, "PR author is not eligible for automated approval")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible})
 	}
 	if input.UnresolvedHumanThreads > 0 {
-		reasons = append(reasons, "unresolved human review threads are present")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview})
 	}
 	if input.BlockingFindings > 0 {
-		reasons = append(reasons, "review agents reported blocking findings")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings})
 	}
 	if input.ReviewerDisagreement && policy.AgentRoster.DisagreementBlocks {
-		reasons = append(reasons, "reviewer agents disagreed on material risk")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement})
 	}
 	if input.ScopeMismatch {
-		reasons = append(reasons, "orchestrator reported the change may not match the stated intent")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonScopeMismatch})
 	}
 	if input.UnresolvedUncertainty {
-		reasons = append(reasons, "orchestrator reported unresolved uncertainty")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty})
 	}
 	if input.PromptInjectionFound {
-		reasons = append(reasons, "possible prompt-injection attempt found in PR content")
+		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonPromptInjection})
 	}
 	if policy.RiskPolicy.ExcludeSensitivePaths {
 		for _, path := range input.ChangedPaths {
 			if matchesAnyCodeReviewPath(path, policy.RiskPolicy.SensitivePaths) {
-				reasons = append(reasons, "sensitive path changed: "+path)
+				risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: path})
 			}
 		}
 	}
 	if len(policy.RiskPolicy.AllowedPathPatterns) > 0 {
 		for _, path := range input.ChangedPaths {
 			if !matchesAnyCodeReviewPath(path, policy.RiskPolicy.AllowedPathPatterns) {
-				reasons = append(reasons, "path is outside allowed policy scope: "+path)
+				risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonPathOutsideScope, Subject: path})
 			}
 		}
 	}
 	for _, path := range input.ChangedPaths {
 		if matchesAnyCodeReviewPath(path, policy.RiskPolicy.BlockedPathPatterns) {
-			reasons = append(reasons, "blocked path changed: "+path)
+			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockedPath, Subject: path})
 		}
 	}
 	if !policy.RiskPolicy.AllowPolicyChanges {
 		for _, path := range input.ChangedPaths {
 			if isCodeReviewPolicyPath(path) {
-				reasons = append(reasons, "code review policy/config path changed: "+path)
+				risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: path})
 			}
 		}
 	}
 	for _, category := range input.Categories {
 		if stringInSlice(category, policy.RiskPolicy.ExcludeCategories) {
-			reasons = append(reasons, "excluded risk category changed: "+category)
+			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: category})
 		}
 	}
-	if len(reasons) == 0 {
-		return CodeReviewRiskEvaluation{Acceptable: true}
-	}
-	return CodeReviewRiskEvaluation{Acceptable: false, Reasons: reasons}
+	return risk
 }
 
 func stringInSlice(needle string, haystack []string) bool {
