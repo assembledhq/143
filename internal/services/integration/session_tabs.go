@@ -24,7 +24,7 @@ type InternalSessionTabManager struct {
 func NewInternalSessionTabManager(token, baseURL string) *InternalSessionTabManager {
 	return &InternalSessionTabManager{
 		token:   token,
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: internalAPIBaseURL(baseURL),
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }

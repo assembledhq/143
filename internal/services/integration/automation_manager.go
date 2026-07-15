@@ -22,7 +22,7 @@ type InternalAutomationManager struct {
 func NewInternalAutomationManager(token, baseURL string) *InternalAutomationManager {
 	return &InternalAutomationManager{
 		token:   token,
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: internalAPIBaseURL(baseURL),
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }

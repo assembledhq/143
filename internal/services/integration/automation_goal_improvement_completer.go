@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +21,7 @@ type InternalAutomationGoalImprovementCompleter struct {
 func NewInternalAutomationGoalImprovementCompleter(token, baseURL string) *InternalAutomationGoalImprovementCompleter {
 	return &InternalAutomationGoalImprovementCompleter{
 		token:   token,
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: internalAPIBaseURL(baseURL),
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }

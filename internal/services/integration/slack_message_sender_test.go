@@ -34,7 +34,7 @@ func TestInternalSlackMessageSenderSendMessage(t *testing.T) {
 	})
 
 	require.NoError(t, err, "valid Slack send should succeed")
-	require.Equal(t, "/slack/messages", gotPath, "sender should call the internal Slack messages endpoint")
+	require.Equal(t, "/api/v1/internal/slack/messages", gotPath, "sender should call the internal Slack messages endpoint")
 	require.Equal(t, "Bearer tok", gotAuth, "sender should pass the internal bearer token")
 	require.Equal(t, SendMessageParams{ChannelID: "C123", Text: "Automation completed.", ThreadTS: "1700000000.000001"}, gotBody, "sender should forward Slack message params")
 	require.Equal(t, &SendMessageResult{Status: "sent", ChannelID: "C123", MessageTS: "1700000000.000100"}, got, "sender should decode delivery status")

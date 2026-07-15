@@ -1548,7 +1548,7 @@ func buildServices(
 		SandboxAuth:                orchestratorSandboxAuth,
 		Users:                      userStore,
 		EvalBootstraps:             evalBootstrapStore,
-		InternalAPIURL:             cfg.BaseURL + "/api/v1/internal",
+		InternalAPIURL:             cfg.BaseURL,
 		InternalAPISecret:          cfg.SessionSecret,
 		NodeID:                     cfg.NodeID,
 		Logger:                     logger,
@@ -1609,7 +1609,7 @@ func buildServices(
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetSessionMessageStore(sessionMessageStore)
-	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
+	pmSvc.SetInternalAPI(cfg.BaseURL, cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
