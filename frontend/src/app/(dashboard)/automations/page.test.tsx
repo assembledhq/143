@@ -26,8 +26,8 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Search templates...")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: /^New automation$/i })).toHaveAttribute("href", "/automations/new");
     expect(screen.getByRole("tab", { name: "Popular" })).toBeInTheDocument();
@@ -50,8 +50,8 @@ describe("AutomationsPage", () => {
 
     renderWithProviders(<AutomationsPage />);
 
-    expect(await screen.findByRole("heading", { name: "Template library" })).toBeInTheDocument();
-    expect(screen.getByText("Find flaky tests")).toBeInTheDocument();
+    expect(await screen.findByText("Find flaky tests")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
     expect(screen.getByText("Security sweep")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Search templates...")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Start from blank/i })).not.toBeInTheDocument();
@@ -299,5 +299,18 @@ describe("AutomationsPage", () => {
     expect(await screen.findAllByText("Weekly sweep")).toHaveLength(2);
     expect(screen.queryByRole("link", { name: /new/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /more options for weekly sweep/i })).not.toBeInTheDocument();
+  });
+
+  it("renders the automation workspace skeleton while automations load", () => {
+    server.use(
+      http.get("*/api/v1/automations", async () => new Promise<HttpResponse>(() => {})),
+    );
+
+    renderWithProviders(<AutomationsPage />);
+
+    expect(screen.getByLabelText("Loading automations")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("heading", { name: "Your automations" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Template library" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading automations...")).not.toBeInTheDocument();
   });
 });
