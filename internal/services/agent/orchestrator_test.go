@@ -755,6 +755,18 @@ func (m *mockSessionStore) getResultUpdates() []resultUpdate {
 	return out
 }
 
+func (m *mockSessionStore) getResultsWithFailureCategory(category string) []resultUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]resultUpdate, 0)
+	for _, update := range m.resultUpdates {
+		if update.result != nil && update.result.FailureCategory != nil && *update.result.FailureCategory == category {
+			out = append(out, update)
+		}
+	}
+	return out
+}
+
 func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1335,6 +1347,7 @@ type testDeps struct {
 // blocks use updateStatusCalls to assert thread.status was reset.
 type mockSessionThreadStore struct {
 	mu                sync.Mutex
+	eventHook         func(string)
 	getByIDResult     *models.SessionThread
 	updateStatusCalls []struct {
 		threadID uuid.UUID
@@ -1383,6 +1396,9 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uui
 func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.eventHook != nil {
+		m.eventHook("thread_result:" + threadID.String() + ":" + string(status))
+	}
 	m.updateStatusCalls = append(m.updateStatusCalls, struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
@@ -2273,9 +2289,9 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 	require.Len(t, results, 1, "exhausted recovery should mark the session failed")
 	require.Equal(t, models.SessionStatusFailed, results[0].status, "exhausted recovery should be terminal")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryRecovery)
 	require.Len(t, failures, 1, "exhausted recovery should record structured failure metadata")
-	require.Equal(t, agent.FailureCategoryRecovery, failures[0].category, "recovery failures should be classified distinctly from agent/tool failures")
+	require.True(t, failures[0].result.FailureRetryAdvised, "recovery failures should recommend retrying")
 
 	require.Empty(t, d.sessions.getStatusUpdates(), "exhausted recovery should not transition back to running")
 	require.Empty(t, d.sessions.getTurnUpdates(), "exhausted recovery should not advance the turn")
@@ -6236,9 +6252,10 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		"HOME should always be set to the sandbox user's home dir")
 
 	// The failure should be categorized as claude_code_auth.
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryClaudeCodeAuth)
 	require.Len(t, failures, 1)
-	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
+	require.Contains(t, failures[0].result.FailureNextSteps, "Connect a Claude subscription from Account settings",
+		"the terminal result should carry the Account settings recovery guidance")
 }
 
 func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.T) {
@@ -6265,14 +6282,14 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "claude subscription invalid for claude code agent")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryClaudeCodeAuth)
 	require.Len(t, failures, 1)
-	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
-	require.Contains(t, failures[0].explanation, "no longer valid",
+	require.NotNil(t, failures[0].result.FailureExplanation, "the terminal result should include a user-facing explanation")
+	require.Contains(t, *failures[0].result.FailureExplanation, "no longer valid",
 		"the explanation should say the subscription was invalidated")
-	require.Contains(t, failures[0].explanation, "Reconnect",
+	require.Contains(t, *failures[0].result.FailureExplanation, "Reconnect",
 		"the explanation should tell the user to reconnect")
-	require.NotContains(t, failures[0].explanation, "No Claude Code credentials are configured",
+	require.NotContains(t, *failures[0].result.FailureExplanation, "No Claude Code credentials are configured",
 		"a user who connected a subscription must not be told nothing is configured")
 	threadResults := threadStore.resultsForThread(threadID)
 	require.NotEmpty(t, threadResults, "the failed Claude tab should receive terminal result metadata")
@@ -6743,12 +6760,22 @@ func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T
 	session.Status = models.SessionStatusIdle
 	session.CurrentTurn = 1
 	session.PrimaryThreadID = &primaryThreadID
+	var (
+		eventMu sync.Mutex
+		events  []string
+	)
+	recordEvent := func(event string) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		events = append(events, event)
+	}
 
 	d := defaultDeps()
 	d.issues.issue = issue
 	d.creds = &mockCredentialProvider{}
 	d.codingCreds = &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
-	d.sessionThreads = &mockSessionThreadStore{}
+	d.sessions.eventHook = recordEvent
+	d.sessionThreads = &mockSessionThreadStore{eventHook: recordEvent}
 	d.messages.messages = []models.SessionMessage{{
 		ID:         1,
 		SessionID:  session.ID,
@@ -6784,6 +6811,15 @@ func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T
 	require.NotNil(t, activeResults[0].FailureExplanation, "the executing reviewer thread should carry the user-facing explanation")
 	require.Contains(t, *activeResults[0].FailureExplanation, "No Claude Code credentials are configured",
 		"the reviewer thread should show actionable setup guidance instead of the raw orchestrator error")
+
+	eventMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventMu.Unlock()
+	sessionTerminalEvent := "session_result:" + string(models.SessionStatusFailed)
+	require.Less(t, indexOfEvent(gotEvents, "thread_result:"+activeThreadID.String()+":"+string(models.ThreadStatusFailed)), indexOfEvent(gotEvents, sessionTerminalEvent),
+		"the executing reviewer thread should be durable before the terminal session event closes SSE")
+	require.Less(t, indexOfEvent(gotEvents, "thread_result:"+primaryThreadID.String()+":"+string(models.ThreadStatusFailed)), indexOfEvent(gotEvents, sessionTerminalEvent),
+		"the primary thread should be durable before the terminal session event closes SSE")
 }
 
 func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
@@ -8706,13 +8742,10 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, failedResults, 1, "ErrCodexAuthInvalid must mark the session failed inline so the user gets the re-authenticate CTA without waiting for the retry budget to exhaust")
 
-	failedFailures := 0
-	for _, f := range d.sessions.getFailureUpdates() {
-		if f.category == agent.FailureCategoryCodexAuth {
-			failedFailures++
-		}
-	}
-	require.GreaterOrEqual(t, failedFailures, 1, "auth-invalid path must record the codex_auth_expired category inline")
+	structuredFailures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryCodexAuth)
+	require.GreaterOrEqual(t, len(structuredFailures), 1, "auth-invalid path must record the codex_auth_expired category inline")
+	require.True(t, structuredFailures[len(structuredFailures)-1].result.FailureRetryAdvised,
+		"auth-invalid terminal event should include the retry recommendation")
 }
 
 // TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter mirrors
@@ -9435,10 +9468,9 @@ func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	// async classifier.
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
 		"timeout path classifies explicitly; analyze_failure should not be enqueued")
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1)
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
-	require.True(t, failures[0].retryAdvised)
+	require.True(t, failures[0].result.FailureRetryAdvised, "timeout terminal event should advise retrying")
 }
 
 func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
@@ -9491,10 +9523,9 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
 		"timeout path classifies explicitly; analyze_failure should not be enqueued")
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1)
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
-	require.True(t, failures[0].retryAdvised)
+	require.True(t, failures[0].result.FailureRetryAdvised, "timeout terminal event should advise retrying")
 }
 
 func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T) {
@@ -9552,10 +9583,10 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.Equal(t, models.RuntimeStopReasonNoProgress, checkpoints[len(checkpoints)-1].stopReason, "policy stop should record the no-progress stop reason")
 	require.NotEmpty(t, checkpoints[len(checkpoints)-1].snapshotKey, "policy stop should persist the checkpoint snapshot key")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1, "policy stop should persist a structured failure explanation")
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
-	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
+	require.NotNil(t, failures[0].result.FailureExplanation, "policy stop should include a user-facing explanation")
+	require.Contains(t, *failures[0].result.FailureExplanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
 
 	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
@@ -9629,9 +9660,9 @@ func TestRunAgent_PolicyStopPersistsTerminalStateBeforeMentionWarmup(t *testing.
 	eventMu.Lock()
 	gotEvents := append([]string(nil), events...)
 	eventMu.Unlock()
-	require.Contains(t, gotEvents, "session_failure", "policy stop should persist session failure details")
+	require.Contains(t, gotEvents, "session_result:failed", "policy stop should persist the complete terminal failure result")
 	require.Contains(t, gotEvents, "mention_warm", "policy stop should still attempt mention-index warmup after checkpointing")
-	require.Less(t, indexOfEvent(gotEvents, "session_failure"), indexOfEvent(gotEvents, "mention_warm"), "terminal session state should be persisted before mention-index warmup")
+	require.Less(t, indexOfEvent(gotEvents, "session_result:failed"), indexOfEvent(gotEvents, "mention_warm"), "terminal session state should be persisted before mention-index warmup")
 }
 
 func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {

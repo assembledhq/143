@@ -622,6 +622,8 @@ type SessionResult struct {
 	Error                           *string           `json:"error,omitempty"`
 	FailureExplanation              *string           `json:"failure_explanation,omitempty"`
 	FailureCategory                 *string           `json:"failure_category,omitempty"`
+	FailureNextSteps                []string          `json:"failure_next_steps,omitempty"`
+	FailureRetryAdvised             bool              `json:"failure_retry_advised"`
 	DiffBaseCommitSHA               *string           `json:"-"`
 	DiffHeadCommitSHA               *string           `json:"-"`
 	DiffWorkspaceDirty              bool              `json:"-"`

@@ -5745,15 +5745,18 @@ func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Sessio
 	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
 		result.Error = strPtr(errMsg)
 	}
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
-		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
-	}
-	// Drive the primary thread terminal too. The frontend's "Agent is working…"
+	// Drive the primary thread terminal before publishing the terminal session
+	// status. The session SSE closes after its first terminal status event, so
+	// every thread field needed by that payload must already be durable.
+	// The frontend's "Agent is working…"
 	// indicator is bound to the thread status, not the session status, so failing
 	// only the session leaves the thread stuck at "running" — the UI keeps spinning
 	// until the reaper sweeps it (~2.5h later). updatePrimaryThreadTerminal also
 	// publishes a thread-runtime SSE event so any open page flips immediately.
 	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
+	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
+		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
+	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
@@ -5841,15 +5844,17 @@ func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Sess
 // not give their per-tab UI enough information to explain the failure.
 func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string) {
 	result := &models.SessionResult{
-		Error:              strPtr(errMsg),
-		FailureExplanation: strPtr(explanation),
-		FailureCategory:    strPtr(category),
+		Error:               strPtr(errMsg),
+		FailureExplanation:  strPtr(explanation),
+		FailureCategory:     strPtr(category),
+		FailureNextSteps:    append([]string(nil), nextSteps...),
+		FailureRetryAdvised: true,
 	}
-	o.failRunWithResult(ctx, run, result, errMsg)
+	// Persist the exact executing thread first. failRunWithResult then persists
+	// the primary thread before atomically writing and publishing the fully
+	// structured terminal session result.
 	o.failNonPrimaryThreadWithResult(ctx, run, threadID, result, o.logger)
-	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
-		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
-	}
+	o.failRunWithResult(ctx, run, result, errMsg)
 }
 
 // failTimedOutSession handles the common bookkeeping for a session that hit
