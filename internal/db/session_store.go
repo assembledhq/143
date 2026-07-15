@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1282,32 +1283,42 @@ func (s *SessionStore) MarkRuntimeStopRequested(ctx context.Context, orgID, sess
 }
 
 // ListRuntimeControlStalledSessions returns running sessions whose runtime
-// controller should already have stopped or requested stop handling. This is a
-// narrower watchdog than ListStaleRunningSessions: it only targets rows whose
-// own runtime budget has already expired or whose persisted stop-after deadline
-// has passed.
+// controller should already have stopped or requested stop handling while an
+// execution job still holds a live lease. This is a narrower watchdog than
+// ListStaleRunningSessions: it only targets rows whose own runtime budget has
+// expired and whose worker is still actively claiming capacity.
 // lint:allow-no-orgid reason="cross-org reaper scan for stalled runtime control"
 func (s *SessionStore) ListRuntimeControlStalledSessions(ctx context.Context, deadlineBefore, stopAfterBefore time.Time) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
 		FROM sessions
-		WHERE status = 'running'
-		  AND deleted_at IS NULL
+		WHERE sessions.status = 'running'
+		  AND sessions.deleted_at IS NULL
+		  AND EXISTS (
+		    SELECT 1
+		    FROM jobs j
+		    WHERE j.org_id = sessions.org_id
+		      AND j.status = 'running'
+		      AND j.job_type IN ('run_agent', 'continue_session')
+		      AND j.payload->>'session_id' = sessions.id::text
+		      AND j.lock_token IS NOT NULL
+		      AND j.lease_expires_at > @stop_after_before
+		  )
 		  AND (
 		    (
-		      runtime_stop_reason <> ''
-		      AND runtime_graceful_stop_at IS NOT NULL
-		      AND (started_at IS NULL OR runtime_graceful_stop_at >= started_at)
-		      AND runtime_graceful_stop_at < @stop_after_before
+		      sessions.runtime_stop_reason <> ''
+		      AND sessions.runtime_graceful_stop_at IS NOT NULL
+		      AND (sessions.started_at IS NULL OR sessions.runtime_graceful_stop_at >= sessions.started_at)
+		      AND sessions.runtime_graceful_stop_at < @stop_after_before
 		    )
 		    OR (
-		      runtime_stop_reason = ''
-		      AND runtime_soft_deadline_at IS NOT NULL
-		      AND (started_at IS NULL OR runtime_soft_deadline_at >= started_at)
-		      AND runtime_soft_deadline_at < @deadline_before
+		      sessions.runtime_stop_reason = ''
+		      AND sessions.runtime_soft_deadline_at IS NOT NULL
+		      AND (sessions.started_at IS NULL OR sessions.runtime_soft_deadline_at >= sessions.started_at)
+		      AND sessions.runtime_soft_deadline_at < @deadline_before
 		    )
 		  )
-		ORDER BY COALESCE(runtime_graceful_stop_at, runtime_soft_deadline_at) ASC
+		ORDER BY COALESCE(sessions.runtime_graceful_stop_at, sessions.runtime_soft_deadline_at) ASC
 		LIMIT 100`
 
 	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
@@ -1625,7 +1636,8 @@ func (s *SessionStore) UpdatePMPlanID(ctx context.Context, orgID, runID, planID 
 // sessions will resurface at the top of the MRU-ordered list.
 func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	diffStats := computeDiffStatsForResult(result)
-	if !shouldPersistDiffSnapshot(result) {
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
 		return s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
 	}
 
@@ -1638,14 +1650,19 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats); err != nil {
 		return err
 	}
-	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-	if err != nil {
-		return err
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+		if err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
 	return nil
 }
 
@@ -1703,6 +1720,9 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		return err
 	}
 	hydrateSessionPolicy(&session)
+	if err := s.recordPrimaryChangesetHead(ctx, db, orgID, runID, result.DiffHeadCommitSHA); err != nil {
+		return err
+	}
 	s.publishStatus(ctx, &session)
 	return nil
 }
@@ -1962,13 +1982,84 @@ func (s *SessionStore) UndoResetForRetry(ctx context.Context, orgID, sessionID u
 }
 
 func (s *SessionStore) UpdateTitle(ctx context.Context, orgID, sessionID uuid.UUID, title string) error {
-	query := `UPDATE sessions SET title = @title, last_activity_at = now() WHERE id = @id AND org_id = @org_id`
+	return s.UpdateTitleWithSource(ctx, orgID, sessionID, title, models.SessionTitleSourceManual)
+}
+
+func (s *SessionStore) UpdateTitleWithSource(ctx context.Context, orgID, sessionID uuid.UUID, title string, source models.SessionTitleSource) error {
+	if err := source.Validate(); err != nil {
+		return err
+	}
+	query := `
+		UPDATE sessions
+		SET title = @title,
+		    title_source = @title_source,
+		    title_intent = NULL,
+		    title_pivoted_at_turn = NULL,
+		    title_generated_at = CASE WHEN @title_source = 'generated' THEN now() ELSE NULL END,
+		    last_activity_at = now()
+		WHERE id = @id AND org_id = @org_id`
 	_, err := s.db.Exec(ctx, query, pgx.NamedArgs{
-		"id":     sessionID,
-		"org_id": orgID,
-		"title":  title,
+		"id":           sessionID,
+		"org_id":       orgID,
+		"title":        title,
+		"title_source": source,
 	})
 	return err
+}
+
+// UpdateTitleForPivot records a generated title and the accepted primary
+// objective atomically. An unchanged display title preserves last_activity_at
+// while still advancing the accepted intent so the pivot is not rediscovered.
+func (s *SessionStore) UpdateTitleForPivot(ctx context.Context, orgID, sessionID uuid.UUID, title, intent string, pivotedAtTurn int) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE sessions
+		SET title = @title,
+		    title_source = 'generated',
+		    title_intent = @title_intent,
+		    title_pivoted_at_turn = @pivoted_at_turn,
+		    title_generated_at = CASE WHEN title IS DISTINCT FROM @title THEN now() ELSE title_generated_at END,
+		    last_activity_at = CASE WHEN title IS DISTINCT FROM @title THEN now() ELSE last_activity_at END
+		WHERE id = @id
+		  AND org_id = @org_id`, pgx.NamedArgs{
+		"id":              sessionID,
+		"org_id":          orgID,
+		"title":           title,
+		"title_intent":    intent,
+		"pivoted_at_turn": pivotedAtTurn,
+	})
+	return err
+}
+
+func (s *SessionStore) GetTitleState(ctx context.Context, orgID, sessionID uuid.UUID) (models.SessionTitleState, error) {
+	var state models.SessionTitleState
+	var title sql.NullString
+	var intent sql.NullString
+	var pivotedAtTurn sql.NullInt64
+	var generatedAt sql.NullTime
+	err := s.db.QueryRow(ctx, `
+		SELECT title, title_source, title_intent, title_pivoted_at_turn, title_generated_at, current_turn
+		FROM sessions
+		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`, pgx.NamedArgs{
+		"id":     sessionID,
+		"org_id": orgID,
+	}).Scan(&title, &state.TitleSource, &intent, &pivotedAtTurn, &generatedAt, &state.CurrentTurn)
+	if err != nil {
+		return models.SessionTitleState{}, err
+	}
+	if title.Valid {
+		state.Title = &title.String
+	}
+	if intent.Valid {
+		state.TitleIntent = &intent.String
+	}
+	if pivotedAtTurn.Valid {
+		turn := int(pivotedAtTurn.Int64)
+		state.TitlePivotedAtTurn = &turn
+	}
+	if generatedAt.Valid {
+		state.TitleGeneratedAt = &generatedAt.Time
+	}
+	return state, nil
 }
 
 func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error) {
@@ -2066,7 +2157,8 @@ func (s *SessionStore) ListByIDs(ctx context.Context, orgID uuid.UUID, ids []uui
 // a snapshot to diff_history for diff-between-passes review.
 func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	diffStats := computeDiffStatsForResult(result)
-	if !shouldPersistDiffSnapshot(result) {
+	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
+	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
 		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats)
 	}
 
@@ -2079,14 +2171,19 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
 		return err
 	}
-	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-	if err != nil {
-		return err
+	var updated workspaceRevisionUpdate
+	if persistDiffSnapshot {
+		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+		if err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	if persistDiffSnapshot {
+		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
+	}
 	return nil
 }
 
@@ -2163,11 +2260,33 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		"diff_collected_at": result.DiffCollectedAt,
 		"diff_stats":        diffStats,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recordPrimaryChangesetHead(ctx, db, orgID, sessionID, result.DiffHeadCommitSHA)
+}
+
+func (s *SessionStore) recordPrimaryChangesetHead(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, headSHA *string) error {
+	if headSHA == nil || strings.TrimSpace(*headSHA) == "" {
+		return nil
+	}
+	_, err := db.Exec(ctx, `UPDATE session_changesets
+		SET head_sha = @head_sha, updated_at = now()
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "head_sha": *headSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("record primary changeset turn head: %w", err)
+	}
+	return nil
 }
 
 func shouldPersistDiffSnapshot(result *models.SessionResult) bool {
 	return result != nil && result.Diff != nil && result.DiffBaseCommitSHA != nil && *result.DiffBaseCommitSHA != ""
+}
+
+func shouldPersistChangesetHead(result *models.SessionResult) bool {
+	return result != nil && result.DiffHeadCommitSHA != nil && strings.TrimSpace(*result.DiffHeadCommitSHA) != ""
 }
 
 func (s *SessionStore) writeDiffSnapshot(ctx context.Context, db DBTX, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, diffStats json.RawMessage) (workspaceRevisionUpdate, error) {
@@ -3523,6 +3642,41 @@ func (s *SessionStore) UpdateWorkingBranch(ctx context.Context, orgID, sessionID
 		"working_branch": branch,
 	})
 	return err
+}
+
+func (s *SessionStore) GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
+	var changesetID uuid.UUID
+	err := s.db.QueryRow(ctx, `SELECT id FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&changesetID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("get primary session changeset id: %w", err)
+	}
+	return changesetID, nil
+}
+
+func (s *SessionStore) GetPrimaryChangesetWorktreePath(ctx context.Context, orgID, sessionID uuid.UUID) (*string, error) {
+	var path *string
+	if err := s.db.QueryRow(ctx, `SELECT worktree_path FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND is_primary`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID,
+	}).Scan(&path); err != nil {
+		return nil, fmt.Errorf("get primary changeset worktree path: %w", err)
+	}
+	return path, nil
+}
+
+func (s *SessionStore) GetChangesetWorktreePath(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (*string, error) {
+	var path *string
+	if err := s.db.QueryRow(ctx, `SELECT worktree_path FROM session_changesets
+		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id
+		  AND status <> 'abandoned'`, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).Scan(&path); err != nil {
+		return nil, fmt.Errorf("get changeset worktree path: %w", err)
+	}
+	return path, nil
 }
 
 // ListStalePendingSessions returns pending sessions whose latest pending-state

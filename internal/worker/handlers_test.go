@@ -317,14 +317,14 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 		},
 		{
 			name:      "event list matches event",
-			raw:       json.RawMessage(`{"events":["session.failed"]}`),
-			eventKind: "session.failed",
+			raw:       json.RawMessage(`{"events":["human_input.requested"]}`),
+			eventKind: "human_input.requested",
 			expected:  true,
 		},
 		{
 			name:      "wildcard matches event",
 			raw:       json.RawMessage(`{"events":["*"]}`),
-			eventKind: "session.failed",
+			eventKind: "human_input.requested",
 			expected:  true,
 		},
 		{
@@ -385,6 +385,12 @@ func TestSlackNotificationSubscriptionMatches(t *testing.T) {
 			name:      "explicit readiness attention does not match",
 			raw:       json.RawMessage(`{"events":["pr.readiness_attention"]}`),
 			eventKind: "pr.readiness_attention",
+			expected:  false,
+		},
+		{
+			name:      "explicit session failure does not match",
+			raw:       json.RawMessage(`{"events":["session.failed"]}`),
+			eventKind: "session.failed",
 			expected:  false,
 		},
 		{
@@ -450,7 +456,9 @@ func TestSlackNotificationSubscriptionMatchesPresets(t *testing.T) {
 		{name: "quiet excludes readiness attention", preset: &quiet, eventKind: string(models.SlackNotificationPRReadinessAttention), expected: false},
 		{name: "quiet excludes preview failed", preset: &quiet, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 		{name: "quiet excludes session completed", preset: &quiet, eventKind: string(models.SlackNotificationSessionCompleted), expected: false},
-		{name: "verbose includes any typed event", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: true},
+		{name: "quiet excludes session failed", preset: &quiet, eventKind: string(models.SlackNotificationSessionFailed), expected: false},
+		{name: "verbose excludes session failed", preset: &verbose, eventKind: string(models.SlackNotificationSessionFailed), expected: false},
+		{name: "verbose includes automation completed", preset: &verbose, eventKind: string(models.SlackNotificationAutomationCompleted), expected: true},
 		{name: "verbose excludes preview ready", preset: &verbose, eventKind: string(models.SlackNotificationPreviewReady), expected: false},
 		{name: "verbose excludes preview failed", preset: &verbose, eventKind: string(models.SlackNotificationPreviewFailed), expected: false},
 	}
@@ -470,6 +478,9 @@ func TestSlackNotificationEventDisabled(t *testing.T) {
 
 	disabled := []string{
 		string(models.SlackNotificationSessionCompleted),
+		string(models.SlackNotificationSessionFailed),
+		string(models.SlackNotificationAutomationFailed),
+		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationPROpened),
 		string(models.SlackNotificationPreviewReady),
 		string(models.SlackNotificationPreviewFailed),
@@ -482,15 +493,21 @@ func TestSlackNotificationEventDisabled(t *testing.T) {
 	}
 
 	enabled := []string{
-		string(models.SlackNotificationSessionFailed),
 		string(models.SlackNotificationAutomationCompleted),
-		string(models.SlackNotificationAutomationFailed),
-		string(models.SlackNotificationAutomationFailureStreak),
 		string(models.SlackNotificationHumanInputRequested),
 	}
 	for _, eventKind := range enabled {
 		require.False(t, slackNotificationEventDisabled(eventKind), "%s should still be deliverable", eventKind)
 	}
+}
+
+func TestSlackSendNotificationHandlerDropsDisabledEvents(t *testing.T) {
+	t.Parallel()
+
+	handler := newSlackSendNotificationHandler(nil, nil, zerolog.Nop())
+	err := handler(context.Background(), "slack_send_notification", json.RawMessage(`{"kind":"session.failed"}`))
+
+	require.NoError(t, err, "disabled notifications should be dropped before delivery dependencies are required")
 }
 
 func TestSlackNotificationDeliveryPolicyHonorsChannelDMVisibility(t *testing.T) {
@@ -1959,7 +1976,7 @@ func TestSlackSessionAttributionMetadataIsSanitized(t *testing.T) {
 		SlackUserID:           "U123",
 		MappedUserID:          &mappedUserID,
 		TeamSession:           false,
-	})
+	}, nil)
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(raw, &got), "metadata should be valid JSON")
@@ -3340,6 +3357,22 @@ type orchestratorServiceStub struct {
 	runtimeCeiling       time.Duration
 }
 
+func (s *orchestratorServiceStub) MaterializeChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetMaterializationResult, error) {
+	return agent.ChangesetMaterializationResult{}, nil
+}
+
+func (s *orchestratorServiceStub) CaptureChangesetDiff(context.Context, *models.Session, models.SessionChangeset) (agent.ChangesetDiffResult, error) {
+	return agent.ChangesetDiffResult{}, nil
+}
+
+func (s *orchestratorServiceStub) CheckpointChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetDiffResult, error) {
+	return agent.ChangesetDiffResult{}, nil
+}
+
+func (s *orchestratorServiceStub) RestackChangeset(context.Context, *models.Session, models.SessionChangeset, string) (agent.ChangesetRestackResult, error) {
+	return agent.ChangesetRestackResult{}, nil
+}
+
 type fakeSessionExecutorDispatcher struct {
 	calls    int
 	jobType  string
@@ -3377,6 +3410,10 @@ func (r *sessionCompleteRecorder) OnSessionComplete(_ context.Context, run *mode
 	}
 	r.calls = append(r.calls, call)
 	return r.err
+}
+
+func (r *sessionCompleteRecorder) AutomaticPublishPolicy(context.Context, uuid.UUID, uuid.UUID) (models.AutomationPublishPolicy, error) {
+	return models.AutomationPublishPolicyPullRequest, nil
 }
 
 func (s *orchestratorServiceStub) RunAgent(ctx context.Context, run *models.Session) error {
@@ -4704,6 +4741,7 @@ type stubPRService struct {
 	enrichPullRequestHealthFn      func(context.Context, uuid.UUID, uuid.UUID, int64) error
 	completePullRequestRepairRunFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	maybeStartAutoRepairFn         func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error)
+	maybeStartAutoRepairForPRFn    func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error)
 	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 	syncPRPreviewSurfacesFn        func(context.Context, ghservice.SyncPRPreviewSurfacesPayload) error
@@ -4761,6 +4799,13 @@ func (s *stubPRService) CompletePullRequestRepairRun(ctx context.Context, orgID,
 func (s *stubPRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, sessionID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
 	if s.maybeStartAutoRepairFn != nil {
 		return s.maybeStartAutoRepairFn(ctx, orgID, sessionID, reason)
+	}
+	return nil, nil
+}
+
+func (s *stubPRService) MaybeStartAutoRepairForPullRequest(ctx context.Context, orgID uuid.UUID, pullRequestID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+	if s.maybeStartAutoRepairForPRFn != nil {
+		return s.maybeStartAutoRepairForPRFn(ctx, orgID, pullRequestID, reason)
 	}
 	return nil, nil
 }
@@ -5248,6 +5293,114 @@ func TestOpenPRHandler_TerminalPRErrorsBecomeFatal(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestOpenPRHandler_AutomationNoChangesCompletesAsNoop(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-automation-noop"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"pre_pr_review_loops":0}`),
+			models.AutomationRunStatusCompleted, nil, &now, nil, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectQuery("INSERT INTO jobs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "automation open_pr should treat no changes as a successful no-op")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation no-op should clear PR state, terminalize the run, and emit its milestone")
+}
+
+func TestOpenPRHandler_AutomationNoChangesRetriesPRStateCleanup(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.AutomationRuns = db.NewAutomationRunStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	automationID := uuid.New()
+	automationRunID := uuid.New()
+	now := time.Now()
+	snapshotKey := "snap-open-pr-automation-noop-cleanup-error"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumnValue(sessionRow, "automation_run_id", &automationRunID)
+	cleanupErr := errors.New("publish state unavailable")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	mock.ExpectQuery(`SELECT .+ FROM automation_runs\s+WHERE id = @id AND org_id = @org_id`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(automationRunRowColumns()).AddRow(
+			automationRunID, automationID, orgID, now, models.AutomationTriggeredBySchedule,
+			nil, nil, nil, nil, nil, []byte("{}"), "goal", []byte(`{"pre_pr_review_loops":0}`),
+			models.AutomationRunStatusCompleted, nil, &now, nil, now, now,
+		))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE automation_runs").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(cleanupErr)
+
+	services := &Services{
+		PR: &stubPRService{
+			createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+				return nil, ghservice.ErrNoChanges
+			},
+		},
+	}
+
+	handler := newOpenPRHandler(stores, services, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `"}`)
+	err := handler(context.Background(), "open_pr", payload)
+
+	require.ErrorIs(t, err, cleanupErr, "automation no-op should retry when clearing PR creation state fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "automation no-op retry should stop before emitting its terminal milestone")
+}
+
 func TestOpenPRHandler_RetryablePRErrorEnqueuesFailedMilestoneOnDeadLetter(t *testing.T) {
 	t.Parallel()
 
@@ -5434,6 +5587,13 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 						called.prID = gotPRID
 						return nil
 					},
+					maybeStartAutoRepairForPRFn: func(_ context.Context, gotOrgID, gotPRID uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+						called.autoRepairCalls++
+						called.orgID = gotOrgID
+						called.prID = gotPRID
+						called.autoRepairReason = reason
+						return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
+					},
 					reconcilePullRequestFn: func(_ context.Context, gotOrgID uuid.UUID, gotLimit int) error {
 						called.reconcileCalls++
 						called.orgID = gotOrgID
@@ -5472,8 +5632,10 @@ func TestPullRequestHealthJobHandlers(t *testing.T) {
 			switch tt.name {
 			case "sync pull request state passes parsed ids":
 				require.Equal(t, 1, called.syncCalls, "sync handler should invoke the PR service once")
+				require.Equal(t, 1, called.autoRepairCalls, "sync handler should evaluate automatic repair after fresh GitHub health is persisted")
 				require.Equal(t, orgID, called.orgID, "sync handler should parse and pass the org ID")
 				require.Equal(t, prID, called.prID, "sync handler should parse and pass the pull request ID")
+				require.Equal(t, "github_pr_health_updated", called.autoRepairReason, "sync handler should identify GitHub health as the automatic repair trigger")
 			case "reconcile pull request state defaults the limit":
 				require.Equal(t, 1, called.reconcileCalls, "reconcile handler should invoke the PR service once")
 				require.Equal(t, orgID, called.orgID, "reconcile handler should parse and pass the org ID")
@@ -5525,8 +5687,31 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
+func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return nil
+			},
+			maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
+				return nil, fmt.Errorf("policy lookup failed")
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	require.NoError(t, err, "persisted GitHub health should remain successful when follow-through evaluation fails")
+}
+
 type prHandlerCalls struct {
 	syncCalls           int
+	autoRepairCalls     int
 	reconcileCalls      int
 	enrichCalls         int
 	mergeWhenReadyCalls int
@@ -5535,6 +5720,7 @@ type prHandlerCalls struct {
 	prID                uuid.UUID
 	limit               int
 	version             int64
+	autoRepairReason    string
 	surfacePayload      ghservice.SyncPRPreviewSurfacesPayload
 }
 
@@ -7427,7 +7613,7 @@ func automationRowColumns() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope", "pre_pr_review_loops",
+		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
@@ -7516,7 +7702,7 @@ func TestAutomationRunHandler_HappyPath(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			&agentType, nil, &reasoningEffort, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7604,7 +7790,7 @@ func TestAutomationRunHandler_UsesRepositoryOverrideFromTriggerContext(t *testin
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &automationRepoID, "incident", "fix incident", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleNone, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7680,7 +7866,7 @@ func TestAutomationRunHandler_LosesRaceClaimingPendingRow(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, &repoID, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,
@@ -7817,7 +8003,7 @@ func TestAutomationRunHandler_MarksSkippedWhenAutomationPaused(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, false, nil, nil, nil,
@@ -7872,7 +8058,7 @@ func TestAutomationRunHandler_PersonalAutomationRunsAsCreator(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -7945,7 +8131,7 @@ func TestAutomationRunHandler_OrgAutomationIgnoresManualClickerForSessionIdentit
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &clickerID, nil, nil,
@@ -8024,7 +8210,7 @@ func TestAutomationRunHandler_UsesIdentityScopeFromRunSnapshot(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopeOrg, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, &creatorID, nil, nil,
@@ -8095,7 +8281,7 @@ func TestAutomationRunHandler_MissingCreatorMarksPersonalRunFailedWithoutRetry(t
 		WillReturnRows(pgxmock.NewRows(automationRowColumns()).AddRow(
 			automationID, orgID, nil, "nightly", "cleanup", nil,
 			models.AutomationIconTypeEmoji, "⚙️",
-			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, 0,
+			nil, nil, nil, "sequential", 1, "main", models.AutomationIdentityScopePersonal, models.AutomationPublishPolicyPullRequest, 0,
 			models.AutomationScheduleInterval, nil, nil, nil, nil, "UTC",
 			[]string{}, []byte("{}"),
 			nil, nil, true, nil, nil, nil,

@@ -89,6 +89,9 @@ func TestSessionStore_UpdateResult_WithDiffSnapshot(t *testing.T) {
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
 			),
 		)
+	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots[\\s\\S]+review_artifact_key[\\s\\S]+review_artifact_truncated").
 		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
@@ -166,6 +169,9 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotDoesNotPublishWorkspaceEventO
 				newAgentSessionRow(sessionID, uuid.New(), orgID, collectedAt)...,
 			),
 		)
+	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(anyDBArgs(19)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(snapshotID))
@@ -199,6 +205,32 @@ func TestSessionStore_UpdateResult_WithDiffSnapshotBeginFailure(t *testing.T) {
 	require.Contains(t, err.Error(), "does not support transactions", "UpdateResult should surface the missing transaction support")
 }
 
+func TestSessionStore_UpdateResult_WithHeadAndNoDiffIsAtomic(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID, sessionID := uuid.New(), uuid.New()
+	headSHA := "turn-head"
+	now := time.Now()
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE sessions").
+		WithArgs(anyDBArgs(11)...).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(newAgentSessionRow(sessionID, uuid.New(), orgID, now)...))
+	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	err = NewSessionStore(mock).UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{
+		DiffHeadCommitSHA: &headSHA,
+	})
+	require.NoError(t, err, "head-only result should commit session completion and changeset head atomically")
+	require.NoError(t, mock.ExpectationsWereMet(), "head-only result should use one transaction without a diff snapshot write")
+}
+
 func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	t.Parallel()
 
@@ -212,15 +244,20 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	snapshotID := uuid.New()
 	diff := "--- a/a.go\n+++ b/a.go\n"
 	baseSHA := "base123"
+	headSHA := "head123"
 	result := &models.SessionResult{
 		Diff:               &diff,
 		DiffBaseCommitSHA:  &baseSHA,
+		DiffHeadCommitSHA:  &headSHA,
 		DiffWorkspaceDirty: true,
 	}
 
 	mock.ExpectBegin()
 	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
 		WithArgs(anyDBArgs(13)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO session_diff_snapshots").
 		WithArgs(anyDBArgs(19)...).
@@ -233,6 +270,31 @@ func TestSessionStore_UpdateTurnComplete_WithDiffSnapshot(t *testing.T) {
 	err = store.UpdateTurnComplete(context.Background(), orgID, sessionID, 2, result, "agent-123", "snap-key")
 	require.NoError(t, err, "UpdateTurnComplete should persist a diff snapshot when provenance is present")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateTurnComplete_WithHeadAndNoDiffRollsBackTogether(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	headSHA := "turn-head"
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE sessions.+SET status = 'idle'.+pr_creation_state = 'idle', pr_creation_error = NULL").
+		WithArgs(anyDBArgs(13)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets.+SET head_sha = .+WHERE org_id = .+ AND session_id = .+ AND is_primary").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("changeset write failed"))
+	mock.ExpectRollback()
+
+	err = NewSessionStore(mock).UpdateTurnComplete(
+		context.Background(), uuid.New(), uuid.New(), 2,
+		&models.SessionResult{DiffHeadCommitSHA: &headSHA}, "agent-123", "snap-key",
+	)
+	require.ErrorContains(t, err, "record primary changeset turn head", "head failure should abort the entire turn-completion transaction")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed head persistence should roll back the preceding session update")
 }
 
 func TestSessionStore_UpdateTurnComplete_WithDiffSnapshotInsertFailure(t *testing.T) {

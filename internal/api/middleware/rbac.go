@@ -58,6 +58,8 @@ func requiredAPIScope(method, path string) string {
 		return "sessions:create"
 	case method == http.MethodPost && strings.HasSuffix(path, "/messages") && strings.HasPrefix(path, "/api/v1/sessions/"):
 		return "sessions:write"
+	case method == http.MethodPost && strings.HasSuffix(path, "/title/regenerate") && strings.HasPrefix(path, "/api/v1/sessions/"):
+		return "sessions:write"
 	case method == http.MethodPost && (strings.HasSuffix(path, "/cancel") || strings.HasSuffix(path, "/end")) && strings.HasPrefix(path, "/api/v1/sessions/"):
 		return "sessions:cancel"
 	case method == http.MethodPost && strings.HasSuffix(path, "/retry") && strings.HasPrefix(path, "/api/v1/sessions/"):

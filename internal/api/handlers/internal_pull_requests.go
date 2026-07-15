@@ -3,7 +3,6 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -23,9 +22,14 @@ import (
 type InternalPullRequestHandler struct {
 	sessionStore     *db.SessionStore
 	pullRequestStore *db.PullRequestStore
+	changesetStore   *db.SessionChangesetStore
 	jobStore         *db.JobStore
 	signingSecret    string
 	logger           zerolog.Logger
+}
+
+func (h *InternalPullRequestHandler) SetChangesetStore(store *db.SessionChangesetStore) {
+	h.changesetStore = store
 }
 
 func NewInternalPullRequestHandler(
@@ -112,6 +116,17 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusForbidden, "REPO_MISMATCH", "token is not authorized for this session repository")
 		return
 	}
+	changesetID := sessionID
+	if h.changesetStore != nil {
+		primary, primaryErr := h.changesetStore.GetPrimary(r.Context(), claims.OrgID, sessionID)
+		if primaryErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "PRIMARY_CHANGESET_FAILED", "failed to resolve the primary pull request target", primaryErr)
+			return
+		}
+		changesetID = primary.ID
+		session.PRCreationState = primary.PRCreationState
+		session.PRCreationError = primary.PRCreationError
+	}
 
 	switch session.PRCreationState {
 	case models.PRCreationStateQueued, models.PRCreationStatePushing:
@@ -125,7 +140,7 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 	// Catch cases where PRCreationState is stale but a PR record already exists
 	// (e.g. state-sync bug). The job-store dedupe key is the authoritative guard
 	// against duplicate jobs; this check produces a clearer 409 error for clients.
-	_, prErr := h.pullRequestStore.GetBySessionID(r.Context(), claims.OrgID, sessionID)
+	_, prErr := h.pullRequestStore.GetPrimaryBySessionID(r.Context(), claims.OrgID, sessionID)
 	if prErr == nil {
 		writeError(w, r, http.StatusConflict, "PR_EXISTS", "a pull request already exists for this session")
 		return
@@ -135,15 +150,18 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Mark state first so subsequent calls hit the PRCreationState guard even if
-	// the enqueue step below fails transiently and the caller retries.
-	if err := h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateQueued, ""); err != nil {
-		h.logger.Warn().Err(err).Str("session_id", sessionID.String()).Msg("failed to mark internal PR creation as queued")
+	if h.changesetStore == nil {
+		err = h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateQueued, "")
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "PR_STATE_FAILED", "failed to reserve pull request creation", err)
+			return
+		}
 	}
 
 	payload := map[string]any{
-		"session_id": sessionID.String(),
-		"org_id":     claims.OrgID.String(),
+		"session_id":   sessionID.String(),
+		"changeset_id": changesetID.String(),
+		"org_id":       claims.OrgID.String(),
 	}
 	if req.Draft != nil {
 		payload["draft"] = *req.Draft
@@ -151,10 +169,25 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 	if req.AuthorMode != "" && req.AuthorMode != "auto" {
 		payload["author_mode"] = req.AuthorMode
 	}
-	dedupeKey := fmt.Sprintf("open_pr:%s", sessionID)
-	if _, err := h.jobStore.Enqueue(r.Context(), claims.OrgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
-		return
+	if h.changesetStore != nil {
+		_, queued, queueErr := h.jobStore.QueueChangesetPRCreation(r.Context(), claims.OrgID, sessionID, changesetID, "agent", payload, 5)
+		if queueErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", queueErr)
+			return
+		}
+		if !queued {
+			writeError(w, r, http.StatusConflict, "PR_IN_FLIGHT", "PR creation already in progress")
+			return
+		}
+	} else {
+		dedupeKey := db.OpenPRDedupeKey(changesetID)
+		if _, err := h.jobStore.Enqueue(r.Context(), claims.OrgID, "agent", "open_pr", payload, 5, &dedupeKey); err != nil {
+			if stateErr := h.sessionStore.UpdatePRCreationState(r.Context(), claims.OrgID, sessionID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
+				h.logger.Warn().Err(stateErr).Str("session_id", sessionID.String()).Msg("failed to restore PR creation state after enqueue failure")
+			}
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue PR creation job", err)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusAccepted, internalCreatePullRequestResponse{Status: "queued", SessionID: sessionID.String()})

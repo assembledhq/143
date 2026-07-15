@@ -464,10 +464,10 @@ describe("PullRequestPreviewPage", () => {
     renderWithProviders(<PullRequestPreviewContent owner="acme" repo="web" number="42" />);
 
     const startingLabels = await screen.findAllByText("Starting");
-    const startingBadges = startingLabels.filter((label) => label.closest('[data-slot="badge"]'));
+    const startingBadges = startingLabels.filter((label) => label.closest('[data-slot="status-label"]'));
     expect(startingBadges.length).toBeGreaterThan(0);
     for (const label of startingBadges) {
-      expect(label.closest('[data-slot="badge"]')?.querySelector('[data-slot="preview-status-spinner"]')).toBeInTheDocument();
+      expect(label.closest('[data-slot="status-label"]')?.querySelector('[data-slot="status-spinner"]')).toBeInTheDocument();
     }
   });
 

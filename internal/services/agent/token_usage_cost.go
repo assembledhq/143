@@ -16,6 +16,9 @@ type tokenRate struct {
 }
 
 var openAIAPIRates = map[string]tokenRate{
+	models.CodexModelGPT56Sol:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56Terra: {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, cacheCreationPerMTok: 3.125, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56Luna:  {inputPerMTok: 1.00, cachedInputPerMTok: 0.10, cacheCreationPerMTok: 1.25, outputPerMTok: 6.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT55:      {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 	models.CodexModelGPT55Fast:  {inputPerMTok: 12.50, cachedInputPerMTok: 1.25, outputPerMTok: 75.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
 	models.CodexModelGPT54:      {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
@@ -28,6 +31,9 @@ var openAIAPIRates = map[string]tokenRate{
 }
 
 var codexCreditRates = map[string]tokenRate{
+	models.CodexModelGPT56Sol:   {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56Terra: {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56Luna:  {inputPerMTok: 25.00, cachedInputPerMTok: 2.50, outputPerMTok: 150.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
 	models.CodexModelGPT55:      {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
 	models.CodexModelGPT55Fast:  {inputPerMTok: 312.50, cachedInputPerMTok: 31.25, outputPerMTok: 1875.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
 	models.CodexModelGPT54:      {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
@@ -52,7 +58,7 @@ var anthropicRates = map[string]tokenRate{
 }
 
 var googleRates = map[string]tokenRate{
-	models.PiModelGemini25Pro:        {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
+	models.PiModelGemini25Pro: {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 }
 
 // FinalizeTokenUsage normalizes adapter-parsed usage into a single persisted

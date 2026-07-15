@@ -7,31 +7,31 @@ import Footer from "@/components/landing/footer";
 export default function AboutPage() {
   const isDark = usePrefersDark();
   const navLinkClass = `text-sm font-medium ${
-    isDark ? "text-white/60 hover:text-white" : "text-slate-600 hover:text-slate-900"
+    isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"
   } transition-colors`;
-  const pageTitleClass = `text-2xl sm:text-3xl font-light tracking-tight ${
-    isDark ? "text-white" : "text-slate-900"
+  const pageTitleClass = `font-display text-2xl font-semibold tracking-[-0.035em] sm:text-3xl ${
+    isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
   }`;
   const bodyClass = `space-y-6 text-sm leading-7 ${
-    isDark ? "text-white/58" : "text-slate-600"
+    isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"
   }`;
   const headingClass = `text-base font-medium ${
-    isDark ? "text-white/78" : "text-slate-800"
+    isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
   }`;
   const metaClass = `text-xs font-medium uppercase tracking-wider ${
-    isDark ? "text-white/35" : "text-slate-500"
+    isDark ? "text-[#77766f]" : "text-[#85847c]"
   }`;
   const linkClass = `underline underline-offset-2 ${
-    isDark ? "hover:text-white/78" : "hover:text-slate-800"
+    isDark ? "hover:text-[#f4f3ee]" : "hover:text-[#1b1b19]"
   } transition-colors`;
   const ruleClass = `my-8 h-px w-full ${
-    isDark ? "bg-white/10" : "bg-slate-900/12"
+    isDark ? "bg-white/10" : "bg-black/10"
   }`;
 
   return (
     <div
       className="min-h-screen flex flex-col"
-      style={{ background: isDark ? "#08080f" : "#d4e6f5" }}
+      style={{ background: isDark ? "#151513" : "#f6f5f0" }}
     >
       <div className="flex items-center justify-between px-6 sm:px-10 pt-6 sm:pt-8">
         <Link href="/" className={navLinkClass}>

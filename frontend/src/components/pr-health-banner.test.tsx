@@ -334,7 +334,7 @@ describe("PRHealthBanner", () => {
     expect(onQueue).toHaveBeenCalledTimes(1);
   });
 
-  it("matches the Create PR split button sizing and menu alignment", async () => {
+  it("uses compact shared sizing for PR actions and keeps the menu aligned", async () => {
     renderWithProviders(
       <PRHealthBanner
         health={{
@@ -353,9 +353,15 @@ describe("PRHealthBanner", () => {
       />,
     );
 
+    const mergeAction = screen.getByRole("button", { name: "Merge" });
     const moreActions = screen.getByRole("button", { name: "More merge actions" });
-    expect(moreActions).toHaveClass("h-7", "w-7", "rounded-l-none");
-    expect(moreActions).not.toHaveClass("h-9", "w-8");
+    const actionGroup = moreActions.closest("[data-slot='button-group']");
+    expect(actionGroup).toHaveAttribute("data-size", "xs");
+    expect(mergeAction).toHaveAttribute("data-size", "xs");
+    expect(mergeAction).toHaveClass("h-10", "sm:h-6");
+    expect(moreActions).toHaveAttribute("data-size", "icon-xs");
+    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none");
+    expect(moreActions).not.toHaveClass("h-7", "w-7");
 
     await userEvent.setup().click(moreActions);
     const menuItem = await screen.findByRole("menuitem", { name: "Merge when ready" });

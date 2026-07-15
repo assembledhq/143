@@ -171,7 +171,7 @@ func TestGoalImprovementService_ApplySavedUsesLockedTransaction(t *testing.T) {
 			nil, nil, nil, nil, nil, now, now,
 		))
 	mock.ExpectExec(`UPDATE automations SET`).
-		WithArgs(anyGoalImprovementServiceArgs(30)...).
+		WithArgs(anyGoalImprovementServiceArgs(31)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectExec(`UPDATE automation_goal_improvements\s+SET applied_by = @applied_by, applied_at = now\(\), updated_at = now\(\)\s+WHERE id = @id AND org_id = @org_id`).
 		WithArgs(&userID, improvementID, orgID).
@@ -215,7 +215,7 @@ func automationColumnsForGoalImprovementServiceTest() []string {
 		"id", "org_id", "repository_id", "name", "goal", "scope",
 		"icon_type", "icon_value",
 		"agent_type", "model_override", "reasoning_effort", "execution_mode", "max_concurrent", "base_branch",
-		"identity_scope", "pre_pr_review_loops",
+		"identity_scope", "publish_policy", "pre_pr_review_loops",
 		"schedule_type", "interval_value", "interval_unit", "interval_run_at", "cron_expression", "timezone",
 		"github_event_triggers", "github_event_filters",
 		"next_run_at", "last_run_at", "enabled", "created_by", "paused_by", "paused_at",
@@ -236,7 +236,7 @@ func addAutomationRowForGoalImprovementServiceTest(rows *pgxmock.Rows, a models.
 		a.ID, a.OrgID, a.RepositoryID, a.Name, a.Goal, a.Scope,
 		a.IconType.OrDefault(), a.IconValue,
 		a.AgentType, a.ModelOverride, a.ReasoningEffort, a.ExecutionMode, a.MaxConcurrent, a.BaseBranch,
-		a.IdentityScope.OrDefault(), a.PrePRReviewLoops,
+		a.IdentityScope.OrDefault(), a.PublishPolicy.OrDefault(), a.PrePRReviewLoops,
 		a.ScheduleType, a.IntervalValue, a.IntervalUnit, a.IntervalRunAt, a.CronExpression, a.Timezone,
 		nil, githubEventFilters,
 		a.NextRunAt, a.LastRunAt, a.Enabled, a.CreatedBy, a.PausedBy, a.PausedAt,

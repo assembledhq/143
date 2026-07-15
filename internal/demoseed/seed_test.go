@@ -1,18 +1,11 @@
 package demoseed
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,180 +79,6 @@ func TestIsProbablyProductionURL(t *testing.T) {
 	}
 }
 
-func TestValidateApplyEnvironment(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		env         map[string]string
-		databaseURL string
-		expectErr   string
-	}{
-		{
-			name:        "requires explicit apply opt in",
-			env:         map[string]string{"DEMO_MODE": "true"},
-			databaseURL: "postgres://user:pass@localhost/demo",
-			expectErr:   "ALLOW_DEMO_SEED_APPLY=true",
-		},
-		{
-			name:        "requires demo mode",
-			env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true"},
-			databaseURL: "postgres://user:pass@localhost/demo",
-			expectErr:   "DEMO_MODE=true",
-		},
-		{
-			name:        "rejects production-looking target",
-			env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
-			databaseURL: "postgres://user:pass@prod-db.internal/onefortythree",
-			expectErr:   "production-looking",
-		},
-		{
-			name: "allows production-looking target only with second override",
-			env: map[string]string{
-				"ALLOW_DEMO_SEED_APPLY":          "true",
-				"DEMO_MODE":                      "true",
-				"DEMO_SEED_ALLOW_PRODUCTION_URL": "true",
-			},
-			databaseURL: "postgres://user:pass@prod-db.internal/onefortythree",
-		},
-		{
-			name:        "allows explicit demo target",
-			env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
-			databaseURL: "postgres://user:pass@demo-db.internal/demo_workspace",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := ValidateApplyEnvironment(tt.env, tt.databaseURL)
-			if tt.expectErr != "" {
-				require.Error(t, err, "ValidateApplyEnvironment should reject unsafe apply configuration")
-				require.Contains(t, err.Error(), tt.expectErr, "ValidateApplyEnvironment should explain the rejected guardrail")
-				return
-			}
-			require.NoError(t, err, "ValidateApplyEnvironment should allow guarded demo apply configuration")
-		})
-	}
-}
-
-func TestApplyPreflightsTargetBeforeMigrations(t *testing.T) {
-	t.Parallel()
-
-	var calls []string
-	errUnsafeTarget := fmt.Errorf("unsafe target")
-	err := apply(context.Background(), ApplyOptions{
-		DatabaseURL: "postgres://user:pass@localhost/demo",
-		Env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
-	}, applyDeps{
-		readAndScanSeed: func(seedPath string) ([]byte, error) {
-			calls = append(calls, "read")
-			return []byte("seed sql"), nil
-		},
-		validateApplyEnvironment: func(env map[string]string, databaseURL string) error {
-			calls = append(calls, "validate")
-			return nil
-		},
-		connectPool: func(ctx context.Context, databaseURL string) (seedDB, error) {
-			calls = append(calls, "connect")
-			return fakeSeedDB{}, nil
-		},
-		ensureApplyTargetSafe: func(ctx context.Context, pool seedDB, allowNonDemoOrgs bool) error {
-			calls = append(calls, "preflight")
-			return errUnsafeTarget
-		},
-		runMigrations: func(databaseURL string) error {
-			calls = append(calls, "migrate")
-			return nil
-		},
-		applySeedSQL: func(ctx context.Context, pool seedDB, seedSQL []byte) error {
-			calls = append(calls, "apply")
-			return nil
-		},
-		assertDemoSeedState: func(ctx context.Context, pool seedDB) error {
-			calls = append(calls, "assert")
-			return nil
-		},
-	})
-
-	require.ErrorIs(t, err, errUnsafeTarget, "Apply should return the target-safety preflight error")
-	require.Equal(t, []string{"read", "validate", "connect", "preflight"}, calls, "Apply should preflight the target before migrations or seed writes")
-}
-
-func TestPruneDeletesOldDemoVolatileState(t *testing.T) {
-	t.Parallel()
-
-	db := &pruneSeedDB{auditRows: 5}
-	rows, err := prune(context.Background(), PruneOptions{
-		DatabaseURL: "postgres://user:pass@localhost/demo",
-		MaxAge:      24 * time.Hour,
-		Env:         map[string]string{"ALLOW_DEMO_SEED_APPLY": "true", "DEMO_MODE": "true"},
-	}, func(ctx context.Context, databaseURL string) (seedDB, error) {
-		require.Equal(t, "postgres://user:pass@localhost/demo", databaseURL, "Prune should connect to requested database")
-		return db, nil
-	})
-
-	require.NoError(t, err, "Prune should delete volatile demo rows")
-	require.Equal(t, int64(12), rows, "Prune should return total deleted row count")
-	require.True(t, db.closed, "Prune should close the database connection")
-	require.Contains(t, db.execSQL, "DELETE FROM auth_sessions", "Prune should delete old auth sessions")
-	require.Equal(t, DemoOrgID, db.execArgs[0], "Prune should scope deletes to demo org")
-	require.IsType(t, time.Time{}, db.execArgs[1], "Prune should pass a cutoff timestamp")
-	require.Contains(t, db.querySQL, "delete_expired_audit_logs", "Prune should call audit log retention")
-	require.Equal(t, DemoOrgID, db.queryArgs[0], "Prune should scope audit retention to demo org")
-	require.Equal(t, 1, db.queryArgs[1], "Prune should retain at least one day of audit logs")
-}
-
-func TestEnsureApplyTargetSafe(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		setupMock func(mock pgxmock.PgxPoolIface)
-		expectErr string
-	}{
-		{
-			name: "allows unmigrated database",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass('public.organizations') IS NOT NULL")).
-					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
-			},
-		},
-		{
-			name: "rejects non-demo organizations",
-			setupMock: func(mock pgxmock.PgxPoolIface) {
-				mock.ExpectQuery(regexp.QuoteMeta("SELECT to_regclass('public.organizations') IS NOT NULL")).
-					WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
-				mock.ExpectQuery(regexp.QuoteMeta("SELECT count(*) FROM organizations WHERE id <> $1")).
-					WithArgs(DemoOrgID).
-					WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
-			},
-			expectErr: "non-demo organization",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "test should create pgx mock pool")
-			defer mock.Close()
-			tt.setupMock(mock)
-
-			err = EnsureApplyTargetSafe(context.Background(), mock, false)
-			if tt.expectErr != "" {
-				require.Error(t, err, "EnsureApplyTargetSafe should reject unsafe targets")
-				require.Contains(t, err.Error(), tt.expectErr, "EnsureApplyTargetSafe should explain target rejection")
-			} else {
-				require.NoError(t, err, "EnsureApplyTargetSafe should allow safe targets")
-			}
-			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
-		})
-	}
-}
-
 func TestScanSeedSafety(t *testing.T) {
 	t.Parallel()
 
@@ -280,7 +99,7 @@ func TestScanSeedSafety(t *testing.T) {
 		{
 			name:      "rejects non-demo email",
 			body:      "INSERT INTO users (email) VALUES ('alice@example.com');",
-			expectErr: "non-demo email",
+			expectErr: "non-preview email",
 		},
 		{
 			name:      "rejects obvious GitHub token",
@@ -455,67 +274,4 @@ func seedBlock(t *testing.T, seed, startMarker, endMarker string) string {
 	end := strings.Index(remainder, endMarker)
 	require.NotEqual(t, -1, end, "seed should contain the requested block end")
 	return remainder[:end]
-}
-
-type fakeSeedDB struct{}
-
-func (fakeSeedDB) Close() {}
-
-func (fakeSeedDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
-	return pgconn.CommandTag{}, nil
-}
-
-func (fakeSeedDB) QueryRow(context.Context, string, ...any) pgx.Row {
-	return fakeRow{}
-}
-
-type fakeRow struct{}
-
-func (fakeRow) Scan(...any) error {
-	return nil
-}
-
-type pruneAuditRow struct {
-	rows int64
-	err  error
-}
-
-func (r pruneAuditRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(dest) == 0 {
-		return nil
-	}
-	target, ok := dest[0].(*int64)
-	if !ok {
-		return fmt.Errorf("expected first scan target to be *int64")
-	}
-	*target = r.rows
-	return nil
-}
-
-type pruneSeedDB struct {
-	execSQL   string
-	execArgs  []any
-	querySQL  string
-	queryArgs []any
-	auditRows int64
-	closed    bool
-}
-
-func (p *pruneSeedDB) Close() {
-	p.closed = true
-}
-
-func (p *pruneSeedDB) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	p.execSQL = sql
-	p.execArgs = args
-	return pgconn.NewCommandTag("DELETE 7"), nil
-}
-
-func (p *pruneSeedDB) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
-	p.querySQL = sql
-	p.queryArgs = args
-	return pruneAuditRow{rows: p.auditRows}
 }

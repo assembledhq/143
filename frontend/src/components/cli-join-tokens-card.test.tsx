@@ -16,16 +16,16 @@ describe("CLIJoinTokensCard", () => {
     expect(heading.previousElementSibling).toBeNull();
   });
 
-  it("keeps the create-link controls the same height", async () => {
+  it("keeps the create-link controls touch-safe on mobile and compact on desktop", async () => {
     server.use(
       http.get("/api/v1/org/join-tokens", () => HttpResponse.json({ data: [], meta: {} })),
     );
 
     renderWithProviders(<CLIJoinTokensCard />);
 
-    expect(await screen.findByLabelText("Link name")).toHaveClass("h-9");
-    expect(screen.getByRole("combobox", { name: "Role granted" })).toHaveClass("h-9");
-    expect(screen.getByRole("button", { name: "Create link" })).toHaveClass("h-9");
+    expect(await screen.findByLabelText("Link name")).toHaveClass("h-11", "sm:h-9");
+    expect(screen.getByRole("combobox", { name: "Role granted" })).toHaveClass("h-11", "sm:h-9");
+    expect(screen.getByRole("button", { name: "Create link" })).toHaveClass("h-11", "sm:h-9", "w-full", "sm:w-auto");
   });
 
   it("copies an existing recoverable install link on demand", async () => {

@@ -6,7 +6,7 @@ import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockPR } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
 import type { Session, User, SingleResponse } from '@/lib/types';
-import { installSessionDetailPageTestHooks, mockSessionDetailWithLazyDiff } from './session-detail-test-kit';
+import { installSessionDetailPageTestHooks, mockSessionDetailWithLazyDiff, setMobileViewport } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
   toast: {
@@ -180,13 +180,42 @@ describe('SessionDetailPage PR creation', () => {
 
     renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
     await screen.findAllByText('Fixed TypeError by adding null check');
-    expect(await screen.findByRole('button', { name: /Create PR/ })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /Create PR/ })).toHaveAttribute('data-size', 'sm');
     expect(screen.getByRole('button', { name: /Create PR/ })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'More publish actions' })).toHaveAttribute('data-size', 'icon-sm');
 
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'More publish actions' }));
 
     expect(await screen.findByRole('menuitem', { name: /Create branch/ })).toHaveClass('text-xs');
+  });
+
+  it('uses xs publish actions on mobile', async () => {
+    setMobileViewport(true);
+    const sessionWithDiff: Session = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => {
+        return HttpResponse.json({ data: sessionWithDiff } satisfies SingleResponse<Session>);
+      }),
+      http.get('/api/v1/sessions/:id/pr', () => {
+        return HttpResponse.json(
+          { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+          { status: 404 },
+        );
+      }),
+    );
+
+    renderWithProviders(<SessionDetailContent id="session-abcdef12-3456-7890" />);
+
+    expect(await screen.findByRole('button', { name: /Create PR/ })).toHaveAttribute('data-size', 'xs');
+    expect(screen.getByRole('button', { name: 'More publish actions' })).toHaveAttribute('data-size', 'icon-xs');
   });
 
   it('shows a durable View branch link after branch-only publish succeeds', async () => {

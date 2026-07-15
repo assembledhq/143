@@ -9,20 +9,22 @@ interface FooterProps {
 export default function Footer({ isDark }: FooterProps) {
   return (
     <footer
-      className="px-6 sm:px-10 py-12 sm:py-16"
-      style={{ background: isDark ? "#08080f" : "#eef4f8" }}
+      className={`border-t px-6 py-12 sm:px-10 sm:py-16 ${
+        isDark ? "border-white/10" : "border-[#e1ded5]"
+      }`}
+      style={{ background: isDark ? "#11110f" : "#efeee8" }}
     >
       <div className={layout.pageShell}>
         <div className="flex flex-col sm:flex-row justify-between gap-10">
           {/* Brand */}
           <div className="space-y-3">
             <p
-              className={`${type.navBrand} ${isDark ? "text-white/80" : "text-slate-800"}`}
+              className={`${type.navBrand} ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
             >
               143
             </p>
             <p
-              className={`${type.footerLink} leading-relaxed max-w-xs ${isDark ? "text-white/30" : "text-slate-500"}`}
+              className={`${type.footerLink} leading-relaxed max-w-xs ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
             >
               Open-source coding-agent infrastructure for teams.
               <br />
@@ -31,7 +33,7 @@ export default function Footer({ isDark }: FooterProps) {
                 href="https://www.assembled.com"
                 target="_blank"
                 rel="noopener noreferrer"
-                className={`underline underline-offset-2 ${isDark ? "hover:text-white/50" : "hover:text-slate-700"}`}
+                className={`underline decoration-current/40 underline-offset-4 ${isDark ? "hover:text-[#f4f3ee]" : "hover:text-[#1b1b19]"}`}
               >
                 Assembled
               </a>
@@ -43,7 +45,7 @@ export default function Footer({ isDark }: FooterProps) {
           <div className="flex gap-16">
             <div className="space-y-3">
               <p
-                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
+                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-[#7992ff]" : "text-[#315ce8]"}`}
               >
                 Project
               </p>
@@ -51,7 +53,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/about"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     About
                   </Link>
@@ -59,7 +61,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/why-143"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     Why &ldquo;143&rdquo;?
                   </Link>
@@ -67,7 +69,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/docs"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     Docs
                   </Link>
@@ -77,7 +79,7 @@ export default function Footer({ isDark }: FooterProps) {
                     href="https://github.com/assembledhq/143"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     GitHub
                   </a>
@@ -87,7 +89,7 @@ export default function Footer({ isDark }: FooterProps) {
                     href="https://github.com/assembledhq/143/blob/main/LICENSE"
                     target="_blank"
                     rel="noopener noreferrer"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     MIT License
                   </a>
@@ -97,7 +99,7 @@ export default function Footer({ isDark }: FooterProps) {
 
             <div className="space-y-3">
               <p
-                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-white/40" : "text-slate-500"}`}
+                className={`${type.footerLink} font-medium uppercase tracking-wider ${isDark ? "text-[#7992ff]" : "text-[#315ce8]"}`}
               >
                 Legal
               </p>
@@ -105,7 +107,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/privacy"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     Privacy
                   </Link>
@@ -113,7 +115,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/terms"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     Terms
                   </Link>
@@ -121,7 +123,7 @@ export default function Footer({ isDark }: FooterProps) {
                 <li>
                   <Link
                     href="/security"
-                    className={`${type.footerLink} ${isDark ? "text-white/30 hover:text-white/60" : "text-slate-500 hover:text-slate-700"} transition-colors`}
+                    className={`${type.footerLink} ${isDark ? "text-[#aaa89f] hover:text-[#f4f3ee]" : "text-[#6b6b65] hover:text-[#1b1b19]"} transition-colors`}
                   >
                     Security
                   </Link>
@@ -133,10 +135,10 @@ export default function Footer({ isDark }: FooterProps) {
 
         {/* Bottom */}
         <div
-          className={`mt-12 pt-6 border-t ${isDark ? "border-white/5" : "border-slate-300/50"}`}
+          className={`mt-12 border-t pt-6 ${isDark ? "border-white/10" : "border-[#dad7ce]"}`}
         >
           <p
-            className={`${type.footerLink} ${isDark ? "text-white/20" : "text-slate-400"}`}
+            className={`${type.footerLink} ${isDark ? "text-[#aaa89f]/65" : "text-[#6b6b65]/75"}`}
           >
             &copy; {new Date().getFullYear()} Assembled, Inc.
           </p>

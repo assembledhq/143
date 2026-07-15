@@ -5,6 +5,7 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { parseAsString, useQueryState } from "nuqs";
 import {
+  AlertTriangle,
   ExternalLink,
   GitBranch,
   Loader2,
@@ -18,6 +19,8 @@ import {
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
 import { CreatePreviewDialog } from "@/components/preview/create-preview-dialog";
 import { PreviewStatusBadge } from "@/components/preview/preview-status-badge";
 import {
@@ -54,7 +57,7 @@ import type {
 } from "@/lib/types";
 import { safeExternalUrl } from "@/lib/utils";
 
-type PreviewScope = "running" | "resumable" | "recent";
+type PreviewScope = "running" | "attention" | "resumable" | "recent";
 
 const RESTART_LATEST_LABEL = "Start latest";
 const RESTART_LATEST_TOOLTIP = "Start a new preview from the latest source state";
@@ -70,6 +73,12 @@ const SECTIONS: {
     title: "Running",
     empty: "No previews are running.",
     interval: 5000,
+  },
+  {
+    scope: "attention",
+    title: "Needs attention",
+    empty: "No previews need attention.",
+    interval: 30000,
   },
   {
     scope: "resumable",
@@ -111,16 +120,6 @@ function previewNeedsAttention(preview: PreviewCurrentResponse): boolean {
   );
 }
 
-function previewIsRunning(preview: PreviewCurrentResponse): boolean {
-  return (
-    preview.status === "starting" ||
-    preview.status === "ready" ||
-    preview.status === "partially_ready" ||
-    preview.status === "unhealthy" ||
-    preview.status === "recycling"
-  );
-}
-
 function sortAttentionFirst(
   previews: PreviewCurrentResponse[],
 ): PreviewCurrentResponse[] {
@@ -132,20 +131,6 @@ function sortAttentionFirst(
     if (a.status !== "failed" && b.status === "failed") return 1;
     return 0;
   });
-}
-
-function mergePreviewRows(
-  primary: PreviewCurrentResponse[],
-  additions: PreviewCurrentResponse[],
-): PreviewCurrentResponse[] {
-  const seen = new Set(primary.map((preview) => preview.preview_group_id));
-  const merged = [...primary];
-  for (const preview of additions) {
-    if (seen.has(preview.preview_group_id)) continue;
-    seen.add(preview.preview_group_id);
-    merged.push(preview);
-  }
-  return merged;
 }
 
 function stoppedReasonLabel(
@@ -199,7 +184,9 @@ function statusDetail(preview: PreviewCurrentResponse, scope: PreviewScope): str
   if (scope === "resumable" && preview.resume_estimate_seconds) {
     return capitalizeStatusDetail(`resumes in ~${preview.resume_estimate_seconds}s`);
   }
-  if (scope === "recent") return capitalizeStatusDetail(stoppedReasonLabel(preview.stopped_reason));
+  if (scope === "recent" || scope === "attention") {
+    return capitalizeStatusDetail(stoppedReasonLabel(preview.stopped_reason));
+  }
   if (preview.expires_at) return capitalizeStatusDetail(`expires ${expiresIn(preview.expires_at)}`);
   return preview.current_phase ? formatPreviewStatus(preview.current_phase) : "";
 }
@@ -325,7 +312,7 @@ function PreviewActions({
   const previewHref = safeExternalUrl(preview.preview_url);
 
   return (
-    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap">
+    <div className="flex flex-wrap items-center justify-end gap-1.5 whitespace-nowrap [&_a]:min-h-11 [&_button]:min-h-11 md:[&_a]:min-h-0 md:[&_button]:min-h-0">
       {previewHref ? (
         <Button
           asChild
@@ -383,34 +370,40 @@ function PreviewActions({
 }
 
 function PreviewMobileRow(props: PreviewActionsProps) {
-  const { preview } = props;
+  const { preview, scope } = props;
 
   return (
-    <div className="space-y-3 p-4">
-      <div className="min-w-0">
+    <ResourceRow
+      title={(
         <Link
           href={previewDetailHref(preview)}
-          className="block truncate font-medium text-foreground"
+          className="block truncate font-medium text-foreground hover:underline"
         >
           {previewDisplayName(preview)}
         </Link>
-        <p className="truncate text-sm text-muted-foreground">
+      )}
+      metadata={(
+        <span>
           {preview.repository_full_name || preview.repository_id} ·{" "}
           {sourceLabel(preview)}
-        </p>
-      </div>
-      <div className="flex items-center justify-between gap-2">
+        </span>
+      )}
+      status={(
         <PreviewStatusBadge
           status={preview.status}
           label={statusLabel(preview)}
           variant={statusBadgeVariant(preview)}
         />
-        <span className="text-xs text-muted-foreground">
+      )}
+      detail={(
+        <span>
+          {statusDetail(preview, scope)}
+          {statusDetail(preview, scope) && relativeTime(preview.created_at) ? " · " : ""}
           {relativeTime(preview.created_at)}
         </span>
-      </div>
-      <PreviewActions {...props} />
-    </div>
+      )}
+      actions={<PreviewActions {...props} />}
+    />
   );
 }
 
@@ -634,8 +627,8 @@ export default function PreviewsPage() {
     refetchInterval: pollMs(30000),
     placeholderData: (previous) => previous,
   });
-  const allSectionQueries = [runningQuery, resumableQuery, attentionQuery, recentQuery];
-  const visibleSectionQueries = [runningQuery, resumableQuery, recentQuery];
+  const allSectionQueries = [runningQuery, attentionQuery, resumableQuery, recentQuery];
+  const visibleSectionQueries = [runningQuery, attentionQuery, resumableQuery, recentQuery];
 
   const firstMeta = allSectionQueries.find((item) => item.data?.meta)?.data?.meta;
   // A query that has only ever errored holds no data, and React Query resets
@@ -662,45 +655,33 @@ export default function PreviewsPage() {
   );
 
   const attentionPreviews = useMemo(
-    () => attentionQuery.data?.data ?? [],
+    () => sortAttentionFirst(attentionQuery.data?.data ?? []),
     [attentionQuery.data?.data],
   );
+  const attentionPreviewIds = useMemo(
+    () => new Set(attentionPreviews.map((preview) => preview.preview_group_id)),
+    [attentionPreviews],
+  );
   const runningPreviews = useMemo(
-    () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          runningQuery.data?.data ?? [],
-          attentionPreviews.filter(previewIsRunning),
-        ),
-      ),
-    [attentionPreviews, runningQuery.data?.data],
+    () => sortAttentionFirst(runningQuery.data?.data ?? []),
+    [runningQuery.data?.data],
   );
   const resumablePreviews = useMemo(
-    () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          resumableQuery.data?.data ?? [],
-          attentionPreviews.filter(
-            (preview) => preview.resumable && !previewIsRunning(preview),
-          ),
-        ),
-      ),
-    [attentionPreviews, resumableQuery.data?.data],
+    () => sortAttentionFirst(resumableQuery.data?.data ?? []),
+    [resumableQuery.data?.data],
   );
   const recentPreviews = useMemo(
     () =>
-      sortAttentionFirst(
-        mergePreviewRows(
-          recentQuery.data?.data ?? [],
-          attentionPreviews.filter(
-            (preview) => !previewIsRunning(preview) && !preview.resumable,
-          ),
-        ),
+      (recentQuery.data?.data ?? []).filter(
+        (preview) =>
+          !previewNeedsAttention(preview) &&
+          !attentionPreviewIds.has(preview.preview_group_id),
       ),
-    [attentionPreviews, recentQuery.data?.data],
+    [attentionPreviewIds, recentQuery.data?.data],
   );
   const previewsByScope: Record<PreviewScope, PreviewCurrentResponse[]> = {
     running: runningPreviews,
+    attention: attentionPreviews,
     resumable: resumablePreviews,
     recent: recentPreviews,
   };
@@ -810,41 +791,32 @@ export default function PreviewsPage() {
               const sectionPreviews = previewsByScope[section.scope];
               const count = sectionPreviews.length;
               return (
-                <section
+                <SectionGroup
                   key={section.scope}
-                  className="space-y-3"
-                  aria-labelledby={`previews-${section.scope}`}
-                >
-                  <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2">
+                  aria-label={`${section.title} previews`}
+                  title={(
+                    <span className="inline-flex items-center gap-2">
                       {section.scope === "running" ? (
                         <MonitorPlay className="h-4 w-4 text-muted-foreground" />
+                      ) : section.scope === "attention" ? (
+                        <AlertTriangle className="h-4 w-4 text-muted-foreground" />
                       ) : section.scope === "resumable" ? (
                         <Play className="h-4 w-4 text-muted-foreground" />
                       ) : (
                         <GitBranch className="h-4 w-4 text-muted-foreground" />
                       )}
-                      <h2
-                        id={`previews-${section.scope}`}
-                        className="text-sm font-semibold text-foreground"
-                      >
-                        {section.title} ({count})
-                      </h2>
-                    </div>
-                    {section.scope === "running" && firstMeta?.pool ? (
-                      <p className="text-xs text-muted-foreground">
-                        Pool:{" "}
-                        {firstMeta.pool.user_active +
-                          firstMeta.pool.auto_active}{" "}
-                        of {firstMeta.pool.user_max + firstMeta.pool.auto_max}{" "}
-                        previews
-                      </p>
-                    ) : section.scope === "resumable" ? (
-                      <p className="text-xs text-muted-foreground">
-                        warm - resumes in ~30s
-                      </p>
-                    ) : null}
-                  </div>
+                      {section.title} ({count})
+                    </span>
+                  )}
+                  action={section.scope === "running" && firstMeta?.pool ? (
+                    <p className="text-xs text-muted-foreground">
+                      Pool: {firstMeta.pool.user_active + firstMeta.pool.auto_active} of{" "}
+                      {firstMeta.pool.user_max + firstMeta.pool.auto_max} previews
+                    </p>
+                  ) : section.scope === "resumable" ? (
+                    <p className="text-xs text-muted-foreground">warm - resumes in ~30s</p>
+                  ) : undefined}
+                >
                   <SectionRows
                     scope={section.scope}
                     previews={
@@ -866,7 +838,7 @@ export default function PreviewsPage() {
                       pendingStartLatestIds.has(preview.preview_group_id)
                     }
                   />
-                </section>
+                </SectionGroup>
               );
             })}
           </div>

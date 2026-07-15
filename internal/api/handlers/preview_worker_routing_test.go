@@ -653,3 +653,111 @@ func TestPreviewHandler_CaptureScreenshot_InlineBase64Default(t *testing.T) {
 		})
 	}
 }
+
+type interactScreenshotInspector struct {
+	internalPreviewTestInspector
+}
+
+func (interactScreenshotInspector) ExecuteInteraction(context.Context, string, []models.InteractionStep) (*models.InteractionResult, error) {
+	return &models.InteractionResult{
+		FinalURL: "http://preview.local/final",
+		Steps: []models.StepResult{{
+			StepIndex:  0,
+			Action:     "click",
+			Success:    true,
+			Screenshot: &models.ScreenshotResult{PageTitle: "Step", URL: "http://preview.local", PNG: []byte("fake-png-bytes")},
+		}},
+	}, nil
+}
+
+// ScreenshotResult.PNG serializes as png_base64 (for worker transport), so
+// handlers that don't persist-and-strip would leak full base64 images into the
+// agent transcript. The interact handler must strip step screenshots' bytes
+// after attaching artifacts.
+func TestPreviewHandler_Interact_StripsInlineScreenshotBytes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+
+	h := newPreviewHandlerWithMock(mock)
+	h.manager.SetInspector(interactScreenshotInspector{})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(`{"steps":[{"action":"click"}]}`))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	rr := httptest.NewRecorder()
+
+	h.ExecuteInteraction(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "interact should succeed")
+
+	body := rr.Body.String()
+	require.NotContains(t, body, "png_base64", "interact response must not inline base64 screenshot bytes")
+	require.Contains(t, body, "\"page_title\":\"Step\"", "step screenshot metadata should still be present")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+type multiViewportScreenshotInspector struct {
+	internalPreviewTestInspector
+}
+
+func (multiViewportScreenshotInspector) CaptureMultiViewport(context.Context, string, models.MultiViewportOpts) (*models.MultiViewportResult, error) {
+	return &models.MultiViewportResult{
+		Captures: []models.ViewportCapture{{
+			Viewport:   models.ViewportSpec{Name: "desktop", Width: 1440, Height: 900},
+			Screenshot: models.ScreenshotResult{PageTitle: "Desktop", URL: "http://preview.local", PNG: []byte("fake-png-bytes")},
+		}},
+	}, nil
+}
+
+// The multi-viewport handler embeds a ScreenshotResult per capture; like the
+// interact handler it must strip the inline PNG bytes after attaching artifacts
+// so large base64 images do not leak into the agent transcript.
+func TestPreviewHandler_MultiViewport_StripsInlineScreenshotBytes(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should be created")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	sessionID := uuid.New()
+	previewID := uuid.New()
+	now := time.Now().UTC()
+
+	h := newPreviewHandlerWithMock(mock)
+	h.manager.SetInspector(multiViewportScreenshotInspector{})
+
+	mock.ExpectQuery("SELECT .+ FROM preview_instances").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(previewInstanceTestCols).
+				AddRow(newActivePreviewRow(previewID, sessionID, orgID, userID, now)...),
+		)
+
+	req := httptest.NewRequest(http.MethodPost, "/preview", strings.NewReader(`{}`))
+	req = previewTestContextWithIDs(req, orgID, userID, sessionID.String())
+	rr := httptest.NewRecorder()
+
+	h.CaptureMultiViewport(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, "multi-viewport should succeed")
+
+	body := rr.Body.String()
+	require.NotContains(t, body, "png_base64", "multi-viewport response must not inline base64 screenshot bytes")
+	require.Contains(t, body, "\"page_title\":\"Desktop\"", "capture screenshot metadata should still be present")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}

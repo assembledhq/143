@@ -130,8 +130,10 @@ type ToolCallResult struct {
 
 // ToolContent is a single content block in a tool result.
 type ToolContent struct {
-	Type string `json:"type"` // "text"
-	Text string `json:"text"`
+	Type     string `json:"type"` // "text" or "image"
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`
+	MIMEType string `json:"mimeType,omitempty"`
 }
 
 // TextResult creates a ToolCallResult with a single text block.
@@ -139,6 +141,12 @@ func TextResult(text string) *ToolCallResult {
 	return &ToolCallResult{
 		Content: []ToolContent{{Type: "text", Text: text}},
 	}
+}
+
+// ImageContent creates an MCP image content block. Data must be base64-encoded
+// image bytes; callers remain responsible for validating the encoded payload.
+func ImageContent(data, mimeType string) ToolContent {
+	return ToolContent{Type: "image", Data: data, MIMEType: mimeType}
 }
 
 // ErrorResult creates a ToolCallResult indicating an error.

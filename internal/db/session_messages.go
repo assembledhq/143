@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -118,6 +119,64 @@ func (s *SessionMessageStore) ListBySession(ctx context.Context, orgID, sessionI
 		return nil, fmt.Errorf("query session messages: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[models.SessionMessage])
+}
+
+// ListTitleContext returns the original human-authored primary-thread request
+// followed by at most limit recent instructions after afterTurn. The bounded
+// query avoids loading a long multi-thread transcript for title evaluation.
+func (s *SessionMessageStore) ListTitleContext(ctx context.Context, orgID, sessionID uuid.UUID, primaryThreadID *uuid.UUID, afterTurn, limit int) ([]models.SessionMessage, error) {
+	threadClause := "thread_id IS NULL"
+	args := pgx.NamedArgs{
+		"org_id":     orgID,
+		"session_id": sessionID,
+		"after_turn": afterTurn,
+		"limit":      limit,
+	}
+	if primaryThreadID != nil {
+		threadClause = "(thread_id = @thread_id OR thread_id IS NULL)"
+		args["thread_id"] = *primaryThreadID
+	}
+	baseWhere := `org_id = @org_id AND session_id = @session_id AND role = 'user' AND source = '' AND ` + threadClause
+
+	originalRows, err := s.db.Query(ctx, `
+		SELECT `+sessionMessageSelectColumns+`
+		FROM session_messages
+		WHERE `+baseWhere+`
+		ORDER BY turn_number ASC, id ASC
+		LIMIT 1`, args)
+	if err != nil {
+		return nil, fmt.Errorf("query original title context: %w", err)
+	}
+	original, err := pgx.CollectOneRow(originalRows, pgx.RowToStructByNameLax[models.SessionMessage])
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []models.SessionMessage{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("collect original title context: %w", err)
+	}
+
+	recentRows, err := s.db.Query(ctx, `
+		SELECT `+sessionMessageSelectColumns+`
+		FROM session_messages
+		WHERE `+baseWhere+` AND turn_number > @after_turn
+		ORDER BY turn_number DESC, id DESC
+		LIMIT @limit`, args)
+	if err != nil {
+		return nil, fmt.Errorf("query recent title context: %w", err)
+	}
+	recent, err := pgx.CollectRows(recentRows, pgx.RowToStructByNameLax[models.SessionMessage])
+	if err != nil {
+		return nil, fmt.Errorf("collect recent title context: %w", err)
+	}
+
+	result := make([]models.SessionMessage, 1, len(recent)+1)
+	result[0] = original
+	for i := len(recent) - 1; i >= 0; i-- {
+		if recent[i].ID != original.ID {
+			result = append(result, recent[i])
+		}
+	}
+	return result, nil
 }
 
 // Delete removes a session message by ID. Used to clean up orphaned messages

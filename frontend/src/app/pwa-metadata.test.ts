@@ -29,14 +29,14 @@ describe("PWA metadata", () => {
       apple: [{ url: "/apple-icon.png", type: "image/png", sizes: "180x180" }],
     });
     expect(viewport.themeColor).toEqual([
-      { media: "(prefers-color-scheme: light)", color: "#091f33" },
-      { media: "(prefers-color-scheme: dark)", color: "#091f33" },
+      { media: "(prefers-color-scheme: light)", color: "#f6f5f0" },
+      { media: "(prefers-color-scheme: dark)", color: "#151513" },
     ]);
     expect(appManifest).toMatchObject({
       name: "143",
       short_name: "143",
-      theme_color: "#091f33",
-      background_color: "#091f33",
+      theme_color: "#151513",
+      background_color: "#f6f5f0",
       display: "standalone",
     });
     expect(appManifest.icons).toEqual([

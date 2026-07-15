@@ -49,6 +49,12 @@ func (s *drainStubSessions) GetByID(context.Context, uuid.UUID, uuid.UUID) (mode
 
 // All other SessionStore methods are no-op zero-returning stubs; the drain
 // path never calls them.
+func (s *drainStubSessions) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+func (s *drainStubSessions) UpdatePRCreationState(context.Context, uuid.UUID, uuid.UUID, models.PRCreationState, string) error {
+	return nil
+}
 func (s *drainStubSessions) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus) error {
 	return nil
 }
@@ -187,6 +193,14 @@ func (j *drainStubJobs) EnqueueWithTarget(_ context.Context, _ uuid.UUID, queue,
 
 func (j *drainStubJobs) OldestPendingSessionJobAge(context.Context) (time.Duration, bool, error) {
 	return 0, false, nil
+}
+
+func (j *drainStubJobs) QueueChangesetPRCreation(ctx context.Context, orgID, _, _ uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error) {
+	id, err := j.Enqueue(ctx, orgID, queue, "open_pr", payload, priority, nil)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
 }
 
 // drainStubThreads records ClearPendingMessages calls so tests can assert

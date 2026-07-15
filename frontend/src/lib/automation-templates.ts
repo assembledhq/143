@@ -207,25 +207,28 @@ Verification
     name: "Codebase maintenance",
     icon: Wrench,
     category: "maintenance",
-    summary: "Look for small, high-leverage cleanup work that lowers future change cost without creating broad churn.",
+    summary: "Implement one small, high-leverage maintenance improvement that lowers future change cost without creating broad churn.",
     goal: `What to do
-- Identify high-leverage maintenance opportunities that would make this repository safer and easier to change.
+- Identify high-leverage maintenance opportunities that would make this repository safer and easier to change, then select one high-confidence candidate that is safe to land now.
 - Favor issues that have clear downstream impact: duplicated logic, brittle boundaries, stale abstractions, oversized modules, or poor local testability.
 - Prefer small, reviewable improvements over broad rewrites or taste-based refactors.
+- Implement the selected improvement using the repository's existing patterns. Do not stop after producing a backlog or recommendation.
+- If no candidate can be implemented safely with the available evidence, make no changes and explain why.
 
 Output requirements
-- Return a short backlog of the best maintenance opportunities, ranked by leverage.
-- For each item, explain the specific pain it reduces, the likely scope, and whether it is safe for an incremental change.
-- Include one recommended candidate for the next automation run if a clear winner emerges.
+- Produce one focused change that is ready for review as a pull request, or an explicit no-op when no safe change exists.
+- Summarize the specific pain reduced, why this candidate was selected, and why the change is safe and appropriately scoped.
+- Keep unrelated maintenance opportunities out of the diff; list only the strongest follow-up candidates briefly in the final summary.
 
 Verification
-- Anchor each recommendation in the codebase as it exists today, with file-level evidence where helpful.
+- Anchor the change in the codebase as it exists today, with file-level evidence where helpful.
+- Add or update focused tests for the behavior changed, and run the narrowest relevant checks for the touched files or packages.
 - Avoid style-only or framework-fashion suggestions unless they remove a concrete source of risk.
-- Keep the backlog specific enough that an engineer could turn each item into a scoped issue.`,
+- Review the final diff for accidental behavior, API, data-model, authorization, tenant-scoping, or operational changes.`,
     outcomes: [
-      "A ranked maintenance backlog",
-      "Clear leverage and scope per item",
-      "One recommended next task",
+      "One focused maintenance PR or explicit no-op",
+      "Tests protecting the changed behavior",
+      "Clear leverage, scope, and verification notes",
     ],
     tags: ["refactor", "cleanup", "maintainability"],
     scheduleEnabled: true,

@@ -69,11 +69,17 @@ When Slack asks for durable coding work, 143 resolves the repository in this ord
 
 Reply in the same Slack thread to continue the linked 143 session. 143 reuses the Slack thread as long as the session can be continued; if the previous session is already in a terminal non-resumable state, a new session is started and linked back to the thread.
 
+## Notifications
+
+New Slack integrations default to the **Quiet** notification preset. Notification channels are reserved for lightweight, actionable updates such as human-input requests; session failures, automation failures, and repeated-failure streaks stay in 143 instead of being broadcast into Slack channels. Sessions started from Slack still report their outcome in the originating thread.
+
 ## How it works
 
 When the Slack agent receives a mention, DM, App Home start, or slash command, it creates or continues a normal 143 session with `origin = slack`. The bot posts a quick acknowledgement with the session link, sends sparse progress updates, then posts the final answer and useful outcome links such as branch, PR, preview, CI state, diff stats, or required next action.
 
 Human-input requests can be delivered back to the originating Slack thread and answered from Slack by linked users with the right access. Slack App Home also surfaces pending responses, recent Slack-started sessions, active previews, recent automation runs, and connection basics.
+
+If your Slack identity is not connected, work can still start as a visibly labeled team session using organization defaults. Use **Connect account** in the acknowledgement, final message, or App Home; the one-time link expires after 30 minutes. Once connected, future sessions can use your personal coding-agent credentials and PR attribution. You can disconnect self-linked identities from **My settings → External identities**. Admins manage Slack and Linear mappings, suggestions, and recently seen unmapped users from **Team settings → External identities**.
 
 <Callout type="info" title="Visibility">
 If the session was started from Slack, Slack remains the lightweight collaboration surface. Use the linked 143 session for the full transcript, workspace state, diffs, preview controls, and PR workflow.

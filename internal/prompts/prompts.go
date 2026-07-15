@@ -536,14 +536,14 @@ func ComplexityEstimateUserPrompt(data ComplexityEstimateUserPromptData) string 
 
 // ─── Session Title ────────────────────────────────────────────────────────────
 
-// SessionTitlePromptData holds the dynamic values for the session title prompt.
-type SessionTitlePromptData struct {
-	CurrentTitle string // empty on initial generation
+// SessionTitleGenerationPrompt renders the system prompt for title generation.
+func SessionTitleGenerationPrompt() string {
+	return render("session_title_generation_prompt.template", nil)
 }
 
-// SessionTitlePrompt renders the system prompt for session title generation.
-func SessionTitlePrompt(data SessionTitlePromptData) string {
-	return render("session_title_prompt.template", data)
+// SessionTitlePivotPrompt renders the conservative title-pivot classifier prompt.
+func SessionTitlePivotPrompt() string {
+	return render("session_title_pivot_prompt.template", nil)
 }
 
 // ─── Eval ─────────────────────────────────────────────────────────────────────

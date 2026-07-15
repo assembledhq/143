@@ -319,6 +319,8 @@ type mockSessionStore struct {
 	workerOwnerships       []workerOwnershipUpdate
 	revisionContextUpdates [][]byte
 	updateWorkingBranchErr error
+	primaryWorktreePath    *string
+	primaryWorktreeErr     error
 	countRunningErr        error
 	beginRuntimeErr        error
 	publishCheckpointErr   error
@@ -1111,6 +1113,27 @@ type mockProjectTaskUpdater struct {
 	statuses []string
 }
 
+type mockAutomationRunUpdater struct {
+	mu        sync.Mutex
+	policy    models.AutomationPublishPolicy
+	policyErr error
+	statuses  []models.SessionStatus
+}
+
+func (m *mockAutomationRunUpdater) OnSessionComplete(_ context.Context, _ *models.Session, status models.SessionStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statuses = append(m.statuses, status)
+	return nil
+}
+
+func (m *mockAutomationRunUpdater) AutomaticPublishPolicy(_ context.Context, _, _ uuid.UUID) (models.AutomationPublishPolicy, error) {
+	if m.policyErr != nil {
+		return "", m.policyErr
+	}
+	return m.policy, nil
+}
+
 func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1185,6 +1208,18 @@ func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Org
 	return m.org, nil
 }
 
+func (m *mockSessionStore) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+
+func (m *mockSessionStore) GetPrimaryChangesetWorktreePath(_ context.Context, _, _ uuid.UUID) (*string, error) {
+	return m.primaryWorktreePath, m.primaryWorktreeErr
+}
+
+func (m *mockSessionStore) UpdatePRCreationState(_ context.Context, _, _ uuid.UUID, _ models.PRCreationState, _ string) error {
+	return nil
+}
+
 // mockJobStore implements agent.JobStore.
 type mockJobStore struct {
 	mu               sync.Mutex
@@ -1234,6 +1269,16 @@ func (m *mockJobStore) getPayload(jobType string) any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.payloads[jobType]
+}
+
+// QueueChangesetPRCreation records the open_pr enqueue through the same maps as
+// Enqueue so assertions on getEnqueued/getPayload observe the queued job.
+func (m *mockJobStore) QueueChangesetPRCreation(ctx context.Context, orgID, _, _ uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error) {
+	id, err := m.Enqueue(ctx, orgID, queue, "open_pr", payload, priority, nil)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
 }
 
 // --- Helpers ---
@@ -1300,6 +1345,7 @@ type testDeps struct {
 	sessions         *mockSessionStore
 	sessionThreads   *mockSessionThreadStore
 	projects         *mockProjectTaskUpdater
+	automationRuns   agent.AutomationRunUpdater
 	issues           *mockIssueStore
 	repos            *mockRepositoryStore
 	logs             *mockSessionLogStore
@@ -1571,6 +1617,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SessionMessages:    d.messages,
 		DecisionLog:        d.decisions,
 		ProjectTasks:       d.projects,
+		AutomationRuns:     d.automationRuns,
 		Issues:             d.issues,
 		Repositories:       d.repos,
 		Jobs:               d.jobs,
@@ -2220,7 +2267,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
 	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete the run from scratch")
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "restart should skip PR creation when the recovered run produces no diff")
 }
 
 func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
@@ -2346,7 +2393,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
 	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete successfully under a single-slot concurrency limit")
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "restart should skip PR creation when the recovered run produces no diff")
 }
 
 func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T) {
@@ -3988,6 +4035,69 @@ func TestRunAgent_SuccessEnqueuesOpenPR(t *testing.T) {
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
+}
+
+func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		diff            string
+		automation      bool
+		policy          models.AutomationPublishPolicy
+		expectOpenPR    bool
+		expectEndedNoPR bool
+	}{
+		{
+			name:            "no diff skips pull request",
+			expectEndedNoPR: true,
+		},
+		{
+			name:       "automation policy none skips pull request",
+			diff:       "--- a/fix.go\n+++ b/fix.go",
+			automation: true,
+			policy:     models.AutomationPublishPolicyNone,
+		},
+		{
+			name:         "automation pull request policy publishes diff",
+			diff:         "--- a/fix.go\n+++ b/fix.go",
+			automation:   true,
+			policy:       models.AutomationPublishPolicyPullRequest,
+			expectOpenPR: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			d := defaultDeps()
+			if tt.automation {
+				automationRunID := uuid.New()
+				run.AutomationRunID = &automationRunID
+				d.automationRuns = &mockAutomationRunUpdater{policy: tt.policy}
+			}
+			d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				return &agent.AgentResult{Diff: tt.diff, Summary: "review complete", ExitCode: 0}, nil
+			}
+
+			err := buildOrchestrator(d).RunAgent(context.Background(), run)
+			require.NoError(t, err, "successful session should complete")
+			if tt.expectEndedNoPR {
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				require.True(t, ok, "no-diff session should enqueue a Linear terminal milestone")
+				require.Equal(t, string(linear.MilestoneEndedNoPR), payload["event"], "no-diff session should complete Linear without a PR")
+			}
+			if tt.expectOpenPR {
+				require.Contains(t, d.jobs.getEnqueued(), "open_pr", "eligible automation should queue pull request creation")
+				return
+			}
+			require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "ineligible session should not queue pull request creation")
+		})
+	}
 }
 
 func TestRunAgent_ConcurrencyLimit(t *testing.T) {
@@ -8178,6 +8288,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 	const (
 		sandboxCreateFailure failureMode = iota
 		workdirResolveFailure
+		primaryChangesetWorktreeFailure
 	)
 
 	cases := []struct {
@@ -8233,6 +8344,15 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			wantMessageAfter:  true,
 			wantErrMatch:      "resolve workdir",
 		},
+		{
+			name:              "primary-changeset-worktree: dead-letter posts exactly one message",
+			failure:           primaryChangesetWorktreeFailure,
+			withRegistry:      true,
+			runHooks:          true,
+			wantMessageInline: false,
+			wantMessageAfter:  true,
+			wantErrMatch:      "resolve primary changeset worktree",
+		},
 	}
 
 	for _, c := range cases {
@@ -8268,6 +8388,8 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			case workdirResolveFailure:
 				// Force sessionRepoSlug to fail at the repo lookup.
 				d.repos.err = errors.New("db flaky")
+			case primaryChangesetWorktreeFailure:
+				d.sessions.primaryWorktreeErr = errors.New(`column "worktree_path" does not exist`)
 			}
 
 			ctx := context.Background()
@@ -8277,8 +8399,12 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 
 			orch := buildOrchestrator(d)
 			err := orch.ContinueSession(ctx, session, nil)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), c.wantErrMatch)
+			require.Error(t, err, "ContinueSession should return the startup failure")
+			require.Contains(t, err.Error(), c.wantErrMatch, "ContinueSession should identify the failed startup stage")
+			if c.failure == primaryChangesetWorktreeFailure {
+				require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "worktree lookup failure should immediately restore the session to idle")
+				require.Contains(t, d.sessions.getSandboxStateUpdateContexts(), sandboxStateUpdateContext{state: models.SandboxStateSnapshotted}, "worktree lookup failure should restore the durable sandbox state")
+			}
 
 			countAssistantMessages := func() int {
 				var n int

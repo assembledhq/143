@@ -15,11 +15,15 @@ import {
   Plus,
   PowerOff,
   Settings2,
+  SlidersHorizontal,
   Trash2,
   Users,
 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +48,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
@@ -156,21 +161,90 @@ function decisionDetailLabel(review: CodeReviewListItem): string | null {
   return null;
 }
 
-function decisionVariant(review: CodeReviewListItem): "success" | "secondary" | "destructive" | "outline" {
+function statusLabel(status: string): string {
+  return status
+    .split("_")
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ");
+}
+
+function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
   if (wasAutomaticallyApproved(review)) return "success";
   if (review.decision === "blocked") return "destructive";
-  if (review.decision === "needs_human_review") return "secondary";
-  return "outline";
+  if (review.decision === "needs_human_review") return "warning";
+  return "neutral";
 }
 
-function statusVariant(status: string): "success" | "secondary" | "destructive" | "outline" {
+function reviewStatusTone(status: string): StatusTone {
   if (status === "completed") return "success";
   if (status === "failed" || status === "stale") return "destructive";
-  if (status === "running" || status === "queued") return "secondary";
-  return "outline";
+  if (status === "running" || status === "queued") return "primary";
+  return "neutral";
 }
 
-function statusLabel(review: CodeReviewListItem): string {
+function ReviewActions({
+  review,
+  selected,
+  onToggleEvidence,
+}: {
+  review: CodeReviewListItem;
+  selected: boolean;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <TooltipProvider>
+      <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
+        <Button
+          variant={selected ? "secondary" : "ghost"}
+          size="sm"
+          className="min-h-11 justify-center md:min-h-0"
+          onClick={onToggleEvidence}
+        >
+          <FileSearch className="h-4 w-4" />
+          Evidence
+        </Button>
+        <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
+          <Link href={`/sessions/${review.session_id}`}>
+            <ExternalLink className="h-4 w-4 md:hidden" />
+            Session
+          </Link>
+        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              className={`min-h-11 justify-center md:size-7 md:min-h-0 ${review.github_review_url ? "" : "col-span-2 md:col-span-1"}`}
+              variant="ghost"
+              size="sm"
+              asChild
+              aria-label="Open pull request"
+            >
+              <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                <span className="md:sr-only">Pull request</span>
+              </Link>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
+        </Tooltip>
+        {review.github_review_url ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button className="min-h-11 justify-center md:size-7 md:min-h-0" variant="ghost" size="sm" asChild aria-label="Open final review">
+                <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+                  <ClipboardCheck className="h-4 w-4" />
+                  <span className="md:sr-only">Final review</span>
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="hidden md:block">Open final review</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function reviewStatusLabel(review: CodeReviewListItem): string {
   if (review.stale || review.status === "stale") return "Stale after PR update";
   if (review.status === "completed") return "Ran successfully";
   if (review.status === "failed") return "Run failed";
@@ -229,6 +303,7 @@ export default function CodeReviewsPage() {
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const setOutcomeFilter = useCallback(
     (value: string) => {
@@ -480,48 +555,6 @@ export default function CodeReviewsPage() {
           description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
         />
 
-        <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">
-          <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
-            <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
-            {repositories.map((repo) => (
-              <SelectItem key={repo.id} value={repo.id}>
-                {repo.full_name}
-              </SelectItem>
-            ))}
-          </FilterSelect>
-          <FilterSelect label="Outcome" value={outcomeFilter} onValueChange={setOutcomeFilter}>
-            <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
-            <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
-            <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
-            <SelectItem value="needs_human_review">Needs human review</SelectItem>
-            <SelectItem value="comment_only">Comment-only decision</SelectItem>
-            <SelectItem value="blocked">Blocked</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
-            <SelectItem value={ALL_RISKS}>All risk</SelectItem>
-            <SelectItem value="acceptable">Acceptable</SelectItem>
-            <SelectItem value="needs_review">Needs review</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
-            <SelectItem value="queued">Queued</SelectItem>
-            <SelectItem value="running">Running</SelectItem>
-            <SelectItem value="completed">Completed</SelectItem>
-            <SelectItem value="failed">Failed</SelectItem>
-            <SelectItem value="stale">Stale</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
-          </FilterSelect>
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs text-muted-foreground">Search</Label>
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="PR, repo, or title"
-              aria-label="Search code reviews"
-            />
-          </div>
-        </div>
-
         <Tabs defaultValue="reviews" className="space-y-4">
           <TabsList>
             <TabsTrigger value="reviews">
@@ -535,6 +568,69 @@ export default function CodeReviewsPage() {
           </TabsList>
 
           <TabsContent value="reviews" className="space-y-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full justify-between md:hidden"
+              aria-expanded={mobileFiltersOpen}
+              aria-controls="code-review-filters"
+              onClick={() => setMobileFiltersOpen((open) => !open)}
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="h-4 w-4" />
+                Filter reviews
+              </span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${mobileFiltersOpen ? "rotate-180" : ""}`} />
+            </Button>
+            <div
+              id="code-review-filters"
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
+            >
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+              <FilterSelect label="Outcome" value={outcomeFilter} onValueChange={setOutcomeFilter}>
+                <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
+                <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
+                <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
+                <SelectItem value="needs_human_review">Needs human review</SelectItem>
+                <SelectItem value="comment_only">Comment-only decision</SelectItem>
+                <SelectItem value="blocked">Blocked</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+                <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+                <SelectItem value="acceptable">Acceptable</SelectItem>
+                <SelectItem value="needs_review">Needs review</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
+                <SelectItem value="queued">Queued</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="stale">Stale</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
+              </FilterSelect>
+              <div className="flex flex-col gap-2">
+                <Label className="text-xs text-muted-foreground">Search</Label>
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="PR, repo, or title"
+                  aria-label="Search code reviews"
+                />
+              </div>
+            </div>
+            <SectionGroup
+              title="Review activity"
+              description="Pull requests reviewed by the team policy and their current outcome."
+            >
             {reviews.length === 0 ? (
               <EmptyState
                 icon={ClipboardCheck}
@@ -543,7 +639,7 @@ export default function CodeReviewsPage() {
               />
             ) : (
               <>
-              <Card>
+              <Card className="hidden md:flex">
                 <CardContent className="p-0">
                   <Table>
                     <TableHeader>
@@ -570,54 +666,34 @@ export default function CodeReviewsPage() {
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
                           <TableCell>
-                            <Badge variant={review.acceptable ? "success" : "secondary"}>
-                              {review.acceptable ? "Acceptable" : "Needs review"}
-                            </Badge>
+                            <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
                           </TableCell>
                           <TableCell>
                             <div className="space-y-1">
-                              <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                              <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
                               {decisionDetailLabel(review) ? (
                                 <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
                               ) : null}
                             </div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(review.stale ? "stale" : review.status)}>
-                              {statusLabel(review)}
-                            </Badge>
+                            <StatusLabel
+                              label={reviewStatusLabel(review)}
+                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                              active={!review.stale && (review.status === "running" || review.status === "queued")}
+                            />
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                variant={selectedEvidenceSessionId === review.session_id ? "secondary" : "ghost"}
-                                size="sm"
-                                onClick={() =>
-                                  setSelectedEvidenceSessionId((current) =>
-                                    current === review.session_id ? null : review.session_id,
-                                  )
-                                }
-                              >
-                                <FileSearch className="h-4 w-4" />
-                                Evidence
-                              </Button>
-                              <Button variant="ghost" size="sm" asChild>
-                                <Link href={`/sessions/${review.session_id}`}>Session</Link>
-                              </Button>
-                              <Button variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
-                                <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
-                                  <ExternalLink className="h-4 w-4" />
-                                </Link>
-                              </Button>
-                              {review.github_review_url ? (
-                                <Button variant="ghost" size="icon-sm" asChild aria-label="Open final review">
-                                  <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-                                    <ClipboardCheck className="h-4 w-4" />
-                                  </Link>
-                                </Button>
-                              ) : null}
-                            </div>
+                            <ReviewActions
+                              review={review}
+                              selected={selectedEvidenceSessionId === review.session_id}
+                              onToggleEvidence={() =>
+                                setSelectedEvidenceSessionId((current) =>
+                                  current === review.session_id ? null : review.session_id,
+                                )
+                              }
+                            />
                           </TableCell>
                         </TableRow>
                       ))}
@@ -625,19 +701,79 @@ export default function CodeReviewsPage() {
                   </Table>
                 </CardContent>
               </Card>
-              {selectedEvidenceReview ? (
-                <CodeReviewEvidencePanel
-                  review={selectedEvidenceReview}
-                  evidence={evidenceQuery.data?.data}
-                  isLoading={evidenceQuery.isLoading}
-                  error={evidenceQuery.error}
-                />
-              ) : null}
+              <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
+                {reviews.map((review) => {
+                  const effectiveStatus = review.stale ? "stale" : review.status;
+                  return (
+                    <ResourceRow
+                      key={review.id}
+                      title={(
+                        <span className="break-words text-sm">
+                          #{review.github_pr_number} {review.pull_request_title}
+                        </span>
+                      )}
+                      metadata={(
+                        <span>
+                          {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                        </span>
+                      )}
+                      status={(
+                        <StatusLabel
+                          label={reviewStatusLabel(review)}
+                          tone={reviewStatusTone(effectiveStatus)}
+                          active={!review.stale && (review.status === "running" || review.status === "queued")}
+                        />
+                      )}
+                      detail={(
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                          <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
+                          <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+                          {decisionDetailLabel(review) ? <span>{decisionDetailLabel(review)}</span> : null}
+                          <span>Completed {formatDate(review.completed_at)}</span>
+                        </div>
+                      )}
+                      actions={(
+                        <ReviewActions
+                          review={review}
+                          selected={selectedEvidenceSessionId === review.session_id}
+                          onToggleEvidence={() =>
+                            setSelectedEvidenceSessionId((current) =>
+                              current === review.session_id ? null : review.session_id,
+                            )
+                          }
+                        />
+                      )}
+                      className="[&_[data-slot=resource-row-actions]]:ml-0"
+                    />
+                  );
+                })}
+              </Card>
+              <CodeReviewEvidenceSheet
+                review={selectedEvidenceReview}
+                evidence={evidenceQuery.data?.data}
+                isLoading={evidenceQuery.isLoading}
+                error={evidenceQuery.error}
+                open={Boolean(selectedEvidenceReview)}
+                onOpenChange={(open) => {
+                  if (!open) setSelectedEvidenceSessionId(null);
+                }}
+              />
               </>
             )}
+            </SectionGroup>
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
+            <div className="max-w-sm">
+              <FilterSelect label="Policy repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+            </div>
             <Card>
               <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
@@ -1072,29 +1208,23 @@ function OutcomeControl({
   ];
 
   return (
-    <div className="grid gap-2 rounded-md border border-border p-2 md:grid-cols-3">
-      {options.map((option) => {
-        const active = option.value === selected;
-        return (
-          <Button
-            key={option.value}
-            type="button"
-            variant={active ? "secondary" : "ghost"}
-            className="h-auto justify-start whitespace-normal px-3 py-3 text-left"
-            disabled={disabled}
-            aria-pressed={active}
-            onClick={() => {
-              if (!active) onChange(option.value);
-            }}
-          >
-            <span className="flex min-w-0 flex-col gap-1">
-              <span className="text-sm font-medium">{option.title}</span>
-              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
-            </span>
-          </Button>
-        );
-      })}
-    </div>
+    <RadioGroup
+      value={selected}
+      disabled={disabled}
+      aria-label="Outcome"
+      className="grid gap-3 md:grid-cols-3"
+      onValueChange={(value) => onChange(value as "disabled" | "comment" | "approve")}
+    >
+      {options.map((option) => (
+        <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
+          <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-sm font-medium text-foreground">{option.title}</span>
+            <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
+          </span>
+        </Label>
+      ))}
+    </RadioGroup>
   );
 }
 
@@ -2107,117 +2237,152 @@ function FineTuningSection({
   );
 }
 
-function CodeReviewEvidencePanel({
+function CodeReviewEvidenceSheet({
   review,
   evidence,
   isLoading,
   error,
+  open,
+  onOpenChange,
 }: {
-  review: CodeReviewListItem;
+  review: CodeReviewListItem | null;
   evidence?: CodeReviewEvidence;
   isLoading: boolean;
   error: Error | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }) {
   const agentResults = evidence?.agent_results ?? [];
   const findings = evidence?.findings ?? [];
   const artifacts = evidence?.prompt_artifacts ?? [];
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <CardTitle>
-            Evidence for #{review.github_pr_number} {review.pull_request_title}
-          </CardTitle>
-          <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
-        {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
-        {!isLoading && !error && !evidence ? (
-          <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
-        ) : null}
-        {evidence ? (
-          <>
-            <div className="grid gap-3 lg:grid-cols-2">
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-foreground">Agent results</div>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent className="w-[calc(100vw-1rem)] p-0 sm:max-w-xl">
+        <SheetHeader className="border-b border-border px-6 py-5">
+          <div className="flex items-start justify-between gap-4 pr-8">
+            <div className="min-w-0 space-y-1">
+              <SheetTitle>Evidence for #{review?.github_pr_number}</SheetTitle>
+              <SheetDescription className="line-clamp-2">
+                {review?.pull_request_title ?? "Review evidence"}
+              </SheetDescription>
+            </div>
+            {review ? <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} /> : null}
+          </div>
+        </SheetHeader>
+        <div className="space-y-6 px-6 py-5">
+          {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
+          {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
+          {!isLoading && !error && !evidence ? (
+            <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
+          ) : null}
+          {evidence ? (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <EvidenceMetric label="Agents" value={agentResults.length} />
+                <EvidenceMetric label="Findings" value={findings.length} />
+                <EvidenceMetric label="Prompts" value={artifacts.length} />
+              </div>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Agent results" empty={agentResults.length === 0} />
                 {agentResults.length === 0 ? (
                   <div className="text-sm text-muted-foreground">No agent results recorded.</div>
                 ) : (
                   agentResults.map((result) => (
-                    <div key={result.id} className="rounded-md border border-border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium text-foreground">
-                            {result.agent_provider} · {result.role}
+                    <div key={result.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="truncate text-sm font-medium text-foreground">{result.agent_provider}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {result.role}
+                            {result.agent_model ? ` · ${result.agent_model}` : ""}
                           </div>
-                          {result.agent_model ? (
-                            <div className="mt-1 text-xs text-muted-foreground">{result.agent_model}</div>
-                          ) : null}
                         </div>
-                        <Badge variant={statusVariant(result.status)}>{result.status}</Badge>
+                        <StatusLabel label={statusLabel(result.status)} tone={reviewStatusTone(result.status)} active={result.status === "running" || result.status === "queued"} />
                       </div>
                       {result.raw_output ? (
-                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                           {result.raw_output}
                         </pre>
                       ) : null}
                       {result.structured_result ? (
-                        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                        <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                           {formatEvidenceJSON(result.structured_result)}
                         </pre>
                       ) : null}
                     </div>
                   ))
                 )}
-              </div>
-              <div className="space-y-2">
-                <div className="text-sm font-medium text-foreground">Findings</div>
+              </section>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Findings" empty={findings.length === 0} />
                 {findings.length === 0 ? (
                   <div className="text-sm text-muted-foreground">No findings recorded.</div>
                 ) : (
                   findings.map((finding) => (
-                    <div key={finding.id} className="rounded-md border border-border p-3">
+                    <div key={finding.id} className="space-y-2 border-t border-border pt-3 first:border-t-0 first:pt-0">
                       <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
+                        <div className="min-w-0 space-y-1">
                           <div className="text-sm font-medium text-foreground">{finding.summary}</div>
-                          <div className="mt-1 text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
+                          <div className="text-xs text-muted-foreground">{formatFindingLocation(finding)}</div>
                         </div>
                         <Badge variant={finding.severity === "critical" || finding.severity === "high" ? "destructive" : "outline"}>
-                          {finding.severity}
+                          {statusLabel(finding.severity)}
                         </Badge>
                       </div>
-                      <div className="mt-2 text-sm text-muted-foreground">{finding.body}</div>
+                      <div className="text-sm leading-6 text-muted-foreground">{finding.body}</div>
                     </div>
                   ))
                 )}
-              </div>
-            </div>
-            <div className="space-y-2">
-              <div className="text-sm font-medium text-foreground">Prompt artifacts</div>
-              {artifacts.length === 0 ? (
-                <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
-              ) : (
-                <div className="grid gap-3 lg:grid-cols-2">
-                  {artifacts.map((artifact) => (
-                    <div key={artifact.id} className="rounded-md border border-border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
+              </section>
+
+              <section className="space-y-3">
+                <EvidenceSectionHeader title="Prompt artifacts" empty={artifacts.length === 0} />
+                {artifacts.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No prompt artifacts recorded.</div>
+                ) : (
+                  artifacts.map((artifact) => (
+                    <div key={artifact.id} className="space-y-3 border-t border-border pt-3 first:border-t-0 first:pt-0">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
+                          {artifact.agent_provider ? (
+                            <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div>
+                          ) : null}
+                        </div>
                         <Badge variant="outline">{artifact.role}</Badge>
                       </div>
-                      <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
                         {artifact.content}
                       </pre>
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
-        ) : null}
-      </CardContent>
-    </Card>
+                  ))
+                )}
+              </section>
+            </>
+          ) : null}
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function EvidenceMetric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border px-3 py-2">
+      <div className="text-lg font-medium text-foreground">{value}</div>
+      <div className="text-xs text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function EvidenceSectionHeader({ title, empty }: { title: string; empty: boolean }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="text-sm font-medium text-foreground">{title}</div>
+      {empty ? <div className="text-xs text-muted-foreground">None</div> : null}
+    </div>
   );
 }
 

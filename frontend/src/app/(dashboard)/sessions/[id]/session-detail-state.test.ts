@@ -290,6 +290,7 @@ describe("mergeSessionDetailStatusUpdate", () => {
     current_turn: 1,
     last_activity_at: "2026-01-01T00:00:00.000Z",
     sandbox_state: "running",
+    changesets: [],
     created_at: "2026-01-01T00:00:00.000Z",
     threads: [baseThread],
   };

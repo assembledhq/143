@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderWithProviders, screen } from "@/test/test-utils";
+import userEvent from "@testing-library/user-event";
 import { SidebarSettingsSection } from "./sidebar-settings-section";
 
 describe("SidebarSettingsSection", () => {
@@ -11,7 +12,7 @@ describe("SidebarSettingsSection", () => {
     expect(screen.getByTestId("sidebar-settings-divider")).toHaveClass("border-t");
 
     const trigger = screen.getByRole("button", { name: /Settings/ });
-    expect(trigger).toHaveClass("gap-2.5", "py-[7px]", "text-xs");
+    expect(trigger).toHaveClass("gap-2.5", "px-2.5", "has-[>svg]:px-2.5", "py-[7px]", "type-dense");
     expect(trigger).not.toHaveClass("gap-2", "py-1.5");
 
     const settingsIcon = trigger.querySelector("svg");
@@ -24,6 +25,23 @@ describe("SidebarSettingsSection", () => {
     );
 
     expect(screen.getByRole("button", { name: /Settings/ })).toHaveClass("px-2.5", "py-3", "text-sm");
+  });
+
+  it("opens collapsed settings in a floating menu", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <SidebarSettingsSection pathname="/sessions" userRole="admin" collapsed />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Settings" });
+    expect(trigger).toHaveClass("justify-center", "px-0");
+    expect(screen.queryByRole("link", { name: "Account" })).not.toBeInTheDocument();
+
+    await user.click(trigger);
+
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveAttribute("data-side", "right");
+    expect(screen.getByRole("menuitem", { name: "Account" })).toHaveAttribute("href", "/settings/account");
   });
 
   it("uses mobile-sized text for nested settings links in the mobile nav drawer", () => {

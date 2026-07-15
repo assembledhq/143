@@ -10,7 +10,8 @@ describe("Input", () => {
 
     const input = screen.getByRole("textbox", { name: "Name" });
     expect(input).toHaveClass("max-sm:text-base");
-    expect(input).toHaveClass("text-xs");
+    expect(input).toHaveClass("type-dense");
+    expect(input).toHaveClass("h-11", "sm:h-9");
     expect(input).not.toHaveClass("text-base");
   });
 });

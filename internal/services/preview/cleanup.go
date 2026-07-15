@@ -8,23 +8,32 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const (
+	DefaultPreviewResourceSampleRetention   = 24 * time.Hour
+	DefaultPreviewResourceSampleDeleteLimit = 10000
+)
+
 // CleanupWorker periodically stops expired and idle previews.
 // It runs as a background goroutine and can be stopped via its Stop method.
 type CleanupWorker struct {
-	manager     *Manager
-	logger      zerolog.Logger
-	interval    time.Duration
-	idleTimeout time.Duration
-	stopCh      chan struct{}
-	doneCh      chan struct{}
+	manager                   *Manager
+	logger                    zerolog.Logger
+	interval                  time.Duration
+	idleTimeout               time.Duration
+	resourceSampleRetention   time.Duration
+	resourceSampleDeleteLimit int
+	stopCh                    chan struct{}
+	doneCh                    chan struct{}
 }
 
 // CleanupWorkerConfig holds initialization options.
 type CleanupWorkerConfig struct {
-	Manager     *Manager
-	Logger      zerolog.Logger
-	Interval    time.Duration // default 1 minute
-	IdleTimeout time.Duration // default 15 minutes
+	Manager                   *Manager
+	Logger                    zerolog.Logger
+	Interval                  time.Duration // default 1 minute
+	IdleTimeout               time.Duration // default 15 minutes
+	ResourceSampleRetention   time.Duration // default 24 hours; set negative to disable
+	ResourceSampleDeleteLimit int           // default 10000 rows per cleanup pass
 }
 
 // NewCleanupWorker creates a new cleanup worker.
@@ -37,13 +46,23 @@ func NewCleanupWorker(cfg CleanupWorkerConfig) *CleanupWorker {
 	if idleTimeout <= 0 {
 		idleTimeout = DefaultIdleTimeout
 	}
+	resourceSampleRetention := cfg.ResourceSampleRetention
+	if resourceSampleRetention == 0 {
+		resourceSampleRetention = DefaultPreviewResourceSampleRetention
+	}
+	resourceSampleDeleteLimit := cfg.ResourceSampleDeleteLimit
+	if resourceSampleDeleteLimit <= 0 {
+		resourceSampleDeleteLimit = DefaultPreviewResourceSampleDeleteLimit
+	}
 	return &CleanupWorker{
-		manager:     cfg.Manager,
-		logger:      cfg.Logger,
-		interval:    interval,
-		idleTimeout: idleTimeout,
-		stopCh:      make(chan struct{}),
-		doneCh:      make(chan struct{}),
+		manager:                   cfg.Manager,
+		logger:                    cfg.Logger,
+		interval:                  interval,
+		idleTimeout:               idleTimeout,
+		resourceSampleRetention:   resourceSampleRetention,
+		resourceSampleDeleteLimit: resourceSampleDeleteLimit,
+		stopCh:                    make(chan struct{}),
+		doneCh:                    make(chan struct{}),
 	}
 }
 
@@ -76,6 +95,7 @@ func (w *CleanupWorker) cleanup() {
 	defer cancel()
 
 	var expiredCount, idleCount int
+	var resourceSamplesDeleted int64
 
 	now := time.Now()
 
@@ -112,11 +132,22 @@ func (w *CleanupWorker) cleanup() {
 		}
 	}
 
-	if expiredCount > 0 || idleCount > 0 {
+	if w.resourceSampleRetention > 0 {
+		cutoff := now.Add(-w.resourceSampleRetention)
+		deleted, err := w.manager.store.DeleteExpiredPreviewResourceSamples(ctx, cutoff, w.resourceSampleDeleteLimit)
+		if err != nil {
+			w.logger.Warn().Err(err).Msg("cleanup: failed to delete expired preview resource samples")
+		} else {
+			resourceSamplesDeleted = deleted
+		}
+	}
+
+	if expiredCount > 0 || idleCount > 0 || resourceSamplesDeleted > 0 {
 		w.logger.Info().
 			Int("expired", expiredCount).
 			Int("idle", idleCount).
-			Msg("cleanup: stopped previews")
+			Int64("resource_samples_deleted", resourceSamplesDeleted).
+			Msg("cleanup: completed preview cleanup")
 	}
 }
 

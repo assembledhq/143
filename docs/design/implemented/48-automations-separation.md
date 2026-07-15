@@ -5,6 +5,8 @@
 > **Implementation notes:** Core automations and `automation_runs` are implemented. Notification delivery and repeated-failure alerting were explicitly split out into [doc 49](../future/49-automation-notifications.md).
 >
 > **2026-05-14 update:** Automations now carry a typed icon pair (`icon_type`, `icon_value`) for visual identity. Only `emoji` is enabled today; the pair is designed to admit image-backed icons later without replacing the API contract.
+
+> **2026-07-14 update:** Automations now carry a typed `publish_policy` with exactly two values: `pull_request` (the backwards-compatible default) and `none`. The value is captured in each run's `config_snapshot`, so an in-flight run keeps the policy it started with. Automatic PR creation is also skipped for every successful session whose persisted diff is empty. A branch-only automation policy is intentionally unsupported.
 >
 > **Supersedes:** [31-automations-tab.md](31-automations-tab.md) (client-side MVP), [32-project-cadence-and-lifecycle.md](../backlog/32-project-cadence-and-lifecycle.md) (evergreen projects)
 >
@@ -62,6 +64,8 @@ CREATE TABLE automations (
     execution_mode  TEXT NOT NULL DEFAULT 'sequential',
     max_concurrent  INT NOT NULL DEFAULT 1,
     base_branch     TEXT NOT NULL DEFAULT 'main',
+    publish_policy  TEXT NOT NULL DEFAULT 'pull_request'
+                    CHECK (publish_policy IN ('pull_request', 'none')),
 
     -- When to do it
     schedule_type   TEXT NOT NULL DEFAULT 'interval', -- 'interval' or 'cron'
@@ -107,7 +111,7 @@ CREATE TABLE automation_runs (
 
     -- Snapshot of automation config at trigger time (for debuggability)
     goal_snapshot   TEXT NOT NULL,                      -- copy of automations.goal at trigger time
-    config_snapshot JSONB,                              -- optional: agent_type, model_override, scope, etc.
+    config_snapshot JSONB,                              -- optional: agent_type, model_override, scope, publish_policy, etc.
 
     -- State
     status          TEXT NOT NULL DEFAULT 'pending',    -- pending, running, completed, completed_noop, failed
@@ -327,6 +331,8 @@ For each returned row:
 3. **Check `max_concurrent`:** count in-flight runs (`status IN ('pending', 'running')`) for this automation. If `>= max_concurrent`, mark the run as `status = 'skipped'` and skip session creation.
 4. **Create a session** and write a `session_automation_links` row to associate it with the run.
 5. **Enqueue the session** for execution (same as manual session dispatch).
+
+After successful execution, the orchestrator queues automatic PR creation only when the persisted session diff is non-empty and the run snapshot's `publish_policy` is `pull_request`. `none` is the reporting/review-only mode: the run completes normally without a branch or PR publication job. Legacy snapshots without the field retain the historical `pull_request` behavior.
 
 The `SELECT ... FOR UPDATE SKIP LOCKED` pattern ensures that even with multiple scheduler replicas, each due automation is claimed by exactly one replica. No advisory locks needed.
 

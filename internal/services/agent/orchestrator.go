@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -435,6 +436,13 @@ type SessionStore interface {
 	// COALESCE loss so an alive preview hydrate is retried rather than
 	// misclassified as a duplicate agent job.
 	ContainerHoldState(ctx context.Context, orgID, sessionID uuid.UUID, expectedContainerID string) (turnHolds bool, previewHolds bool, err error)
+	// GetPrimaryChangesetID resolves the session's primary changeset, the
+	// changeset-scoped target for automatic PR creation.
+	GetPrimaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error)
+	// UpdatePRCreationState records the session's PR-creation state so the
+	// automatic-PR enqueue path can surface a failure when the job cannot be
+	// queued.
+	UpdatePRCreationState(ctx context.Context, orgID, sessionID uuid.UUID, state models.PRCreationState, errMsg string) error
 }
 
 // SessionLogStore defines the log persistence operations.
@@ -518,6 +526,10 @@ type JobStore interface {
 	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	EnqueueWithTarget(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string, targetNodeID *string) (uuid.UUID, error)
 	OldestPendingSessionJobAge(ctx context.Context) (time.Duration, bool, error)
+	// QueueChangesetPRCreation atomically reserves a changeset's PR slot and
+	// enqueues its open_pr job. queued is false when another caller already
+	// owns the slot or PR creation has completed; that is not an error.
+	QueueChangesetPRCreation(ctx context.Context, orgID, sessionID, changesetID uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error)
 }
 
 // UsageRecorder tracks container lifecycle events for billing.
@@ -558,6 +570,7 @@ type ProjectTaskUpdater interface {
 // consistent with whatever the orchestrator persisted to the session.
 type AutomationRunUpdater interface {
 	OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error
+	AutomaticPublishPolicy(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationPublishPolicy, error)
 }
 
 type AutomationGoalImprovementUpdater interface {
@@ -570,6 +583,24 @@ type PagerDutySessionWritebacker interface {
 
 type EvalBootstrapLookup interface {
 	GetBySessionThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.EvalBootstrapRun, error)
+}
+
+// SuccessfulTurnVerification describes the adapter-independent output of a
+// completed coding turn. Preview verification is deliberately attached here,
+// rather than to individual adapters, so credential retries and resume
+// fallbacks cannot bypass it.
+type SuccessfulTurnVerification struct {
+	Session           *models.Session
+	Sandbox           *Sandbox
+	Result            *AgentResult
+	WorkspaceRevision int64
+	Diff              string
+}
+
+// SuccessfulTurnVerifier runs bounded, evidence-producing verification after
+// a successful turn has been durably persisted.
+type SuccessfulTurnVerifier interface {
+	VerifySuccessfulTurn(ctx context.Context, input SuccessfulTurnVerification) error
 }
 
 // Orchestrator coordinates end-to-end agent execution: sandbox lifecycle,
@@ -615,6 +646,7 @@ type Orchestrator struct {
 	sandboxAuth                SandboxAuthServer  // can be nil — paired with identityResolver
 	users                      UserLookup         // can be nil — needed for App-token Co-authored-by trailer
 	evalBootstraps             EvalBootstrapLookup
+	successfulTurnVerifier     SuccessfulTurnVerifier
 	internalAPIURL             string
 	internalAPISecret          string
 	logger                     zerolog.Logger
@@ -623,6 +655,246 @@ type Orchestrator struct {
 	threadCancels              *ThreadCancelRegistry // optional — enables per-tab SIGINT
 	nodeID                     string
 	isDraining                 func() bool
+}
+
+type ChangesetMaterializationResult struct {
+	WorkingBranch string
+	WorktreePath  string
+	BaseHeadSHA   string
+	HeadSHA       string
+	Diff          string
+}
+
+type ChangesetDiffResult struct {
+	HeadSHA string
+	Diff    string
+}
+
+type ChangesetRestackResult struct {
+	BaseHeadSHA string
+	HeadSHA     string
+	Diff        string
+	Conflict    bool
+	Message     string
+}
+
+func (o *Orchestrator) applyPrimaryChangesetWorkDir(ctx context.Context, session *models.Session, cfg *SandboxConfig) error {
+	lookup, ok := o.sessions.(interface {
+		GetPrimaryChangesetWorktreePath(context.Context, uuid.UUID, uuid.UUID) (*string, error)
+	})
+	if !ok || session == nil || cfg == nil {
+		return nil
+	}
+	worktreePath, err := lookup.GetPrimaryChangesetWorktreePath(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return err
+	}
+	if worktreePath != nil && strings.TrimSpace(*worktreePath) != "" {
+		cfg.WorkDir = *worktreePath
+	}
+	return nil
+}
+
+func (o *Orchestrator) applyTargetChangesetWorkDir(ctx context.Context, session *models.Session, changesetID *uuid.UUID, cfg *SandboxConfig) error {
+	if changesetID == nil {
+		return o.applyPrimaryChangesetWorkDir(ctx, session, cfg)
+	}
+	lookup, ok := o.sessions.(interface {
+		GetChangesetWorktreePath(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*string, error)
+	})
+	if !ok || session == nil || cfg == nil {
+		return nil
+	}
+	worktreePath, err := lookup.GetChangesetWorktreePath(ctx, session.OrgID, session.ID, *changesetID)
+	if err != nil {
+		return err
+	}
+	if worktreePath == nil || strings.TrimSpace(*worktreePath) == "" {
+		return errors.New("target changeset is not materialized")
+	}
+	cfg.WorkDir = *worktreePath
+	return nil
+}
+
+func (o *Orchestrator) CaptureChangesetDiff(ctx context.Context, session *models.Session, changeset models.SessionChangeset) (ChangesetDiffResult, error) {
+	if session == nil || session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		return ChangesetDiffResult{}, ErrChangesetSandboxUnavailable
+	}
+	if changeset.WorktreePath == nil || changeset.BaseHeadSHA == nil {
+		return ChangesetDiffResult{}, errors.New("changeset is not materialized")
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: *changeset.WorktreePath, HomeDir: DefaultSandboxConfig().HomeDir}
+	cmd := fmt.Sprintf("git -C '%s' rev-parse HEAD && git -C '%s' diff --binary '%s' -- .", shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.BaseHeadSHA))
+	var stdout, stderr bytes.Buffer
+	code, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil || code != 0 {
+		return ChangesetDiffResult{}, fmt.Errorf("capture changeset diff: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	output := stdout.String()
+	newline := strings.IndexByte(output, '\n')
+	if newline < 0 {
+		return ChangesetDiffResult{}, errors.New("capture changeset diff: git returned no head line")
+	}
+	return ChangesetDiffResult{HeadSHA: strings.TrimSpace(output[:newline]), Diff: output[newline+1:]}, nil
+}
+
+var ErrChangesetSandboxUnavailable = errors.New("changeset materialization requires a live session sandbox")
+var ErrChangesetDiskBudget = errors.New("insufficient sandbox disk for another changeset worktree")
+
+// MaterializeChangeset creates a worktree from the changeset's direct base in
+// the session's live sandbox. Independent changesets fetch the target branch;
+// stacked changesets use the already-materialized parent branch. Dependency installation remains
+// lazy: the worktree shares Git objects immediately and bootstrap/install work
+// runs only when the branch is first used by an agent, preview, or readiness.
+func (o *Orchestrator) MaterializeChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, patch string) (ChangesetMaterializationResult, error) {
+	if session == nil || session.ContainerID == nil || strings.TrimSpace(*session.ContainerID) == "" {
+		return ChangesetMaterializationResult{}, ErrChangesetSandboxUnavailable
+	}
+	workDir := DefaultSandboxConfig().WorkDir
+	if session.RepositoryID != nil {
+		repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
+		if err != nil {
+			return ChangesetMaterializationResult{}, fmt.Errorf("resolve changeset repository: %w", err)
+		}
+		if slug := SlugForRepo(repo.FullName); slug != "" {
+			workDir = DefaultSandboxConfig().HomeDir + "/" + slug
+		}
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: workDir, HomeDir: DefaultSandboxConfig().HomeDir}
+	var diskOut, diskErr bytes.Buffer
+	code, err := o.provider.Exec(ctx, sandbox, "df -Pk '"+shellEscapeSingleQuote(workDir)+"' | awk 'NR==2 {print $4}'", &diskOut, &diskErr)
+	if err != nil || code != 0 {
+		return ChangesetMaterializationResult{}, fmt.Errorf("inspect sandbox disk budget: %w: %s", err, strings.TrimSpace(diskErr.String()))
+	}
+	availableKB, err := strconv.ParseInt(strings.TrimSpace(diskOut.String()), 10, 64)
+	if err != nil {
+		return ChangesetMaterializationResult{}, fmt.Errorf("parse sandbox disk budget: %w", err)
+	}
+	const minimumWorktreeAvailableKB = 512 * 1024
+	if availableKB < minimumWorktreeAvailableKB {
+		return ChangesetMaterializationResult{}, fmt.Errorf("%w: %d KiB available, %d KiB required", ErrChangesetDiskBudget, availableKB, minimumWorktreeAvailableKB)
+	}
+	branchSlug := strings.Trim(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return '-'
+	}, changeset.Title), "-")
+	if branchSlug == "" {
+		branchSlug = "pull-request"
+	}
+	if len(branchSlug) > 36 {
+		branchSlug = strings.TrimRight(branchSlug[:36], "-")
+	}
+	workingBranch := fmt.Sprintf("143/%s/%d-%s", session.ID.String()[:8], changeset.OrderIndex+1, branchSlug)
+	worktreePath := fmt.Sprintf("%s/.143/changesets/%s", DefaultSandboxConfig().HomeDir, changeset.ID.String())
+	baseRef := "FETCH_HEAD"
+	prepareBase := fmt.Sprintf("git -C '%s' fetch --quiet origin '%s'", shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(changeset.TargetBranch))
+	if changeset.StackedOnChangesetID != nil {
+		baseRef = changeset.BaseBranch
+		prepareBase = fmt.Sprintf("git -C '%s' show-ref --verify --quiet 'refs/heads/%s'", shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(baseRef))
+	}
+	cmd := fmt.Sprintf("%s && mkdir -p '%s/.143/changesets' && git -C '%s' worktree add -b '%s' '%s' '%s' && git -C '%s' rev-parse HEAD",
+		prepareBase, shellEscapeSingleQuote(DefaultSandboxConfig().HomeDir), shellEscapeSingleQuote(workDir),
+		shellEscapeSingleQuote(workingBranch), shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(baseRef), shellEscapeSingleQuote(worktreePath))
+	var stdout, stderr bytes.Buffer
+	code, err = o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil || code != 0 {
+		return ChangesetMaterializationResult{}, fmt.Errorf("create changeset worktree: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	headSHA := strings.TrimSpace(stdout.String())
+	if headSHA == "" {
+		return ChangesetMaterializationResult{}, errors.New("create changeset worktree: git returned an empty head SHA")
+	}
+	cleanup := func() {
+		cleanupCmd := fmt.Sprintf("git -C '%s' worktree remove --force '%s' && git -C '%s' branch -D '%s'", shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(workDir), shellEscapeSingleQuote(workingBranch))
+		var cleanupErr bytes.Buffer
+		if code, err := o.provider.Exec(context.WithoutCancel(ctx), sandbox, cleanupCmd, io.Discard, &cleanupErr); err != nil || code != 0 {
+			o.logger.Warn().Err(err).Str("changeset_id", changeset.ID.String()).Str("stderr", strings.TrimSpace(cleanupErr.String())).Msg("failed to clean up partial changeset worktree")
+		}
+	}
+	if strings.TrimSpace(patch) != "" {
+		patchPath := worktreePath + "/.143-split.patch"
+		if err := o.provider.WriteFile(ctx, sandbox, patchPath, []byte(patch)); err != nil {
+			cleanup()
+			return ChangesetMaterializationResult{}, fmt.Errorf("write changeset split patch: %w", err)
+		}
+		applyCmd := fmt.Sprintf("git -C '%s' apply --whitespace=nowarn '%s' && rm -f '%s'", shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(patchPath), shellEscapeSingleQuote(patchPath))
+		var applyErr bytes.Buffer
+		if code, err := o.provider.Exec(ctx, sandbox, applyCmd, io.Discard, &applyErr); err != nil || code != 0 {
+			cleanup()
+			return ChangesetMaterializationResult{}, fmt.Errorf("apply changeset split patch: %w: %s", err, strings.TrimSpace(applyErr.String()))
+		}
+		checkpointCmd := fmt.Sprintf("git -C '%s' add -A && git -C '%s' -c user.name='143 Changeset' -c user.email='noreply@143.dev' commit -m 'Materialize %s' --quiet",
+			shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(worktreePath), shellEscapeSingleQuote(changeset.Title))
+		var checkpointErr bytes.Buffer
+		if code, err := o.provider.Exec(ctx, sandbox, checkpointCmd, io.Discard, &checkpointErr); err != nil || code != 0 {
+			cleanup()
+			return ChangesetMaterializationResult{}, fmt.Errorf("checkpoint changeset split patch: %w: %s", err, strings.TrimSpace(checkpointErr.String()))
+		}
+	}
+	captured, err := o.CaptureChangesetDiff(ctx, session, models.SessionChangeset{WorktreePath: &worktreePath, BaseHeadSHA: &headSHA})
+	if err != nil {
+		cleanup()
+		return ChangesetMaterializationResult{}, err
+	}
+	return ChangesetMaterializationResult{WorkingBranch: workingBranch, WorktreePath: worktreePath, BaseHeadSHA: headSHA, HeadSHA: captured.HeadSHA, Diff: captured.Diff}, nil
+}
+
+func (o *Orchestrator) CheckpointChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, message string) (ChangesetDiffResult, error) {
+	if session == nil || session.ContainerID == nil || changeset.WorktreePath == nil {
+		return ChangesetDiffResult{}, ErrChangesetSandboxUnavailable
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: *changeset.WorktreePath, HomeDir: DefaultSandboxConfig().HomeDir}
+	if strings.TrimSpace(message) == "" {
+		message = "Update " + changeset.Title
+	}
+	cmd := fmt.Sprintf("if ! git -C '%s' diff --quiet -- . || ! git -C '%s' diff --cached --quiet -- .; then git -C '%s' add -A && git -C '%s' -c user.name='143 Changeset' -c user.email='noreply@143.dev' commit -m '%s' --quiet; fi",
+		shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(message))
+	var stderr bytes.Buffer
+	if code, err := o.provider.Exec(ctx, sandbox, cmd, io.Discard, &stderr); err != nil || code != 0 {
+		return ChangesetDiffResult{}, fmt.Errorf("checkpoint changeset: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return o.CaptureChangesetDiff(ctx, session, changeset)
+}
+
+func (o *Orchestrator) RestackChangeset(ctx context.Context, session *models.Session, changeset models.SessionChangeset, baseRef string) (ChangesetRestackResult, error) {
+	if session == nil || session.ContainerID == nil || changeset.WorktreePath == nil || changeset.BaseHeadSHA == nil {
+		return ChangesetRestackResult{}, ErrChangesetSandboxUnavailable
+	}
+	sandbox := &Sandbox{ID: *session.ContainerID, Provider: o.provider.Name(), WorkDir: *changeset.WorktreePath, HomeDir: DefaultSandboxConfig().HomeDir}
+	prepare := "true"
+	if baseRef == "" {
+		baseRef = "origin/" + changeset.BaseBranch
+		prepare = fmt.Sprintf("git -C '%s' fetch --quiet origin '%s'", shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(changeset.BaseBranch))
+	}
+	cmd := fmt.Sprintf("%s && base=$(git -C '%s' rev-parse '%s') && if git -C '%s' rebase --onto \"$base\" '%s'; then printf '__143_BASE_SHA=%%s\\n' \"$base\"; else git -C '%s' rebase --abort >/dev/null 2>&1 || true; exit 79; fi",
+		prepare, shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(baseRef), shellEscapeSingleQuote(*changeset.WorktreePath), shellEscapeSingleQuote(*changeset.BaseHeadSHA), shellEscapeSingleQuote(*changeset.WorktreePath))
+	var stdout, stderr bytes.Buffer
+	code, err := o.provider.Exec(ctx, sandbox, cmd, &stdout, &stderr)
+	if err != nil {
+		return ChangesetRestackResult{}, fmt.Errorf("restack changeset: %w", err)
+	}
+	if code == 79 {
+		return ChangesetRestackResult{Conflict: true, Message: strings.TrimSpace(stderr.String())}, nil
+	}
+	if code != 0 {
+		return ChangesetRestackResult{}, fmt.Errorf("restack changeset failed (exit %d): %s", code, strings.TrimSpace(stderr.String()))
+	}
+	baseHead := ""
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if strings.HasPrefix(line, "__143_BASE_SHA=") {
+			baseHead = strings.TrimPrefix(line, "__143_BASE_SHA=")
+		}
+	}
+	if baseHead == "" {
+		return ChangesetRestackResult{}, errors.New("restack changeset returned no base head")
+	}
+	captured, err := o.CaptureChangesetDiff(ctx, session, models.SessionChangeset{WorktreePath: changeset.WorktreePath, BaseHeadSHA: &baseHead})
+	if err != nil {
+		return ChangesetRestackResult{}, err
+	}
+	return ChangesetRestackResult{BaseHeadSHA: baseHead, HeadSHA: captured.HeadSHA, Diff: captured.Diff}, nil
 }
 
 // CancelThreadByID asks the thread-scoped cancel registry to SIGINT the
@@ -710,6 +982,9 @@ func (o *Orchestrator) RevertThread(ctx context.Context, session *models.Session
 	} else if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
+	if err := o.applyPrimaryChangesetWorkDir(ctx, session, &sandboxCfg); err != nil {
+		return fmt.Errorf("revert thread: resolve primary changeset worktree: %w", err)
+	}
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, session.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		return fmt.Errorf("revert thread: resolve sandbox network: %w", err)
 	}
@@ -789,6 +1064,7 @@ type ContinueSessionOptions struct {
 	PRRepair             *PRRepairContinueOptions
 	HumanInputRequestID  *uuid.UUID
 	QueuedMessageID      *int64
+	ChangesetID          *uuid.UUID
 
 	// ThreadID, when set, identifies the agent tab this turn belongs to.
 	// The orchestrator passes it to the thread cancel registry so a
@@ -875,14 +1151,15 @@ type OrchestratorConfig struct {
 	// Users looks up the triggering user record for the App-token
 	// Co-authored-by trailer. Required when IdentityResolver is set and
 	// the org has any user-triggered sessions.
-	Users             UserLookup
-	EvalBootstraps    EvalBootstrapLookup
-	InternalAPIURL    string
-	InternalAPISecret string
-	NodeID            string
-	IsDraining        func() bool
-	Logger            zerolog.Logger
-	MaxConcurrent     int
+	Users                  UserLookup
+	EvalBootstraps         EvalBootstrapLookup
+	SuccessfulTurnVerifier SuccessfulTurnVerifier // optional — automatic preview verification
+	InternalAPIURL         string
+	InternalAPISecret      string
+	NodeID                 string
+	IsDraining             func() bool
+	Logger                 zerolog.Logger
+	MaxConcurrent          int
 }
 
 type sandboxGitHubAuthState struct {
@@ -954,6 +1231,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sandboxAuth:                cfg.SandboxAuth,
 		users:                      cfg.Users,
 		evalBootstraps:             cfg.EvalBootstraps,
+		successfulTurnVerifier:     cfg.SuccessfulTurnVerifier,
 		internalAPIURL:             cfg.InternalAPIURL,
 		internalAPISecret:          cfg.InternalAPISecret,
 		cancels:                    cfg.Cancels,
@@ -962,6 +1240,28 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		maxConcurrent:              maxConcurrent,
 		nodeID:                     cfg.NodeID,
 		isDraining:                 cfg.IsDraining,
+	}
+}
+
+// SetSuccessfulTurnVerifier supports late binding on worker processes, where
+// the preview manager is constructed after the core agent services.
+func (o *Orchestrator) SetSuccessfulTurnVerifier(verifier SuccessfulTurnVerifier) {
+	o.successfulTurnVerifier = verifier
+}
+
+func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, log zerolog.Logger) {
+	if o.successfulTurnVerifier == nil || session == nil || result == nil {
+		return
+	}
+	diff := strings.TrimSpace(result.Diff)
+	revision := session.WorkspaceRevision
+	if diff != "" {
+		revision++
+	}
+	if err := o.successfulTurnVerifier.VerifySuccessfulTurn(ctx, SuccessfulTurnVerification{
+		Session: session, Sandbox: sandbox, Result: result, WorkspaceRevision: revision, Diff: diff,
+	}); err != nil {
+		log.Warn().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
 	}
 }
 
@@ -1181,21 +1481,21 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		sandboxCfg.Env = make(map[string]string)
 	}
 	tokenTTL := sandboxCfg.Timeout + 5*time.Minute
-	var scopes []string
+	scopes := []string{"preview:read", "preview:interact", "preview:manage"}
 	sessionOrigin := string(session.Origin)
 	var evalBootstrapRunID *uuid.UUID
 	if session.Origin == models.SessionOriginEvalBootstrap {
 		if o.evalBootstraps != nil && threadID != nil && *threadID != uuid.Nil {
 			if run, err := o.evalBootstraps.GetBySessionThread(ctx, session.OrgID, session.ID, *threadID); err == nil {
 				evalBootstrapRunID = &run.ID
-				scopes = []string{"eval:add"}
+				scopes = append(scopes, "eval:add")
 			} else {
 				log.Warn().Err(err).Str("session_id", session.ID.String()).Str("thread_id", threadID.String()).Msg("failed to resolve eval bootstrap run for internal token claim; eval:add tool will be unavailable")
 			}
 		}
 	}
 	if session.Origin == models.SessionOriginAutomationGoalImprovement {
-		scopes = []string{"automation-goal-improvement:complete"}
+		scopes = append(scopes, "automation-goal-improvement:complete")
 	}
 	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {
@@ -2601,6 +2901,10 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	if slug := SlugForRepo(repoFullName); slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
 	}
+	if err := o.applyPrimaryChangesetWorkDir(ctx, run, &sandboxCfg); err != nil {
+		o.failRun(ctx, run, fmt.Sprintf("resolve primary changeset worktree: %s", err))
+		return err
+	}
 	if err := ApplyOrgSandboxNetworkSettings(ctx, o.orgs, run.OrgID, o.staticEgress, &sandboxCfg); err != nil {
 		o.failRun(ctx, run, err.Error())
 		return err
@@ -3165,6 +3469,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 				log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to mark primary thread turn complete")
 			}
 		}
+		o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 
 		log.Info().
 			Int("turn", turnNumber).
@@ -3180,6 +3485,15 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
+	// Completion hooks consume the in-memory session after UpdateResult.
+	// Keep it aligned with the persisted terminal result so automation runs
+	// can distinguish a shippable change from a clean no-op and retain the
+	// agent's actual summary instead of a generic fallback.
+	run.Status = status
+	run.ResultSummary = runResult.ResultSummary
+	run.Diff = runResult.Diff
+	run.Error = runResult.Error
+	o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 	if primaryThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
 			log.Warn().Err(err).Str("thread_id", primaryThreadID.String()).Msg("failed to persist primary thread result")
@@ -3205,7 +3519,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			Str("status", string(status))
 	})
 
-	if run.Origin != models.SessionOriginAutomationGoalImprovement {
+	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		payload := map[string]interface{}{
 			"session_id": run.ID.String(),
 			"org_id":     run.OrgID.String(),
@@ -3213,7 +3527,20 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
 		}
-		o.enqueueJob(ctx, run.OrgID, "default", "open_pr", payload)
+		changesetID, changesetErr := o.sessions.GetPrimaryChangesetID(ctx, run.OrgID, run.ID)
+		if changesetErr != nil {
+			o.logger.Error().Err(changesetErr).Str("session_id", run.ID.String()).Msg("failed to resolve primary changeset for automatic PR creation")
+		} else {
+			payload["changeset_id"] = changesetID.String()
+			if _, queued, queueErr := o.jobs.QueueChangesetPRCreation(ctx, run.OrgID, run.ID, changesetID, "default", payload, 0); queueErr != nil {
+				if stateErr := o.sessions.UpdatePRCreationState(ctx, run.OrgID, run.ID, models.PRCreationStateFailed, "Could not queue pull request creation."); stateErr != nil {
+					o.logger.Warn().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to restore automatic PR creation state after enqueue failure")
+				}
+				o.logger.Error().Err(queueErr).Str("changeset_id", changesetID.String()).Msg("failed to enqueue automatic PR creation")
+			} else if !queued {
+				o.logger.Info().Str("changeset_id", changesetID.String()).Msg("automatic PR creation already queued or complete")
+			}
+		}
 	}
 
 	if run.PMPlanID != nil && o.decisionLog != nil {
@@ -3250,6 +3577,49 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	o.notifyPagerDutySessionComplete(ctx, run, status, pagerDutySessionCompletionSummary(run))
 
 	return nil
+}
+
+func (o *Orchestrator) shouldQueueAutomaticPR(ctx context.Context, run *models.Session, result *models.SessionResult, log zerolog.Logger) bool {
+	if run.Origin == models.SessionOriginAutomationGoalImprovement {
+		return false
+	}
+	if result == nil || result.Diff == nil || strings.TrimSpace(*result.Diff) == "" {
+		log.Info().Msg("skipping automatic PR creation because the session produced no diff")
+		o.enqueueLinearMilestone(ctx, run, string(linear.MilestoneEndedNoPR))
+		return false
+	}
+	if run.AutomationRunID == nil {
+		return true
+	}
+	if o.automationRuns == nil {
+		log.Warn().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy is unavailable")
+		return false
+	}
+	policy, err := o.automationRuns.AutomaticPublishPolicy(ctx, run.OrgID, *run.AutomationRunID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy could not be resolved")
+		return false
+	}
+	switch policy {
+	case models.AutomationPublishPolicyPullRequest:
+		return true
+	case models.AutomationPublishPolicyNone:
+		log.Info().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Msg("skipping automatic PR creation because automation publish policy is none")
+		return false
+	default:
+		log.Error().
+			Str("automation_run_id", run.AutomationRunID.String()).
+			Str("publish_policy", string(policy)).
+			Msg("skipping automatic PR creation because automation publish policy is invalid")
+		return false
+	}
 }
 
 // ContinueSession handles a follow-up turn in a multi-turn session.
@@ -3610,6 +3980,31 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if slug != "" {
 		sandboxCfg.WorkDir = sandboxCfg.HomeDir + "/" + slug
+	}
+	var targetChangesetID *uuid.UUID
+	if opts != nil {
+		targetChangesetID = opts.ChangesetID
+	}
+	if err := o.applyTargetChangesetWorkDir(ctx, session, targetChangesetID, &sandboxCfg); err != nil {
+		log.Error().Err(err).Msg("primary changeset worktree resolution failed during continue_session")
+		o.cleanupContinueSessionStartupFailure(
+			ctx,
+			session,
+			log,
+			models.SessionStatusIdle,
+			&snapshottedState,
+			"failed to revert session to idle after primary changeset worktree resolution failure",
+			"failed to revert sandbox state after primary changeset worktree resolution failure",
+			fmt.Sprintf("Failed to resolve the pull request workspace: %s\n\nPlease try again in a moment.", err),
+			"primary changeset worktree resolution",
+		)
+		return fmt.Errorf("resolve primary changeset worktree: %w", err)
+	}
+	if targetChangesetID != nil {
+		if sandboxCfg.Env == nil {
+			sandboxCfg.Env = map[string]string{}
+		}
+		sandboxCfg.Env["143_CHANGESET_ID"] = targetChangesetID.String()
 	}
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
@@ -4630,6 +5025,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update turn complete: %w", err)
 	}
+	o.verifySuccessfulTurn(ctx, session, sandbox, result, log)
 
 	drainAfterRelease = true
 
