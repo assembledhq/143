@@ -119,6 +119,7 @@ const review: CodeReviewListItem = {
   acceptable: true,
   stale: false,
   review_output_key: "pr-1:abcdef:policy-1",
+  github_review_id: 143428,
   completed_at: "2026-06-26T12:05:00Z",
   created_at: "2026-06-26T12:00:00Z",
   repository_name: "api",
@@ -267,7 +268,8 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
     expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
     expect(screen.getByText("Acceptable")).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
+    expect(screen.getByText("Automatically approved")).toBeInTheDocument();
+    expect(screen.getByText("Ran successfully")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Evidence/i }));
     expect(await screen.findByText(/Evidence for #428/i)).toBeInTheDocument();
     expect(screen.getByText("No blocking issues found.")).toBeInTheDocument();
@@ -338,6 +340,59 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
+    const user = userEvent.setup();
+    const requestedOutcomes: string[] = [];
+    const successfulNotApproved: CodeReviewListItem = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      pull_request_id: "pr-2",
+      status: "completed",
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: 143429,
+      github_pr_number: 429,
+      github_pr_url: "https://github.com/acme/api/pull/429",
+      pull_request_title: "Keep manual approval",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        const outcome = new URL(request.url).searchParams.get("outcome") ?? "";
+        requestedOutcomes.push(outcome);
+        return HttpResponse.json({
+          data: outcome === "completed_not_approved" ? [successfulNotApproved] : [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    expect(await screen.findByText("Automatically approved")).toBeInTheDocument();
+    expect(screen.getByText("Ran successfully")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Ran successfully — not approved" }));
+
+    expect(await screen.findByText("#429 Keep manual approval")).toBeInTheDocument();
+    expect(screen.getByText("Not automatically approved")).toBeInTheDocument();
+    expect(screen.getByText("Needs human review")).toBeInTheDocument();
+    expect(screen.getByText("Ran successfully")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("completed_not_approved");
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Automatically approved" }));
+
+    expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("automatically_approved");
+    });
   });
 
   it("edits description requirements in a focused side sheet", async () => {

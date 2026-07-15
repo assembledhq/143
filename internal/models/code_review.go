@@ -67,6 +67,25 @@ func (d CodeReviewDecision) Validate() error {
 	}
 }
 
+// CodeReviewListOutcome groups review decisions into the two completion
+// outcomes operators most often need to distinguish on the Code reviews page.
+// It is a list-filter contract rather than persisted review state.
+type CodeReviewListOutcome string
+
+const (
+	CodeReviewListOutcomeAutomaticallyApproved CodeReviewListOutcome = "automatically_approved"
+	CodeReviewListOutcomeCompletedNotApproved  CodeReviewListOutcome = "completed_not_approved"
+)
+
+func (o CodeReviewListOutcome) Validate() error {
+	switch o {
+	case CodeReviewListOutcomeAutomaticallyApproved, CodeReviewListOutcomeCompletedNotApproved:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewListOutcome: %q", o)
+	}
+}
+
 // CodeReviewUpdatedEvent is fanned out over the org-scoped code review SSE
 // stream whenever a review row is created or its status/decision changes. The
 // frontend treats it as a "the list moved, refetch" signal rather than reading

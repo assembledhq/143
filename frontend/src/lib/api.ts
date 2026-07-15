@@ -272,6 +272,7 @@ export const api = {
     list: (params?: {
       repository_id?: string;
       decision?: import('./types').CodeReviewDecision;
+      outcome?: import('./types').CodeReviewListOutcome;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
@@ -280,6 +281,7 @@ export const api = {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);

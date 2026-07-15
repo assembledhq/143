@@ -739,6 +739,7 @@ func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.
 type CodeReviewListFilters struct {
 	RepositoryID *uuid.UUID
 	Decision     *models.CodeReviewDecision
+	Outcome      *models.CodeReviewListOutcome
 	Status       *models.CodeReviewSessionStatus
 	Acceptable   *bool
 	Search       string
@@ -779,6 +780,23 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		query += `
 			  AND m.decision = @decision`
 		args["decision"] = *filters.Decision
+	}
+	if filters.Outcome != nil {
+		if err := filters.Outcome.Validate(); err != nil {
+			return nil, err
+		}
+		switch *filters.Outcome {
+		case models.CodeReviewListOutcomeAutomaticallyApproved:
+			query += `
+			  AND m.status = 'completed'
+			  AND m.decision = 'approved'
+			  AND m.github_review_id IS NOT NULL`
+		case models.CodeReviewListOutcomeCompletedNotApproved:
+			query += `
+			  AND m.status = 'completed'
+			  AND (m.decision IS DISTINCT FROM 'approved'
+			       OR m.github_review_id IS NULL)`
+		}
 	}
 	if filters.Status != nil {
 		if err := filters.Status.Validate(); err != nil {

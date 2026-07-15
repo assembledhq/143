@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChevronDown,
@@ -72,6 +73,7 @@ import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
+  CodeReviewListOutcome,
   CodeReviewPolicyConfig,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
@@ -81,9 +83,20 @@ import type {
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
-const ALL_DECISIONS = "all";
+const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
+const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
+const OUTCOME_FILTER_VALUES = [
+  ALL_OUTCOMES,
+  AUTOMATICALLY_APPROVED,
+  COMPLETED_NOT_APPROVED,
+  "needs_human_review",
+  "comment_only",
+  "blocked",
+] as const;
+type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -125,16 +138,26 @@ function formatDate(value?: string): string {
   }).format(new Date(value));
 }
 
+function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
+  return review.status === "completed" && review.decision === "approved" && Boolean(review.github_review_id);
+}
+
 function decisionLabel(review: CodeReviewListItem): string {
-  if (review.decision === "approved") return "Approved";
-  if (review.decision === "needs_human_review") return "Needs human";
-  if (review.decision === "blocked") return "Blocked";
-  if (review.decision === "comment_only") return "Comment only";
-  return "Pending";
+  if (wasAutomaticallyApproved(review)) return "Automatically approved";
+  if (review.decision) return "Not automatically approved";
+  return "Pending decision";
+}
+
+function decisionDetailLabel(review: CodeReviewListItem): string | null {
+  if (review.decision === "approved" && !wasAutomaticallyApproved(review)) return "Approval was not posted";
+  if (review.decision === "needs_human_review") return "Needs human review";
+  if (review.decision === "blocked") return "Blocked by policy";
+  if (review.decision === "comment_only") return "Comment-only policy";
+  return null;
 }
 
 function decisionVariant(review: CodeReviewListItem): "success" | "secondary" | "destructive" | "outline" {
-  if (review.decision === "approved") return "success";
+  if (wasAutomaticallyApproved(review)) return "success";
   if (review.decision === "blocked") return "destructive";
   if (review.decision === "needs_human_review") return "secondary";
   return "outline";
@@ -145,6 +168,16 @@ function statusVariant(status: string): "success" | "secondary" | "destructive" 
   if (status === "failed" || status === "stale") return "destructive";
   if (status === "running" || status === "queued") return "secondary";
   return "outline";
+}
+
+function statusLabel(review: CodeReviewListItem): string {
+  if (review.stale || review.status === "stale") return "Stale after PR update";
+  if (review.status === "completed") return "Ran successfully";
+  if (review.status === "failed") return "Run failed";
+  if (review.status === "running") return "Running";
+  if (review.status === "queued") return "Queued";
+  if (review.status === "cancelled") return "Cancelled";
+  return review.status;
 }
 
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
@@ -186,7 +219,10 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
-  const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
+  const [outcomeFilter, setOutcomeParam] = useQueryState(
+    "outcome",
+    parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
+  );
   const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
@@ -194,17 +230,32 @@ export default function CodeReviewsPage() {
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
+  const setOutcomeFilter = useCallback(
+    (value: string) => {
+      void setOutcomeParam(value as OutcomeFilter);
+    },
+    [setOutcomeParam],
+  );
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
       repository_id: repositoryId,
-      decision: decisionFilter === ALL_DECISIONS ? undefined : (decisionFilter as CodeReviewDecision),
+      decision:
+        outcomeFilter !== ALL_OUTCOMES &&
+        outcomeFilter !== AUTOMATICALLY_APPROVED &&
+        outcomeFilter !== COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewDecision)
+          : undefined,
+      outcome:
+        outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewListOutcome)
+          : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
       search: search.trim() || undefined,
       limit: 100,
     }),
-    [decisionFilter, repositoryId, riskFilter, search, statusFilter],
+    [outcomeFilter, repositoryId, riskFilter, search, statusFilter],
   );
 
   const repositoriesQuery = useQuery({
@@ -438,11 +489,12 @@ export default function CodeReviewsPage() {
               </SelectItem>
             ))}
           </FilterSelect>
-          <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
-            <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
-            <SelectItem value="approved">Approved</SelectItem>
-            <SelectItem value="comment_only">Comment only</SelectItem>
-            <SelectItem value="needs_human_review">Needs human</SelectItem>
+          <FilterSelect label="Outcome" value={outcomeFilter} onValueChange={setOutcomeFilter}>
+            <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
+            <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
+            <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
+            <SelectItem value="needs_human_review">Needs human review</SelectItem>
+            <SelectItem value="comment_only">Comment-only decision</SelectItem>
             <SelectItem value="blocked">Blocked</SelectItem>
           </FilterSelect>
           <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
@@ -499,8 +551,8 @@ export default function CodeReviewsPage() {
                         <TableHead>PR</TableHead>
                         <TableHead>Repo</TableHead>
                         <TableHead>Risk</TableHead>
-                        <TableHead>Decision</TableHead>
-                        <TableHead>Status</TableHead>
+                        <TableHead>Outcome</TableHead>
+                        <TableHead>Run status</TableHead>
                         <TableHead>Completed</TableHead>
                         <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
@@ -523,10 +575,17 @@ export default function CodeReviewsPage() {
                             </Badge>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                            <div className="space-y-1">
+                              <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                              {decisionDetailLabel(review) ? (
+                                <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
+                              ) : null}
+                            </div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(review.status)}>{review.stale ? "stale" : review.status}</Badge>
+                            <Badge variant={statusVariant(review.stale ? "stale" : review.status)}>
+                              {statusLabel(review)}
+                            </Badge>
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
