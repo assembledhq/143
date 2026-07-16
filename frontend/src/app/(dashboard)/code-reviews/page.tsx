@@ -694,7 +694,12 @@ export default function CodeReviewsPage() {
                             </div>
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
-                          <TableCell>{review.acceptable ? "Acceptable" : "Needs review"}</TableCell>
+                          <TableCell>
+                            <StatusLabel
+                              label={review.acceptable ? "Acceptable" : "Needs review"}
+                              tone={review.acceptable ? "success" : "warning"}
+                            />
+                          </TableCell>
                           <TableCell>
                             <ReviewOutcome
                               review={review}
@@ -706,7 +711,13 @@ export default function CodeReviewsPage() {
                               }
                             />
                           </TableCell>
-                          <TableCell>{reviewStatusLabel(review)}</TableCell>
+                          <TableCell>
+                            <StatusLabel
+                              label={reviewStatusLabel(review)}
+                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                              active={!review.stale && (review.status === "running" || review.status === "queued")}
+                            />
+                          </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
                             <ReviewActions review={review} />
@@ -732,12 +743,19 @@ export default function CodeReviewsPage() {
                       </span>
                     )}
                     status={(
-                      <span className="text-foreground">{reviewStatusLabel(review)}</span>
+                      <StatusLabel
+                        label={reviewStatusLabel(review)}
+                        tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                        active={!review.stale && (review.status === "running" || review.status === "queued")}
+                      />
                     )}
                     detail={(
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
-                          <span>{review.acceptable ? "Acceptable" : "Needs review"}</span>
+                          <StatusLabel
+                            label={review.acceptable ? "Acceptable" : "Needs review"}
+                            tone={review.acceptable ? "success" : "warning"}
+                          />
                           <span>Completed {formatDate(review.completed_at)}</span>
                         </div>
                         <ReviewOutcome
