@@ -49,6 +49,7 @@ type codeReviewDescriptionEvaluation struct {
 
 type codeReviewOrchestratorSynthesis struct {
 	Summary                 string   `json:"summary,omitempty"`
+	ReviewSummary           string   `json:"review_summary,omitempty"`
 	RiskNotes               []string `json:"risk_notes,omitempty"`
 	ScopeMismatch           bool     `json:"scope_mismatch,omitempty"`
 	UnresolvedUncertainty   bool     `json:"unresolved_uncertainty,omitempty"`
@@ -1069,7 +1070,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		RequiredReviewerQuorum: cfg.AgentRoster.RequireReviewerQuorum,
 		InlineCommentLimit:     cfg.InlineCommentLimit,
 		DescriptionResults:     append([]string(nil), description.RequirementSummaries...),
-		RiskReasons:            codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings),
+		RiskReasons:            models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings)),
 		ReviewerOutputs:        codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:               codeReviewFindingsForPrompt(findings),
 		ChangedFiles:           codeReviewChangedPaths(changedFiles),
@@ -1077,7 +1078,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 	})
 }
 
-func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
+func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	descriptionPassed := description.Passed
 	if len(description.RequirementSummaries) == 0 {
@@ -1107,9 +1108,9 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		PromptInjectionFound:   description.PromptInjectionFound,
 	})
 	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
-		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, cfg.AgentRoster.RequireReviewerQuorum))
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: cfg.AgentRoster.RequireReviewerQuorum})
 	}
-	return risk.Reasons
+	return risk.ReasonDetails
 }
 
 // codeReviewLowRiskQuorumWaived reports whether the resolved policy's low-risk
@@ -1419,6 +1420,7 @@ func parseCodeReviewOrchestratorStructuredResult(raw json.RawMessage) (codeRevie
 func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSynthesis, error) {
 	var payload struct {
 		Summary                 *string   `json:"summary"`
+		ReviewSummary           *string   `json:"review_summary"`
 		RiskNotes               *[]string `json:"risk_notes"`
 		ScopeMismatch           *bool     `json:"scope_mismatch"`
 		UnresolvedUncertainty   *bool     `json:"unresolved_uncertainty"`
@@ -1429,6 +1431,7 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("parse orchestrator synthesis: %w", err)
 	}
 	if payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
+		payload.ReviewSummary == nil || strings.TrimSpace(*payload.ReviewSummary) == "" ||
 		payload.RiskNotes == nil ||
 		payload.ScopeMismatch == nil ||
 		payload.UnresolvedUncertainty == nil ||
@@ -1438,6 +1441,7 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 	}
 	return codeReviewOrchestratorSynthesis{
 		Summary:                 *payload.Summary,
+		ReviewSummary:           *payload.ReviewSummary,
 		RiskNotes:               *payload.RiskNotes,
 		ScopeMismatch:           *payload.ScopeMismatch,
 		UnresolvedUncertainty:   *payload.UnresolvedUncertainty,
@@ -1447,7 +1451,7 @@ func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSyn
 }
 
 func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynthesis) bool {
-	return strings.TrimSpace(synthesis.Summary) != ""
+	return strings.TrimSpace(synthesis.Summary) != "" && strings.TrimSpace(synthesis.ReviewSummary) != ""
 }
 
 func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgentResult) codeReviewOrchestratorSynthesis {
@@ -1479,6 +1483,13 @@ func codeReviewOrchestratorEvidence(results []models.CodeReviewAgentResult) (pre
 		}
 	}
 	return present, usable
+}
+
+func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthesis) string {
+	if summary := strings.TrimSpace(synthesis.ReviewSummary); summary != "" {
+		return summary
+	}
+	return strings.TrimSpace(synthesis.Summary)
 }
 
 func extractCodeReviewJSON(raw string) string {
@@ -1955,6 +1966,7 @@ type liveCodeReviewOutcomeInput struct {
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
 	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
+	reviewerQuorumWaived := reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
@@ -1986,27 +1998,31 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles) {
-		risk.Acceptable = false
-		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, policy.AgentRoster.RequireReviewerQuorum))
+	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !reviewerQuorumWaived {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: policy.AgentRoster.RequireReviewerQuorum})
 	}
 	if orchestratorPresent, orchestratorUsable := codeReviewOrchestratorEvidence(input.AgentResults); orchestratorPresent && !orchestratorUsable {
-		risk.Acceptable = false
-		risk.Reasons = append(risk.Reasons, "orchestrator did not produce a valid structured synthesis")
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
 		Decision:                  decision.Decision,
 		Acceptable:                decision.Acceptable,
-		RiskReasons:               decision.RiskReasons,
+		RiskReasons:               decision.RiskReasonDetails,
+		GeneratedSummary:          codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis),
 		SessionURL:                input.SessionURL,
-		PolicyVersion:             input.Job.PolicyVersion,
-		HeadSHA:                   input.Job.HeadSHA,
-		Summary:                   codeReviewOutcomeSummary(decision, input.OrchestratorSynthesis),
 		DescriptionPassed:         &descriptionPassed,
+		DescriptionIssues:         codeReviewFailedDescriptionRequirements(input.DescriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
-		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasons, input.ChangedFiles),
+		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasonDetails, input.ChangedFiles),
+		ChangeStatsAvailable:      input.ChangedFilesAvailable,
+		FilesChanged:              len(input.ChangedFiles),
+		LinesChanged:              codeReviewLinesChanged(input.ChangedFiles),
+		ChecksRequired:            policy.RiskPolicy.RequirePassingChecks || len(policy.RiskPolicy.RequiredChecks) > 0,
+		ReviewerQuorum:            reviewerQuorum,
+		RequiredReviewerQuorum:    policy.AgentRoster.RequireReviewerQuorum,
+		ReviewerQuorumWaived:      reviewerQuorumWaived,
 	})
 	return decision, body
 }
@@ -2901,16 +2917,6 @@ func codeReviewFindingDedupeKey(path string, startLine, endLine int, summary str
 	return fmt.Sprintf("%s:%d:%d:%s", path, startLine, endLine, strings.ToLower(strings.TrimSpace(summary)))
 }
 
-func codeReviewOutcomeSummary(decision models.CodeReviewDecisionEvaluation, synthesis codeReviewOrchestratorSynthesis) string {
-	if summary := strings.TrimSpace(synthesis.Summary); summary != "" {
-		return summary
-	}
-	if decision.Decision == models.CodeReviewDecisionApproved {
-		return "143 reviewed the stored PR health and reviewer evidence and found the change acceptable under policy."
-	}
-	return "143 reviewed the stored PR health and reviewer evidence and withheld automated approval."
-}
-
 func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
 	findingCounts := make(map[uuid.UUID]int)
 	for _, finding := range findings {
@@ -2923,10 +2929,7 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 		if result.Role != models.CodeReviewAgentRoleReviewer {
 			continue
 		}
-		name := strings.TrimSpace(result.AgentProvider)
-		if name == "" {
-			name = "reviewer"
-		}
+		name := codeReviewAgentDisplayName(result.AgentProvider)
 		switch result.Status {
 		case models.CodeReviewAgentResultStatusCompleted:
 			if !codeReviewReviewerResultHasUsableOutput(result) {
@@ -2934,9 +2937,14 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				continue
 			}
 			if findingCounts[result.ID] == 0 {
-				summaries = append(summaries, name+" clean")
+				summaries = append(summaries, name+" found no blocking issues")
 			} else {
-				summaries = append(summaries, fmt.Sprintf("%s reported %d finding(s)", name, findingCounts[result.ID]))
+				count := findingCounts[result.ID]
+				label := "findings"
+				if count == 1 {
+					label = "finding"
+				}
+				summaries = append(summaries, fmt.Sprintf("%s reported %d %s", name, count, label))
 			}
 		case models.CodeReviewAgentResultStatusFailed:
 			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
@@ -2954,7 +2962,49 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 	return summaries
 }
 
-func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codereviewsvc.PullRequestFile) []string {
+func codeReviewFailedDescriptionRequirements(summaries []string) []string {
+	issues := make([]string, 0)
+	for _, summary := range summaries {
+		summary = strings.TrimSpace(summary)
+		if !strings.Contains(summary, ": failed") {
+			continue
+		}
+		issues = append(issues, strings.TrimSpace(strings.Replace(summary, ": failed", "", 1)))
+	}
+	return issues
+}
+
+func codeReviewAgentDisplayName(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "codex":
+		return "Codex"
+	case "claude", "claude_code":
+		return "Claude Code"
+	case "opencode", "open_code":
+		return "OpenCode"
+	case "gemini":
+		return "Gemini"
+	case "":
+		return "Review agent"
+	}
+
+	words := strings.FieldsFunc(provider, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' '
+	})
+	for i, word := range words {
+		if word == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	if len(words) == 0 {
+		return "Review agent"
+	}
+	return strings.Join(words, " ")
+}
+
+func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason, changedFiles []codereviewsvc.PullRequestFile) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
 	add := func(value string) {
@@ -2968,16 +3018,11 @@ func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codere
 		out = append(out, value)
 	}
 	for _, reason := range reasons {
-		lower := strings.ToLower(reason)
-		switch {
-		case strings.Contains(lower, "auth") || strings.Contains(lower, "permission") || strings.Contains(lower, "secret") || strings.Contains(lower, "crypto"):
+		switch reason.Code {
+		case models.CodeReviewRiskReasonPromptInjection:
 			add("security/platform")
-		case strings.Contains(lower, "billing") || strings.Contains(lower, "invoice") || strings.Contains(lower, "payment"):
-			add("billing")
-		case strings.Contains(lower, "infra") || strings.Contains(lower, "workflow") || strings.Contains(lower, "deploy"):
+		case models.CodeReviewRiskReasonPolicyPathChanged:
 			add("platform")
-		case strings.Contains(lower, "migration") || strings.Contains(lower, "database"):
-			add("backend/platform")
 		}
 	}
 	for _, category := range codeReviewChangedCategories(changedFiles) {

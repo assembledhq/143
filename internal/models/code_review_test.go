@@ -184,7 +184,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				UpToDate:          true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: true},
+			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
 			name: "blocks oversized sensitive fork with agent concerns",
@@ -200,18 +200,18 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				BlockingFindings:       1,
 				ReviewerDisagreement:   true,
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"changed files 6 exceeds policy limit 5",
-				"changed lines 350 exceeds policy limit 300",
-				"required GitHub checks are not passing",
-				"PR description policy did not pass",
-				"fork PRs are not eligible for approval",
-				"unresolved human review threads are present",
-				"review agents reported blocking findings",
-				"reviewer agents disagreed on material risk",
-				"sensitive path changed: internal/auth/session.go",
-				"excluded risk category changed: auth",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 350, Limit: 300},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"},
+			),
 		},
 		{
 			name: "blocks missing required named check and ineligible author",
@@ -227,10 +227,10 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed:     true,
 				Author:                "sam",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"required check is not passing: ci/test",
-				"PR author is not eligible for automated approval",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonRequiredCheckFailing, Subject: "ci/test"},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible},
+			),
 		},
 		{
 			name: "allows configured author classes",
@@ -245,7 +245,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				Author:            "sam",
 				AuthorClass:       "human",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: true},
+			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
 			name: "blocks policy changes independently from sensitive path exclusions",
@@ -260,9 +260,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"code review policy/config path changed: internal/models/code_review.go",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: "internal/models/code_review.go"},
+			),
 		},
 		{
 			name: "blocks synthesized reviewer risk signals",
@@ -276,11 +276,11 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				UnresolvedUncertainty: true,
 				PromptInjectionFound:  true,
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"orchestrator reported the change may not match the stated intent",
-				"orchestrator reported unresolved uncertainty",
-				"possible prompt-injection attempt found in PR content",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonScopeMismatch},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty},
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonPromptInjection},
+			),
 		},
 		{
 			name: "blocks paths outside allowed scope",
@@ -296,9 +296,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"path is outside allowed policy scope: internal/api/router.go",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonPathOutsideScope, Subject: "internal/api/router.go"},
+			),
 		},
 		{
 			name: "blocks explicit blocked path patterns",
@@ -314,9 +314,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"blocked path changed: internal/db/schema/users.go",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockedPath, Subject: "internal/db/schema/users.go"},
+			),
 		},
 		{
 			name: "low-risk docs lane raises the churn ceiling",
@@ -329,7 +329,7 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: true},
+			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
 			name: "low-risk docs lane still enforces its own ceiling",
@@ -342,9 +342,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"changed lines 1200 exceeds policy limit 1000",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 1200, Limit: 1000},
+			),
 		},
 		{
 			name: "low-risk lane does not apply to mixed docs and code changes",
@@ -357,9 +357,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				DescriptionPassed: true,
 				Author:            "devin",
 			},
-			expected: CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{
-				"changed lines 607 exceeds policy limit 300",
-			}},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 607, Limit: 300},
+			),
 		},
 	}
 
@@ -375,6 +375,121 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			actual := EvaluateCodeReviewRisk(config, tt.input)
 
 			require.Equal(t, tt.expected, actual, "risk evaluator should enforce deterministic approval prerequisites")
+		})
+	}
+}
+
+func codeReviewRiskEvaluationForTest(reasons ...CodeReviewRiskReason) CodeReviewRiskEvaluation {
+	if len(reasons) == 0 {
+		return CodeReviewRiskEvaluation{Acceptable: true}
+	}
+	return CodeReviewRiskEvaluation{
+		Acceptable:    false,
+		Reasons:       CodeReviewRiskReasonMessages(reasons),
+		ReasonDetails: reasons,
+	}
+}
+
+func TestCodeReviewRiskReasonCodeValidate(t *testing.T) {
+	t.Parallel()
+
+	valid := []CodeReviewRiskReasonCode{
+		CodeReviewRiskReasonReviewerDisabled,
+		CodeReviewRiskReasonContextUnavailable,
+		CodeReviewRiskReasonHeadChanged,
+		CodeReviewRiskReasonFilesLimitExceeded,
+		CodeReviewRiskReasonLinesLimitExceeded,
+		CodeReviewRiskReasonChecksFailing,
+		CodeReviewRiskReasonRequiredCheckFailing,
+		CodeReviewRiskReasonDescriptionFailed,
+		CodeReviewRiskReasonBranchOutOfDate,
+		CodeReviewRiskReasonForkIneligible,
+		CodeReviewRiskReasonAuthorIneligible,
+		CodeReviewRiskReasonUnresolvedHumanReview,
+		CodeReviewRiskReasonBlockingFindings,
+		CodeReviewRiskReasonReviewerDisagreement,
+		CodeReviewRiskReasonScopeMismatch,
+		CodeReviewRiskReasonUnresolvedUncertainty,
+		CodeReviewRiskReasonPromptInjection,
+		CodeReviewRiskReasonSensitivePath,
+		CodeReviewRiskReasonPathOutsideScope,
+		CodeReviewRiskReasonBlockedPath,
+		CodeReviewRiskReasonPolicyPathChanged,
+		CodeReviewRiskReasonExcludedCategory,
+		CodeReviewRiskReasonReviewerQuorum,
+		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
+	}
+	tests := make([]struct {
+		name      string
+		code      CodeReviewRiskReasonCode
+		expectErr bool
+	}, 0, len(valid)+1)
+	for _, code := range valid {
+		tests = append(tests, struct {
+			name      string
+			code      CodeReviewRiskReasonCode
+			expectErr bool
+		}{name: string(code), code: code})
+	}
+	tests = append(tests, struct {
+		name      string
+		code      CodeReviewRiskReasonCode
+		expectErr bool
+	}{name: "invalid", code: "unknown_reason", expectErr: true})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.code.Validate()
+			if tt.expectErr {
+				require.Error(t, err, "unknown risk reason codes should fail validation")
+				return
+			}
+			require.NoError(t, err, "known risk reason codes should validate")
+		})
+	}
+}
+
+func TestCodeReviewRiskReasonMessage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		reason   CodeReviewRiskReason
+		expected string
+	}{
+		{name: "reviewer disabled", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisabled}, expected: "code reviewer is disabled by policy"},
+		{name: "context unavailable", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonContextUnavailable}, expected: "required PR context could not be fetched"},
+		{name: "head changed", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged}, expected: "PR head changed after review started"},
+		{name: "files limit", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 34, Limit: 20}, expected: "changed files 34 exceeds policy limit 20"},
+		{name: "lines limit", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 1842, Limit: 1000}, expected: "changed lines 1842 exceeds policy limit 1000"},
+		{name: "checks failing", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing}, expected: "required GitHub checks are not passing"},
+		{name: "required check", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonRequiredCheckFailing, Subject: "ci/test"}, expected: "required check is not passing: ci/test"},
+		{name: "description", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed}, expected: "PR description policy did not pass"},
+		{name: "branch", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonBranchOutOfDate}, expected: "PR branch is not up to date"},
+		{name: "fork", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible}, expected: "fork PRs are not eligible for approval"},
+		{name: "author", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible}, expected: "PR author is not eligible for automated approval"},
+		{name: "human review", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview}, expected: "unresolved human review threads are present"},
+		{name: "findings", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings}, expected: "review agents reported blocking findings"},
+		{name: "disagreement", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement}, expected: "reviewer agents disagreed on material risk"},
+		{name: "scope", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonScopeMismatch}, expected: "orchestrator reported the change may not match the stated intent"},
+		{name: "uncertainty", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedUncertainty}, expected: "orchestrator reported unresolved uncertainty"},
+		{name: "prompt injection", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPromptInjection}, expected: "possible prompt-injection attempt found in PR content"},
+		{name: "sensitive path", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"}, expected: "sensitive path changed: internal/auth/session.go"},
+		{name: "outside scope", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPathOutsideScope, Subject: "internal/api/router.go"}, expected: "path is outside allowed policy scope: internal/api/router.go"},
+		{name: "blocked path", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockedPath, Subject: "internal/db/schema/users.go"}, expected: "blocked path changed: internal/db/schema/users.go"},
+		{name: "policy path", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: "internal/models/code_review.go"}, expected: "code review policy/config path changed: internal/models/code_review.go"},
+		{name: "category", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"}, expected: "excluded risk category changed: auth"},
+		{name: "quorum", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerQuorum, Actual: 1, Limit: 2}, expected: "reviewer quorum 1 is below policy requirement 2"},
+		{name: "invalid orchestrator synthesis", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid}, expected: "orchestrator did not produce a valid structured synthesis"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, tt.reason.Message(), "typed risk reasons should preserve the compatibility message")
 		})
 	}
 }
@@ -413,11 +528,14 @@ func TestEvaluateCodeReviewDecision(t *testing.T) {
 		{
 			name:   "requires human review when risk is not acceptable",
 			policy: DefaultCodeReviewPolicyConfig(),
-			risk:   CodeReviewRiskEvaluation{Acceptable: false, Reasons: []string{"required GitHub checks are not passing"}},
+			risk: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
+			),
 			expected: CodeReviewDecisionEvaluation{
-				Decision:    CodeReviewDecisionNeedsHumanReview,
-				Acceptable:  false,
-				RiskReasons: []string{"required GitHub checks are not passing"},
+				Decision:          CodeReviewDecisionNeedsHumanReview,
+				Acceptable:        false,
+				RiskReasons:       []string{"required GitHub checks are not passing"},
+				RiskReasonDetails: []CodeReviewRiskReason{{Code: CodeReviewRiskReasonChecksFailing}},
 			},
 		},
 	}
