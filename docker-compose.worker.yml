@@ -101,6 +101,10 @@ services:
       DATABASE_URL: "postgres://onefortythree:${DB_PASSWORD}@${DB_HOST}:5432/onefortythree?sslmode=disable&pool_max_conns=${WORKER_DATABASE_POOL_MAX_CONNS:-4}"
       ENV: production
       MODE: worker
+      # Release channel this worker claims jobs for. Written into the host
+      # .env by deploy.sh: 'canary' for worker-canary hosts, 'stable'
+      # otherwise. See docs/design/118-canary-stable-release-channels.md.
+      CHANNEL: ${CHANNEL:-stable}
       CHROME_WS_URL: ${CHROME_WS_URL:-ws://chrome:9222}
       MAX_CONCURRENT_RUNS: ${MAX_CONCURRENT_RUNS:-5}
       NODE_ID: ${NODE_ID:?missing in /opt/143/.env.local}

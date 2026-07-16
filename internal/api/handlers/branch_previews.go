@@ -3407,7 +3407,17 @@ func (h *BranchPreviewHandler) workerSelectionRequirements(ctx context.Context, 
 	if h == nil {
 		return preview.WorkerSelectionRequirements{}, nil
 	}
-	return previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgressPublicIP)
+	reqs, err := previewWorkerSelectionRequirements(ctx, h.orgStore, orgID, h.staticEgressPublicIP)
+	if err != nil {
+		return preview.WorkerSelectionRequirements{}, err
+	}
+	if h.selector == nil {
+		return reqs, nil
+	}
+	// Direct least-loaded/resolve fallbacks below bypass SelectStartNode*'s
+	// own channel stamping, so pin the org's release channel here — a
+	// wrong-channel placement strands the pinned start job.
+	return h.selector.RequireOrgChannel(ctx, orgID, reqs)
 }
 
 func (h *BranchPreviewHandler) previewURL(id uuid.UUID) string {

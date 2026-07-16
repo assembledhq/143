@@ -37,7 +37,7 @@ services:
              apt-get install -y --no-install-recommends libheif-examples &&
              rm -rf /var/lib/apt/lists/* &&
              go install github.com/air-verse/air@latest &&
-             go run cmd/migrate/main.go up &&
+             go run ./cmd/migrate up &&
              air"
     depends_on:
       postgres:

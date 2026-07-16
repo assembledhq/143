@@ -64,7 +64,7 @@ func seedUser(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID) models.User {
 // nodes row explicitly.
 func seedWorkerNode(t *testing.T, pool *pgxpool.Pool, nodeID string) {
 	t.Helper()
-	manager := cluster.NewNodeManager(pool, zerolog.Nop(), nodeID, "worker")
+	manager := cluster.NewNodeManager(pool, zerolog.Nop(), nodeID, "worker", "stable")
 	if err := manager.Register(context.Background(), "integration-test-host"); err != nil {
 		t.Fatalf("seed worker node: %v", err)
 	}

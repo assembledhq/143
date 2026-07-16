@@ -857,6 +857,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	workerSelector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
 		MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 		PreferredRegion:      cfg.NodeRegion,
+		OrgChannels:          orgStore,
 	})
 	previewRPCSecrets := cfg.PreviewRPCSecrets
 	if len(previewRPCSecrets) == 0 && strings.TrimSpace(cfg.SessionSecret) != "" {
@@ -874,6 +875,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	// gwSrv is stored so callers can shut it down gracefully.
 	var gwSrv *http.Server
 	if cfg.PreviewGatewayPort > 0 && cfg.Mode != "worker" {
+		var additionalAppOrigins []string
+		if cfg.CanaryOrigin != "" {
+			additionalAppOrigins = append(additionalAppOrigins, cfg.CanaryOrigin)
+		}
 		gw := gateway.NewGateway(gateway.GatewayConfig{
 			Store:                 previewStore,
 			Manager:               previewManager,
@@ -881,6 +886,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			HMRWatcher:            hmrWatcher,
 			Logger:                logger,
 			AppOrigin:             cfg.FrontendURL,
+			AdditionalAppOrigins:  additionalAppOrigins,
 			CookieSecret:          []byte(cfg.SessionSecret),
 			PreviewTokenKeyring:   previewRPCKeyring,
 			PreviewOriginTemplate: cfg.PreviewOriginTemplate,
@@ -1146,6 +1152,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Use(externalAPIRateLimiter.Middleware())
 			r.Use(middleware.ExternalAPIIdempotency(apiIdempotencyStore, logger))
 			r.Use(middleware.CSRF(cfg.CSRFSigningKey, logger))
+			// Canary host guard: the canary hostname only serves orgs on the
+			// canary release channel. No-op when CANARY_ORIGIN is unset.
+			r.Use(middleware.RequireCanaryChannelForHost(cfg.CanaryHostname(), orgStore, logger))
 
 			// Zero-membership-safe endpoints: a user whose only membership was
 			// just revoked still needs to load /auth/me to see the empty state,

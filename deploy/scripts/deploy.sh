@@ -25,7 +25,20 @@ case "$ROLE" in
     COMPOSE_FILE="docker-compose.app.yml"
     HEALTH_SERVICE="api"
     ;;
+  app-canary)
+    # Canary plane on the app host: extra services in the SAME compose
+    # project (api-canary/frontend-canary), deployed with a dedicated lean
+    # path below — it owns migrations and never touches stable containers.
+    COMPOSE_FILE="docker-compose.app.yml"
+    HEALTH_SERVICE="api-canary"
+    ;;
   worker)
+    COMPOSE_FILE="docker-compose.worker.yml"
+    HEALTH_SERVICE="worker"
+    ;;
+  worker-canary)
+    # A dedicated worker host claiming only canary-channel jobs. Reuses the
+    # entire worker deploy machinery; only CHANNEL in the host .env differs.
     COMPOSE_FILE="docker-compose.worker.yml"
     HEALTH_SERVICE="worker"
     ;;
@@ -41,7 +54,16 @@ case "$ROLE" in
     COMPOSE_FILE="docker-compose.redis.yml"
     HEALTH_SERVICE="redis"
     ;;
-  *)      echo "Unknown role: $ROLE (expected: app, worker, db, logging, redis)"; exit 1 ;;
+  *)      echo "Unknown role: $ROLE (expected: app, app-canary, worker, worker-canary, db, logging, redis)"; exit 1 ;;
+esac
+
+# ROLE_KIND strips the channel suffix so shared host logic (secrets, file
+# sync, worker machinery) treats worker-canary like worker. CHANNEL feeds the
+# host .env so compose can hand it to the server process.
+ROLE_KIND="${ROLE%-canary}"
+case "$ROLE" in
+  *-canary) CHANNEL="canary" ;;
+  *)        CHANNEL="stable" ;;
 esac
 
 echo "Deploying role=$ROLE tag=$TAG to $HOST..."
@@ -55,7 +77,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 SCP_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new -i "$SSH_KEY")
 
 repair_deploy_sudoers() {
-  bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE" "$HOST" "$SSH_KEY"
+  bash "$SCRIPT_DIR/repair-deploy-sudoers.sh" "$ROLE_KIND" "$HOST" "$SSH_KEY"
 }
 
 # repair-deploy-sudoers.sh can ONLY fix one thing: a missing/incorrect NOPASSWD
@@ -134,7 +156,7 @@ remote_env_assignment() {
 }
 
 apply_static_egress_worker_host_map() {
-  if [ "$ROLE" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
+  if [ "$ROLE_KIND" != "worker" ] || [ -z "${STATIC_EGRESS_WORKER_HOSTS:-}" ]; then
     return
   fi
 
@@ -178,7 +200,7 @@ WORKER_SUPPORT_SERVICE_FINGERPRINT_FILES='/opt/143/Dockerfile.dnsmasq /opt/143/d
 WORKER_SUPPORT_SERVICE_COMPOSE_SERVICES='chrome gvisor-check sandbox-dns'
 
 run_worker_staged_fingerprint_gate() {
-  if [ "$ROLE" != "worker" ]; then
+  if [ "$ROLE_KIND" != "worker" ]; then
     return 0
   fi
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
@@ -432,7 +454,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     fi
   done <<< "$DECRYPTED"
 
-  apply_worker_bucket_overrides "$ROLE" "$HOST"
+  apply_worker_bucket_overrides "$ROLE_KIND" "$HOST"
   apply_static_egress_worker_host_map
 
   if [ "$ROLE" = "logging" ]; then
@@ -453,7 +475,7 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${REDIS_PRIVATE_IP:?REDIS_PRIVATE_IP is required for redis role (set it or add to .env.production.enc)}"
     printf 'REDIS_PASSWORD=%s\nREDIS_PRIVATE_IP=%s\n' "$REDIS_PASSWORD" "$REDIS_PRIVATE_IP" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
-  elif [ "$ROLE" = "worker" ]; then
+  elif [ "$ROLE_KIND" = "worker" ]; then
     : "${DB_PASSWORD:?DB_PASSWORD is required for worker role (set it or add to .env.production.enc)}"
     : "${DB_HOST:?DB_HOST is required for worker role (set it or add to .env.production.enc)}"
     : "${VICTORIALOGS_HOST:?VICTORIALOGS_HOST is required for worker role (set it or add to .env.production.enc)}"
@@ -469,8 +491,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     # compose can still interpolate them when it parses the compose file.
     # .env.local is owned by provisioning and we abort if it's missing instead
     # of silently coming up with empty/unsafe defaults.
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSTATIC_EGRESS_PROBE_IMAGE=%s\n' \
-      "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" \
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nCHANNEL=%s\nWORKER_PROCESS_COUNT=%s\nWORKER_MAX_ACTIVE_SANDBOXES=%s\nWORKER_PREVIEW_DRAIN_TIMEOUT=%s\nSANDBOX_CPU_LIMIT=%s\nSANDBOX_MEMORY_LIMIT_MB=%s\nSANDBOX_DISK_LIMIT_GB=%s\nSANDBOX_HEALTH_CHECK_IMAGE=%s\nSANDBOX_REQUIRE_DISK_QUOTA=%s\nSANDBOX_GC_INTERVAL=%s\nSANDBOX_GC_GRACE=%s\nSANDBOX_GC_HARD_MAX=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nSTATIC_EGRESS_PROBE_IMAGE=%s\n' \
+      "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE_KIND" "$CHANNEL" \
       "${WORKER_PROCESS_COUNT:-}" "${WORKER_MAX_ACTIVE_SANDBOXES:-}" "${WORKER_PREVIEW_DRAIN_TIMEOUT:-}" "${SANDBOX_CPU_LIMIT:-}" "${SANDBOX_MEMORY_LIMIT_MB:-}" "${SANDBOX_DISK_LIMIT_GB:-}" \
       "$SANDBOX_HEALTH_CHECK_IMAGE" "$SANDBOX_REQUIRE_DISK_QUOTA" "$SANDBOX_GC_INTERVAL" "$SANDBOX_GC_GRACE" "$SANDBOX_GC_HARD_MAX" \
       "${STATIC_EGRESS_PUBLIC_IP:-}" "$STATIC_EGRESS_PROBE_IMAGE" \
@@ -510,7 +532,8 @@ if [ -n "${SOPS_AGE_KEY:-}" ] && [ -f "$ENC_FILE" ]; then
     : "${DOMAIN:=143.dev}"
     : "${PREVIEW_ORIGIN_TEMPLATE:=https://{id}.preview.143.dev}"
     : "${NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE:=$PREVIEW_ORIGIN_TEMPLATE}"
-    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nDOMAIN=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE" "$DOMAIN" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "${STATIC_EGRESS_PUBLIC_IP:-}" \
+    : "${CANARY_ORIGIN:=https://canary.$DOMAIN}"
+    printf 'SOPS_AGE_KEY=%s\nDB_PASSWORD=%s\nDB_HOST=%s\nVICTORIALOGS_HOST=%s\nSERVER_ROLE=%s\nDOMAIN=%s\nCLOUDFLARE_API_TOKEN=%s\nPREVIEW_ORIGIN_TEMPLATE=%s\nNEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE=%s\nSTATIC_EGRESS_PUBLIC_IP=%s\nCANARY_ORIGIN=%s\n' "$SOPS_AGE_KEY" "$DB_PASSWORD" "$DB_HOST" "$VICTORIALOGS_HOST" "$ROLE_KIND" "$DOMAIN" "$CLOUDFLARE_API_TOKEN" "$PREVIEW_ORIGIN_TEMPLATE" "$NEXT_PUBLIC_PREVIEW_ORIGIN_TEMPLATE" "${STATIC_EGRESS_PUBLIC_IP:-}" "$CANARY_ORIGIN" \
       | ssh "${SSH_OPTS[@]}" deploy@"$HOST" 'cat > /opt/143/.env && chmod 600 /opt/143/.env'
     scp "${SCP_OPTS[@]}" "$ENC_FILE" deploy@"$HOST":/opt/143/
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "chmod 644 /opt/143/.env.production.enc"
@@ -523,7 +546,7 @@ fi
 # Sync compose file so the remote always runs the latest version. Worker
 # compose can include support-service changes, so stage it until the routine
 # worker fingerprint gate allows promotion.
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+if [ "$ROLE_KIND" = "app" ] || [ "$ROLE_KIND" = "worker" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/"$COMPOSE_FILE".new
 else
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" deploy@"$HOST":/opt/143/
@@ -533,7 +556,7 @@ if [ "$ROLE" = "db" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/postgresql.conf" deploy@"$HOST":/opt/143/deploy/postgres/
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/postgres/pg_hba.conf" deploy@"$HOST":/opt/143/deploy/postgres/
 fi
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
+if [ "$ROLE_KIND" = "app" ] || [ "$ROLE_KIND" = "worker" ] || [ "$ROLE" = "logging" ]; then
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
@@ -541,8 +564,8 @@ fi
 # DNS probe is included by app and worker compose files (logging has its
 # own stack and doesn't include it). Stage the file so docker compose can
 # resolve the include directive.
-if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
-  if [ "$ROLE" = "worker" ]; then
+if [ "$ROLE_KIND" = "app" ] || [ "$ROLE_KIND" = "worker" ]; then
+  if [ "$ROLE_KIND" = "worker" ]; then
     scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/docker-compose.dns-probe.yml.new
   else
     scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.dns-probe.yml" deploy@"$HOST":/opt/143/
@@ -580,7 +603,7 @@ if [ "$ROLE" = "app" ]; then
   scp -p "${SCP_OPTS[@]}" "$PROJECT_DIR/Dockerfile.caddy" \
     deploy@"$HOST":/opt/143/Dockerfile.caddy.new
 fi
-if [ "$ROLE" = "worker" ]; then
+if [ "$ROLE_KIND" = "worker" ]; then
   # Keep the sandbox firewall script in sync so every deploy can re-apply
   # the egress rules (they read the sandbox network's current subnet).
   # Older workers may have a root-owned copy from cloud-init bootstrap.
@@ -704,7 +727,7 @@ if [ "$ROLE" = "worker" ]; then
   rm -f "$reconcile_log"
 fi
 
-if [ "$ROLE" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+if [ "$ROLE_KIND" = "app" ] && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
   echo "Skipping docker log rotation check on app deploy; set ALLOW_DEPLOY_DOCKER_DAEMON_RESTART=1 for explicit maintenance."
 else
   # --- Docker log rotation (idempotent) ---
@@ -780,8 +803,8 @@ else
   fi
 fi
 
-if { [ "$ROLE" = "app" ] || { [ "$ROLE" = "worker" ] && [ "${DEPLOY_MODE:-routine}" = "routine" ]; }; } && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
-  if [ "$ROLE" = "worker" ]; then
+if { [ "$ROLE_KIND" = "app" ] || { [ "$ROLE_KIND" = "worker" ] && [ "${DEPLOY_MODE:-routine}" = "routine" ]; }; } && [ "$ALLOW_DEPLOY_DOCKER_DAEMON_RESTART" != "1" ]; then
+  if [ "$ROLE_KIND" = "worker" ]; then
     run_worker_staged_fingerprint_gate
     ssh "${SSH_OPTS[@]}" deploy@"$HOST" "rm -f /opt/143/deploy/scripts/install-docker-dns.sh.new"
   fi
@@ -843,10 +866,83 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# app-canary: dedicated lean deploy path. The canary plane owns migrations
+# (design doc 118) and must never touch stable containers, Caddy, vector, or
+# host-level daemon config — those all belong to the stable app deploy. The
+# canary services are recreated in place rather than blue/green rolled: the
+# canary plane serves dogfood orgs only, and a few seconds of restart there
+# is an acceptable trade for not duplicating the rolling machinery.
+# ---------------------------------------------------------------------------
+if [ "$ROLE" = "app-canary" ]; then
+  ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
+    "$(remote_env_assignment COMPOSE_FILE "$COMPOSE_FILE")" \
+    "$(remote_env_assignment CANARY_IMAGE_TAG "$TAG")" \
+    "$(remote_env_assignment STABLE_MAX_MIGRATION "${STABLE_MAX_MIGRATION:-}")" \
+    bash << 'CANARY_REMOTE'
+  set -euo pipefail
+  cd /opt/143
+
+  # Promote the freshly-scp'd compose file (staged as .new by the sync step
+  # above). A same-run stable app deploy re-syncs its own copy afterwards.
+  if [ -f "$COMPOSE_FILE.new" ]; then
+    mv "$COMPOSE_FILE.new" "$COMPOSE_FILE"
+  fi
+
+  export CANARY_IMAGE_TAG STABLE_MAX_MIGRATION
+
+  wait_canary_healthy() {
+    local cid="$1" label="$2" deadline
+    deadline=$(( $(date +%s) + 180 ))
+    while :; do
+      status="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo 'missing')"
+      if [ "$status" = "healthy" ]; then
+        return 0
+      fi
+      if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "ERROR: $label did not become healthy within 180s (last status: $status)" >&2
+        docker logs --tail 50 "$cid" >&2 || true
+        return 1
+      fi
+      sleep 3
+    done
+  }
+
+  echo "Pulling canary images (tag=$CANARY_IMAGE_TAG)..."
+  docker compose -f "$COMPOSE_FILE" pull api-canary frontend-canary
+
+  # Migrations run from the canary pipeline, BEFORE the canary code rolls.
+  # STABLE_MAX_MIGRATION (when provided by CI) arms the destructive-migration
+  # gate inside /bin/migrate; floors are recorded after a successful up.
+  echo "Running database migrations (canary pipeline)..."
+  docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps \
+    -e STABLE_MAX_MIGRATION api-canary /bin/migrate up < /dev/null
+
+  echo "Recreating canary api..."
+  docker compose -f "$COMPOSE_FILE" up -d --no-deps api-canary
+  cid="$(docker compose -f "$COMPOSE_FILE" ps -q api-canary | head -1)"
+  [ -n "$cid" ] || { echo "ERROR: api-canary container not found after up" >&2; exit 1; }
+  wait_canary_healthy "$cid" api-canary
+
+  echo "Recreating canary frontend..."
+  docker compose -f "$COMPOSE_FILE" up -d --no-deps frontend-canary
+  cid="$(docker compose -f "$COMPOSE_FILE" ps -q frontend-canary | head -1)"
+  [ -n "$cid" ] || { echo "ERROR: frontend-canary container not found after up" >&2; exit 1; }
+  wait_canary_healthy "$cid" frontend-canary
+
+  echo "Canary plane deploy complete."
+CANARY_REMOTE
+  echo "Deploy complete ($ROLE)."
+  exit 0
+fi
+
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment COMPOSE_FILE "$COMPOSE_FILE")" \
   "$(remote_env_assignment HEALTH_SERVICE "$HEALTH_SERVICE")" \
   "$(remote_env_assignment ROLE "$ROLE")" \
+  "$(remote_env_assignment ROLE_KIND "$ROLE_KIND")" \
+  "$(remote_env_assignment CHANNEL "$CHANNEL")" \
+  "$(remote_env_assignment APP_SCHEMA_MODE "${APP_SCHEMA_MODE:-migrate}")" \
   "$(remote_env_assignment IMAGE_TAG "$TAG")" \
   "$(remote_env_assignment WORKER_DEPLOY_DETACH "${WORKER_DEPLOY_DETACH:-}")" \
   "$(remote_env_assignment WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS "${WORKER_DEPLOY_DRAIN_TIMEOUT_SECONDS:-}")" \
@@ -2223,7 +2319,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   }
 
   run_worker_session_deploy_guardrail() {
-    if [ "$ROLE" != "worker" ]; then
+    if [ "$ROLE_KIND" != "worker" ]; then
       return 0
     fi
     local database_url
@@ -2339,7 +2435,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   #     though the inode is visible inside the sandbox.
   # Re-runs `runsc install` whenever either flag is missing so existing hosts
   # get patched on the next deploy.
-  if [ "$ROLE" = "worker" ] && command -v runsc &>/dev/null; then
+  if [ "$ROLE_KIND" = "worker" ] && command -v runsc &>/dev/null; then
     DAEMON_JSON="/etc/docker/daemon.json"
     if [ ! -f "$DAEMON_JSON" ] || ! grep -q "ignore-cgroups" "$DAEMON_JSON" || ! grep -Eq -- '--host-uds(=|[[:space:]]+)open' "$DAEMON_JSON"; then
       if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
@@ -2369,7 +2465,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   # The sandbox image is referenced via SANDBOX_IMAGE env var, not as a compose
   # service, so `docker compose pull` doesn't fetch it. Pull it explicitly —
   # ContainerCreate doesn't auto-pull, so the worker would fail on first launch.
-  if [ "$ROLE" = "worker" ]; then
+  if [ "$ROLE_KIND" = "worker" ]; then
     docker pull "ghcr.io/assembledhq/143-sandbox:$IMAGE_TAG"
     if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
       if ! docker image inspect 143-sandbox-dns:local >/dev/null 2>&1; then
@@ -2403,9 +2499,20 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   # image (already pulled) to execute the migration binary without replacing
   # the running container. This prevents 500s from code referencing columns
   # that the old schema doesn't have yet.
+  #
+  # APP_SCHEMA_MODE=verify switches to the stable-plane preflight: assert the
+  # schema (owned by the canary pipeline) is already at least as new as this
+  # ref and that this ref satisfies every recorded destructive floor, without
+  # migrating. The default stays `migrate` so single-plane deployments and
+  # self-hosters are unaffected; the promote workflow sets verify.
   if [ "$ROLE" = "app" ]; then
-    echo "Running database migrations..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
+    if [ "${APP_SCHEMA_MODE:-migrate}" = "verify" ]; then
+      echo "Verifying database schema (stable plane preflight; canary owns migrations)..."
+      docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate verify < /dev/null
+    else
+      echo "Running database migrations..."
+      docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
+    fi
   fi
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.
@@ -2415,8 +2522,10 @@ SELECT COUNT(*) FROM endpoint_blockers;"
   # briefly unbinds ports 80/443 and surfaces as 502s to any proxy in front.
   if [ "$ROLE" = "app" ]; then
     echo "Updating supporting services..."
-    recreate_other_services "api frontend caddy"
-  elif [ "$ROLE" = "worker" ]; then
+    # Canary services are owned by app-canary deploys; a stable rollout must
+    # never force-recreate them (their tag variable isn't even set here).
+    recreate_other_services "api frontend caddy api-canary frontend-canary"
+  elif [ "$ROLE_KIND" = "worker" ]; then
     if [ "${DEPLOY_MODE:-routine}" = "routine" ]; then
       echo "Skipping supporting-service recreation for routine worker deploy; use DEPLOY_MODE=maintenance for host/runtime dependency changes."
     else
@@ -2435,7 +2544,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
 
     reconcile_caddy_service
 
-  elif [ "$ROLE" = "worker" ]; then
+  elif [ "$ROLE_KIND" = "worker" ]; then
     run_worker_session_deploy_guardrail
 
     # Worker deploys use per-generation node IDs and host ports. The new
@@ -2544,7 +2653,7 @@ EOS
   fi
 
   # Verify Vector is running on app/worker/logging nodes
-  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
+  if [ "$ROLE_KIND" = "app" ] || [ "$ROLE_KIND" = "worker" ] || [ "$ROLE" = "logging" ]; then
     echo "Checking Vector log collector..."
     VECTOR_ID="$(docker compose -f "$COMPOSE_FILE" ps -q vector)"
     if [ -z "$VECTOR_ID" ]; then
@@ -2556,8 +2665,8 @@ EOS
     fi
   fi
 
-  if [ "$ROLE" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then
-    prune_docker_deploy_artifacts "$ROLE"
+  if [ "$ROLE_KIND" != "worker" ] || [ -z "${WORKER_DEPLOY_DETACH:-}" ]; then
+    prune_docker_deploy_artifacts "$ROLE_KIND"
   fi
 
   echo "Deploy complete ($ROLE)."

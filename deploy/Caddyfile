@@ -102,6 +102,121 @@ www.{$DOMAIN:143.dev} {
 	}
 }
 
+# Canary plane: latest main, serving dogfood orgs only (the API refuses orgs
+# whose release_channel is not canary). Mirrors the main-domain routing with
+# the canary containers as upstreams. Same origin server, same certificates
+# story, no new host ports — Caddy resolves the canary container names on the
+# shared compose project network.
+# See docs/design/118-canary-stable-release-channels.md.
+canary.{$DOMAIN:143.dev} {
+	@safe method GET HEAD OPTIONS
+	@preview_data_plane path /api/v1/sessions/*/preview /api/v1/sessions/*/preview/* /api/v1/previews /api/v1/previews/*
+
+	handle @preview_data_plane {
+		handle @safe {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 5
+				import preview_gateway_upstream_defaults
+			}
+		}
+		handle {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 0
+				import preview_gateway_upstream_defaults
+			}
+		}
+	}
+
+	handle /api/* {
+		handle @safe {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 5
+				import upstream_defaults
+			}
+		}
+		handle {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 0
+				import upstream_defaults
+			}
+		}
+	}
+
+	# 143-tools CLI distribution, served by the Go server — same routes as the
+	# main domain so `curl canary.<domain>/install.sh` exercises the canary
+	# build instead of 404ing off the frontend fallthrough.
+	@cli_dist path /install.sh /install/* /download/*
+	handle @cli_dist {
+		handle @safe {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 5
+				import upstream_defaults
+			}
+		}
+		handle {
+			reverse_proxy {
+				dynamic a {
+					name api-canary
+					port 8080
+					refresh 2s
+				}
+				lb_retries 0
+				import upstream_defaults
+			}
+		}
+	}
+
+	handle {
+		handle @safe {
+			reverse_proxy {
+				dynamic a {
+					name frontend-canary
+					port 3000
+					refresh 2s
+				}
+				lb_retries 5
+				import upstream_defaults
+			}
+		}
+		handle {
+			reverse_proxy {
+				dynamic a {
+					name frontend-canary
+					port 3000
+					refresh 2s
+				}
+				lb_retries 0
+				import upstream_defaults
+			}
+		}
+	}
+}
+
 {$DOMAIN:143.dev} {
 	# Retries are gated by HTTP method. For idempotent requests (GET/HEAD/
 	# OPTIONS), Caddy retries transient 5xx against a different/healthy

@@ -1098,6 +1098,10 @@ type Job struct {
 	ID             uuid.UUID       `db:"id" json:"id"`
 	OrgID          uuid.UUID       `db:"org_id" json:"org_id"`
 	Queue          string          `db:"queue" json:"queue"`
+	// Channel is the release channel stamped at enqueue time from the org's
+	// release_channel (a snapshot, not a live join). Workers claim only jobs
+	// matching their configured channel.
+	Channel        ReleaseChannel  `db:"channel" json:"channel"`
 	JobType        string          `db:"job_type" json:"job_type"`
 	Payload        json.RawMessage `db:"payload" json:"payload"`
 	Priority       int             `db:"priority" json:"priority"`

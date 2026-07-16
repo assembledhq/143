@@ -37,6 +37,9 @@ func (s *OrganizationStore) Create(ctx context.Context, org *models.Organization
 }
 
 // GetByID returns the organization with the given id.
+// The release_channel column is deliberately not part of the model yet —
+// only the canary host guard consumes it, via GetReleaseChannel below; an
+// admin surface exposing it on the org payload is future work.
 // lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
 func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.Organization, error) {
 	query := `
@@ -49,6 +52,22 @@ func (s *OrganizationStore) GetByID(ctx context.Context, id uuid.UUID) (models.O
 		return models.Organization{}, fmt.Errorf("query organization: %w", err)
 	}
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Organization])
+}
+
+// GetReleaseChannel returns the org's release channel. Used on the hot path
+// by the canary host guard, so it selects the single column instead of the
+// whole row.
+// lint:allow-no-orgid reason="organizations is the root tenant table; id IS the org"
+func (s *OrganizationStore) GetReleaseChannel(ctx context.Context, id uuid.UUID) (models.ReleaseChannel, error) {
+	var channel models.ReleaseChannel
+	err := s.db.QueryRow(ctx, `
+		SELECT release_channel
+		FROM organizations
+		WHERE id = @id`, pgx.NamedArgs{"id": id}).Scan(&channel)
+	if err != nil {
+		return "", fmt.Errorf("query organization release channel: %w", err)
+	}
+	return channel, nil
 }
 
 // ListIDs returns tenant root IDs for system cleanup tasks.

@@ -1,0 +1,15 @@
+# Auto-generated release notes layout (used by promote.yml's
+# `gh release create --generate-notes`). GitHub compiles the merged-PR list
+# between the previous release tag and the new one and groups it by label.
+# See docs/design/118-canary-stable-release-channels.md.
+changelog:
+  exclude:
+    authors:
+      - dependabot
+  categories:
+    - title: Agent-generated (143 dogfood)
+      labels:
+        - 143-generated
+    - title: Everything else
+      labels:
+        - "*"

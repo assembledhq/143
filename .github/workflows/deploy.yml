@@ -177,6 +177,59 @@ jobs:
           fi
           echo "FLEET_HOSTS=$fleet_hosts" >> "$GITHUB_ENV"
 
+      # Resolve the currently promoted stable release so the canary migration
+      # gate (STABLE_MAX_MIGRATION) can refuse destructive migrations whose
+      # lint:destructive-ok-after floor stable hasn't reached yet. No release
+      # yet (pre-promotion or single-plane) leaves the gate off.
+      # NOTE: the contents API caps directory listings at 1000 entries; at the
+      # current migration cadence that is years of headroom.
+      - name: Resolve stable release migration floor
+        id: stable_floor
+        if: steps.deploy_latest.outputs.should_deploy == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Only an explicit HTTP 404 (no releases yet) leaves the gate off.
+          # Any other failure aborts the deploy: treating an API outage as
+          # "no release" would silently disarm the destructive-migration gate
+          # and let gated contract migrations apply before stable is ready.
+          body_file="$(mktemp)"
+          if ! status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$REPO/releases/latest")"; then
+            echo "ERROR: could not reach the GitHub API for releases/latest." >&2
+            exit 1
+          fi
+          case "$status" in
+            200)
+              tag="$(jq -r '.tag_name // empty' "$body_file")"
+              if [ -z "$tag" ]; then
+                echo "ERROR: releases/latest succeeded but carries no tag_name; refusing to disarm the migration gate:" >&2
+                cat "$body_file" >&2
+                exit 1
+              fi
+              ;;
+            404) tag="" ;;
+            *)
+              echo "ERROR: releases/latest returned HTTP $status:" >&2
+              cat "$body_file" >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "$tag" ]; then
+            echo "No stable release yet; destructive-migration gate is off."
+            echo "stable_max_migration=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          max="$(gh api "repos/$REPO/contents/migrations?ref=$tag" --paginate \
+            --jq '.[].name | select(test("^[0-9]+_.*\\.up\\.sql$")) | split("_")[0]' \
+            | sort -n | tail -1)"
+          echo "Stable release $tag carries migrations up to ${max:-none}."
+          echo "stable_max_migration=$max" >> "$GITHUB_OUTPUT"
+
       - name: Deploy fleet
         if: steps.deploy_latest.outputs.should_deploy == 'true'
         # WORKER_DEPLOY_DETACH=1 makes deploy.sh kick off the worker rollover
@@ -188,6 +241,12 @@ jobs:
         # generation binds a free port while old worker generations keep serving
         # previews on their existing endpoints until their preview drain windows
         # expire. Keep the app-to-worker private network open for this range.
+        #
+        # DEPLOY_ROLES phases the canary/stable split without workflow edits
+        # (design doc 118):
+        #   unset               -> "app,worker"                        (single plane, today)
+        #   Phase 2 transition  -> "app-canary,app,worker,worker-canary" (both planes track main)
+        #   Phase 3 pinned      -> "app-canary,worker-canary"          (stable moves via promote.yml)
         env:
           WORKER_DEPLOY_DETACH: "1"
           WORKER_BLUE_GREEN_PORT_START: "8080"
@@ -196,9 +255,11 @@ jobs:
           # capture every per-host log when any deploy fails.
           DEPLOY_FLEET_LOG_DIR: /tmp/deploy-fleet-logs
           SECRETS_DIR: ${{ github.workspace }}/.infra
+          DEPLOY_ROLES: ${{ vars.DEPLOY_ROLES || 'app,worker' }}
+          STABLE_MAX_MIGRATION: ${{ steps.stable_floor.outputs.stable_max_migration }}
         run: |
           chmod +x deploy/scripts/deploy.sh deploy/scripts/deploy-fleet.sh
-          ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}"
+          ./deploy/scripts/deploy-fleet.sh ~/.ssh/deploy-key "${{ github.event.workflow_run.head_sha }}" "$DEPLOY_ROLES"
 
       - name: Upload per-host deploy logs
         if: failure()
@@ -231,10 +292,22 @@ jobs:
           DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
           VERIFY_TIMEOUT_SECONDS: "360"
           POLL_INTERVAL_SECONDS: "10"
+          DEPLOY_ROLES: ${{ vars.DEPLOY_ROLES || 'app,worker' }}
         run: |
           set -euo pipefail
 
-          WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep '^worker:' | cut -d: -f2 || true)"
+          # Both worker pools use the same detached rollover mechanics; only
+          # verify the pools that were actually part of this deploy's roles.
+          ROLES=",${DEPLOY_ROLES:-app,worker},"
+          PATTERNS=()
+          [[ "$ROLES" == *,worker,* || "$ROLES" == *,all,* ]] && PATTERNS+=('^worker:')
+          [[ "$ROLES" == *,worker-canary,* || "$ROLES" == *,all,* ]] && PATTERNS+=('^worker-canary:')
+          if [ "${#PATTERNS[@]}" -eq 0 ]; then
+            echo "no worker roles in this deploy — nothing to verify"
+            exit 0
+          fi
+          ROLE_FILTER="$(IFS='|'; echo "${PATTERNS[*]}")"
+          WORKERS="$(echo "$FLEET_HOSTS" | tr ',' '\n' | grep -E "$ROLE_FILTER" | cut -d: -f2 || true)"
           if [ -z "$WORKERS" ]; then
             echo "no worker hosts in fleet — nothing to verify"
             exit 0

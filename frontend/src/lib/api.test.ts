@@ -2008,6 +2008,44 @@ describe('api client', () => {
       });
     });
 
+    it('bounces the session to the primary origin on ORG_NOT_ON_CANARY', async () => {
+      const assign = vi.fn();
+      // Keep href/origin intact: fetch (via msw) resolves relative request
+      // URLs against location.href, so a bare stub breaks the request before
+      // the error body is ever parsed.
+      Object.defineProperty(window, 'location', {
+        value: {
+          ...originalLocation,
+          assign,
+          pathname: '/sessions/abc',
+          search: '?tab=diff',
+          hash: '#message-42',
+        },
+        writable: true,
+        configurable: true,
+      });
+      server.use(
+        http.get('/api/v1/issues', () => {
+          return HttpResponse.json(
+            {
+              error: {
+                code: 'ORG_NOT_ON_CANARY',
+                message: 'this org is not on the canary release channel; use the primary domain',
+                details: { redirect_origin: 'https://143.dev' },
+              },
+            },
+            { status: 403 },
+          );
+        }),
+      );
+
+      await expect(api.issues.list()).rejects.toThrow();
+      expect(assign).toHaveBeenCalledWith('https://143.dev/sessions/abc?tab=diff#message-42');
+      // The once-guard must keep parallel 403s from stacking navigations.
+      await expect(api.issues.list()).rejects.toThrow();
+      expect(assign).toHaveBeenCalledTimes(1);
+    });
+
     it('login redirects to GitHub OAuth', () => {
       const loc = { href: '', pathname: '/overview' };
       Object.defineProperty(window, 'location', {

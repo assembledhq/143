@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -472,15 +473,15 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				orgID := uuid.New()
 				now := time.Now()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "worker-1", "stable", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at", "channel",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, now, now, nil, "stable",
 					))
 			},
 		},
@@ -492,15 +493,15 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 				now := time.Now()
 				completedAt := now.Add(time.Minute)
 				mock.ExpectQuery("WITH unavailable_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "worker-1", "stable", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at", "channel",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", now, now, completedAt, "canary",
 					))
 			},
 		},
@@ -508,7 +509,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 			name: "returns nil when no pending job exists",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
 				mock.ExpectQuery("WITH unavailable_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "worker-1", "stable", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
 			expectNil: true,
@@ -517,7 +518,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 			name: "returns query errors",
 			setupMock: func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID) {
 				mock.ExpectQuery("WITH unavailable_target_nodes AS[\\s\\S]*next_job AS[\\s\\S]*RETURNING j.id, j.org_id, j.queue, j.job_type").
-					WithArgs(pgxmock.AnyArg(), "worker-1", "worker-1", lockToken, int(leaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "worker-1", "stable", "worker-1", lockToken, int(leaseDuration.Seconds())).
 					WillReturnError(errors.New("db down"))
 			},
 			expectErr: true,
@@ -537,7 +538,7 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 			lockToken := uuid.New()
 			tt.setupMock(mock, leaseDuration, lockToken)
 
-			job, err := store.ClaimNextRunnable(context.Background(), "worker-1", "worker-1", lockToken, leaseDuration)
+			job, err := store.ClaimNextRunnable(context.Background(), "worker-1", "worker-1", models.ReleaseChannelStable, lockToken, leaseDuration)
 			if tt.expectErr {
 				require.Error(t, err, "ClaimNextRunnable should return an error")
 				require.Nil(t, job, "ClaimNextRunnable should not return a job on error")
@@ -1021,8 +1022,9 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 	defer mock.Close()
 
 	store := NewJobStore(mock)
-	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+	mock.ExpectQuery("SELECT\\s+channel,\\s+queue,\\s+job_type").
 		WillReturnRows(pgxmock.NewRows([]string{
+			"channel",
 			"queue",
 			"job_type",
 			"pending_runnable",
@@ -1030,13 +1032,15 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			"running",
 			"dead_letter",
 			"oldest_runnable_age_seconds",
-		}).AddRow("agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
-			AddRow("default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
+		}).AddRow("stable", "agent", "run_agent", int64(3), int64(2), int64(1), int64(0), float64(42)).
+			AddRow("canary", "agent", "run_agent", int64(1), int64(0), int64(0), int64(0), float64(7)).
+			AddRow("stable", "default", "open_pr", int64(0), int64(1), int64(0), int64(2), nil))
 
 	samples, err := store.QueueHealthSamples(context.Background())
 	require.NoError(t, err, "QueueHealthSamples should not return an error")
 	require.Equal(t, []JobQueueHealthSample{
 		{
+			Channel:                  "stable",
 			Queue:                    "agent",
 			JobType:                  "run_agent",
 			PendingRunnable:          3,
@@ -1046,6 +1050,17 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			OldestRunnableAgeSeconds: 42,
 		},
 		{
+			Channel:                  "canary",
+			Queue:                    "agent",
+			JobType:                  "run_agent",
+			PendingRunnable:          1,
+			PendingDeferred:          0,
+			Running:                  0,
+			DeadLetter:               0,
+			OldestRunnableAgeSeconds: 7,
+		},
+		{
+			Channel:                  "stable",
 			Queue:                    "default",
 			JobType:                  "open_pr",
 			PendingRunnable:          0,
@@ -1054,7 +1069,7 @@ func TestJobStore_QueueHealthSamples(t *testing.T) {
 			DeadLetter:               2,
 			OldestRunnableAgeSeconds: 0,
 		},
-	}, samples, "QueueHealthSamples should return grouped queue health rows")
+	}, samples, "QueueHealthSamples should return queue health rows grouped per release channel")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1066,7 +1081,7 @@ func TestJobStore_QueueHealthSamples_ReturnsWrappedErrors(t *testing.T) {
 	defer mock.Close()
 
 	store := NewJobStore(mock)
-	mock.ExpectQuery("SELECT\\s+queue,\\s+job_type").
+	mock.ExpectQuery("SELECT\\s+channel,\\s+queue,\\s+job_type").
 		WillReturnError(errors.New("query failed"))
 
 	samples, err := store.QueueHealthSamples(context.Background())

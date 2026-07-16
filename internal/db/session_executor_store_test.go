@@ -533,11 +533,11 @@ func TestJobStore_GetRunningForSessionExecutor(t *testing.T) {
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at", "channel",
 		}).AddRow(
 			jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
 			1, 3, now, "worker-1", now, now.Add(time.Minute), lockToken.String(), executorID.String(), "session_executor", nil,
-			nil, nil, now, now, nil,
+			nil, nil, now, now, nil, "stable",
 		))
 
 	job, ok, err := store.GetRunningForSessionExecutor(context.Background(), orgID, jobID, lockToken, executorID)

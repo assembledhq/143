@@ -12,10 +12,11 @@ import (
 )
 
 type NodeManager struct {
-	pool   db.DBTX
-	logger zerolog.Logger
-	nodeID string
-	mode   string
+	pool    db.DBTX
+	logger  zerolog.Logger
+	nodeID  string
+	mode    string
+	channel string
 
 	mu                sync.RWMutex
 	draining          bool
@@ -23,8 +24,8 @@ type NodeManager struct {
 	metadataProvider  func() map[string]any
 }
 
-func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode string) *NodeManager {
-	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode, heartbeatInterval: 30 * time.Second}
+func NewNodeManager(pool db.DBTX, logger zerolog.Logger, nodeID, mode, channel string) *NodeManager {
+	return &NodeManager{pool: pool, logger: logger, nodeID: nodeID, mode: mode, channel: channel, heartbeatInterval: 30 * time.Second}
 }
 
 func (n *NodeManager) Register(ctx context.Context, host string) error {
@@ -34,10 +35,11 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 	}
 
 	_, err = n.pool.Exec(ctx, `
-		INSERT INTO nodes (id, mode, host, started_at, last_heartbeat_at, status, metadata)
-		VALUES ($1, $2, $3, now(), now(), 'active', $4)
+		INSERT INTO nodes (id, mode, channel, host, started_at, last_heartbeat_at, status, metadata)
+		VALUES ($1, $2, $3, $4, now(), now(), 'active', $5)
 		ON CONFLICT (id) DO UPDATE SET
 			mode = EXCLUDED.mode,
+			channel = EXCLUDED.channel,
 			host = EXCLUDED.host,
 			started_at = now(),
 			last_heartbeat_at = now(),
@@ -48,7 +50,7 @@ func (n *NodeManager) Register(ctx context.Context, host string) error {
 			drain_requested_by = '',
 			drain_reason = '',
 			metadata = EXCLUDED.metadata
-	`, n.nodeID, n.mode, host, metadata)
+	`, n.nodeID, n.mode, n.channel, host, metadata)
 	return err
 }
 

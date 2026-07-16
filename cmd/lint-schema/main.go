@@ -108,6 +108,7 @@ func main() {
 	sort.Strings(files)
 
 	var violations []violation
+	var destructiveViolations []violation
 	for _, f := range files {
 		// #nosec G304 -- f comes from filepath.Glob over the migrations dir; not user input.
 		src, err := os.ReadFile(f)
@@ -115,23 +116,38 @@ func main() {
 			fatal("read %s: %v", f, err)
 		}
 		violations = append(violations, scan(f, string(src))...)
+		destructiveViolations = append(destructiveViolations, scanDestructive(f, string(src))...)
 	}
 
-	if len(violations) == 0 {
+	if len(violations) == 0 && len(destructiveViolations) == 0 {
 		fmt.Printf("lint-schema: OK — scanned %d migration file(s)\n", len(files))
 		return
 	}
 
-	fmt.Fprintln(os.Stderr, "lint-schema: multi-tenancy violations")
-	for _, v := range violations {
-		fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q: %s\n", v.file, v.line, v.table, v.detail)
+	if len(violations) > 0 {
+		fmt.Fprintln(os.Stderr, "lint-schema: multi-tenancy violations")
+		for _, v := range violations {
+			fmt.Fprintf(os.Stderr, "  %s:%d: CREATE TABLE %q: %s\n", v.file, v.line, v.table, v.detail)
+		}
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Every new tenant-scoped table defaults to `org_id uuid NOT NULL REFERENCES organizations(id)`.")
+		fmt.Fprintln(os.Stderr, "FKs are the default; for reviewed hot append-only table exceptions, add")
+		fmt.Fprintln(os.Stderr, "`-- lint:allow-hot-table-no-fk reason=\"...\"` inside the CREATE TABLE statement.")
+		fmt.Fprintln(os.Stderr, "To exempt a table from org_id entirely, add it to allowedNoOrgID in")
+		fmt.Fprintln(os.Stderr, "cmd/lint-schema/main.go or use `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
 	}
-	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Every new tenant-scoped table defaults to `org_id uuid NOT NULL REFERENCES organizations(id)`.")
-	fmt.Fprintln(os.Stderr, "FKs are the default; for reviewed hot append-only table exceptions, add")
-	fmt.Fprintln(os.Stderr, "`-- lint:allow-hot-table-no-fk reason=\"...\"` inside the CREATE TABLE statement.")
-	fmt.Fprintln(os.Stderr, "To exempt a table from org_id entirely, add it to allowedNoOrgID in")
-	fmt.Fprintln(os.Stderr, "cmd/lint-schema/main.go or use `-- lint:no-org-id reason=\"...\"` on the CREATE TABLE line.")
+	if len(destructiveViolations) > 0 {
+		fmt.Fprintln(os.Stderr, "lint-schema: destructive-migration violations")
+		for _, v := range destructiveViolations {
+			fmt.Fprintf(os.Stderr, "  %s:%d: %s\n", v.file, v.line, v.detail)
+		}
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "The shared schema must stay compatible with the promoted stable release")
+		fmt.Fprintln(os.Stderr, "(docs/design/118-canary-stable-release-channels.md). Destructive DDL needs an explicit floor:")
+		fmt.Fprintln(os.Stderr, "  -- lint:destructive-ok-after schema=\"NNNNNN\" reason=\"<why stable no longer depends on the old shape>\"")
+		fmt.Fprintln(os.Stderr, "where NNNNNN is the migration the stable release must already carry. The canary")
+		fmt.Fprintln(os.Stderr, "deploy gate defers the migration until stable has been promoted past that floor.")
+	}
 	os.Exit(1)
 }
 

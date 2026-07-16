@@ -124,7 +124,7 @@ cd cmd/server && air
 cd frontend && npm run dev
 
 # Run migrations
-go run cmd/migrate/main.go up
+go run ./cmd/migrate up
 
 # Run tests
 go test ./...
@@ -142,7 +142,7 @@ agent runs use the same sandbox image tag as the runtime default.
 
 setup:
 	docker compose up -d postgres
-	go run cmd/migrate/main.go up
+	go run ./cmd/migrate up
 	cd frontend && npm install
 
 dev:
@@ -153,10 +153,10 @@ test:
 	cd frontend && npm test
 
 migrate:
-	go run cmd/migrate/main.go up
+	go run ./cmd/migrate up
 
 migrate-down:
-	go run cmd/migrate/main.go down 1
+	go run ./cmd/migrate down 1
 
 build:
 	docker build -t 143-server .

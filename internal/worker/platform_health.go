@@ -71,6 +71,7 @@ func emitQueueHealthSample(ctx context.Context, store queueHealthStore, logger z
 	}
 	for _, sample := range samples {
 		logger.Info().
+			Str("job_channel", sample.Channel).
 			Str("queue", sample.Queue).
 			Str("job_type", sample.JobType).
 			Int64("pending_runnable", sample.PendingRunnable).
@@ -152,6 +153,7 @@ func emitControlPlaneHealthAlerts(ctx context.Context, queues queueHealthStore, 
 					continue
 				}
 				logger.Warn().
+					Str("job_channel", sample.Channel).
 					Str("queue", sample.Queue).
 					Str("job_type", sample.JobType).
 					Int64("pending_runnable", sample.PendingRunnable).

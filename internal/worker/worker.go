@@ -92,7 +92,7 @@ func jobOrgIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 }
 
 type jobLeaseStore interface {
-	ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error)
+	ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, channel models.ReleaseChannel, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error)
 	RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
 	MarkSucceededWithLease(ctx context.Context, jobID, lockToken uuid.UUID) (bool, error)
 	MarkFailedWithLease(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
@@ -117,6 +117,7 @@ type Worker struct {
 	jobs          jobLeaseStore
 	logger        zerolog.Logger
 	nodeID        string
+	channel       models.ReleaseChannel
 	handlers      map[string]JobHandler
 	pollInterval  time.Duration
 	leaseDuration time.Duration
@@ -132,11 +133,23 @@ type Worker struct {
 	activeRunAgentJobs atomic.Int32
 }
 
-func New(pool db.DBTX, logger zerolog.Logger, nodeID string) *Worker {
+func New(pool db.DBTX, logger zerolog.Logger, nodeID string, channel models.ReleaseChannel) *Worker {
+	if channel.Validate() != nil {
+		// A worker on an unknown channel must never claim from a real pool;
+		// callers validate config at startup, so this is a defensive default.
+		// Coercing an intended-canary worker onto stable would silently mix
+		// planes, so make the fallback loud.
+		logger.Warn().
+			Str("requested_channel", string(channel)).
+			Str("channel", string(models.ReleaseChannelStable)).
+			Msg("invalid release channel passed to worker; defaulting to stable")
+		channel = models.ReleaseChannelStable
+	}
 	return &Worker{
 		jobs:                      db.NewJobStore(pool),
 		logger:                    logger,
 		nodeID:                    nodeID,
+		channel:                   channel,
 		handlers:                  make(map[string]JobHandler),
 		pollInterval:              5 * time.Second,
 		leaseDuration:             defaultLeaseDuration,
@@ -181,7 +194,7 @@ func (w *Worker) poll(ctx context.Context) {
 	}
 
 	lockToken := uuid.New()
-	job, err := w.jobs.ClaimNextRunnable(ctx, w.nodeID, w.nodeID, lockToken, w.leaseDuration)
+	job, err := w.jobs.ClaimNextRunnable(ctx, w.nodeID, w.nodeID, w.channel, lockToken, w.leaseDuration)
 	if err != nil {
 		w.logger.Error().Err(err).Msg("failed to claim job")
 		return

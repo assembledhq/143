@@ -89,7 +89,7 @@ Optional LLM routing vars:
 - [ ] Build backend image:
   - `docker build -t 143-server .`
 - [ ] Run database migrations before startup:
-  - local/CI: `go run cmd/migrate/main.go up`
+  - local/CI: `go run ./cmd/migrate up`
   - containerized: run `/bin/migrate up` in an image/container with `DATABASE_URL` set
 - [ ] Deploy backend container with env vars from section 3
 - [ ] Build and deploy frontend with `API_PROXY_TARGET` pointing to backend base URL (if using rewrites in `frontend/next.config.ts`)

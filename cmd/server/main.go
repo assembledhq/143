@@ -83,6 +83,15 @@ func main() {
 
 	cfg := config.Load()
 	logger := logging.NewLogger(cfg.LogLevel, cfg.Env)
+	if err := models.ReleaseChannel(cfg.Channel).Validate(); err != nil {
+		// Fail closed: a typo'd CHANNEL must never silently join a real
+		// worker pool (a mislabeled canary worker would run unreleased code
+		// against stable orgs' jobs).
+		logger.Fatal().Err(err).Str("channel", cfg.Channel).Msg("invalid CHANNEL configuration")
+	}
+	// Every log line carries the release channel so per-channel log queries
+	// and dashboards can split canary from stable.
+	logger = logger.With().Str("channel", cfg.Channel).Logger()
 	cfg.LogStatus(logger)
 
 	if version.IsDev() {
@@ -384,7 +393,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("failed to initialize API router")
 	}
 
-	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode)
+	nodeManager := cluster.NewNodeManager(pool, logger, cfg.NodeID, cfg.Mode, cfg.Channel)
 	previewCapable := (cfg.Mode == "worker" || cfg.Mode == "all") && pvProvider != nil
 	var previewRoutingReady atomic.Bool
 	nodeManager.SetMetadataProvider(func() map[string]any {
@@ -562,6 +571,7 @@ func main() {
 						autoPreviewSelector := preview.NewWorkerSelectorWithOptions(autoPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
 							MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 							PreferredRegion:      cfg.NodeRegion,
+							OrgChannels:          db.NewOrganizationStore(pool),
 						})
 						previewStopper := preview.NewWorkerStopper(previewStore, autoPreviewSelector, preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring), cfg.NodeID, previewManager)
 						prSvc.SetPreviewTeardown(previewStore, previewStopper)
@@ -575,6 +585,7 @@ func main() {
 					slackPreviewSelector := preview.NewWorkerSelectorWithOptions(slackPreviewNodeStore, previewStore, preview.WorkerSelectorOptions{
 						MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
 						PreferredRegion:      cfg.NodeRegion,
+						OrgChannels:          db.NewOrganizationStore(pool),
 					})
 					slackPreviewHandler := handlers.NewPreviewHandler(previewManager, previewStore, sessionStore, repoStore, fileReader, apiSandboxProvider, snapshotStore, logger)
 					slackPreviewHandler.SetJobStore(jobStore)
@@ -702,6 +713,7 @@ func main() {
 			pool,
 			logger,
 			cfg.NodeID,
+			models.ReleaseChannel(cfg.Channel),
 			workerCount,
 			stores,
 			services,
@@ -733,34 +745,47 @@ func main() {
 		go worker.RunHostResourceSampler(ctx, logger, cfg.NodeID, time.Minute)
 
 		usageRollupStore := db.NewUsageRollupStore(pool)
-		reaperOpts := []agent.SessionReaperOption{
-			agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
-			agent.WithUsageRoller(usageRollupStore),
-			agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
-			agent.WithRuntimeJobTerminalizer(jobStore),
-			agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
-			// Phase 0.5b safety net: fails session_threads stuck in 'running'
-			// past maxRunningAge. Catches orphans the orchestrator/handler
-			// thread.status reset paths couldn't unwind themselves.
-			agent.WithStuckThreadLister(sessionThreadStore),
-		}
-		if previewManager != nil {
-			previewStore := db.NewPreviewStore(pool)
-			nodeStore := db.NewNodeStore(pool)
-			selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
-				MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
-				PreferredRegion:      cfg.NodeRegion,
-			})
-			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
-			if keyringErr != nil {
-				logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
-				previewRPCKeyring = auth.PreviewTokenKeyring{}
+		// The session reaper is a fleet-global, cross-org sweep of stale
+		// sessions/threads/snapshots. Like the scheduler, it runs only on
+		// the stable channel so unreleased canary code never performs
+		// cross-org writes; a stable-run reaper covers canary orgs' rows
+		// too (its preview stops go over the worker RPC contract, which is
+		// old-caller→new-worker compatible by design). The node/job
+		// recovery loop deliberately stays on BOTH channels — it is mutual
+		// crash recovery whose requeues preserve each job's channel.
+		if cfg.Channel == string(models.ReleaseChannelStable) {
+			reaperOpts := []agent.SessionReaperOption{
+				agent.WithOrphanCloser(db.NewContainerUsageStore(pool)),
+				agent.WithUsageRoller(usageRollupStore),
+				agent.WithMaxRunningAge(cfg.SessionMaxRunningAge),
+				agent.WithRuntimeJobTerminalizer(jobStore),
+				agent.WithThreadRuntimeLeaseReclaimer(db.NewThreadRuntimeStore(pool)),
+				// Phase 0.5b safety net: fails session_threads stuck in 'running'
+				// past maxRunningAge. Catches orphans the orchestrator/handler
+				// thread.status reset paths couldn't unwind themselves.
+				agent.WithStuckThreadLister(sessionThreadStore),
 			}
-			client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
-			reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
+			if previewManager != nil {
+				previewStore := db.NewPreviewStore(pool)
+				nodeStore := db.NewNodeStore(pool)
+				selector := preview.NewWorkerSelectorWithOptions(nodeStore, previewStore, preview.WorkerSelectorOptions{
+					MaxPreviewsPerWorker: cfg.PreviewMaxPerWorker,
+					PreferredRegion:      cfg.NodeRegion,
+					OrgChannels:          db.NewOrganizationStore(pool),
+				})
+				previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
+				if keyringErr != nil {
+					logger.Warn().Err(keyringErr).Msg("preview RPC keyring is not configured; preview worker RPC will be unavailable")
+					previewRPCKeyring = auth.PreviewTokenKeyring{}
+				}
+				client := preview.NewWorkerPreviewClientWithKeyring(previewRPCKeyring)
+				reaperOpts = append(reaperOpts, agent.WithPreviewStopper(preview.NewWorkerStopper(previewStore, selector, client, cfg.NodeID, previewManager)))
+			}
+			reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
+			go reaper.Run(ctx)
+		} else {
+			logger.Info().Msg("session reaper disabled: this node is not on the stable release channel")
 		}
-		reaper := agent.NewSessionReaper(sessionStore, snapshotStore, cfg.SessionMaxIdleAge, cfg.SessionMaxSnapshotAge, cfg.SessionReaperInterval, logger, reaperOpts...)
-		go reaper.Run(ctx)
 
 		// Runtime resource sampler — emits live memory/CPU histograms per
 		// running sandbox so operators can size SANDBOX_* limits against
@@ -778,26 +803,36 @@ func main() {
 		uploadReaper := storage.NewUploadReaper(uploadStore, cfg.UploadMaxAge, cfg.SessionReaperInterval, logger)
 		go uploadReaper.Run(ctx)
 
-		scheduler := cluster.NewScheduler(
-			cluster.NewSchedulerLock(pool),
-			jobStore,
-			orgStore,
-			integrationStore,
-			pmPlanStore,
-			repoStore,
-			logger,
-		)
-		scheduler.SetPMDocStore(pmDocumentStore)
-		scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
-		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
-		scheduler.SetSessionStore(sessionStore)
-		scheduler.SetDomainRecheck(
-			db.NewOrganizationDomainStore(pool),
-			domains.NewVerifier(),
-			db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
-		)
-		scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
-		go scheduler.Start(ctx, 10*time.Minute)
+		// Scheduler candidacy is stable-only: leader election is a single
+		// advisory lock shared by every worker-capable node, so a canary
+		// candidate could win it and enqueue system-wide cron work from
+		// unreleased code. Stable (pinned) code owns global enqueue; channel
+		// routing decides which pool executes each enqueued job. See
+		// docs/design/118-canary-stable-release-channels.md.
+		if cfg.Channel == string(models.ReleaseChannelStable) {
+			scheduler := cluster.NewScheduler(
+				cluster.NewSchedulerLock(pool),
+				jobStore,
+				orgStore,
+				integrationStore,
+				pmPlanStore,
+				repoStore,
+				logger,
+			)
+			scheduler.SetPMDocStore(pmDocumentStore)
+			scheduler.SetAutomationStores(automationStore, automationRunStore, pool)
+			scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
+			scheduler.SetSessionStore(sessionStore)
+			scheduler.SetDomainRecheck(
+				db.NewOrganizationDomainStore(pool),
+				domains.NewVerifier(),
+				db.NewAuditEmitter(db.NewAuditLogStore(pool), logger),
+			)
+			scheduler.SetGitHubOrgRosterReconciliation(db.NewGitHubInstallationStore(pool))
+			go scheduler.Start(ctx, 10*time.Minute)
+		} else {
+			logger.Info().Msg("periodic scheduler disabled: this node is not on the stable release channel")
+		}
 	}
 
 	srv := &http.Server{
@@ -959,6 +994,7 @@ func startProcessWorkers(
 	pool db.DBTX,
 	logger zerolog.Logger,
 	nodeID string,
+	channel models.ReleaseChannel,
 	workerCount int,
 	stores *worker.Stores,
 	services *worker.Services,
@@ -974,7 +1010,7 @@ func startProcessWorkers(
 ) []*worker.Worker {
 	workers := make([]*worker.Worker, 0, workerCount)
 	for i := 0; i < workerCount; i++ {
-		w := worker.New(pool, logger, nodeID)
+		w := worker.New(pool, logger, nodeID, channel)
 		worker.RegisterHandlers(w, stores, services, retentionCfg, logger)
 		workers = append(workers, w)
 	}

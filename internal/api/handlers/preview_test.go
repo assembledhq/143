@@ -779,7 +779,7 @@ func expectWorkerRoutedReserveAndEnqueue(mock pgxmock.PgxPoolIface, sessionID, o
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id, channel\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
@@ -1845,7 +1845,7 @@ func TestPreviewHandler_StartPreview_WorkerRoutedEnqueuesStartPreviewJob(t *test
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id, channel\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
@@ -2175,7 +2175,7 @@ func TestPreviewHandler_EnsurePreview_NoActiveWorkerRoutedStartsFresh(t *testing
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id, channel\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()
@@ -2438,7 +2438,7 @@ func TestPreviewHandler_RestartPreview_NoActiveStartsFresh(t *testing.T) {
 			pgxmock.NewRows(handlerPreviewRuntimeTestCols).
 				AddRow(newHandlerPreviewRuntimeRow(uuid.New(), orgID, previewID, now)...),
 		)
-	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id\\)").
+	mock.ExpectQuery("INSERT INTO jobs \\(org_id, queue, job_type, payload, priority, dedupe_key, target_node_id, channel\\)").
 		WithArgs(previewAnyArgs(7)...).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 	mock.ExpectCommit()

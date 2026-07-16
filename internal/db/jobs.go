@@ -71,6 +71,11 @@ type JobStore struct {
 // job type. It intentionally spans orgs so dashboards can show platform-wide
 // pressure rather than one tenant's view.
 type JobQueueHealthSample struct {
+	// Channel splits queue health per release channel so a stuck canary
+	// pool is visible instead of hiding inside (or inflating) stable
+	// numbers. There is no cross-channel claim fallback, so per-channel
+	// backlog age is the signal that a pool is down.
+	Channel                  string
 	Queue                    string
 	JobType                  string
 	PendingRunnable          int64
@@ -339,6 +344,7 @@ func (s *JobStore) OldestPendingSessionJobAge(ctx context.Context) (time.Duratio
 func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSample, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT
+			channel,
 			queue,
 			job_type,
 			COUNT(*) FILTER (WHERE status = 'pending' AND run_at <= now()) AS pending_runnable,
@@ -348,8 +354,8 @@ func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSamp
 			EXTRACT(EPOCH FROM now() - MIN(run_at) FILTER (WHERE status = 'pending' AND run_at <= now()))::double precision AS oldest_runnable_age_seconds
 		FROM jobs
 		WHERE status IN ('pending', 'running', 'dead_letter')
-		GROUP BY queue, job_type
-		ORDER BY pending_runnable DESC, running DESC, queue ASC, job_type ASC`)
+		GROUP BY channel, queue, job_type
+		ORDER BY pending_runnable DESC, running DESC, channel ASC, queue ASC, job_type ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("queue health samples: %w", err)
 	}
@@ -360,6 +366,7 @@ func (s *JobStore) QueueHealthSamples(ctx context.Context) ([]JobQueueHealthSamp
 		var sample JobQueueHealthSample
 		var oldest any
 		if err := rows.Scan(
+			&sample.Channel,
 			&sample.Queue,
 			&sample.JobType,
 			&sample.PendingRunnable,
@@ -573,15 +580,22 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 		"dedupe_key":     opts.DedupeKey,
 		"target_node_id": opts.TargetNodeID,
 	}
+	// channel is stamped here — the single INSERT INTO jobs chokepoint — from
+	// the org's release_channel so every enqueue helper routes to the right
+	// worker pool without per-call-site changes. It is a snapshot: flipping an
+	// org's channel affects new jobs only. Jobs with no matching org (system
+	// work, uuid.Nil org) default to 'stable'.
 	query := `
-		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id)
-		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id)
+		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id, channel)
+		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id,
+			COALESCE((SELECT release_channel FROM organizations WHERE id = @org_id), 'stable'))
 		ON CONFLICT DO NOTHING
 		RETURNING id`
 	if opts.TargetNodeID == nil {
 		query = `
-			INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key)
-			VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key)
+			INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, channel)
+			VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key,
+				COALESCE((SELECT release_channel FROM organizations WHERE id = @org_id), 'stable'))
 			ON CONFLICT DO NOTHING
 			RETURNING id`
 		delete(args, "target_node_id")
@@ -610,7 +624,7 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
 	j.lease_expires_at, j.lock_token, j.run_owner_id, j.owner_kind, j.last_error,
-	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at`
+	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at, j.channel`
 
 // nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
 // before its pinned jobs become claimable by any worker. Set generously
@@ -631,8 +645,12 @@ type jobExecer interface {
 // (status='dead' or stale heartbeat) or draining. A draining node keeps
 // heartbeating to hold its previews, so without the draining case a pinned
 // turn starves until the node dies; the claimer hydrates from the snapshot.
+//
+// Channel filter: workers claim only jobs stamped with their release channel.
+// There is deliberately no cross-channel fallback — a canary job whose pool is
+// down queues rather than executing on stable code, and vice versa.
 // lint:allow-no-orgid reason="worker queue consumer scans cross-org jobs by design"
-func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, channel models.ReleaseChannel, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	query := fmt.Sprintf(`
 		WITH unavailable_target_nodes AS (
 			SELECT id
@@ -652,6 +670,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 			LEFT JOIN unavailable_target_nodes d ON d.id = j.target_node_id
 			JOIN claiming_node cn ON TRUE
 			WHERE j.status = 'pending' AND j.run_at <= now()
+			  AND j.channel = @channel
 			  AND (
 			    j.target_node_id IS NULL
 			    OR j.target_node_id = @node_id
@@ -678,6 +697,7 @@ func (s *JobStore) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string
 	job, err := scanJobRow(s.db.QueryRow(ctx, query, pgx.NamedArgs{
 		"node_id":       nodeID,
 		"owner_id":      ownerID,
+		"channel":       string(channel),
 		"lock_token":    lockToken,
 		"lease_seconds": int(leaseDuration.Seconds()),
 		"dead_before":   time.Now().Add(-nodeDeadHeartbeatThreshold),
@@ -708,6 +728,7 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
 		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&job.Channel,
 	)
 	if err != nil {
 		return nil, err

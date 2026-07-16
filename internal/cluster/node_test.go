@@ -23,7 +23,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "successful registration",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "stable", "localhost:8080", []byte("{}")).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			},
 		},
@@ -31,7 +31,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "upsert on conflict updates existing node",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "stable", "localhost:8080", []byte("{}")).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
@@ -39,7 +39,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "database error returns error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "stable", "localhost:8080", []byte("{}")).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
@@ -55,7 +55,7 @@ func TestNodeManager_Register(t *testing.T) {
 			defer mock.Close()
 
 			tt.setupMock(mock)
-			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 
 			err = nm.Register(context.Background(), "localhost:8080")
 			if tt.expectErr {
@@ -83,7 +83,7 @@ func TestNodeManager_Register_UsesMetadataProviderAndSurfacesMarshalErrors(t *te
 					return map[string]any{"build_sha": "abc123"}
 				})
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte(`{"build_sha":"abc123"}`)).
+					WithArgs("node-1", "worker", "stable", "localhost:8080", []byte(`{"build_sha":"abc123"}`)).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			},
 		},
@@ -106,7 +106,7 @@ func TestNodeManager_Register_UsesMetadataProviderAndSurfacesMarshalErrors(t *te
 			require.NoError(t, err, "should create mock pool")
 			defer mock.Close()
 
-			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 			tt.setup(nm, mock)
 
 			err = nm.Register(context.Background(), "localhost:8080")
@@ -156,7 +156,7 @@ func TestNodeManager_Heartbeat(t *testing.T) {
 			defer mock.Close()
 
 			tt.setupMock(mock)
-			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+			nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 
 			err = nm.HeartbeatOnce(context.Background())
 			if tt.expectErr {
@@ -176,7 +176,7 @@ func TestNodeManager_Heartbeat_UsesDrainStatusAndMetadata(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	nm.SetMetadataProvider(func() map[string]any {
 		return map[string]any{"active_job_count": 2}
 	})
@@ -198,7 +198,7 @@ func TestNodeManager_StartHeartbeat_StopsOnContextCancel(t *testing.T) {
 	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	nm.heartbeatInterval = 5 * time.Millisecond
 
 	mock.ExpectExec("UPDATE nodes").
@@ -233,7 +233,7 @@ func TestNodeManager_RequestDrain(t *testing.T) {
 		WithArgs("node-1", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	err = nm.RequestDrain(context.Background(), time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC))
 	require.NoError(t, err, "RequestDrain should not return an error")
 	require.True(t, nm.IsDraining(), "RequestDrain should flip the local draining flag")
@@ -251,7 +251,7 @@ func TestNodeManager_RequestDrain_ReturnsDatabaseErrors(t *testing.T) {
 		WithArgs("node-1", pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(fmt.Errorf("write failed"))
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	err = nm.RequestDrain(context.Background(), time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC))
 	require.Error(t, err, "RequestDrain should return database errors")
 	require.True(t, nm.IsDraining(), "RequestDrain should leave the local drain bit set even when the write fails")
@@ -270,7 +270,7 @@ func TestNodeManager_MarkStaleNodesDead(t *testing.T) {
 		WithArgs(staleBefore).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	updated, err := nm.MarkStaleNodesDead(context.Background(), staleBefore)
 	require.NoError(t, err, "MarkStaleNodesDead should not return an error")
 	require.Equal(t, int64(2), updated, "MarkStaleNodesDead should return the number of stale nodes marked dead")
@@ -289,7 +289,7 @@ func TestNodeManager_MarkStaleNodesDead_ReturnsWrappedErrors(t *testing.T) {
 		WithArgs(staleBefore).
 		WillReturnError(fmt.Errorf("update failed"))
 
-	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(mock, zerolog.Nop(), "node-1", "worker", "stable")
 	updated, err := nm.MarkStaleNodesDead(context.Background(), staleBefore)
 	require.Error(t, err, "MarkStaleNodesDead should return wrapped update errors")
 	require.Equal(t, int64(0), updated, "MarkStaleNodesDead should return zero when the update fails")
@@ -299,7 +299,7 @@ func TestNodeManager_MarkStaleNodesDead_ReturnsWrappedErrors(t *testing.T) {
 func TestNodeManager_BuildMetadata_MergesExtraAndProvider(t *testing.T) {
 	t.Parallel()
 
-	nm := NewNodeManager(nil, zerolog.Nop(), "node-1", "worker")
+	nm := NewNodeManager(nil, zerolog.Nop(), "node-1", "worker", "stable")
 	nm.SetMetadataProvider(func() map[string]any {
 		return map[string]any{"build_sha": "abc123", "active_job_count": 1}
 	})

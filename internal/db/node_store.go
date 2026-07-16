@@ -86,7 +86,7 @@ func NewNodeStore(db DBTX) *NodeStore {
 	return &NodeStore{db: db}
 }
 
-const nodeColumns = `id, mode, host, status, drain_intent, metadata, started_at, last_heartbeat_at,
+const nodeColumns = `id, mode, channel, host, status, drain_intent, metadata, started_at, last_heartbeat_at,
 	drain_requested_at, drain_budget_expires_at, drain_requested_by, drain_reason`
 
 // GetByID returns a node by ID.

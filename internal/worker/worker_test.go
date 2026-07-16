@@ -23,7 +23,7 @@ type wakeTestStore struct {
 	claims atomic.Int32
 }
 
-func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, uuid.UUID, time.Duration) (*models.Job, error) {
+func (s *wakeTestStore) ClaimNextRunnable(context.Context, string, string, models.ReleaseChannel, uuid.UUID, time.Duration) (*models.Job, error) {
 	s.claims.Add(1)
 	return nil, nil
 }
@@ -58,7 +58,7 @@ func newTestWorker(t *testing.T) (*Worker, pgxmock.PgxPoolIface) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create pgxmock pool")
 
-	w := New(mock, zerolog.Nop(), "test-node")
+	w := New(mock, zerolog.Nop(), "test-node", models.ReleaseChannelStable)
 	w.renewInterval = time.Hour
 	return w, mock
 }
@@ -102,7 +102,7 @@ func TestWorker_Poll(t *testing.T) {
 			setupMock: func(t *testing.T, w *Worker, mock pgxmock.PgxPoolIface) {
 				t.Helper()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node", "stable", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnError(pgx.ErrNoRows)
 			},
 		},
@@ -407,15 +407,15 @@ func TestWorker_Poll(t *testing.T) {
 				orgID := uuid.New()
 				now := time.Now()
 				mock.ExpectQuery("WITH unavailable_target_nodes AS").
-					WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+					WithArgs(pgxmock.AnyArg(), "test-node", "stable", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 					WillReturnRows(pgxmock.NewRows([]string{
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at", "channel",
 					}).AddRow(
 						jobID, orgID, "default", "missing_token", json.RawMessage(`{}`), 5, "running",
-						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, now, now, nil,
+						1, 3, now, "test-node", now, now.Add(defaultLeaseDuration), nil, "test-node", string(models.JobOwnerKindWorker), nil, nil, nil, now, now, nil, "stable",
 					))
 			},
 		},
@@ -681,7 +681,7 @@ type renewLeaseStoreStub struct {
 	renewLeaseFn func(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
 }
 
-func (s *renewLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+func (s *renewLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, channel models.ReleaseChannel, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	return nil, nil
 }
 
@@ -767,7 +767,7 @@ func TestWorker_Start_StopsOnContextCancel(t *testing.T) {
 	mock.MatchExpectationsInOrder(false)
 	for range 5 {
 		mock.ExpectQuery("WITH unavailable_target_nodes AS").
-			WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+			WithArgs(pgxmock.AnyArg(), "test-node", "stable", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 			WillReturnError(pgx.ErrNoRows)
 	}
 
@@ -796,7 +796,7 @@ type terminalLeaseStoreStub struct {
 	deadLetterFn     func(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string) (bool, error)
 }
 
-func (s *terminalLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
+func (s *terminalLeaseStoreStub) ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, channel models.ReleaseChannel, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error) {
 	return nil, nil
 }
 
@@ -957,15 +957,15 @@ func expectClaimWithAttemptsAndTarget(mock pgxmock.PgxPoolIface, jobID, orgID uu
 		target = *targetNodeID
 	}
 	mock.ExpectQuery("WITH unavailable_target_nodes AS").
-		WithArgs(pgxmock.AnyArg(), "test-node", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
+		WithArgs(pgxmock.AnyArg(), "test-node", "stable", "test-node", pgxmock.AnyArg(), int(defaultLeaseDuration.Seconds())).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 			"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 			"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+			"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at", "channel",
 		}).AddRow(
 			jobID, orgID, "default", jobType, payload, 5, "running",
 			attempts, maxAttempts, createdAt, "test-node", createdAt, createdAt.Add(defaultLeaseDuration),
-			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, createdAt, createdAt, nil,
+			lockToken.String(), "test-node", string(models.JobOwnerKindWorker), nil, nil, target, createdAt, createdAt, nil, "stable",
 		))
 }
