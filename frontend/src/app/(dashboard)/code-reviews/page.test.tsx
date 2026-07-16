@@ -351,6 +351,33 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
   });
 
+  it("uses the standard error notice and retries evidence loading", async () => {
+    const user = userEvent.setup();
+    let evidenceRequests = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-1/evidence", () => {
+        evidenceRequests += 1;
+        if (evidenceRequests === 1) {
+          return HttpResponse.json({ error: { code: "unavailable", message: "temporarily unavailable" } }, { status: 503 });
+        }
+        return HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByRole("alert")).toHaveTextContent("Evidence could not be loaded");
+
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Retry" }));
+
+    expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
+    expect(evidenceRequests).toBe(2);
+  });
+
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();
     const requestedOutcomes: string[] = [];

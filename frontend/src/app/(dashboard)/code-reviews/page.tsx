@@ -26,6 +26,7 @@ import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -753,6 +754,7 @@ export default function CodeReviewsPage() {
                 evidence={evidenceQuery.data?.data}
                 isLoading={evidenceQuery.isLoading}
                 error={evidenceQuery.error}
+                onRetry={() => void evidenceQuery.refetch()}
                 open={Boolean(selectedEvidenceReview)}
                 onOpenChange={(open) => {
                   if (!open) setSelectedEvidenceSessionId(null);
@@ -2242,6 +2244,7 @@ function CodeReviewEvidenceSheet({
   evidence,
   isLoading,
   error,
+  onRetry,
   open,
   onOpenChange,
 }: {
@@ -2249,6 +2252,7 @@ function CodeReviewEvidenceSheet({
   evidence?: CodeReviewEvidence;
   isLoading: boolean;
   error: Error | null;
+  onRetry: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -2271,7 +2275,13 @@ function CodeReviewEvidenceSheet({
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
           {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
-          {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
+          {error ? (
+            <ErrorNotice
+              title="Evidence could not be loaded"
+              description="Retry the request to view this review's evidence."
+              action={{ label: "Retry", onClick: onRetry }}
+            />
+          ) : null}
           {!isLoading && !error && !evidence ? (
             <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
           ) : null}
