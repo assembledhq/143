@@ -799,7 +799,7 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 				stringPtr("internal/worker/code_review_handler.go"), intPtr(42), intPtr(42), "Missing regression coverage",
 				"The parser behavior changed without a direct regression test.", false, nil, now))
 	mock.ExpectQuery("UPDATE code_review_agent_results").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(models.CodeReviewAgentResultStatusCompleted, &rawReview, validatedOrchestratorResultArg{}, orgID, resultID).
 		WillReturnRows(newCodeReviewAgentResultRows().
 			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusCompleted, &rawReview, state, now))
 
@@ -816,6 +816,84 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 
 	require.NoError(t, err, "orchestrator harvest should persist directive-backed findings")
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should parse findings and mark the result completed")
+}
+
+type validatedOrchestratorResultArg struct{}
+
+func (validatedOrchestratorResultArg) Match(value any) bool {
+	var raw json.RawMessage
+	switch typed := value.(type) {
+	case json.RawMessage:
+		raw = typed
+	case []byte:
+		raw = typed
+	case string:
+		raw = json.RawMessage(typed)
+	default:
+		return false
+	}
+	state, ok := parseCodeReviewOrchestratorStructuredResult(raw)
+	return ok && state.SynthesisValidated && codeReviewOrchestratorSynthesisUsable(state.Synthesis)
+}
+
+func TestParseCodeReviewOrchestratorSynthesis(t *testing.T) {
+	t.Parallel()
+
+	valid := codeReviewOrchestratorSynthesis{
+		Summary:                 "The change is safe to approve.",
+		ReviewSummary:           "The change is focused, and the review evidence supports approval.",
+		RiskNotes:               []string{},
+		ScopeMismatch:           false,
+		UnresolvedUncertainty:   false,
+		ReviewerDisagreement:    false,
+		PromptInjectionDetected: false,
+	}
+	tests := []struct {
+		name      string
+		raw       string
+		expected  codeReviewOrchestratorSynthesis
+		expectErr bool
+	}{
+		{
+			name:     "accepts complete fenced synthesis",
+			raw:      "Review complete.\n```json\n{\"scope_mismatch\":false,\"unresolved_uncertainty\":false,\"reviewer_disagreement\":false,\"prompt_injection_detected\":false,\"summary\":\"The change is safe to approve.\",\"review_summary\":\"The change is focused, and the review evidence supports approval.\",\"risk_notes\":[]}\n```",
+			expected: valid,
+		},
+		{
+			name:      "rejects prose without JSON",
+			raw:       "I reviewed the code and found no issues.",
+			expectErr: true,
+		},
+		{
+			name:      "rejects missing required fields",
+			raw:       `{"summary":"The change is safe to approve."}`,
+			expectErr: true,
+		},
+		{
+			name:      "rejects empty summary",
+			raw:       `{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":" ","review_summary":"The review evidence is otherwise complete.","risk_notes":[]}`,
+			expectErr: true,
+		},
+		{
+			name:      "rejects missing reviewer-facing summary",
+			raw:       `{"scope_mismatch":false,"unresolved_uncertainty":false,"reviewer_disagreement":false,"prompt_injection_detected":false,"summary":"The change is safe to approve.","risk_notes":[]}`,
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := parseCodeReviewOrchestratorSynthesis(tt.raw)
+			if tt.expectErr {
+				require.Error(t, err, "malformed orchestrator synthesis should be rejected")
+				return
+			}
+			require.NoError(t, err, "complete orchestrator synthesis should parse")
+			require.Equal(t, tt.expected, actual, "parser should preserve every synthesis field")
+		})
+	}
 }
 
 func TestCodeReviewOrchestratorReviewSummary(t *testing.T) {
@@ -844,10 +922,63 @@ func TestCodeReviewOrchestratorReviewSummary(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-
 			require.Equal(t, tt.expected, codeReviewOrchestratorReviewSummary(tt.synthesis), "final review should use the best available LLM-generated summary")
 		})
 	}
+}
+
+func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	rawReview := "I reviewed the code and found no issues."
+	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+		ThreadID: threadID.String(),
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusCompleted,
+				nil, 1, &now, nil, nil, nil, nil,
+				&now, &now, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
+		WillReturnRows(newSessionMessageRows().
+			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, rawReview, nil, nil, nil, nil, "", now))
+	mock.ExpectQuery("UPDATE code_review_agent_results").
+		WithArgs(models.CodeReviewAgentResultStatusFailed, &rawReview, pgxmock.AnyArg(), orgID, resultID).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusFailed, &rawReview, state, now))
+
+	policy := codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig())
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}})
+
+	require.NoError(t, err, "orchestrator harvest should record malformed synthesis as an agent failure")
+	require.NoError(t, mock.ExpectationsWereMet(), "malformed synthesis should be retained as raw output and never marked completed")
 }
 
 type codeReviewDescriptionLLMStub struct {
@@ -1198,6 +1329,18 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 	policy := models.DefaultCodeReviewPolicyConfig()
 	policy.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
 	prBody := "Fixes invoice rounding.\n\nTesting: go test ./..."
+	validOrchestratorResult := models.CodeReviewAgentResult{
+		Role:   models.CodeReviewAgentRoleOrchestrator,
+		Status: models.CodeReviewAgentResultStatusCompleted,
+		StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+			SynthesisValidated: true,
+			Synthesis: codeReviewOrchestratorSynthesis{
+				Summary:       "The reviewed change is safe to approve.",
+				ReviewSummary: "The router update is focused, and both review agents found no blocking issues.",
+				RiskNotes:     []string{},
+			},
+		}),
+	}
 
 	tests := []struct {
 		name         string
@@ -1231,7 +1374,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				AgentResults: []models.CodeReviewAgentResult{
 					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
 					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
-					{Role: models.CodeReviewAgentRoleOrchestrator, Status: models.CodeReviewAgentResultStatusCompleted},
+					validOrchestratorResult,
 				},
 				ChangedFiles: []codereview.PullRequestFile{
 					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
@@ -1243,6 +1386,46 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionApproved,
 			bodyContains: "Why: The router update is focused, and both review agents found no blocking issues.",
+		},
+		{
+			name: "withholds approval when orchestrator synthesis is malformed",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "tests", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{Role: models.CodeReviewAgentRoleReviewer, Status: models.CodeReviewAgentResultStatusCompleted},
+					{
+						Role:   models.CodeReviewAgentRoleOrchestrator,
+						Status: models.CodeReviewAgentResultStatusCompleted,
+						StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+							Synthesis: codeReviewOrchestratorSynthesis{Summary: "This summary was never strictly validated."},
+						}),
+					},
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+			},
+			expected: models.CodeReviewDecisionNeedsHumanReview,
+			reason:   "orchestrator did not produce a valid structured synthesis",
 		},
 		{
 			name: "uses queued GitHub author login for eligible author policy",

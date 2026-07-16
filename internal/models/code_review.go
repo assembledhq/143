@@ -989,29 +989,30 @@ type CodeReviewRiskInput struct {
 type CodeReviewRiskReasonCode string
 
 const (
-	CodeReviewRiskReasonReviewerDisabled      CodeReviewRiskReasonCode = "reviewer_disabled"
-	CodeReviewRiskReasonContextUnavailable    CodeReviewRiskReasonCode = "context_unavailable"
-	CodeReviewRiskReasonHeadChanged           CodeReviewRiskReasonCode = "head_changed"
-	CodeReviewRiskReasonFilesLimitExceeded    CodeReviewRiskReasonCode = "files_limit_exceeded"
-	CodeReviewRiskReasonLinesLimitExceeded    CodeReviewRiskReasonCode = "lines_limit_exceeded"
-	CodeReviewRiskReasonChecksFailing         CodeReviewRiskReasonCode = "checks_failing"
-	CodeReviewRiskReasonRequiredCheckFailing  CodeReviewRiskReasonCode = "required_check_failing"
-	CodeReviewRiskReasonDescriptionFailed     CodeReviewRiskReasonCode = "description_failed"
-	CodeReviewRiskReasonBranchOutOfDate       CodeReviewRiskReasonCode = "branch_out_of_date"
-	CodeReviewRiskReasonForkIneligible        CodeReviewRiskReasonCode = "fork_ineligible"
-	CodeReviewRiskReasonAuthorIneligible      CodeReviewRiskReasonCode = "author_ineligible"
-	CodeReviewRiskReasonUnresolvedHumanReview CodeReviewRiskReasonCode = "unresolved_human_review"
-	CodeReviewRiskReasonBlockingFindings      CodeReviewRiskReasonCode = "blocking_findings"
-	CodeReviewRiskReasonReviewerDisagreement  CodeReviewRiskReasonCode = "reviewer_disagreement"
-	CodeReviewRiskReasonScopeMismatch         CodeReviewRiskReasonCode = "scope_mismatch"
-	CodeReviewRiskReasonUnresolvedUncertainty CodeReviewRiskReasonCode = "unresolved_uncertainty"
-	CodeReviewRiskReasonPromptInjection       CodeReviewRiskReasonCode = "prompt_injection"
-	CodeReviewRiskReasonSensitivePath         CodeReviewRiskReasonCode = "sensitive_path"
-	CodeReviewRiskReasonPathOutsideScope      CodeReviewRiskReasonCode = "path_outside_scope"
-	CodeReviewRiskReasonBlockedPath           CodeReviewRiskReasonCode = "blocked_path"
-	CodeReviewRiskReasonPolicyPathChanged     CodeReviewRiskReasonCode = "policy_path_changed"
-	CodeReviewRiskReasonExcludedCategory      CodeReviewRiskReasonCode = "excluded_category"
-	CodeReviewRiskReasonReviewerQuorum        CodeReviewRiskReasonCode = "reviewer_quorum"
+	CodeReviewRiskReasonReviewerDisabled             CodeReviewRiskReasonCode = "reviewer_disabled"
+	CodeReviewRiskReasonContextUnavailable           CodeReviewRiskReasonCode = "context_unavailable"
+	CodeReviewRiskReasonHeadChanged                  CodeReviewRiskReasonCode = "head_changed"
+	CodeReviewRiskReasonFilesLimitExceeded           CodeReviewRiskReasonCode = "files_limit_exceeded"
+	CodeReviewRiskReasonLinesLimitExceeded           CodeReviewRiskReasonCode = "lines_limit_exceeded"
+	CodeReviewRiskReasonChecksFailing                CodeReviewRiskReasonCode = "checks_failing"
+	CodeReviewRiskReasonRequiredCheckFailing         CodeReviewRiskReasonCode = "required_check_failing"
+	CodeReviewRiskReasonDescriptionFailed            CodeReviewRiskReasonCode = "description_failed"
+	CodeReviewRiskReasonBranchOutOfDate              CodeReviewRiskReasonCode = "branch_out_of_date"
+	CodeReviewRiskReasonForkIneligible               CodeReviewRiskReasonCode = "fork_ineligible"
+	CodeReviewRiskReasonAuthorIneligible             CodeReviewRiskReasonCode = "author_ineligible"
+	CodeReviewRiskReasonUnresolvedHumanReview        CodeReviewRiskReasonCode = "unresolved_human_review"
+	CodeReviewRiskReasonBlockingFindings             CodeReviewRiskReasonCode = "blocking_findings"
+	CodeReviewRiskReasonReviewerDisagreement         CodeReviewRiskReasonCode = "reviewer_disagreement"
+	CodeReviewRiskReasonScopeMismatch                CodeReviewRiskReasonCode = "scope_mismatch"
+	CodeReviewRiskReasonUnresolvedUncertainty        CodeReviewRiskReasonCode = "unresolved_uncertainty"
+	CodeReviewRiskReasonPromptInjection              CodeReviewRiskReasonCode = "prompt_injection"
+	CodeReviewRiskReasonSensitivePath                CodeReviewRiskReasonCode = "sensitive_path"
+	CodeReviewRiskReasonPathOutsideScope             CodeReviewRiskReasonCode = "path_outside_scope"
+	CodeReviewRiskReasonBlockedPath                  CodeReviewRiskReasonCode = "blocked_path"
+	CodeReviewRiskReasonPolicyPathChanged            CodeReviewRiskReasonCode = "policy_path_changed"
+	CodeReviewRiskReasonExcludedCategory             CodeReviewRiskReasonCode = "excluded_category"
+	CodeReviewRiskReasonReviewerQuorum               CodeReviewRiskReasonCode = "reviewer_quorum"
+	CodeReviewRiskReasonOrchestratorSynthesisInvalid CodeReviewRiskReasonCode = "orchestrator_synthesis_invalid"
 )
 
 func (c CodeReviewRiskReasonCode) Validate() error {
@@ -1038,7 +1039,8 @@ func (c CodeReviewRiskReasonCode) Validate() error {
 		CodeReviewRiskReasonBlockedPath,
 		CodeReviewRiskReasonPolicyPathChanged,
 		CodeReviewRiskReasonExcludedCategory,
-		CodeReviewRiskReasonReviewerQuorum:
+		CodeReviewRiskReasonReviewerQuorum,
+		CodeReviewRiskReasonOrchestratorSynthesisInvalid:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewRiskReasonCode: %q", c)
@@ -1100,6 +1102,8 @@ func (r CodeReviewRiskReason) Message() string {
 		return "excluded risk category changed: " + r.Subject
 	case CodeReviewRiskReasonReviewerQuorum:
 		return fmt.Sprintf("reviewer quorum %d is below policy requirement %d", r.Actual, r.Limit)
+	case CodeReviewRiskReasonOrchestratorSynthesisInvalid:
+		return "orchestrator did not produce a valid structured synthesis"
 	default:
 		return string(r.Code)
 	}

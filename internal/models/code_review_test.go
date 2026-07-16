@@ -417,6 +417,7 @@ func TestCodeReviewRiskReasonCodeValidate(t *testing.T) {
 		CodeReviewRiskReasonPolicyPathChanged,
 		CodeReviewRiskReasonExcludedCategory,
 		CodeReviewRiskReasonReviewerQuorum,
+		CodeReviewRiskReasonOrchestratorSynthesisInvalid,
 	}
 	tests := make([]struct {
 		name      string
@@ -481,6 +482,7 @@ func TestCodeReviewRiskReasonMessage(t *testing.T) {
 		{name: "policy path", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonPolicyPathChanged, Subject: "internal/models/code_review.go"}, expected: "code review policy/config path changed: internal/models/code_review.go"},
 		{name: "category", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"}, expected: "excluded risk category changed: auth"},
 		{name: "quorum", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerQuorum, Actual: 1, Limit: 2}, expected: "reviewer quorum 1 is below policy requirement 2"},
+		{name: "invalid orchestrator synthesis", reason: CodeReviewRiskReason{Code: CodeReviewRiskReasonOrchestratorSynthesisInvalid}, expected: "orchestrator did not produce a valid structured synthesis"},
 	}
 
 	for _, tt := range tests {

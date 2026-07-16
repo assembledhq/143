@@ -235,6 +235,8 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 		return fmt.Sprintf("The change falls into the `%s` risk category, which requires human review.", reason.Subject)
 	case CodeReviewRiskReasonReviewerQuorum:
 		return fmt.Sprintf("Only %d of %d required review agents completed a usable review.", reason.Actual, reason.Limit)
+	case CodeReviewRiskReasonOrchestratorSynthesisInvalid:
+		return "The orchestrator did not produce a valid structured synthesis."
 	}
 
 	return codeReviewSentence(reason.Message())

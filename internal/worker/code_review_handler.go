@@ -420,17 +420,18 @@ type codeReviewReviewerStructuredResult struct {
 }
 
 type codeReviewOrchestratorStructuredResult struct {
-	ThreadID          string                          `json:"thread_id,omitempty"`
-	PromptArtifactKey string                          `json:"prompt_artifact_key,omitempty"`
-	FindingCount      int                             `json:"finding_count,omitempty"`
-	CostCents         float64                         `json:"cost_cents,omitempty"`
-	RawArtifactKey    string                          `json:"raw_artifact_key,omitempty"`
-	Synthesis         codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
-	ReadOnly          bool                            `json:"read_only,omitempty"`
-	ReadOnlyViolation bool                            `json:"read_only_violation,omitempty"`
-	Reverted          bool                            `json:"reverted,omitempty"`
-	Error             string                          `json:"error,omitempty"`
-	CompletedAt       string                          `json:"completed_at,omitempty"`
+	ThreadID           string                          `json:"thread_id,omitempty"`
+	PromptArtifactKey  string                          `json:"prompt_artifact_key,omitempty"`
+	FindingCount       int                             `json:"finding_count,omitempty"`
+	CostCents          float64                         `json:"cost_cents,omitempty"`
+	RawArtifactKey     string                          `json:"raw_artifact_key,omitempty"`
+	Synthesis          codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
+	SynthesisValidated bool                            `json:"synthesis_validated,omitempty"`
+	ReadOnly           bool                            `json:"read_only,omitempty"`
+	ReadOnlyViolation  bool                            `json:"read_only_violation,omitempty"`
+	Reverted           bool                            `json:"reverted,omitempty"`
+	Error              string                          `json:"error,omitempty"`
+	CompletedAt        string                          `json:"completed_at,omitempty"`
 }
 
 func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -1416,26 +1417,72 @@ func parseCodeReviewOrchestratorStructuredResult(raw json.RawMessage) (codeRevie
 	return state, true
 }
 
-func parseCodeReviewOrchestratorSynthesis(raw string) codeReviewOrchestratorSynthesis {
-	var parsed codeReviewOrchestratorSynthesis
-	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &parsed); err != nil {
-		return codeReviewOrchestratorSynthesis{}
+func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSynthesis, error) {
+	var payload struct {
+		Summary                 *string   `json:"summary"`
+		ReviewSummary           *string   `json:"review_summary"`
+		RiskNotes               *[]string `json:"risk_notes"`
+		ScopeMismatch           *bool     `json:"scope_mismatch"`
+		UnresolvedUncertainty   *bool     `json:"unresolved_uncertainty"`
+		ReviewerDisagreement    *bool     `json:"reviewer_disagreement"`
+		PromptInjectionDetected *bool     `json:"prompt_injection_detected"`
 	}
-	return parsed
+	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &payload); err != nil {
+		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("parse orchestrator synthesis: %w", err)
+	}
+	if payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
+		payload.ReviewSummary == nil || strings.TrimSpace(*payload.ReviewSummary) == "" ||
+		payload.RiskNotes == nil ||
+		payload.ScopeMismatch == nil ||
+		payload.UnresolvedUncertainty == nil ||
+		payload.ReviewerDisagreement == nil ||
+		payload.PromptInjectionDetected == nil {
+		return codeReviewOrchestratorSynthesis{}, errors.New("orchestrator synthesis is missing required fields")
+	}
+	return codeReviewOrchestratorSynthesis{
+		Summary:                 *payload.Summary,
+		ReviewSummary:           *payload.ReviewSummary,
+		RiskNotes:               *payload.RiskNotes,
+		ScopeMismatch:           *payload.ScopeMismatch,
+		UnresolvedUncertainty:   *payload.UnresolvedUncertainty,
+		ReviewerDisagreement:    *payload.ReviewerDisagreement,
+		PromptInjectionDetected: *payload.PromptInjectionDetected,
+	}, nil
+}
+
+func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynthesis) bool {
+	return strings.TrimSpace(synthesis.Summary) != "" && strings.TrimSpace(synthesis.ReviewSummary) != ""
 }
 
 func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgentResult) codeReviewOrchestratorSynthesis {
 	for _, result := range results {
-		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator || result.Status != models.CodeReviewAgentResultStatusCompleted {
 			continue
 		}
 		state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
-		if !ok {
+		if !ok || !state.SynthesisValidated || !codeReviewOrchestratorSynthesisUsable(state.Synthesis) {
 			continue
 		}
 		return state.Synthesis
 	}
 	return codeReviewOrchestratorSynthesis{}
+}
+
+func codeReviewOrchestratorEvidence(results []models.CodeReviewAgentResult) (present, usable bool) {
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		present = true
+		if result.Status != models.CodeReviewAgentResultStatusCompleted {
+			continue
+		}
+		state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+		if ok && state.SynthesisValidated && codeReviewOrchestratorSynthesisUsable(state.Synthesis) {
+			usable = true
+		}
+	}
+	return present, usable
 }
 
 func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthesis) string {
@@ -1828,7 +1875,22 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		synthesis := parseCodeReviewOrchestratorSynthesis(raw)
+		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
+		if synthesisErr != nil {
+			state.Synthesis = codeReviewOrchestratorSynthesis{}
+			state.SynthesisValidated = false
+			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			if err != nil {
+				return err
+			}
+			state.RawArtifactKey = rawArtifactKey
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+				return fmt.Errorf("mark malformed orchestrator synthesis failed: %w", err)
+			}
+			continue
+		}
 		findings := parseCodeReviewFindings(raw, changedPaths)
 		for i := range findings {
 			findings[i].OrgID = job.OrgID
@@ -1839,6 +1901,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 		}
 		state.Synthesis = synthesis
+		state.SynthesisValidated = true
 		state.FindingCount = len(findings)
 		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
@@ -1937,6 +2000,9 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	})
 	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !reviewerQuorumWaived {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: policy.AgentRoster.RequireReviewerQuorum})
+	}
+	if orchestratorPresent, orchestratorUsable := codeReviewOrchestratorEvidence(input.AgentResults); orchestratorPresent && !orchestratorUsable {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{

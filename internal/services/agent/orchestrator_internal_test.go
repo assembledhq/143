@@ -24,6 +24,14 @@ import (
 	"github.com/assembledhq/143/internal/services/workspace"
 )
 
+func TestSessionPromptStyleCodeReviewUsesRawTask(t *testing.T) {
+	t.Parallel()
+
+	session := &models.Session{Origin: models.SessionOriginCodeReview}
+
+	require.Equal(t, PromptStyleRawTask, sessionPromptStyle(session), "code review sessions should pass the stored synthesis task through verbatim")
+}
+
 func TestRecordedRunFailureErrorSurvivesWrapping(t *testing.T) {
 	t.Parallel()
 

@@ -2345,7 +2345,7 @@ func sessionPromptStyle(session *models.Session) PromptStyle {
 	if session == nil {
 		return PromptStyleIssueContext
 	}
-	if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+	if session.Origin == models.SessionOriginManual || session.Origin == models.SessionOriginCodeReview || session.AutomationRunID != nil {
 		return PromptStyleRawTask
 	}
 	if session.Origin == models.SessionOriginSlack {
