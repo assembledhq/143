@@ -241,6 +241,27 @@ function ReviewOutcome({
   );
 }
 
+function ReviewRisk({ review }: { review: CodeReviewListItem }) {
+  return (
+    <StatusLabel
+      label={review.acceptable ? "Acceptable" : "Needs review"}
+      tone={review.acceptable ? "success" : "warning"}
+    />
+  );
+}
+
+function ReviewRunStatus({ review }: { review: CodeReviewListItem }) {
+  const effectiveStatus = review.stale ? "stale" : review.status;
+
+  return (
+    <StatusLabel
+      label={reviewStatusLabel(review)}
+      tone={reviewStatusTone(effectiveStatus)}
+      active={!review.stale && (review.status === "running" || review.status === "queued")}
+    />
+  );
+}
+
 function ReviewActions({ review }: { review: CodeReviewListItem }) {
   return (
     <TooltipProvider>
@@ -694,7 +715,7 @@ export default function CodeReviewsPage() {
                             </div>
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
-                          <TableCell>{review.acceptable ? "Acceptable" : "Needs review"}</TableCell>
+                          <TableCell><ReviewRisk review={review} /></TableCell>
                           <TableCell>
                             <ReviewOutcome
                               review={review}
@@ -706,7 +727,7 @@ export default function CodeReviewsPage() {
                               }
                             />
                           </TableCell>
-                          <TableCell>{reviewStatusLabel(review)}</TableCell>
+                          <TableCell><ReviewRunStatus review={review} /></TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
                             <ReviewActions review={review} />
@@ -731,13 +752,11 @@ export default function CodeReviewsPage() {
                         {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                       </span>
                     )}
-                    status={(
-                      <span className="text-foreground">{reviewStatusLabel(review)}</span>
-                    )}
+                    status={<ReviewRunStatus review={review} />}
                     detail={(
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
-                          <span>{review.acceptable ? "Acceptable" : "Needs review"}</span>
+                          <ReviewRisk review={review} />
                           <span>Completed {formatDate(review.completed_at)}</span>
                         </div>
                         <ReviewOutcome
