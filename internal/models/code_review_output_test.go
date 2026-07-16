@@ -10,37 +10,136 @@ import (
 func TestBuildCodeReviewFinalReviewBody(t *testing.T) {
 	t.Parallel()
 
-	descriptionPassed := false
+	descriptionFailed := false
+	descriptionPassed := true
 	path := "src/auth/session.go"
 	line := 88
-	body := BuildCodeReviewFinalReviewBody(CodeReviewFinalReviewInput{
-		Decision:          CodeReviewDecisionCommentOnly,
-		Acceptable:        false,
-		RiskReasons:       []string{"required GitHub checks are not passing", "review agents unavailable"},
-		SessionURL:        "https://143.dev/sessions/sess_123",
-		PolicyVersion:     3,
-		HeadSHA:           "abc123",
-		Summary:           "Review completed without automated approval.",
-		DescriptionPassed: &descriptionPassed,
-		AgentSummaries:    []string{"Codex clean", "Claude Code reported 1 finding(s)"},
-		Findings: []CodeReviewFinding{{
-			Severity:  CodeReviewFindingSeverityHigh,
-			Path:      &path,
-			StartLine: &line,
-			Summary:   "Authorization edge case",
-		}},
-		RecommendedHumanReviewers: []string{"security/platform"},
-	})
+	tests := []struct {
+		name     string
+		input    CodeReviewFinalReviewInput
+		expected string
+	}{
+		{
+			name: "uses generated narrative with typed policy blockers",
+			input: CodeReviewFinalReviewInput{
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				RiskReasons: []CodeReviewRiskReason{
+					{Code: CodeReviewRiskReasonDescriptionFailed},
+					{Code: CodeReviewRiskReasonReviewerQuorum, Actual: 1, Limit: 2},
+				},
+				GeneratedSummary:  "The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.",
+				SessionURL:        "https://143.dev/sessions/sess_123",
+				DescriptionPassed: &descriptionFailed,
+				DescriptionIssues: []string{
+					"Testing evidence (say how the change was tested)",
+					"Screenshots or preview link (add a before/after screenshot)",
+				},
+				AgentSummaries: []string{"Codex found no blocking issues", "Claude Code timed out"},
+			},
+			expected: `143 Code Reviewer did not approve this PR
 
-	require.Contains(t, body, "143 Code Reviewer did not approve this PR", "non-approval body should be explicit")
-	require.Contains(t, body, "Risk: needs human review", "non-approval body should include risk classification")
-	require.Contains(t, body, "Description: failed", "body should include description policy result")
-	require.Contains(t, body, "Review agents: Codex clean, Claude Code reported 1 finding(s)", "body should summarize reviewer evidence")
-	require.Contains(t, body, "Policy version: 3", "body should include policy version")
-	require.Contains(t, body, "Review session: https://143.dev/sessions/sess_123", "body should include review session link")
-	require.Contains(t, body, "- required GitHub checks are not passing", "body should include withholding reasons")
-	require.Contains(t, body, "high: src/auth/session.go:88 - Authorization edge case", "body should include grouped findings")
-	require.Contains(t, body, "Recommended human reviewers: security/platform", "body should include recommended reviewers")
+Why: The change is focused, but the description does not explain the testing evidence and only one review agent returned usable output. Add that context and rerun the missing review before asking for approval.
+
+Policy blockers:
+- The PR description did not meet the configured requirements: Testing evidence (say how the change was tested); Screenshots or preview link (add a before/after screenshot).
+- Only 1 of 2 required review agents completed a usable review.
+
+Reviewer evidence: Codex found no blocking issues; Claude Code timed out.
+
+[View the full review](https://143.dev/sessions/sess_123)`,
+		},
+		{
+			name: "uses generated approval narrative with compact review facts",
+			input: CodeReviewFinalReviewInput{
+				Decision:               CodeReviewDecisionApproved,
+				Acceptable:             true,
+				GeneratedSummary:       "The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.",
+				SessionURL:             "https://143.dev/sessions/sess_approved",
+				DescriptionPassed:      &descriptionPassed,
+				AgentSummaries:         []string{"Codex found no blocking issues", "Claude Code found no blocking issues"},
+				ChangeStatsAvailable:   true,
+				FilesChanged:           4,
+				LinesChanged:           180,
+				ChecksRequired:         true,
+				ReviewerQuorum:         2,
+				RequiredReviewerQuorum: 2,
+			},
+			expected: `143 Code Reviewer approved this PR
+
+Why: The settings update is narrowly scoped and both review agents found no blocking issues. The description and test evidence are sufficient for an engineer to verify the change quickly.
+
+Review facts: 180 changed lines across 4 files · required checks passed · reviewer quorum 2/2
+
+Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking issues.
+
+[View the full review](https://143.dev/sessions/sess_approved)`,
+		},
+		{
+			name: "explains acceptable comment-only review",
+			input: CodeReviewFinalReviewInput{
+				Decision:               CodeReviewDecisionCommentOnly,
+				Acceptable:             true,
+				DescriptionPassed:      &descriptionPassed,
+				ReviewerQuorum:         1,
+				RequiredReviewerQuorum: 1,
+			},
+			expected: `143 Code Reviewer completed its review without approving this PR
+
+Why: It met the configured policy: the PR description passed and 1 usable reviewer report met the required quorum of 1. Automated approval is disabled by repository policy.`,
+		},
+		{
+			name: "keeps actionable findings and reviewer recommendation",
+			input: CodeReviewFinalReviewInput{
+				Decision:    CodeReviewDecisionNeedsHumanReview,
+				Acceptable:  false,
+				RiskReasons: []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockingFindings}},
+				Findings: []CodeReviewFinding{{
+					Severity:  CodeReviewFindingSeverityHigh,
+					Path:      &path,
+					StartLine: &line,
+					Summary:   "Authorization edge case",
+				}},
+				RecommendedHumanReviewers: []string{"security/platform"},
+			},
+			expected: `143 Code Reviewer did not approve this PR
+
+Why: Review agents reported blocking findings.
+
+Review findings:
+- high: src/auth/session.go:88 - Authorization edge case
+
+Suggested human reviewers: security/platform
+
+Address the items above and request another review, or ask a human reviewer to decide.`,
+		},
+		{
+			name: "makes scope limits easy to compare",
+			input: CodeReviewFinalReviewInput{
+				Decision:   CodeReviewDecisionNeedsHumanReview,
+				Acceptable: false,
+				RiskReasons: []CodeReviewRiskReason{
+					{Code: CodeReviewRiskReasonLinesLimitExceeded, Actual: 1842, Limit: 1000},
+					{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 34, Limit: 20},
+				},
+			},
+			expected: `143 Code Reviewer did not approve this PR
+
+Why: This change has 1842 changed lines; the policy limit is 1000. This change touches 34 files; the policy limit is 20.
+
+Address the items above and request another review, or ask a human reviewer to decide.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := BuildCodeReviewFinalReviewBody(tt.input)
+
+			require.Equal(t, tt.expected, body, "final review body should be concise and explain the decision")
+		})
+	}
 }
 
 func TestSelectCodeReviewInlineFindings(t *testing.T) {

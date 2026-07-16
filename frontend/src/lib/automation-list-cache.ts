@@ -1,15 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
+import { isListResponse } from "./list-response";
 import { queryKeys } from "./query-keys";
 import type { Automation, ListResponse } from "./types";
-
-function isAutomationListResponse(value: unknown): value is ListResponse<Automation> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "data" in value &&
-    Array.isArray((value as { data?: unknown }).data)
-  );
-}
 
 export function upsertAutomationInListCaches(
   queryClient: QueryClient,
@@ -22,7 +14,7 @@ export function upsertAutomationInListCaches(
   });
 
   for (const [key, current] of cachedLists) {
-    if (!isAutomationListResponse(current)) {
+    if (!isListResponse<Automation>(current)) {
       continue;
     }
 
@@ -59,7 +51,7 @@ export function removeAutomationFromListCaches(
   });
 
   for (const [key, current] of cachedLists) {
-    if (!isAutomationListResponse(current)) {
+    if (!isListResponse<Automation>(current)) {
       continue;
     }
 

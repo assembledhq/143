@@ -17,7 +17,8 @@ var prColumns = []string{
 	"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 	"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 	"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-	"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+	"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch",
+	"merged_at", "created_at", "updated_at",
 }
 
 func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
@@ -26,6 +27,7 @@ func newPRRow(id, sessionID, orgID uuid.UUID, now time.Time) []any {
 		"Fix bug", (*string)(nil), "open", "pending", "app", "", (*string)(nil), (*string)(nil), (*string)(nil),
 		models.PullRequestMergeStateUnknown, false, 0, false, (*time.Time)(nil), int64(0),
 		models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil),
+		models.PRFeedbackMonitoringInherit, int64(0), 0,
 		(*time.Time)(nil), now, now,
 	}
 }
@@ -52,7 +54,7 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 		ReviewStatus:   "pending",
 	}
 
-	mock.ExpectQuery("INSERT INTO pull_requests").
+	mock.ExpectQuery(`(?s)INSERT INTO pull_requests .*changeset_id.*SELECT id FROM session_changesets`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -67,6 +69,91 @@ func TestPullRequestStore_Create_Success(t *testing.T) {
 	require.Equal(t, generatedID, pr.ID, "should set the generated ID on the pull request")
 	require.Equal(t, now, pr.CreatedAt, "should set the created_at timestamp on the pull request")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStoreCreateUsesExplicitChangeset(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	now := time.Now()
+	sessionID := uuid.New()
+	changesetID := uuid.New()
+	pr := &models.PullRequest{
+		SessionID: &sessionID, ChangesetID: &changesetID, OrgID: uuid.New(), GitHubPRNumber: 43,
+		GitHubPRURL: "https://github.com/org/repo/pull/43", GitHubRepo: "org/repo", Title: "Second PR",
+		Status: models.PullRequestStatusOpen, ReviewStatus: models.PullRequestReviewStatusPending,
+	}
+	mock.ExpectQuery(`INSERT INTO pull_requests .*changeset_id`).
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at", "updated_at"}).AddRow(uuid.New(), now, now))
+
+	err = NewPullRequestStore(mock).Create(context.Background(), pr)
+	require.NoError(t, err, "Create should persist an explicitly targeted changeset")
+	require.Equal(t, &changesetID, pr.ChangesetID, "Create should preserve explicit changeset identity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStoreGetByChangesetIDScopesByOrgAndSession(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	changesetID := uuid.New()
+	prID := uuid.New()
+	now := time.Now()
+	columns := append([]string{}, prColumns[:2]...)
+	columns = append(columns, "changeset_id")
+	columns = append(columns, prColumns[2:]...)
+	row := newPRRow(prID, sessionID, orgID, now)
+	row = append(row[:2], append([]any{&changesetID}, row[2:]...)...)
+
+	mock.ExpectQuery(`SELECT .+ FROM pull_requests WHERE org_id = .+ AND session_id = .+ AND changeset_id =`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow(row...))
+
+	pr, err := NewPullRequestStore(mock).GetByChangesetID(context.Background(), orgID, sessionID, changesetID)
+	require.NoError(t, err, "GetByChangesetID should return the tenant- and session-scoped PR")
+	require.Equal(t, prID, pr.ID, "GetByChangesetID should return the expected PR")
+	require.Equal(t, &changesetID, pr.ChangesetID, "GetByChangesetID should hydrate changeset identity")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStoreBatchListBySessionChangesetsPreservesEveryPR(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+	orgID, sessionOne, sessionTwo := uuid.New(), uuid.New(), uuid.New()
+	changesetOne, changesetTwo := uuid.New(), uuid.New()
+	now := time.Now()
+	columns := append([]string{}, prColumns[:2]...)
+	columns = append(columns, "changeset_id")
+	columns = append(columns, prColumns[2:]...)
+	row := func(prID, sessionID, changesetID uuid.UUID) []any {
+		values := newPRRow(prID, sessionID, orgID, now)
+		return append(values[:2], append([]any{&changesetID}, values[2:]...)...)
+	}
+	prOne, prTwo := uuid.New(), uuid.New()
+	mock.ExpectQuery(`(?s)SELECT DISTINCT ON \(changeset_id\).+FROM pull_requests.+session_id = ANY`).
+		WithArgs(orgID, []uuid.UUID{sessionOne, sessionTwo}).
+		WillReturnRows(pgxmock.NewRows(columns).
+			AddRow(row(prOne, sessionOne, changesetOne)...).
+			AddRow(row(prTwo, sessionTwo, changesetTwo)...))
+
+	actual, err := NewPullRequestStore(mock).BatchListBySessionChangesets(context.Background(), orgID, []uuid.UUID{sessionOne, sessionTwo})
+	require.NoError(t, err, "batch changeset hydration should succeed")
+	require.Equal(t, prOne, actual[sessionOne][changesetOne].ID, "first session should retain its changeset PR")
+	require.Equal(t, prTwo, actual[sessionTwo][changesetTwo].ID, "second session should retain its changeset PR")
+	require.NoError(t, mock.ExpectationsWereMet(), "batch lookup should use one tenant-scoped query")
 }
 
 func TestPullRequestStore_GetByID_Success(t *testing.T) {
@@ -131,7 +218,7 @@ func TestPullRequestStore_GetBySessionID_Success(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE session_id").
+	mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE session_id.+changeset_id IS NULL.+OR changeset_id =.+ORDER BY").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			pgxmock.NewRows(prColumns).
@@ -146,6 +233,24 @@ func TestPullRequestStore_GetBySessionID_Success(t *testing.T) {
 	require.Equal(t, 42, pr.GitHubPRNumber, "should return the correct GitHub PR number")
 	require.Equal(t, models.PullRequestStatusOpen, pr.Status, "should return the correct status")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestPullRequestStore_BatchGetPrimaryBySessionIDsAllowsRollingLegacyRows(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	defer mock.Close()
+
+	orgID, sessionID, prID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	mock.ExpectQuery("SELECT DISTINCT ON .+ FROM pull_requests.+changeset_id IS NULL.+OR changeset_id =.+ORDER BY session_id").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prColumns).AddRow(newPRRow(prID, sessionID, orgID, now)...))
+
+	prs, err := NewPullRequestStore(mock).BatchGetPrimaryBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionID})
+	require.NoError(t, err, "batch primary lookup should accept an unattached PR from a rolling legacy writer")
+	require.Equal(t, prID, prs[sessionID].ID, "batch primary lookup should retain one-PR compatibility during rollout")
+	require.NoError(t, mock.ExpectationsWereMet(), "query should exclude child changesets while retaining legacy candidates")
 }
 
 func TestPullRequestStore_UpdateStatus_Closed(t *testing.T) {

@@ -20,6 +20,7 @@ func automationAuditSnapshot(a *models.Automation) map[string]any {
 		"icon_type":      a.IconType.OrDefault(),
 		"icon_value":     a.IconValue,
 		"identity_scope": a.IdentityScope.OrDefault(),
+		"publish_policy": a.PublishPolicy.OrDefault(),
 		"schedule_type":  a.ScheduleType,
 	}
 	if len(a.GitHubEventTriggers) > 0 {
@@ -79,6 +80,7 @@ func automationAuditDiff(old, new_ *models.Automation) map[string]any {
 	track("max_concurrent", old.MaxConcurrent, new_.MaxConcurrent)
 	track("base_branch", old.BaseBranch, new_.BaseBranch)
 	track("identity_scope", old.IdentityScope.OrDefault(), new_.IdentityScope.OrDefault())
+	track("publish_policy", old.PublishPolicy.OrDefault(), new_.PublishPolicy.OrDefault())
 	track("schedule_type", old.ScheduleType, new_.ScheduleType)
 	track("interval_value", optInt(old.IntervalValue), optInt(new_.IntervalValue))
 	track("interval_unit", optScheduleUnit(old.IntervalUnit), optScheduleUnit(new_.IntervalUnit))

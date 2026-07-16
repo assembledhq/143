@@ -1145,11 +1145,102 @@ func TestSessionStore_UpdateTitle(t *testing.T) {
 	sessionID := uuid.New()
 
 	mock.ExpectExec("UPDATE sessions SET title").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs("Fix auth flow", models.SessionTitleSourceManual, sessionID, orgID).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = store.UpdateTitle(context.Background(), orgID, sessionID, "Fix auth flow")
 	require.NoError(t, err, "UpdateTitle should not return an error")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateTitleWithSource(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		source  models.SessionTitleSource
+		wantErr bool
+	}{
+		{name: "generated", source: models.SessionTitleSourceGenerated},
+		{name: "issue", source: models.SessionTitleSourceIssue},
+		{name: "invalid", source: models.SessionTitleSource("unknown"), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "should create mock pool")
+			defer mock.Close()
+			store := NewSessionStore(mock)
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			if !tt.wantErr {
+				mock.ExpectExec("UPDATE sessions SET title").
+					WithArgs("New title", tt.source, sessionID, orgID).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+
+			err = store.UpdateTitleWithSource(context.Background(), orgID, sessionID, "New title", tt.source)
+			if tt.wantErr {
+				require.Error(t, err, "invalid title provenance should be rejected before persistence")
+				return
+			}
+			require.NoError(t, err, "valid title provenance should be persisted")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestSessionStore_GetTitleState(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	title := "Fix auth flow"
+	intent := "Fix authentication"
+	pivotTurn := 10
+	generatedAt := time.Now().UTC().Truncate(time.Microsecond)
+	expected := models.SessionTitleState{
+		Title:              &title,
+		TitleSource:        models.SessionTitleSourceGenerated,
+		TitleIntent:        &intent,
+		TitlePivotedAtTurn: &pivotTurn,
+		TitleGeneratedAt:   &generatedAt,
+		CurrentTurn:        20,
+	}
+
+	mock.ExpectQuery("SELECT title, title_source, title_intent, title_pivoted_at_turn, title_generated_at, current_turn FROM sessions WHERE id = .+ AND org_id = .+").
+		WithArgs(sessionID, orgID).
+		WillReturnRows(pgxmock.NewRows([]string{"title", "title_source", "title_intent", "title_pivoted_at_turn", "title_generated_at", "current_turn"}).
+			AddRow(title, models.SessionTitleSourceGenerated, intent, pivotTurn, generatedAt, 20))
+
+	actual, err := store.GetTitleState(context.Background(), orgID, sessionID)
+	require.NoError(t, err, "title state query should succeed")
+	require.Equal(t, expected, actual, "title state query should return title, provenance, and cadence state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateTitleForPivot(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+	store := NewSessionStore(mock)
+	orgID := uuid.New()
+	sessionID := uuid.New()
+
+	mock.ExpectExec("UPDATE sessions SET title = .+ title_intent = .+ title_pivoted_at_turn").
+		WithArgs("Add billing export", "Build a billing export", 10, sessionID, orgID).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	err = store.UpdateTitleForPivot(context.Background(), orgID, sessionID, "Add billing export", "Build a billing export", 10)
+	require.NoError(t, err, "accepted pivot should persist title and intent atomically")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1234,7 +1325,7 @@ func TestSessionStore_UpdateResult(t *testing.T) {
 
 	now := time.Now()
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -1260,7 +1351,7 @@ func TestSessionStore_UpdateResult_PersistsModelUsed(t *testing.T) {
 	now := time.Now()
 
 	mock.ExpectQuery(`UPDATE sessions[\s\S]+model_used = COALESCE\(@model_used, model_used\)`).
-		WithArgs(anyDBArgs(11)...).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -1286,8 +1377,8 @@ func TestSessionStore_UpdateResultClearsStaleFailureDetails(t *testing.T) {
 	sessionID := uuid.New()
 	now := time.Now()
 
-	mock.ExpectQuery(`UPDATE sessions[\s\S]+failure_explanation = NULL[\s\S]+failure_category = NULL[\s\S]+failure_next_steps = NULL[\s\S]+failure_retry_advised = false`).
-		WithArgs(anyDBArgs(11)...).
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+failure_explanation = @failure_explanation[\s\S]+failure_category = @failure_category[\s\S]+failure_next_steps = @failure_next_steps[\s\S]+failure_retry_advised = @failure_retry_advised`).
+		WithArgs(anyDBArgs(15)...).
 		WillReturnRows(
 			pgxmock.NewRows(sessionTestColumns).AddRow(
 				newAgentSessionRow(sessionID, uuid.New(), orgID, now)...,
@@ -1298,6 +1389,60 @@ func TestSessionStore_UpdateResultClearsStaleFailureDetails(t *testing.T) {
 		ResultSummary: stringPtr("new successful result"),
 	})
 	require.NoError(t, err, "UpdateResult should clear stale failure details while persisting a new result")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestSessionStore_UpdateResultPublishesStructuredFailureInTerminalEvent(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	defer client.Close()
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
+
+	now := time.Now()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	orgID := uuid.New()
+	explanation := "No Claude Code credentials are configured."
+	category := "claude_code_auth_expired"
+	nextSteps := []string{"Open Account settings"}
+	row := newAgentSessionRow(sessionID, issueID, orgID, now)
+	setSessionTestColumnValue(row, "status", string(models.SessionStatusFailed))
+	setSessionTestColumnValue(row, "failure_explanation", &explanation)
+	setSessionTestColumnValue(row, "failure_category", &category)
+	setSessionTestColumnValue(row, "failure_next_steps", nextSteps)
+	setSessionTestColumnValue(row, "failure_retry_advised", true)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+failure_explanation = @failure_explanation[\s\S]+failure_retry_advised = @failure_retry_advised[\s\S]+RETURNING`).
+		WithArgs(anyDBArgs(15)...).
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
+
+	err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusFailed, &models.SessionResult{
+		Error:               stringPtr("no credentials for claude code agent"),
+		FailureExplanation:  &explanation,
+		FailureCategory:     &category,
+		FailureNextSteps:    nextSteps,
+		FailureRetryAdvised: true,
+	})
+	require.NoError(t, err, "UpdateResult should persist and publish the complete terminal failure")
+
+	entries, err := mr.Stream("143:stream:{ses:" + sessionID.String() + "}:status")
+	require.NoError(t, err, "terminal failure should publish a session status event")
+	require.Len(t, entries, 1, "terminal failure should publish exactly one complete status event")
+	var published models.Session
+	require.NoError(t, json.Unmarshal([]byte(entries[0].Values[1]), &published), "published status should contain valid session JSON")
+	require.Equal(t, &explanation, published.FailureExplanation, "terminal event should include the actionable explanation")
+	require.Equal(t, &category, published.FailureCategory, "terminal event should include the failure category")
+	require.Equal(t, nextSteps, published.FailureNextSteps, "terminal event should include the recommended next steps")
+	require.True(t, published.FailureRetryAdvised, "terminal event should include the retry recommendation")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1538,7 +1683,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 
 		store := NewSessionStore(mock)
 		mock.ExpectQuery("UPDATE sessions").
-			WithArgs(anyDBArgs(11)...).
+			WithArgs(anyDBArgs(15)...).
 			WillReturnError(context.DeadlineExceeded)
 
 		err = store.UpdateResult(context.Background(), uuid.New(), uuid.New(), models.SessionStatusCompleted, &models.SessionResult{})
@@ -1576,7 +1721,7 @@ func TestSessionStore_UpdateResult_ErrorBranches(t *testing.T) {
 		require.NoError(t, store.UpdateStatus(context.Background(), orgID, sessionID, models.SessionStatusCompleted), "UpdateStatus should tolerate best-effort Redis publish failures")
 
 		mock.ExpectQuery("UPDATE sessions").
-			WithArgs(anyDBArgs(11)...).
+			WithArgs(anyDBArgs(15)...).
 			WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(sessionID))
 
 		err = store.UpdateResult(context.Background(), orgID, sessionID, models.SessionStatusCompleted, &models.SessionResult{})
@@ -1911,18 +2056,48 @@ func TestSessionStore_UpdateFailure(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
-	require.NoError(t, err)
+	require.NoError(t, err, "should create mock pool")
 	defer mock.Close()
 
 	store := NewSessionStore(mock)
+	store.SetLogger(zerolog.Nop())
+	mr := miniredis.RunT(t)
+	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
+	require.NotNil(t, client, "Redis client should initialize")
+	defer client.Close()
+	store.SetStreams(cache.NewSessionStreams(client, zerolog.Nop(), nil))
 
-	mock.ExpectExec("UPDATE sessions.+SET failure_explanation").
+	now := time.Now()
+	sessionID := uuid.New()
+	issueID := uuid.New()
+	orgID := uuid.New()
+	explanation := "No Claude Code credentials are configured."
+	category := "claude_code_auth_expired"
+	nextSteps := []string{"Open Account settings"}
+	row := newAgentSessionRow(sessionID, issueID, orgID, now)
+	setSessionTestColumnValue(row, "status", string(models.SessionStatusFailed))
+	setSessionTestColumnValue(row, "failure_explanation", &explanation)
+	setSessionTestColumnValue(row, "failure_category", &category)
+	setSessionTestColumnValue(row, "failure_next_steps", nextSteps)
+	setSessionTestColumnValue(row, "failure_retry_advised", true)
+
+	mock.ExpectQuery(`UPDATE sessions[\s\S]+SET failure_explanation[\s\S]+RETURNING`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+		WillReturnRows(pgxmock.NewRows(sessionTestColumns).AddRow(row...))
 
-	err = store.UpdateFailure(context.Background(), uuid.New(), uuid.New(), "test failure", "runtime", []string{"retry"}, true)
-	require.NoError(t, err)
-	require.NoError(t, mock.ExpectationsWereMet())
+	err = store.UpdateFailure(context.Background(), orgID, sessionID, explanation, category, nextSteps, true)
+	require.NoError(t, err, "UpdateFailure should persist structured failure metadata")
+
+	entries, err := mr.Stream("143:stream:{ses:" + sessionID.String() + "}:status")
+	require.NoError(t, err, "structured failure should publish a live session status update")
+	require.Len(t, entries, 1, "structured failure should publish exactly one session status update")
+	var published models.Session
+	require.NoError(t, json.Unmarshal([]byte(entries[0].Values[1]), &published), "published status should contain valid session JSON")
+	require.Equal(t, &explanation, published.FailureExplanation, "live session status should include the actionable failure explanation")
+	require.Equal(t, &category, published.FailureCategory, "live session status should include the failure category")
+	require.Equal(t, nextSteps, published.FailureNextSteps, "live session status should include the recommended next steps")
+	require.True(t, published.FailureRetryAdvised, "live session status should include the retry recommendation")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestSessionStore_UpdateRevisionContext(t *testing.T) {

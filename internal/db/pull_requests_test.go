@@ -29,7 +29,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+		"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -44,7 +44,7 @@ func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
-					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, models.PRFeedbackMonitoringInherit, int64(0), 0, nil, now, now),
 		)
 
 	pr, err := store.GetByRepoAndNumber(context.Background(), "org/repo", 42)
@@ -69,7 +69,7 @@ func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+		"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -84,7 +84,7 @@ func TestPullRequestStore_GetByOrgRepoAndNumber(t *testing.T) {
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", nil, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
-					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, models.PRFeedbackMonitoringInherit, int64(0), 0, nil, now, now),
 		)
 
 	pr, err := store.GetByOrgRepoAndNumber(context.Background(), orgID, "org/repo", 42)
@@ -109,7 +109,7 @@ func TestPullRequestStore_ListOpenByOrgRepoAndHeadSHA(t *testing.T) {
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+		"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch", "merged_at", "created_at", "updated_at",
 	}
 
 	prID := uuid.New()
@@ -125,7 +125,7 @@ func TestPullRequestStore_ListOpenByOrgRepoAndHeadSHA(t *testing.T) {
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("Description"), "open", "pending", "user1", "", &headSHA, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
-					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, models.PRFeedbackMonitoringInherit, int64(0), 0, nil, now, now),
 		)
 
 	prs, err := store.ListOpenByOrgRepoAndHeadSHA(context.Background(), orgID, "org/repo", headSHA)
@@ -173,7 +173,7 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
 		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
 		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
-		"merge_when_ready_updated_at", "merged_at", "created_at", "updated_at",
+		"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch", "merged_at", "created_at", "updated_at",
 	}
 
 	orgID := uuid.New()
@@ -188,7 +188,7 @@ func TestPullRequestStore_BatchGetBySessionIDs_Success(t *testing.T) {
 				AddRow(prID, &sessionID, orgID, 42, "https://github.com/org/repo/pull/42", "org/repo",
 					"Fix bug", ptrStr("body"), "open", "pending", "app", "success", nil, nil, nil,
 					models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0),
-					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, nil, now, now),
+					models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil, models.PRFeedbackMonitoringInherit, int64(0), 0, nil, now, now),
 		)
 
 	result, err := store.BatchGetBySessionIDs(context.Background(), orgID, []uuid.UUID{sessionID})

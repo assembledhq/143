@@ -152,6 +152,8 @@ type rawPreviewConfig struct {
 	Credentials    models.CredentialConfig                `json:"credentials"`
 	Network        models.NetworkConfig                   `json:"network"`
 	Progressive    bool                                   `json:"progressive,omitempty"`
+	Browser        *rawPreviewBrowserConfig               `json:"browser,omitempty"`
+	Verification   *rawPreviewVerificationConfig          `json:"verification,omitempty"`
 
 	// Single-service top-level fields (mutually exclusive with Services).
 	Command []string               `json:"command,omitempty"`
@@ -159,6 +161,21 @@ type rawPreviewConfig struct {
 	Port    int                    `json:"port,omitempty"`
 	Env     map[string]string      `json:"env,omitempty"`
 	Ready   *models.ReadinessProbe `json:"ready,omitempty"`
+}
+
+type rawPreviewBrowserConfig struct {
+	PersistSession  *bool                `json:"persist_session,omitempty"`
+	DefaultViewport *models.ViewportSpec `json:"default_viewport,omitempty"`
+	AllowedPaths    []string             `json:"allowed_paths,omitempty"`
+}
+
+type rawPreviewVerificationConfig struct {
+	Auto               *bool                 `json:"auto,omitempty"`
+	MaxAttempts        int                   `json:"max_attempts,omitempty"`
+	TimeoutSeconds     int                   `json:"timeout_seconds,omitempty"`
+	Viewports          []models.ViewportSpec `json:"viewports,omitempty"`
+	SmokePaths         []string              `json:"smoke_paths,omitempty"`
+	FailOnConsoleError *bool                 `json:"fail_on_console_error,omitempty"`
 }
 
 // ConfigOptions is lightweight metadata for presenting committed preview
@@ -265,6 +282,7 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 		cfg.Primary = raw.Primary
 		cfg.Services = raw.Services
 	}
+	applyBrowserVerificationDefaults(cfg, raw.Browser, raw.Verification)
 
 	if cfg.Infrastructure == nil {
 		cfg.Infrastructure = make(map[string]models.InfrastructureConfig)
@@ -272,6 +290,57 @@ func ParseNamedConfig(data []byte, name string) (*models.PreviewConfig, error) {
 	defaultPreviewInstallConfig(cfg.Install)
 
 	return cfg, nil
+}
+
+func applyBrowserVerificationDefaults(cfg *models.PreviewConfig, browser *rawPreviewBrowserConfig, verification *rawPreviewVerificationConfig) {
+	cfg.Browser = models.PreviewBrowserConfig{
+		PersistSession:  true,
+		DefaultViewport: models.ViewportSpec{Name: "desktop", Width: 1440, Height: 900},
+		AllowedPaths:    []string{"/**"},
+	}
+	if browser != nil {
+		if browser.PersistSession != nil {
+			cfg.Browser.PersistSession = *browser.PersistSession
+		}
+		if browser.DefaultViewport != nil {
+			cfg.Browser.DefaultViewport = *browser.DefaultViewport
+		}
+		if len(browser.AllowedPaths) > 0 {
+			cfg.Browser.AllowedPaths = append([]string(nil), browser.AllowedPaths...)
+		}
+	}
+	cfg.Verification = models.PreviewVerificationConfig{
+		Auto:               true,
+		MaxAttempts:        3,
+		TimeoutSeconds:     300,
+		Viewports:          []models.ViewportSpec{cfg.Browser.DefaultViewport},
+		FailOnConsoleError: true,
+	}
+	if primary, ok := cfg.Services[cfg.Primary]; ok && primary.Ready.HTTPPath != "" {
+		cfg.Verification.SmokePaths = []string{primary.Ready.HTTPPath}
+	} else {
+		cfg.Verification.SmokePaths = []string{"/"}
+	}
+	if verification != nil {
+		if verification.Auto != nil {
+			cfg.Verification.Auto = *verification.Auto
+		}
+		if verification.MaxAttempts != 0 {
+			cfg.Verification.MaxAttempts = verification.MaxAttempts
+		}
+		if verification.TimeoutSeconds != 0 {
+			cfg.Verification.TimeoutSeconds = verification.TimeoutSeconds
+		}
+		if len(verification.Viewports) > 0 {
+			cfg.Verification.Viewports = append([]models.ViewportSpec(nil), verification.Viewports...)
+		}
+		if len(verification.SmokePaths) > 0 {
+			cfg.Verification.SmokePaths = append([]string(nil), verification.SmokePaths...)
+		}
+		if verification.FailOnConsoleError != nil {
+			cfg.Verification.FailOnConsoleError = *verification.FailOnConsoleError
+		}
+	}
 }
 
 func parsePreviewSecrets(raw json.RawMessage) ([]models.PreviewSecretBundleRef, error) {
@@ -627,6 +696,7 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 
 	errs = append(errs, validatePreviewInstallConfig(cfg.Install)...)
 	errs = append(errs, validatePreviewResources(cfg.Resources, resourcePolicy)...)
+	errs = append(errs, validateBrowserVerificationConfig(cfg)...)
 
 	// Per-infrastructure validation.
 	for name, infra := range cfg.Infrastructure {
@@ -703,6 +773,45 @@ func ValidateConfigWithResourcePolicy(cfg *models.PreviewConfig, resourcePolicy 
 	}
 
 	return errs
+}
+
+func validateBrowserVerificationConfig(cfg *models.PreviewConfig) []string {
+	var errs []string
+	validateViewport := func(field string, viewport models.ViewportSpec) {
+		if viewport.Width < 240 || viewport.Width > 7680 || viewport.Height < 240 || viewport.Height > 4320 {
+			errs = append(errs, fmt.Sprintf("%s must be between 240x240 and 7680x4320", field))
+		}
+	}
+	if cfg.Browser.DefaultViewport.Width != 0 || cfg.Browser.DefaultViewport.Height != 0 {
+		validateViewport("browser.default_viewport", cfg.Browser.DefaultViewport)
+	}
+	for i, path := range cfg.Browser.AllowedPaths {
+		if !isValidBrowserPathPattern(path) {
+			errs = append(errs, fmt.Sprintf("browser.allowed_paths[%d] %q must be a preview-origin absolute path pattern", i, path))
+		}
+	}
+	if cfg.Verification.MaxAttempts != 0 && (cfg.Verification.MaxAttempts < 1 || cfg.Verification.MaxAttempts > 10) {
+		errs = append(errs, "verification.max_attempts must be between 1 and 10")
+	}
+	if cfg.Verification.TimeoutSeconds != 0 && (cfg.Verification.TimeoutSeconds < 10 || cfg.Verification.TimeoutSeconds > 1800) {
+		errs = append(errs, "verification.timeout_seconds must be between 10 and 1800")
+	}
+	for i, viewport := range cfg.Verification.Viewports {
+		validateViewport(fmt.Sprintf("verification.viewports[%d]", i), viewport)
+	}
+	for i, path := range cfg.Verification.SmokePaths {
+		if !isValidHTTPPath(path) {
+			errs = append(errs, fmt.Sprintf("verification.smoke_paths[%d] %q must be a safe absolute preview path", i, path))
+		}
+	}
+	return errs
+}
+
+func isValidBrowserPathPattern(path string) bool {
+	if path == "/**" {
+		return true
+	}
+	return isValidHTTPPath(path) || (strings.HasSuffix(path, "/**") && isValidHTTPPath(strings.TrimSuffix(path, "**")))
 }
 
 // validHTTPPath only allows safe characters in readiness probe paths to prevent

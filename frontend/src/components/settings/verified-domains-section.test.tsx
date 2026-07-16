@@ -39,15 +39,15 @@ describe("VerifiedDomainsSection", () => {
     expect(await screen.findByText(/No domains yet/)).toBeInTheDocument();
   });
 
-  it("keeps the add-domain controls the same height", async () => {
+  it("keeps the add-domain controls touch-safe on mobile and compact on desktop", async () => {
     mockDomains([]);
     renderWithProviders(<VerifiedDomainsSection />);
 
     const input = await screen.findByLabelText("Domain to verify");
     const button = screen.getByRole("button", { name: "Add domain" });
 
-    expect(input).toHaveClass("h-9");
-    expect(button).toHaveClass("h-9");
+    expect(input).toHaveClass("h-11", "sm:h-9");
+    expect(button).toHaveClass("h-11", "sm:h-9", "w-full", "sm:w-auto");
   });
 
   it("does not ask connected GitHub users to reconnect when no organization installation is available", async () => {

@@ -1,6 +1,38 @@
 # Design: Session Changesets and Stacked PRs
 
-> **Status:** Future
+> **Status:** Partially Implemented
+
+> **Implementation note (2026-07-11):** Phases 1 and 2 are complete. Session
+> detail exposes ordered, PR-hydrated changeset summaries and shows a pull
+> request selector only for multi-PR sessions. PR-native actions (health,
+> repair, and merge) follow the selected PR. Until Phase 3 materializes a
+> non-primary branch/worktree, its Changes, Preview, readiness, Create PR, and
+> push surfaces are explicitly unavailable rather than falling back to the
+> primary session workspace. The one-PR compatibility path is unchanged.
+>
+> **Implementation note (2026-07-12):** Phase 3 is complete for independent
+> changesets. Split planning freezes an immutable `session_diff_snapshots`
+> source, supports file assignment, confirmed omissions, ordering and folding,
+> applies assigned patches into disk-budgeted sandbox worktrees, and verifies
+> the resulting Git diffs for missing, duplicate, conflicting, or unexpected
+> changes. Readiness runs/checks/bypasses are changeset-scoped and pin the
+> evaluated branch head. Accepting a verified split archives the source, moves
+> the primary flag, and rebuilds the session rollup. The PR details UI and
+> `143-tools changesets` expose the flow. Targeted editing and publishing remain
+> Phase 4; stacked worktrees remain Phase 5.
+>
+> **Implementation note (2026-07-13):** Phases 4 and 5 and the Phase 6 stack
+> safety path are implemented. Composer turns can target a materialized pull
+> request worktree, with durable heartbeat leases and per-turn Git checkpoints.
+> Publishing and pushing are changeset-scoped and guarded by the expected
+> remote head. Stacked worktrees materialize and publish in topology order;
+> lower edits invalidate descendants; clean restacks replay and push in order;
+> merge attempts are blocked behind an unmerged parent. Parent merges retarget
+> the stored child base, invalidate the complete descendant chain, and enqueue
+> restacking on the sandbox-owning worker. Conflicts stop automatic replay and
+> surface an explicitly targeted agent-resolution flow whose result is not
+> pushed until the user confirms it. Stack health remains derived rather than
+> stored.
 
 ## Summary
 
@@ -624,6 +656,13 @@ Tasks:
 
 Goal: let the app represent multiple changesets, but avoid branch splitting and
 restack behavior.
+
+Phase 2 selection is deliberately safe for planned, non-primary changesets:
+PR-native read/actions that already have a PR identity follow the selected
+changeset, while Changes, Preview, readiness, review, push, and Create PR show
+an explicit materialization-required state. They must never fall through to the
+primary session workspace. Making those branch-backed actions executable is
+owned by Phases 3 and 4.
 
 Tasks:
 

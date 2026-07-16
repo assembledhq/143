@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -22,6 +23,39 @@ import (
 	"github.com/assembledhq/143/internal/services/sandboxauth"
 	"github.com/assembledhq/143/internal/services/workspace"
 )
+
+func TestSessionPromptStyleCodeReviewUsesRawTask(t *testing.T) {
+	t.Parallel()
+
+	session := &models.Session{Origin: models.SessionOriginCodeReview}
+
+	require.Equal(t, PromptStyleRawTask, sessionPromptStyle(session), "code review sessions should pass the stored synthesis task through verbatim")
+}
+
+func TestRecordedRunFailureErrorSurvivesWrapping(t *testing.T) {
+	t.Parallel()
+
+	recorded := markRunFailureRecorded(errors.New("categorized auth failure"))
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "direct marker", err: recorded, expected: true},
+		{name: "wrapped marker", err: fmt.Errorf("setup sandbox: %w", recorded), expected: true},
+		{name: "ordinary error", err: errors.New("generic failure"), expected: false},
+		{name: "nil error", err: nil, expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, isRunFailureRecorded(tt.err),
+				"recorded failure detection should survive contextual wrapping without matching generic errors")
+		})
+	}
+}
 
 func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	t.Parallel()
@@ -406,6 +440,46 @@ func (p *testInternalSandboxProvider) WriteFile(_ context.Context, _ *Sandbox, p
 	}
 	p.writes[path] = append([]byte(nil), data...)
 	return nil
+}
+
+func TestOrchestratorMaterializeChangeset(t *testing.T) {
+	t.Parallel()
+	containerID := "sandbox-1"
+	patch := "diff --git a/api.go b/api.go\n+code\n"
+	provider := &testInternalSandboxProvider{}
+	provider.execFn = func(cmd string, stdout, stderr io.Writer) (int, error) {
+		switch {
+		case strings.HasPrefix(cmd, "df -Pk"):
+			_, _ = io.WriteString(stdout, "1048576\n")
+		case strings.Contains(cmd, "worktree add"):
+			_, _ = io.WriteString(stdout, "abc123\n")
+		case strings.Contains(cmd, "rev-parse HEAD") && strings.Contains(cmd, "diff --binary"):
+			_, _ = io.WriteString(stdout, "abc123\n"+patch)
+		}
+		return 0, nil
+	}
+	orchestrator := &Orchestrator{provider: provider, logger: zerolog.Nop()}
+	result, err := orchestrator.MaterializeChangeset(context.Background(), &models.Session{ID: uuid.New(), ContainerID: &containerID}, models.SessionChangeset{
+		ID: uuid.New(), OrderIndex: 1, Title: "API integration", TargetBranch: "main",
+	}, patch)
+	require.NoError(t, err, "materialization should create an independent worktree and apply its assigned source patch")
+	require.Equal(t, "abc123", result.HeadSHA, "materialization should capture the worktree head")
+	require.Equal(t, patch, result.Diff, "materialization should persist the actual worktree diff for verification")
+	require.Contains(t, result.WorkingBranch, "2-api-integration", "working branch should be stable and reviewable")
+	require.Contains(t, string(provider.writes[result.WorktreePath+"/.143-split.patch"]), "+code", "assigned patch should be written into the target worktree")
+}
+
+func TestOrchestratorMaterializeChangesetRejectsInsufficientDisk(t *testing.T) {
+	t.Parallel()
+	containerID := "sandbox-1"
+	provider := &testInternalSandboxProvider{execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
+		_, _ = io.WriteString(stdout, "1024\n")
+		return 0, nil
+	}}
+	orchestrator := &Orchestrator{provider: provider, logger: zerolog.Nop()}
+	_, err := orchestrator.MaterializeChangeset(context.Background(), &models.Session{ID: uuid.New(), ContainerID: &containerID}, models.SessionChangeset{ID: uuid.New(), Title: "API", TargetBranch: "main"}, "")
+	require.ErrorIs(t, err, ErrChangesetDiskBudget, "materialization should fail clearly before git worktree creation when disk headroom is insufficient")
+	require.Len(t, provider.execCalls, 1, "disk budget failure should not mutate git state")
 }
 
 func (p *testInternalSandboxProvider) Destroy(context.Context, *Sandbox) error {
@@ -1159,7 +1233,7 @@ func TestEnsureClaudeCodeAuth_SetupTokenInjectsEnvAndSkipsHarvest(t *testing.T) 
 		"CLAUDE_CODE_MAX_THINK": "1",
 	}
 
-	billingMode, err := orch.ensureClaudeCodeAuth(context.Background(), run, sandbox, envVars)
+	billingMode, err := orch.ensureClaudeCodeAuth(context.Background(), run, nil, sandbox, envVars)
 
 	require.NoError(t, err, "setup-token auth should prepare Claude Code without refreshing")
 	require.Equal(t, TokenBillingModeSubscription, billingMode, "setup-token auth should use subscription billing mode")

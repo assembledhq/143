@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-26
+> **Status:** Implemented | **Last reviewed:** 2026-07-15
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -29,7 +29,7 @@ Implemented:
 - prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
-- GitHub pending/final commit-status publication for code review runs when the worker has GitHub credentials
+- GitHub review submission as the sole GitHub result surface, avoiding a redundant commit status that could be mistaken for a required CI check
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
@@ -127,7 +127,7 @@ Primary interaction:
 - A 143 admin creates or repairs the `143-code-reviewer` GitHub team from the Code reviews configuration page.
 - 143 grants that team read access to the selected repository and stores the team slug as the repo's active trigger.
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
-- The bot posts one pending/running status, then submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines.
+- The bot submits a final GitHub review with a summary body and a configurable number of inline comments on changed lines; it does not publish a separate commit status.
 
 This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 

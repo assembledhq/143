@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChevronDown,
@@ -14,11 +15,15 @@ import {
   Plus,
   PowerOff,
   Settings2,
+  SlidersHorizontal,
   Trash2,
   Users,
 } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
+import { ResourceRow } from "@/components/resource-row";
+import { SectionGroup } from "@/components/section-group";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
@@ -44,6 +49,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
@@ -73,6 +79,7 @@ import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
+  CodeReviewListOutcome,
   CodeReviewPolicyConfig,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
@@ -82,9 +89,20 @@ import type {
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
-const ALL_DECISIONS = "all";
+const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
+const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
+const OUTCOME_FILTER_VALUES = [
+  ALL_OUTCOMES,
+  AUTOMATICALLY_APPROVED,
+  COMPLETED_NOT_APPROVED,
+  "needs_human_review",
+  "comment_only",
+  "blocked",
+] as const;
+type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -126,26 +144,22 @@ function formatDate(value?: string): string {
   }).format(new Date(value));
 }
 
+function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
+  return review.status === "completed" && review.decision === "approved" && Boolean(review.github_review_id);
+}
+
 function decisionLabel(review: CodeReviewListItem): string {
-  if (review.decision === "approved") return "Approved";
-  if (review.decision === "needs_human_review") return "Needs human";
-  if (review.decision === "blocked") return "Blocked";
-  if (review.decision === "comment_only") return "Comment only";
-  return "Pending";
+  if (wasAutomaticallyApproved(review)) return "Automatically approved";
+  if (review.decision) return "Not automatically approved";
+  return "Pending decision";
 }
 
-function decisionVariant(review: CodeReviewListItem): "success" | "secondary" | "destructive" | "outline" {
-  if (review.decision === "approved") return "success";
-  if (review.decision === "blocked") return "destructive";
-  if (review.decision === "needs_human_review") return "secondary";
-  return "outline";
-}
-
-function statusVariant(status: string): "success" | "secondary" | "destructive" | "outline" {
-  if (status === "completed") return "success";
-  if (status === "failed" || status === "stale") return "destructive";
-  if (status === "running" || status === "queued") return "secondary";
-  return "outline";
+function decisionDetailLabel(review: CodeReviewListItem): string | null {
+  if (review.decision === "approved" && !wasAutomaticallyApproved(review)) return "Approval was not posted";
+  if (review.decision === "needs_human_review") return "Needs human review";
+  if (review.decision === "blocked") return "Blocked by policy";
+  if (review.decision === "comment_only") return "Comment-only policy";
+  return null;
 }
 
 function statusLabel(status: string): string {
@@ -153,6 +167,92 @@ function statusLabel(status: string): string {
     .split("_")
     .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
     .join(" ");
+}
+
+function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
+  if (wasAutomaticallyApproved(review)) return "success";
+  if (review.decision === "blocked") return "destructive";
+  if (review.decision === "needs_human_review") return "warning";
+  return "neutral";
+}
+
+function reviewStatusTone(status: string): StatusTone {
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "stale") return "destructive";
+  if (status === "running" || status === "queued") return "primary";
+  return "neutral";
+}
+
+function ReviewActions({
+  review,
+  selected,
+  onToggleEvidence,
+}: {
+  review: CodeReviewListItem;
+  selected: boolean;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <TooltipProvider>
+      <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
+        <Button
+          variant={selected ? "secondary" : "ghost"}
+          size="sm"
+          className="min-h-11 justify-center md:min-h-0"
+          onClick={onToggleEvidence}
+        >
+          <FileSearch className="h-4 w-4" />
+          Evidence
+        </Button>
+        <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
+          <Link href={`/sessions/${review.session_id}`}>
+            <ExternalLink className="h-4 w-4 md:hidden" />
+            Session
+          </Link>
+        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              className={`min-h-11 justify-center md:size-7 md:min-h-0 ${review.github_review_url ? "" : "col-span-2 md:col-span-1"}`}
+              variant="ghost"
+              size="sm"
+              asChild
+              aria-label="Open pull request"
+            >
+              <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
+                <ExternalLink className="h-4 w-4" />
+                <span className="md:sr-only">Pull request</span>
+              </Link>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
+        </Tooltip>
+        {review.github_review_url ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button className="min-h-11 justify-center md:size-7 md:min-h-0" variant="ghost" size="sm" asChild aria-label="Open final review">
+                <Link href={review.github_review_url} target="_blank" rel="noreferrer">
+                  <ClipboardCheck className="h-4 w-4" />
+                  <span className="md:sr-only">Final review</span>
+                </Link>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent className="hidden md:block">Open final review</TooltipContent>
+          </Tooltip>
+        ) : null}
+      </div>
+    </TooltipProvider>
+  );
+}
+
+function reviewStatusLabel(review: CodeReviewListItem): string {
+  if (review.stale || review.status === "stale") return "Stale after PR update";
+  if (review.status === "completed") return "Ran successfully";
+  if (review.status === "failed") return "Run failed";
+  if (review.status === "running") return "Running";
+  if (review.status === "queued") return "Queued";
+  if (review.status === "cancelled") return "Cancelled";
+  return review.status;
 }
 
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
@@ -194,25 +294,44 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
-  const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
+  const [outcomeFilter, setOutcomeParam] = useQueryState(
+    "outcome",
+    parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
+  );
   const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
   const [selectedTemplateKey, setSelectedTemplateKey] = useState(NO_TEMPLATE);
   const [pendingTemplateApply, setPendingTemplateApply] = useState<{ key: string; title: string } | null>(null);
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
+  const setOutcomeFilter = useCallback(
+    (value: string) => {
+      void setOutcomeParam(value as OutcomeFilter);
+    },
+    [setOutcomeParam],
+  );
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
       repository_id: repositoryId,
-      decision: decisionFilter === ALL_DECISIONS ? undefined : (decisionFilter as CodeReviewDecision),
+      decision:
+        outcomeFilter !== ALL_OUTCOMES &&
+        outcomeFilter !== AUTOMATICALLY_APPROVED &&
+        outcomeFilter !== COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewDecision)
+          : undefined,
+      outcome:
+        outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewListOutcome)
+          : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
       search: search.trim() || undefined,
       limit: 100,
     }),
-    [decisionFilter, repositoryId, riskFilter, search, statusFilter],
+    [outcomeFilter, repositoryId, riskFilter, search, statusFilter],
   );
 
   const repositoriesQuery = useQuery({
@@ -437,47 +556,6 @@ export default function CodeReviewsPage() {
           description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
         />
 
-        <div className="grid gap-3 md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr]">
-          <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
-            <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
-            {repositories.map((repo) => (
-              <SelectItem key={repo.id} value={repo.id}>
-                {repo.full_name}
-              </SelectItem>
-            ))}
-          </FilterSelect>
-          <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
-            <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
-            <SelectItem value="approved">Approved</SelectItem>
-            <SelectItem value="comment_only">Comment only</SelectItem>
-            <SelectItem value="needs_human_review">Needs human</SelectItem>
-            <SelectItem value="blocked">Blocked</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
-            <SelectItem value={ALL_RISKS}>All risk</SelectItem>
-            <SelectItem value="acceptable">Acceptable</SelectItem>
-            <SelectItem value="needs_review">Needs review</SelectItem>
-          </FilterSelect>
-          <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
-            <SelectItem value="queued">Queued</SelectItem>
-            <SelectItem value="running">Running</SelectItem>
-            <SelectItem value="completed">Completed</SelectItem>
-            <SelectItem value="failed">Failed</SelectItem>
-            <SelectItem value="stale">Stale</SelectItem>
-            <SelectItem value="cancelled">Cancelled</SelectItem>
-          </FilterSelect>
-          <div className="flex flex-col gap-2">
-            <Label className="text-xs text-muted-foreground">Search</Label>
-            <Input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="PR, repo, or title"
-              aria-label="Search code reviews"
-            />
-          </div>
-        </div>
-
         <Tabs defaultValue="reviews" className="space-y-4">
           <TabsList>
             <TabsTrigger value="reviews">
@@ -491,6 +569,69 @@ export default function CodeReviewsPage() {
           </TabsList>
 
           <TabsContent value="reviews" className="space-y-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full justify-between md:hidden"
+              aria-expanded={mobileFiltersOpen}
+              aria-controls="code-review-filters"
+              onClick={() => setMobileFiltersOpen((open) => !open)}
+            >
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="h-4 w-4" />
+                Filter reviews
+              </span>
+              <ChevronDown className={`h-4 w-4 transition-transform ${mobileFiltersOpen ? "rotate-180" : ""}`} />
+            </Button>
+            <div
+              id="code-review-filters"
+              className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
+            >
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+              <FilterSelect label="Outcome" value={outcomeFilter} onValueChange={setOutcomeFilter}>
+                <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
+                <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
+                <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
+                <SelectItem value="needs_human_review">Needs human review</SelectItem>
+                <SelectItem value="comment_only">Comment-only decision</SelectItem>
+                <SelectItem value="blocked">Blocked</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
+                <SelectItem value={ALL_RISKS}>All risk</SelectItem>
+                <SelectItem value="acceptable">Acceptable</SelectItem>
+                <SelectItem value="needs_review">Needs review</SelectItem>
+              </FilterSelect>
+              <FilterSelect label="Status" value={statusFilter} onValueChange={setStatusFilter}>
+                <SelectItem value={ALL_STATUSES}>All statuses</SelectItem>
+                <SelectItem value="queued">Queued</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="stale">Stale</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
+              </FilterSelect>
+              <div className="flex flex-col gap-2">
+                <Label className="text-xs text-muted-foreground">Search</Label>
+                <Input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="PR, repo, or title"
+                  aria-label="Search code reviews"
+                />
+              </div>
+            </div>
+            <SectionGroup
+              title="Review activity"
+              description="Pull requests reviewed by the team policy and their current outcome."
+            >
             {reviews.length === 0 ? (
               <EmptyState
                 icon={ClipboardCheck}
@@ -499,7 +640,7 @@ export default function CodeReviewsPage() {
               />
             ) : (
               <>
-              <Card>
+              <Card className="hidden md:flex">
                 <CardContent className="p-0">
                   <Table>
                     <TableHeader>
@@ -507,8 +648,8 @@ export default function CodeReviewsPage() {
                         <TableHead>PR</TableHead>
                         <TableHead>Repo</TableHead>
                         <TableHead>Risk</TableHead>
-                        <TableHead>Decision</TableHead>
-                        <TableHead>Status</TableHead>
+                        <TableHead>Outcome</TableHead>
+                        <TableHead>Run status</TableHead>
                         <TableHead>Completed</TableHead>
                         <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
@@ -526,55 +667,87 @@ export default function CodeReviewsPage() {
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
                           <TableCell>
-                            <Badge variant={review.acceptable ? "success" : "secondary"}>
-                              {review.acceptable ? "Acceptable" : "Needs review"}
-                            </Badge>
+                            <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
                           </TableCell>
                           <TableCell>
-                            <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge>
+                            <div className="space-y-1">
+                              <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+                              {decisionDetailLabel(review) ? (
+                                <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
+                              ) : null}
+                            </div>
                           </TableCell>
                           <TableCell>
-                            <Badge variant={statusVariant(review.stale ? "stale" : review.status)}>
-                              {statusLabel(review.stale ? "stale" : review.status)}
-                            </Badge>
+                            <StatusLabel
+                              label={reviewStatusLabel(review)}
+                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                              active={!review.stale && (review.status === "running" || review.status === "queued")}
+                            />
                           </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
-                            <div className="flex justify-end gap-2">
-                              <Button
-                                variant={selectedEvidenceSessionId === review.session_id ? "secondary" : "ghost"}
-                                size="sm"
-                                onClick={() =>
-                                  setSelectedEvidenceSessionId((current) =>
-                                    current === review.session_id ? null : review.session_id,
-                                  )
-                                }
-                              >
-                                <FileSearch className="h-4 w-4" />
-                                Evidence
-                              </Button>
-                              <Button variant="ghost" size="sm" asChild>
-                                <Link href={`/sessions/${review.session_id}`}>Session</Link>
-                              </Button>
-                              <Button variant="ghost" size="icon-sm" asChild aria-label="Open pull request">
-                                <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
-                                  <ExternalLink className="h-4 w-4" />
-                                </Link>
-                              </Button>
-                              {review.github_review_url ? (
-                                <Button variant="ghost" size="icon-sm" asChild aria-label="Open final review">
-                                  <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-                                    <ClipboardCheck className="h-4 w-4" />
-                                  </Link>
-                                </Button>
-                              ) : null}
-                            </div>
+                            <ReviewActions
+                              review={review}
+                              selected={selectedEvidenceSessionId === review.session_id}
+                              onToggleEvidence={() =>
+                                setSelectedEvidenceSessionId((current) =>
+                                  current === review.session_id ? null : review.session_id,
+                                )
+                              }
+                            />
                           </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
                   </Table>
                 </CardContent>
+              </Card>
+              <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
+                {reviews.map((review) => {
+                  const effectiveStatus = review.stale ? "stale" : review.status;
+                  return (
+                    <ResourceRow
+                      key={review.id}
+                      title={(
+                        <span className="break-words text-sm">
+                          #{review.github_pr_number} {review.pull_request_title}
+                        </span>
+                      )}
+                      metadata={(
+                        <span>
+                          {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                        </span>
+                      )}
+                      status={(
+                        <StatusLabel
+                          label={reviewStatusLabel(review)}
+                          tone={reviewStatusTone(effectiveStatus)}
+                          active={!review.stale && (review.status === "running" || review.status === "queued")}
+                        />
+                      )}
+                      detail={(
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                          <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
+                          <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+                          {decisionDetailLabel(review) ? <span>{decisionDetailLabel(review)}</span> : null}
+                          <span>Completed {formatDate(review.completed_at)}</span>
+                        </div>
+                      )}
+                      actions={(
+                        <ReviewActions
+                          review={review}
+                          selected={selectedEvidenceSessionId === review.session_id}
+                          onToggleEvidence={() =>
+                            setSelectedEvidenceSessionId((current) =>
+                              current === review.session_id ? null : review.session_id,
+                            )
+                          }
+                        />
+                      )}
+                      className="[&_[data-slot=resource-row-actions]]:ml-0"
+                    />
+                  );
+                })}
               </Card>
               <CodeReviewEvidenceSheet
                 review={selectedEvidenceReview}
@@ -589,9 +762,20 @@ export default function CodeReviewsPage() {
               />
               </>
             )}
+            </SectionGroup>
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
+            <div className="max-w-sm">
+              <FilterSelect label="Policy repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+                <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
+                {repositories.map((repo) => (
+                  <SelectItem key={repo.id} value={repo.id}>
+                    {repo.full_name}
+                  </SelectItem>
+                ))}
+              </FilterSelect>
+            </div>
             <Card>
               <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
@@ -1026,29 +1210,23 @@ function OutcomeControl({
   ];
 
   return (
-    <div className="grid gap-2 rounded-md border border-border p-2 md:grid-cols-3">
-      {options.map((option) => {
-        const active = option.value === selected;
-        return (
-          <Button
-            key={option.value}
-            type="button"
-            variant={active ? "secondary" : "ghost"}
-            className="h-auto justify-start whitespace-normal px-3 py-3 text-left"
-            disabled={disabled}
-            aria-pressed={active}
-            onClick={() => {
-              if (!active) onChange(option.value);
-            }}
-          >
-            <span className="flex min-w-0 flex-col gap-1">
-              <span className="text-sm font-medium">{option.title}</span>
-              <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
-            </span>
-          </Button>
-        );
-      })}
-    </div>
+    <RadioGroup
+      value={selected}
+      disabled={disabled}
+      aria-label="Outcome"
+      className="grid gap-3 md:grid-cols-3"
+      onValueChange={(value) => onChange(value as "disabled" | "comment" | "approve")}
+    >
+      {options.map((option) => (
+        <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
+          <RadioGroupItem value={option.value} aria-label={option.title} className="mt-0.5" />
+          <span className="flex min-w-0 flex-col gap-1">
+            <span className="text-sm font-medium text-foreground">{option.title}</span>
+            <span className="text-xs font-normal leading-5 text-muted-foreground">{option.description}</span>
+          </span>
+        </Label>
+      ))}
+    </RadioGroup>
   );
 }
 
@@ -2092,7 +2270,7 @@ function CodeReviewEvidenceSheet({
                 {review?.pull_request_title ?? "Review evidence"}
               </SheetDescription>
             </div>
-            {review ? <Badge variant={decisionVariant(review)}>{decisionLabel(review)}</Badge> : null}
+            {review ? <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} /> : null}
           </div>
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
@@ -2130,7 +2308,7 @@ function CodeReviewEvidenceSheet({
                             {result.agent_model ? ` · ${result.agent_model}` : ""}
                           </div>
                         </div>
-                        <Badge variant={statusVariant(result.status)}>{statusLabel(result.status)}</Badge>
+                        <StatusLabel label={statusLabel(result.status)} tone={reviewStatusTone(result.status)} active={result.status === "running" || result.status === "queued"} />
                       </div>
                       {result.raw_output ? (
                         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">

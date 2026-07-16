@@ -418,6 +418,13 @@ export const handlers = [
     } satisfies SingleResponse<SessionDiff>);
   }),
 
+  http.get('/api/v1/sessions/:id/changesets/split-status', () => {
+    return HttpResponse.json(
+      { error: { code: 'SPLIT_PLAN_NOT_FOUND', message: 'No changeset split plan exists' } },
+      { status: 404 },
+    );
+  }),
+
   http.patch('/api/v1/sessions/:id', async ({ request, params }) => {
     const body = await request.json() as { title: string };
     const session = mockSessions.find((s) => s.id === params.id);
@@ -848,6 +855,10 @@ export const handlers = [
       meta: {},
     } satisfies ListResponse<User>);
   }),
+  http.get('/api/v1/integrations/external-user-links', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/integrations/external-user-link-suggestions', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/integrations/external-unmapped-users', () => HttpResponse.json({ data: [], meta: {} })),
+  http.get('/api/v1/users/me/external-identities', () => HttpResponse.json({ data: [], meta: {} })),
 
   http.get('/api/v1/repositories/summary', () => {
     return HttpResponse.json({
@@ -1107,6 +1118,24 @@ export const handlers = [
       data: [],
       meta: {},
     });
+  }),
+
+  // The decision-first automation UI is independently deployable from the
+  // structured-outcomes backend. Default to the pre-outcomes response so
+  // existing page tests exercise its raw-run fallback; focused tests override
+  // these handlers with decision data.
+  http.get('/api/v1/automations/:id/decisions', () => {
+    return HttpResponse.json(
+      { error: { code: 'NOT_FOUND', message: 'Decisions not available' } },
+      { status: 404 },
+    );
+  }),
+
+  http.get('/api/v1/automations/:id/decision-stats', () => {
+    return HttpResponse.json(
+      { error: { code: 'NOT_FOUND', message: 'Decision stats not available' } },
+      { status: 404 },
+    );
   }),
 
   http.get('/api/v1/pm/documents', () => {

@@ -58,6 +58,18 @@ describe("automation template catalog", () => {
     expect(template?.goal).toContain("Do not classify a test as flaky from one failed run alone");
   });
 
+  it("guides codebase maintenance automations to implement one reviewable change", () => {
+    const template = getAutomationTemplate("codebase-maintenance");
+
+    expect(template?.summary).toContain("Implement one small, high-leverage maintenance improvement");
+    expect(template?.goal).toContain("select one high-confidence candidate that is safe to land now");
+    expect(template?.goal).toContain("Do not stop after producing a backlog or recommendation");
+    expect(template?.goal).toContain("ready for review as a pull request");
+    expect(template?.goal).toContain("explicit no-op when no safe change exists");
+    expect(template?.goal).toContain("Add or update focused tests");
+    expect(template?.outcomes).toContain("One focused maintenance PR or explicit no-op");
+  });
+
   it("guides missing-index automations toward evidence-backed database changes", () => {
     const template = getAutomationTemplate("missing-indexes");
 

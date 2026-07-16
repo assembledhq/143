@@ -644,6 +644,14 @@ func (s *Service) AgentSessionDebugURL(linearAgentSessionID string) string {
 	return strings.TrimRight(s.appBaseURL, "/") + path
 }
 
+func (s *Service) ExternalIdentityClaimURL(token string) string {
+	path := "/external-identities/claim?token=" + url.QueryEscape(token)
+	if s == nil || s.appBaseURL == "" {
+		return path
+	}
+	return strings.TrimRight(s.appBaseURL, "/") + path
+}
+
 // Enabled returns true when the org has an active Linear integration. The
 // session-create path uses this to short-circuit detection — design 62
 // §"Path C — Linear is not enabled" demands a silent no-op.

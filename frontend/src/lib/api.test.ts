@@ -1231,6 +1231,57 @@ describe('api client', () => {
         },
       ]);
     });
+
+    it('lists structured decisions with outcome and PR filters', async () => {
+      let capturedURL = '';
+      server.use(
+        http.get('/api/v1/automations/:id/decisions', ({ params, request }) => {
+          expect(params.id).toBe('automation-1');
+          capturedURL = request.url;
+          return HttpResponse.json({ data: [], meta: { next_cursor: '' } });
+        }),
+      );
+
+      const result = await api.automations.listDecisions('automation-1', {
+        limit: 25,
+        cursor: 'run-1',
+        outcome: 'changes_requested',
+        pr: '42',
+      });
+
+      const url = new URL(capturedURL);
+      expect(url.searchParams.get('limit')).toBe('25');
+      expect(url.searchParams.get('cursor')).toBe('run-1');
+      expect(url.searchParams.get('outcome')).toBe('changes_requested');
+      expect(url.searchParams.get('pr')).toBe('42');
+      expect(result.data).toEqual([]);
+    });
+
+    it('gets structured decision totals', async () => {
+      server.use(
+        http.get('/api/v1/automations/:id/decision-stats', ({ params }) => {
+          expect(params.id).toBe('automation-1');
+          return HttpResponse.json({
+            data: {
+              unique_pull_requests: 2,
+              unique_revisions: 3,
+              total_runs: 4,
+              evaluating: 0,
+              passed: 1,
+              changes_requested: 1,
+              advisory: 0,
+              not_applicable: 0,
+              outcome_not_reported: 1,
+              execution_failed: 0,
+            },
+          });
+        }),
+      );
+
+      const result = await api.automations.decisionStats('automation-1');
+      expect(result.data.unique_revisions).toBe(3);
+      expect(result.data.changes_requested).toBe(1);
+    });
   });
 
   describe('memories', () => {
@@ -1486,6 +1537,19 @@ describe('api client', () => {
       expect(capturedBody).toEqual({ draft: true, author_mode: 'user', resume_token: 'resume-123', merge_when_ready: true });
     });
 
+    it('targets the selected pull request slot', async () => {
+      let capturedUrl = '';
+      server.use(
+        http.post('/api/v1/sessions/:id/pr', ({ request }) => {
+          capturedUrl = request.url;
+          return HttpResponse.json({ status: 'queued' }, { status: 202 });
+        }),
+      );
+
+      await api.sessions.createPR('session-abc', { changesetId: 'changeset-2' });
+      expect(capturedUrl).toContain('changeset_id=changeset-2');
+    });
+
     it('throws on conflict when PR already exists', async () => {
       server.use(
         http.post('/api/v1/sessions/:id/pr', () => {
@@ -1526,6 +1590,42 @@ describe('api client', () => {
           resume_token: 'resume-123',
         }),
       });
+    });
+  });
+
+  describe('sessions - changesets', () => {
+    it('lists, creates, updates, assigns, and selects pull request slots', async () => {
+      const calls: string[] = [];
+      server.use(
+        http.get('/api/v1/sessions/:id/changesets', ({ request }) => {
+          calls.push(new URL(request.url).pathname);
+          return HttpResponse.json({ data: [], meta: {} });
+        }),
+        http.post('/api/v1/sessions/:id/changesets', async ({ request }) => {
+          calls.push(JSON.stringify(await request.json()));
+          return HttpResponse.json({ data: { id: 'changeset-2' } }, { status: 201 });
+        }),
+        http.patch('/api/v1/sessions/:id/changesets/:changesetId', async ({ request }) => {
+          calls.push(JSON.stringify(await request.json()));
+          return HttpResponse.json({ data: { id: 'changeset-2' } });
+        }),
+        http.get('/api/v1/sessions/:id/pr', ({ request }) => {
+          calls.push(new URL(request.url).search);
+          return HttpResponse.json({ data: null });
+        }),
+      );
+
+      await api.sessions.listChangesets('session-1');
+      await api.sessions.createChangeset('session-1', { title: 'API', summary: 'Endpoints' });
+      await api.sessions.updateChangeset('session-1', 'changeset-2', { title: 'API integration' });
+      await api.sessions.getPR('session-1', 'changeset-2');
+
+      expect(calls).toEqual([
+        '/api/v1/sessions/session-1/changesets',
+        JSON.stringify({ title: 'API', summary: 'Endpoints' }),
+        JSON.stringify({ title: 'API integration' }),
+        '?changeset_id=changeset-2',
+      ]);
     });
   });
 

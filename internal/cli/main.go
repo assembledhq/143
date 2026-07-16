@@ -101,7 +101,7 @@ func selectToolSource(ctx context.Context, overrides globalOverrides) (mcp.ToolS
 	var direct mcp.ToolSource = mcp.NewToolRegistry(envRegistry)
 	if token, apiURL := os.Getenv("INTERNAL_API_TOKEN"), os.Getenv("INTERNAL_API_URL"); token != "" && apiURL != "" {
 		direct = mcp.NewInternalMetaToolSource(direct, token, apiURL)
-		direct = newPreviewAugmentedToolSource(direct, NewClient(Config{ServerURL: apiURL, Token: token}))
+		direct = newInternalPreviewAugmentedToolSource(direct, NewClient(Config{ServerURL: apiURL, Token: token}))
 		snapshot, err := mcp.FetchCapabilitySnapshot(ctx, token, apiURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "143-tools: capability snapshot unavailable, running without filter: %v\n", err)

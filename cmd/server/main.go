@@ -466,6 +466,7 @@ func main() {
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
+			SessionChangesets:   db.NewSessionChangesetStore(pool),
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
 			Memberships:         db.NewOrganizationMembershipStore(pool),
@@ -1547,6 +1548,7 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
@@ -1747,6 +1749,7 @@ func buildServices(
 		LLM:               llmClient,
 		GitHub:            ghSvc,
 		CodeReviews:       codereviewsvc.NewGitHubSubmitter(ghSvc),
+		CodingAgents:      agentEnv,
 		GitHubOrgRoster:   ghSvc,
 		Snapshots:         snapshotStore,
 		TitleService:      titleService,

@@ -1459,6 +1459,142 @@ func TestAgentEnvCheckAuth(t *testing.T) {
 	require.True(t, authErr.FallbackCandidatesUnavailable, "AuthError should report unavailable fallback candidates")
 }
 
+func TestAgentEnvIsAgentAvailable(t *testing.T) {
+	t.Parallel()
+
+	resolverErr := errors.New("resolver unavailable")
+	tests := []struct {
+		name       string
+		agentType  models.AgentType
+		model      string
+		resolvable map[models.ProviderName][]models.DecryptedCodingCredential
+		errs       map[models.ProviderName]error
+		expected   bool
+		expectErr  bool
+	}{
+		{
+			name:      "Codex is available from an OpenAI API key",
+			agentType: models.AgentTypeCodex,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAI: {{
+					Provider: models.ProviderOpenAI,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.OpenAIConfig{APIKey: "sk-openai"},
+				}},
+			},
+			expected: true,
+		},
+		{
+			name:      "Codex is unavailable when only Claude Code is authenticated",
+			agentType: models.AgentTypeCodex,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropic: {{
+					Provider: models.ProviderAnthropic,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.AnthropicConfig{APIKey: "sk-anthropic"},
+				}},
+			},
+		},
+		{
+			name:      "Claude Code is available from a subscription",
+			agentType: models.AgentTypeClaudeCode,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderAnthropicSubscription: {{
+					Provider: models.ProviderAnthropicSubscription,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.AnthropicSubscriptionConfig{
+						AccessToken:  "access-token",
+						RefreshToken: "refresh-token",
+					},
+				}},
+			},
+			expected: true,
+		},
+		{
+			name:      "Claude Code is unavailable when only Codex is authenticated",
+			agentType: models.AgentTypeClaudeCode,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAI: {{
+					Provider: models.ProviderOpenAI,
+					Status:   models.CodingCredentialStatusActive,
+					Config:   models.OpenAIConfig{APIKey: "sk-openai"},
+				}},
+			},
+		},
+		{
+			name:      "OpenCode native model rejects an OpenRouter-backed credential",
+			agentType: models.AgentTypeOpenCode,
+			model:     models.OpenCodeModelGPT55,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {{
+					Provider: models.ProviderOpenCode,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenCodeConfig{
+						APIKey:          "sk-openrouter",
+						BackingProvider: models.ProviderOpenRouter,
+					},
+				}},
+			},
+		},
+		{
+			name:      "OpenCode OpenRouter model accepts an OpenRouter-backed credential",
+			agentType: models.AgentTypeOpenCode,
+			model:     models.OpenCodeModelOpenRouterGPT55,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenCode: {{
+					Provider: models.ProviderOpenCode,
+					Status:   models.CodingCredentialStatusActive,
+					Config: models.OpenCodeConfig{
+						APIKey:          "sk-openrouter",
+						BackingProvider: models.ProviderOpenRouter,
+					},
+				}},
+			},
+			expected: true,
+		},
+		{
+			name:      "inactive credentials are unavailable",
+			agentType: models.AgentTypeCodex,
+			resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{
+				models.ProviderOpenAI: {{
+					Provider: models.ProviderOpenAI,
+					Status:   models.CodingCredentialStatusDisabled,
+					Config:   models.OpenAIConfig{APIKey: "sk-openai"},
+				}},
+			},
+		},
+		{
+			name:      "resolver errors are propagated",
+			agentType: models.AgentTypeClaudeCode,
+			errs: map[models.ProviderName]error{
+				models.ProviderAnthropic: resolverErr,
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			env := NewAgentEnv(AgentEnvDeps{
+				CodingCredentials: &envCodingCredentialProvider{resolvable: tt.resolvable, errs: tt.errs},
+				Provider:          &envSandboxProvider{},
+				Logger:            zerolog.Nop(),
+			})
+
+			available, err := env.IsAgentAvailable(context.Background(), uuid.New(), nil, tt.agentType, tt.model)
+			if tt.expectErr {
+				require.Error(t, err, "IsAgentAvailable should propagate credential resolver failures")
+				require.ErrorIs(t, err, resolverErr, "IsAgentAvailable should preserve the resolver error")
+				return
+			}
+			require.NoError(t, err, "IsAgentAvailable should resolve configured credentials")
+			require.Equal(t, tt.expected, available, "IsAgentAvailable should match the active authentication stack")
+		})
+	}
+}
+
 func TestAgentEnvRuntimeCredentialBindingRecordsOpenCodeBackingProvider(t *testing.T) {
 	t.Parallel()
 

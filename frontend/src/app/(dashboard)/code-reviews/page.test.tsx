@@ -119,6 +119,7 @@ const review: CodeReviewListItem = {
   acceptable: true,
   stale: false,
   review_output_key: "pr-1:abcdef:policy-1",
+  github_review_id: 143428,
   completed_at: "2026-06-26T12:05:00Z",
   created_at: "2026-06-26T12:00:00Z",
   repository_name: "api",
@@ -265,10 +266,17 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
-    expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
-    expect(screen.getByText("Acceptable")).toBeInTheDocument();
-    expect(screen.getByText("Approved")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Evidence/i }));
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    expect(screen.getAllByText("Acceptable")).toHaveLength(2);
+    expect(screen.getAllByText("Automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    const filterToggle = screen.getByRole("button", { name: /Filter reviews/i });
+    expect(filterToggle).toHaveAttribute("aria-expanded", "false");
+    await user.click(filterToggle);
+    expect(filterToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(evidenceSheet).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("No blocking issues found.")).toBeInTheDocument();
@@ -277,9 +285,9 @@ describe("CodeReviewsPage", () => {
     expect(within(evidenceSheet).getByText("Completed")).toBeInTheDocument();
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
-    await user.click(screen.getByRole("combobox", { name: /Repository/i }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("combobox", { name: "Policy repository" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
     expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
@@ -289,7 +297,7 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
     expect(screen.getByText("2 reviewers")).toBeInTheDocument();
     expect(screen.getByText("quorum 2")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Comment only/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
@@ -359,8 +367,8 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />);
 
-    expect(await screen.findByText("#428 Fix invoice rounding")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /Evidence/i }));
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(within(evidenceSheet).getByRole("alert")).toHaveTextContent("Evidence could not be loaded");
 
@@ -368,6 +376,59 @@ describe("CodeReviewsPage", () => {
 
     expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
     expect(evidenceRequests).toBe(2);
+  });
+
+  it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
+    const user = userEvent.setup();
+    const requestedOutcomes: string[] = [];
+    const successfulNotApproved: CodeReviewListItem = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      pull_request_id: "pr-2",
+      status: "completed",
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: 143429,
+      github_pr_number: 429,
+      github_pr_url: "https://github.com/acme/api/pull/429",
+      pull_request_title: "Keep manual approval",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        const outcome = new URL(request.url).searchParams.get("outcome") ?? "";
+        requestedOutcomes.push(outcome);
+        return HttpResponse.json({
+          data: outcome === "completed_not_approved" ? [successfulNotApproved] : [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    expect(await screen.findAllByText("Automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Ran successfully — not approved" }));
+
+    expect(await screen.findAllByText("#429 Keep manual approval")).toHaveLength(2);
+    expect(screen.getAllByText("Not automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Needs human review")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("completed_not_approved");
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Automatically approved" }));
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("automatically_approved");
+    });
   });
 
   it("edits description requirements in a focused side sheet", async () => {
@@ -406,18 +467,18 @@ describe("CodeReviewsPage", () => {
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
-    await user.click(await screen.findByRole("button", { name: /^Comment only/i }));
+    await user.click(await screen.findByRole("radio", { name: /^Comment only/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });
     expect(state.getCurrentConfig().approval_mode).toBe("comment_only");
 
-    await user.click(screen.getByRole("button", { name: /^Disabled/i }));
+    await user.click(screen.getByRole("radio", { name: /^Disabled/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(false);
     });
 
-    await user.click(screen.getByRole("button", { name: /^Approve acceptable PRs/i }));
+    await user.click(screen.getByRole("radio", { name: /^Approve acceptable PRs/i }));
     await waitFor(() => {
       expect(state.getCurrentConfig().enabled).toBe(true);
     });

@@ -7,6 +7,7 @@ package automations
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,21 @@ func (h *AutomationHooks) SetPagerDutyWritebacker(writebacker pagerDutyAutomatio
 	h.pagerDutyWritebacker = writebacker
 }
 
+// AutomaticPublishPolicy returns the immutable policy captured when the
+// automation run was created. Reading the run snapshot instead of the live
+// automation keeps an in-flight run's publication behavior deterministic.
+func (h *AutomationHooks) AutomaticPublishPolicy(ctx context.Context, orgID, runID uuid.UUID) (models.AutomationPublishPolicy, error) {
+	automationRun, err := h.runs.GetByRunID(ctx, orgID, runID)
+	if err != nil {
+		return "", fmt.Errorf("load automation run publish policy: %w", err)
+	}
+	policy, err := models.AutomationPublishPolicyFromConfigSnapshot(automationRun.ConfigSnapshot)
+	if err != nil {
+		return "", fmt.Errorf("resolve automation run publish policy: %w", err)
+	}
+	return policy, nil
+}
+
 // OnSessionComplete maps a session's terminal status to the automation_run
 // row. Non-terminal statuses (awaiting_input, cancelled, etc.) are ignored —
 // the automation_run stays "running" until the session reaches a terminal
@@ -61,7 +77,11 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 	var runStatus models.AutomationRunStatus
 	switch status {
 	case models.SessionStatusCompleted:
-		runStatus = models.AutomationRunStatusCompleted
+		if run.Diff == nil || strings.TrimSpace(*run.Diff) == "" {
+			runStatus = models.AutomationRunStatusCompletedNoop
+		} else {
+			runStatus = models.AutomationRunStatusCompleted
+		}
 	case models.SessionStatusFailed, models.SessionStatusNeedsHumanGuidance:
 		// needs_human_guidance is terminal from the orchestrator's
 		// perspective — a human response starts a fresh session rather than

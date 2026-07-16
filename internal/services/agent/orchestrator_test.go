@@ -319,6 +319,8 @@ type mockSessionStore struct {
 	workerOwnerships       []workerOwnershipUpdate
 	revisionContextUpdates [][]byte
 	updateWorkingBranchErr error
+	primaryWorktreePath    *string
+	primaryWorktreeErr     error
 	countRunningErr        error
 	beginRuntimeErr        error
 	publishCheckpointErr   error
@@ -755,6 +757,18 @@ func (m *mockSessionStore) getResultUpdates() []resultUpdate {
 	return out
 }
 
+func (m *mockSessionStore) getResultsWithFailureCategory(category string) []resultUpdate {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]resultUpdate, 0)
+	for _, update := range m.resultUpdates {
+		if update.result != nil && update.result.FailureCategory != nil && *update.result.FailureCategory == category {
+			out = append(out, update)
+		}
+	}
+	return out
+}
+
 func (m *mockSessionStore) getTurnUpdates() []turnUpdate {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1111,6 +1125,27 @@ type mockProjectTaskUpdater struct {
 	statuses []string
 }
 
+type mockAutomationRunUpdater struct {
+	mu        sync.Mutex
+	policy    models.AutomationPublishPolicy
+	policyErr error
+	statuses  []models.SessionStatus
+}
+
+func (m *mockAutomationRunUpdater) OnSessionComplete(_ context.Context, _ *models.Session, status models.SessionStatus) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.statuses = append(m.statuses, status)
+	return nil
+}
+
+func (m *mockAutomationRunUpdater) AutomaticPublishPolicy(_ context.Context, _, _ uuid.UUID) (models.AutomationPublishPolicy, error) {
+	if m.policyErr != nil {
+		return "", m.policyErr
+	}
+	return m.policy, nil
+}
+
 func (m *mockProjectTaskUpdater) OnSessionComplete(ctx context.Context, run *models.Session, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1185,6 +1220,18 @@ func (m *mockOrgStore) GetByID(ctx context.Context, orgID uuid.UUID) (models.Org
 	return m.org, nil
 }
 
+func (m *mockSessionStore) GetPrimaryChangesetID(_ context.Context, _, sessionID uuid.UUID) (uuid.UUID, error) {
+	return sessionID, nil
+}
+
+func (m *mockSessionStore) GetPrimaryChangesetWorktreePath(_ context.Context, _, _ uuid.UUID) (*string, error) {
+	return m.primaryWorktreePath, m.primaryWorktreeErr
+}
+
+func (m *mockSessionStore) UpdatePRCreationState(_ context.Context, _, _ uuid.UUID, _ models.PRCreationState, _ string) error {
+	return nil
+}
+
 // mockJobStore implements agent.JobStore.
 type mockJobStore struct {
 	mu               sync.Mutex
@@ -1234,6 +1281,16 @@ func (m *mockJobStore) getPayload(jobType string) any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.payloads[jobType]
+}
+
+// QueueChangesetPRCreation records the open_pr enqueue through the same maps as
+// Enqueue so assertions on getEnqueued/getPayload observe the queued job.
+func (m *mockJobStore) QueueChangesetPRCreation(ctx context.Context, orgID, _, _ uuid.UUID, queue string, payload any, priority int) (uuid.UUID, bool, error) {
+	id, err := m.Enqueue(ctx, orgID, queue, "open_pr", payload, priority, nil)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return id, true, nil
 }
 
 // --- Helpers ---
@@ -1300,6 +1357,7 @@ type testDeps struct {
 	sessions         *mockSessionStore
 	sessionThreads   *mockSessionThreadStore
 	projects         *mockProjectTaskUpdater
+	automationRuns   agent.AutomationRunUpdater
 	issues           *mockIssueStore
 	repos            *mockRepositoryStore
 	logs             *mockSessionLogStore
@@ -1335,10 +1393,16 @@ type testDeps struct {
 // blocks use updateStatusCalls to assert thread.status was reset.
 type mockSessionThreadStore struct {
 	mu                sync.Mutex
+	eventHook         func(string)
 	getByIDResult     *models.SessionThread
 	updateStatusCalls []struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
+	}
+	updateResultCalls []struct {
+		threadID uuid.UUID
+		status   models.ThreadStatus
+		result   models.SessionResult
 	}
 	completeTurnCalls []struct {
 		threadID uuid.UUID
@@ -1375,13 +1439,23 @@ func (m *mockSessionThreadStore) CompleteTurn(_ context.Context, _, threadID uui
 	return nil
 }
 
-func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, _ *models.SessionResult) error {
+func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.eventHook != nil {
+		m.eventHook("thread_result:" + threadID.String() + ":" + string(status))
+	}
 	m.updateStatusCalls = append(m.updateStatusCalls, struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}{threadID: threadID, status: status})
+	if result != nil {
+		m.updateResultCalls = append(m.updateResultCalls, struct {
+			threadID uuid.UUID
+			status   models.ThreadStatus
+			result   models.SessionResult
+		}{threadID: threadID, status: status, result: *result})
+	}
 	return nil
 }
 
@@ -1410,6 +1484,18 @@ func (m *mockSessionThreadStore) statusesForThread(threadID uuid.UUID) []models.
 	for _, c := range m.updateStatusCalls {
 		if c.threadID == threadID {
 			out = append(out, c.status)
+		}
+	}
+	return out
+}
+
+func (m *mockSessionThreadStore) resultsForThread(threadID uuid.UUID) []models.SessionResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]models.SessionResult, 0)
+	for _, call := range m.updateResultCalls {
+		if call.threadID == threadID {
+			out = append(out, call.result)
 		}
 	}
 	return out
@@ -1571,6 +1657,7 @@ func buildOrchestrator(d testDeps) *agent.Orchestrator {
 		SessionMessages:    d.messages,
 		DecisionLog:        d.decisions,
 		ProjectTasks:       d.projects,
+		AutomationRuns:     d.automationRuns,
 		Issues:             d.issues,
 		Repositories:       d.repos,
 		Jobs:               d.jobs,
@@ -2220,7 +2307,7 @@ func TestRecoverSession_RestartsWhenNoDurableCheckpointExists(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should follow the normal run result path")
 	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete the run from scratch")
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "restart should skip PR creation when the recovered run produces no diff")
 }
 
 func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
@@ -2249,9 +2336,9 @@ func TestRecoverSession_FailsAfterRepeatedNoCheckpointRecovery(t *testing.T) {
 	require.Len(t, results, 1, "exhausted recovery should mark the session failed")
 	require.Equal(t, models.SessionStatusFailed, results[0].status, "exhausted recovery should be terminal")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryRecovery)
 	require.Len(t, failures, 1, "exhausted recovery should record structured failure metadata")
-	require.Equal(t, agent.FailureCategoryRecovery, failures[0].category, "recovery failures should be classified distinctly from agent/tool failures")
+	require.True(t, failures[0].result.FailureRetryAdvised, "recovery failures should recommend retrying")
 
 	require.Empty(t, d.sessions.getStatusUpdates(), "exhausted recovery should not transition back to running")
 	require.Empty(t, d.sessions.getTurnUpdates(), "exhausted recovery should not advance the turn")
@@ -2346,7 +2433,7 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	results := d.sessions.getResultUpdates()
 	require.Len(t, results, 1, "restart should still complete the run")
 	require.Equal(t, models.SessionStatusCompleted, results[0].status, "restart should complete successfully under a single-slot concurrency limit")
-	require.Contains(t, d.jobs.getEnqueued(), "open_pr", "restart should enqueue PR creation like a fresh run")
+	require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "restart should skip PR creation when the recovered run produces no diff")
 }
 
 func TestRecoverSession_PreservesRunningStatusWhenRuntimeInitFails(t *testing.T) {
@@ -3988,6 +4075,69 @@ func TestRunAgent_SuccessEnqueuesOpenPR(t *testing.T) {
 	require.Equal(t, models.SessionStatusCompleted, results[0].status)
 
 	require.Contains(t, d.jobs.getEnqueued(), "open_pr")
+}
+
+func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		diff            string
+		automation      bool
+		policy          models.AutomationPublishPolicy
+		expectOpenPR    bool
+		expectEndedNoPR bool
+	}{
+		{
+			name:            "no diff skips pull request",
+			expectEndedNoPR: true,
+		},
+		{
+			name:       "automation policy none skips pull request",
+			diff:       "--- a/fix.go\n+++ b/fix.go",
+			automation: true,
+			policy:     models.AutomationPublishPolicyNone,
+		},
+		{
+			name:         "automation pull request policy publishes diff",
+			diff:         "--- a/fix.go\n+++ b/fix.go",
+			automation:   true,
+			policy:       models.AutomationPublishPolicyPullRequest,
+			expectOpenPR: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := testOrg()
+			issue := testIssue(orgID)
+			run := testRun(orgID, issue.ID)
+			d := defaultDeps()
+			if tt.automation {
+				automationRunID := uuid.New()
+				run.AutomationRunID = &automationRunID
+				d.automationRuns = &mockAutomationRunUpdater{policy: tt.policy}
+			}
+			d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+				return &agent.AgentResult{Diff: tt.diff, Summary: "review complete", ExitCode: 0}, nil
+			}
+
+			err := buildOrchestrator(d).RunAgent(context.Background(), run)
+			require.NoError(t, err, "successful session should complete")
+			if tt.expectEndedNoPR {
+				payload, ok := d.jobs.getPayload("linear_milestone").(map[string]any)
+				require.True(t, ok, "no-diff session should enqueue a Linear terminal milestone")
+				require.Equal(t, string(linear.MilestoneEndedNoPR), payload["event"], "no-diff session should complete Linear without a PR")
+			}
+			if tt.expectOpenPR {
+				require.Contains(t, d.jobs.getEnqueued(), "open_pr", "eligible automation should queue pull request creation")
+				return
+			}
+			require.NotContains(t, d.jobs.getEnqueued(), "open_pr", "ineligible session should not queue pull request creation")
+		})
+	}
 }
 
 func TestRunAgent_ConcurrencyLimit(t *testing.T) {
@@ -6212,9 +6362,10 @@ func TestRunAgent_NoAgentEnvForUnknownType(t *testing.T) {
 		"HOME should always be set to the sandbox user's home dir")
 
 	// The failure should be categorized as claude_code_auth.
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryClaudeCodeAuth)
 	require.Len(t, failures, 1)
-	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
+	require.Contains(t, failures[0].result.FailureNextSteps, "Connect a Claude subscription from Account settings",
+		"the terminal result should carry the Account settings recovery guidance")
 }
 
 func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.T) {
@@ -6223,6 +6374,8 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 	orgID := testOrg()
 	issue := testIssue(orgID)
 	run := testRun(orgID, issue.ID)
+	threadID := uuid.New()
+	run.PrimaryThreadID = &threadID
 
 	d := defaultDeps()
 	// No usable credential anywhere, but the org holds a Claude subscription
@@ -6231,21 +6384,31 @@ func TestRunAgent_InvalidClaudeSubscriptionFailsWithReconnectMessage(t *testing.
 	// credentials are configured".
 	d.creds = &mockCredentialProvider{}
 	d.claudeCodeAuth = &mockClaudeCodeAuthProvider{invalidSub: true}
+	threadStore := &mockSessionThreadStore{}
+	d.sessionThreads = threadStore
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "claude subscription invalid for claude code agent")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryClaudeCodeAuth)
 	require.Len(t, failures, 1)
-	require.Equal(t, string(agent.FailureCategoryClaudeCodeAuth), failures[0].category)
-	require.Contains(t, failures[0].explanation, "no longer valid",
+	require.NotNil(t, failures[0].result.FailureExplanation, "the terminal result should include a user-facing explanation")
+	require.Contains(t, *failures[0].result.FailureExplanation, "no longer valid",
 		"the explanation should say the subscription was invalidated")
-	require.Contains(t, failures[0].explanation, "Reconnect",
+	require.Contains(t, *failures[0].result.FailureExplanation, "Reconnect",
 		"the explanation should tell the user to reconnect")
-	require.NotContains(t, failures[0].explanation, "No Claude Code credentials are configured",
+	require.NotContains(t, *failures[0].result.FailureExplanation, "No Claude Code credentials are configured",
 		"a user who connected a subscription must not be told nothing is configured")
+	threadResults := threadStore.resultsForThread(threadID)
+	require.NotEmpty(t, threadResults, "the failed Claude tab should receive terminal result metadata")
+	require.NotNil(t, threadResults[len(threadResults)-1].FailureCategory, "the failed Claude tab should carry the auth category")
+	require.Equal(t, agent.FailureCategoryClaudeCodeAuth, *threadResults[len(threadResults)-1].FailureCategory,
+		"the thread category should let the session UI render reconnect guidance even if the parent session later completes")
+	require.NotNil(t, threadResults[len(threadResults)-1].FailureExplanation, "the failed Claude tab should carry the user-facing explanation")
+	require.Contains(t, *threadResults[len(threadResults)-1].FailureExplanation, "no longer valid",
+		"the thread explanation should preserve the actionable reconnect guidance instead of the raw auth error")
 }
 
 func TestRunAgent_InvalidSubscriptionProbeErrorFallsBackToGenericFailure(t *testing.T) {
@@ -6694,6 +6857,79 @@ func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
 	require.NotContains(t, d.sessionThreads.statusesForThread(activeThreadID), models.ThreadStatusCompleted, "continue_session should not mark an errored secondary thread completed")
 	require.Empty(t, d.sessions.getTurnUpdates(), "continue_session should not persist a successful turn for an adapter result error")
 	require.Len(t, d.messages.getMessages(), 1, "continue_session should not append an assistant success message for an adapter result error")
+}
+
+func TestContinueSession_ClaudeAuthFailureMarksActiveReviewerThread(t *testing.T) {
+	t.Parallel()
+
+	orgID := testOrg()
+	primaryThreadID := uuid.New()
+	activeThreadID := uuid.New()
+	issue := testIssue(orgID)
+	session := testRun(orgID, issue.ID)
+	session.Status = models.SessionStatusIdle
+	session.CurrentTurn = 1
+	session.PrimaryThreadID = &primaryThreadID
+	var (
+		eventMu sync.Mutex
+		events  []string
+	)
+	recordEvent := func(event string) {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		events = append(events, event)
+	}
+
+	d := defaultDeps()
+	d.issues.issue = issue
+	d.creds = &mockCredentialProvider{}
+	d.codingCreds = &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
+	d.sessions.eventHook = recordEvent
+	d.sessionThreads = &mockSessionThreadStore{eventHook: recordEvent}
+	d.messages.messages = []models.SessionMessage{{
+		ID:         1,
+		SessionID:  session.ID,
+		OrgID:      orgID,
+		ThreadID:   &activeThreadID,
+		TurnNumber: 1,
+		Role:       models.MessageRoleUser,
+		Content:    "/review",
+	}}
+
+	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
+		AgentType: models.AgentTypeClaudeCode,
+		ThreadID:  &activeThreadID,
+	})
+	require.Error(t, err, "continue_session should fail when the Claude reviewer has no credentials")
+	require.Contains(t, err.Error(), "no credentials for claude code agent", "continue_session should preserve the Claude auth failure")
+
+	sessionResults := d.sessions.getResultUpdates()
+	require.Len(t, sessionResults, 1, "categorized auth failure should terminalize the session exactly once")
+	require.NotNil(t, sessionResults[0].result.FailureExplanation, "the session result should retain its user-facing auth explanation")
+	require.Contains(t, *sessionResults[0].result.FailureExplanation, "No Claude Code credentials are configured",
+		"fresh-sandbox error handling should not replace the categorized session failure with a wrapped raw error")
+	primaryResults := d.sessionThreads.resultsForThread(primaryThreadID)
+	require.Len(t, primaryResults, 1, "session-level failure bookkeeping should terminalize the primary thread exactly once")
+	require.NotNil(t, primaryResults[0].FailureExplanation, "the primary thread should retain the categorized explanation")
+	require.Contains(t, *primaryResults[0].FailureExplanation, "No Claude Code credentials are configured",
+		"fresh-sandbox error handling should not overwrite the primary thread with a raw error")
+	activeResults := d.sessionThreads.resultsForThread(activeThreadID)
+	require.Len(t, activeResults, 1, "the executing reviewer thread should receive one categorized failure result")
+	require.NotNil(t, activeResults[0].FailureCategory, "the executing reviewer thread should carry the Claude auth category")
+	require.Equal(t, agent.FailureCategoryClaudeCodeAuth, *activeResults[0].FailureCategory,
+		"the executing reviewer thread should be identifiable as a Claude auth failure")
+	require.NotNil(t, activeResults[0].FailureExplanation, "the executing reviewer thread should carry the user-facing explanation")
+	require.Contains(t, *activeResults[0].FailureExplanation, "No Claude Code credentials are configured",
+		"the reviewer thread should show actionable setup guidance instead of the raw orchestrator error")
+
+	eventMu.Lock()
+	gotEvents := append([]string(nil), events...)
+	eventMu.Unlock()
+	sessionTerminalEvent := "session_result:" + string(models.SessionStatusFailed)
+	require.Less(t, indexOfEvent(gotEvents, "thread_result:"+activeThreadID.String()+":"+string(models.ThreadStatusFailed)), indexOfEvent(gotEvents, sessionTerminalEvent),
+		"the executing reviewer thread should be durable before the terminal session event closes SSE")
+	require.Less(t, indexOfEvent(gotEvents, "thread_result:"+primaryThreadID.String()+":"+string(models.ThreadStatusFailed)), indexOfEvent(gotEvents, sessionTerminalEvent),
+		"the primary thread should be durable before the terminal session event closes SSE")
 }
 
 func TestContinueSession_CancelReturnsPayloadThreadToIdle(t *testing.T) {
@@ -8178,6 +8414,7 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 	const (
 		sandboxCreateFailure failureMode = iota
 		workdirResolveFailure
+		primaryChangesetWorktreeFailure
 	)
 
 	cases := []struct {
@@ -8233,6 +8470,15 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			wantMessageAfter:  true,
 			wantErrMatch:      "resolve workdir",
 		},
+		{
+			name:              "primary-changeset-worktree: dead-letter posts exactly one message",
+			failure:           primaryChangesetWorktreeFailure,
+			withRegistry:      true,
+			runHooks:          true,
+			wantMessageInline: false,
+			wantMessageAfter:  true,
+			wantErrMatch:      "resolve primary changeset worktree",
+		},
 	}
 
 	for _, c := range cases {
@@ -8268,6 +8514,8 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 			case workdirResolveFailure:
 				// Force sessionRepoSlug to fail at the repo lookup.
 				d.repos.err = errors.New("db flaky")
+			case primaryChangesetWorktreeFailure:
+				d.sessions.primaryWorktreeErr = errors.New(`column "worktree_path" does not exist`)
 			}
 
 			ctx := context.Background()
@@ -8277,8 +8525,12 @@ func TestContinueSession_ErrorMessageDeferredToDeadLetterHook(t *testing.T) {
 
 			orch := buildOrchestrator(d)
 			err := orch.ContinueSession(ctx, session, nil)
-			require.Error(t, err)
-			require.Contains(t, err.Error(), c.wantErrMatch)
+			require.Error(t, err, "ContinueSession should return the startup failure")
+			require.Contains(t, err.Error(), c.wantErrMatch, "ContinueSession should identify the failed startup stage")
+			if c.failure == primaryChangesetWorktreeFailure {
+				require.Contains(t, d.sessions.getStatusUpdates(), string(models.SessionStatusIdle), "worktree lookup failure should immediately restore the session to idle")
+				require.Contains(t, d.sessions.getSandboxStateUpdateContexts(), sandboxStateUpdateContext{state: models.SandboxStateSnapshotted}, "worktree lookup failure should restore the durable sandbox state")
+			}
 
 			countAssistantMessages := func() int {
 				var n int
@@ -8616,13 +8868,10 @@ func TestContinueSession_CodexAuthInvalidStillFailsInline(t *testing.T) {
 	}
 	require.GreaterOrEqual(t, failedResults, 1, "ErrCodexAuthInvalid must mark the session failed inline so the user gets the re-authenticate CTA without waiting for the retry budget to exhaust")
 
-	failedFailures := 0
-	for _, f := range d.sessions.getFailureUpdates() {
-		if f.category == agent.FailureCategoryCodexAuth {
-			failedFailures++
-		}
-	}
-	require.GreaterOrEqual(t, failedFailures, 1, "auth-invalid path must record the codex_auth_expired category inline")
+	structuredFailures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryCodexAuth)
+	require.GreaterOrEqual(t, len(structuredFailures), 1, "auth-invalid path must record the codex_auth_expired category inline")
+	require.True(t, structuredFailures[len(structuredFailures)-1].result.FailureRetryAdvised,
+		"auth-invalid terminal event should include the retry recommendation")
 }
 
 // TestRunAgent_CodexAuthInjectInfraFailureDeferredToDeadLetter mirrors
@@ -9345,10 +9594,9 @@ func TestRunAgent_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 	// async classifier.
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
 		"timeout path classifies explicitly; analyze_failure should not be enqueued")
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1)
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
-	require.True(t, failures[0].retryAdvised)
+	require.True(t, failures[0].result.FailureRetryAdvised, "timeout terminal event should advise retrying")
 }
 
 func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
@@ -9401,10 +9649,9 @@ func TestContinueSession_DeadlineExceededClassifiesAsTimeout(t *testing.T) {
 
 	require.NotContains(t, d.jobs.getEnqueued(), "analyze_failure",
 		"timeout path classifies explicitly; analyze_failure should not be enqueued")
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1)
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category)
-	require.True(t, failures[0].retryAdvised)
+	require.True(t, failures[0].result.FailureRetryAdvised, "timeout terminal event should advise retrying")
 }
 
 func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T) {
@@ -9462,10 +9709,10 @@ func TestRunAgent_GracefullyStopsAndPreservesCheckpointOnNoProgress(t *testing.T
 	require.Equal(t, models.RuntimeStopReasonNoProgress, checkpoints[len(checkpoints)-1].stopReason, "policy stop should record the no-progress stop reason")
 	require.NotEmpty(t, checkpoints[len(checkpoints)-1].snapshotKey, "policy stop should persist the checkpoint snapshot key")
 
-	failures := d.sessions.getFailureUpdates()
+	failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTimeout)
 	require.Len(t, failures, 1, "policy stop should persist a structured failure explanation")
-	require.Equal(t, agent.FailureCategoryTimeout, failures[0].category, "policy stop should use the timeout family category")
-	require.Contains(t, failures[0].explanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
+	require.NotNil(t, failures[0].result.FailureExplanation, "policy stop should include a user-facing explanation")
+	require.Contains(t, *failures[0].result.FailureExplanation, "saved a resumable checkpoint", "policy stop should explain that the latest state was preserved")
 
 	completion := findLogEvent(t, logs, "agent run finished")
 	require.NotNil(t, completion, "policy-stopped RunAgent should emit agent run finished log")
@@ -9539,9 +9786,9 @@ func TestRunAgent_PolicyStopPersistsTerminalStateBeforeMentionWarmup(t *testing.
 	eventMu.Lock()
 	gotEvents := append([]string(nil), events...)
 	eventMu.Unlock()
-	require.Contains(t, gotEvents, "session_failure", "policy stop should persist session failure details")
+	require.Contains(t, gotEvents, "session_result:failed", "policy stop should persist the complete terminal failure result")
 	require.Contains(t, gotEvents, "mention_warm", "policy stop should still attempt mention-index warmup after checkpointing")
-	require.Less(t, indexOfEvent(gotEvents, "session_failure"), indexOfEvent(gotEvents, "mention_warm"), "terminal session state should be persisted before mention-index warmup")
+	require.Less(t, indexOfEvent(gotEvents, "session_result:failed"), indexOfEvent(gotEvents, "mention_warm"), "terminal session state should be persisted before mention-index warmup")
 }
 
 func TestRunAgent_DoesNotPublishCheckpointWithoutSnapshotStore(t *testing.T) {

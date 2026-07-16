@@ -743,3 +743,53 @@ func TestHandleLinearAgentCreatedReemitsBootstrapBeforeIssueFetch(t *testing.T) 
 	require.NotEqual(t, -1, fetch, "created handler should still fetch the live Linear issue")
 	require.Less(t, emit, fetch, "worker bootstrap re-emit should happen before the potentially slower live issue fetch")
 }
+
+func TestConnectAccountActivityUsesSharedIdemKey(t *testing.T) {
+	t.Parallel()
+
+	activity := linear.ConnectAccountActivity("https://143.example/external-identities/claim?token=abc")
+	require.Equal(t, linear.ConnectAccountIdemKey, activity.IdemKey,
+		"the connect-account prompt and the emitLinearIdentityClaim replay check must share one idem key so they can never drift")
+}
+
+func TestEmitLinearIdentityClaimSkipsWhenAlreadyEmitted(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	rowID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now().UTC()
+
+	// The activity log already carries a delivered connect-account prompt for
+	// this session, standing in for an earlier (successful) handler run.
+	activityMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock for the activity log")
+	defer activityMock.Close()
+	activityMock.ExpectQuery("SELECT (.+) FROM linear_agent_activity_log").
+		WithArgs(orgID, rowID).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "agent_session_row_id", "idem_key", "activity_type", "linear_activity_id", "created_at",
+		}).AddRow(uuid.New(), orgID, rowID, linear.ConnectAccountIdemKey, models.LinearAgentActivityResponse, "act_1", now))
+
+	// The claim store must never be touched on a replay; give it a strict mock
+	// with no expectations so a mint attempt would surface as an unexpected call.
+	linksMock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create pgx mock for the external user link store")
+	defer linksMock.Close()
+
+	deps := LinearAgentEventHandlerDeps{
+		Stores: &Stores{ExternalUserLinks: db.NewExternalUserLinkStore(linksMock)},
+		Linear: &linear.Service{},
+	}
+	session := &models.Session{OrgID: orgID, ID: sessionID}
+	row := &db.LinearAgentSession{ID: rowID, LinearAgentSessionID: "as_1", LinearCreatorUserID: "creator-1"}
+	fetched := &linear.FetchedIssue{WorkspaceID: "ws-1"}
+
+	emitLinearIdentityClaim(context.Background(), deps, nil, db.NewLinearAgentActivityLogStore(activityMock),
+		session, row, linearAgentEventPayload{}, fetched, zerolog.Nop())
+
+	require.NoError(t, activityMock.ExpectationsWereMet(),
+		"replay must peek the activity log for an already-delivered connect-account prompt")
+	require.NoError(t, linksMock.ExpectationsWereMet(),
+		"replay must not mint a fresh claim token when the prompt was already delivered")
+}

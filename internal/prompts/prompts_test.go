@@ -186,17 +186,20 @@ func TestAnswerOnlyPreamble(t *testing.T) {
 	assert.NotContains(t, result, "Write tests")
 }
 
-func TestSessionTitlePrompt(t *testing.T) {
+func TestSessionTitlePrompts(t *testing.T) {
 	t.Parallel()
 
-	result := SessionTitlePrompt(SessionTitlePromptData{
-		CurrentTitle: "Fix checkout timeout",
-	})
+	generation := SessionTitleGenerationPrompt()
+	require.Contains(t, generation, "primary task", "generation prompt should title the intended deliverable")
+	require.Contains(t, generation, "Output ONLY the title", "generation prompt should require plain title output")
 
-	require.Contains(t, result, "The current title is: Fix checkout timeout", "prompt should include the current title for stability decisions")
-	require.Contains(t, result, "Keep the original task as the main thing", "prompt should anchor the title to the original task")
-	require.Contains(t, result, "Ignore routine follow-ups", "prompt should instruct the model to ignore incidental workflow chatter")
-	require.Contains(t, result, "Only change the title if the conversation clearly shifted to a new primary topic", "prompt should only allow retitling on real topic changes")
+	pivot := SessionTitlePivotPrompt()
+	require.Contains(t, pivot, "original request is authoritative", "pivot prompt should default to original intent")
+	require.Contains(t, pivot, "are not pivots", "pivot prompt should exclude implementation churn")
+	require.Contains(t, pivot, "When uncertain", "pivot prompt should fail closed")
+	require.Contains(t, pivot, "add tests", "pivot prompt should include a routine-follow-up KEEP example")
+	require.Contains(t, pivot, "stop working on authentication", "pivot prompt should include an explicit replacement-objective example")
+	require.Contains(t, pivot, "PIVOT", "pivot prompt should define the strict positive response")
 }
 
 func TestPRContentPromptUsesProblemFirstDefaultShape(t *testing.T) {

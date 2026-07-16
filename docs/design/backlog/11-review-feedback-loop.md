@@ -1,6 +1,8 @@
 # Design: PR Review Feedback -> Agent Improvement Loop
 
-> **Status:** Backlog | **Last reviewed:** 2026-05-06
+> **Status:** Backlog | **Last reviewed:** 2026-07-10
+
+> **Superseded execution design:** Section 2's revision-run auto-apply flow is historical. The current proposal for acting on live PR feedback is [Automatic PR Feedback Follow-Through](../future/116-automatic-pr-feedback-follow-through.md), which continues the canonical PR session, batches submitted reviews, uses backend-owned push/replies, and keeps this document's `review_comments` pipeline as the learning projection.
 
 This document describes how 143.dev captures human PR review feedback and uses it to improve future agent runs — creating a flywheel where every human review makes every future agent run better.
 

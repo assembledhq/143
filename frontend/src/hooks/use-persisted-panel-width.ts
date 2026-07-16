@@ -7,6 +7,12 @@ interface UsePersistedPanelWidthOptions {
   defaultWidth: number;
   minWidth: number;
   maxWidth: number;
+  /**
+   * When set, calling `settle()` after a drag that ended below this width snaps
+   * the panel to `minWidth` (the icon-rail width), so it never rests in the
+   * dead zone between `minWidth` and the collapse threshold.
+   */
+  collapseBelow?: number;
 }
 
 function clampWidth(width: number, minWidth: number, maxWidth: number): number {
@@ -48,8 +54,17 @@ export function usePersistedPanelWidth({
   defaultWidth,
   minWidth,
   maxWidth,
+  collapseBelow,
 }: UsePersistedPanelWidthOptions) {
   const [width, setWidth] = useState(defaultWidth);
+
+  const persistWidth = useCallback((nextWidth: number) => {
+    try {
+      window.localStorage.setItem(storageKey, String(nextWidth));
+    } catch (error) {
+      console.error("failed to persist panel width", { storageKey, width: nextWidth, error });
+    }
+  }, [storageKey]);
 
   useEffect(() => {
     const syncWidthFromStorage = () => {
@@ -64,16 +79,19 @@ export function usePersistedPanelWidth({
   const resizeBy = useCallback((delta: number) => {
     setWidth((current) => {
       const nextWidth = clampWidth(current + delta, minWidth, maxWidth);
-
-      try {
-        window.localStorage.setItem(storageKey, String(nextWidth));
-      } catch (error) {
-        console.error("failed to persist panel width", { storageKey, width: nextWidth, error });
-      }
-
+      persistWidth(nextWidth);
       return nextWidth;
     });
-  }, [maxWidth, minWidth, storageKey]);
+  }, [maxWidth, minWidth, persistWidth]);
 
-  return { width, resizeBy };
+  const settle = useCallback(() => {
+    if (collapseBelow === undefined) return;
+    setWidth((current) => {
+      if (current >= collapseBelow || current === minWidth) return current;
+      persistWidth(minWidth);
+      return minWidth;
+    });
+  }, [collapseBelow, minWidth, persistWidth]);
+
+  return { width, resizeBy, settle };
 }

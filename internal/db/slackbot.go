@@ -704,7 +704,7 @@ func (s *SlackChannelSettingsStore) GetEffectiveByChannel(ctx context.Context, o
 			COALESCE(sc.routing_mode, bs.routing_mode, 'auto') AS routing_mode,
 			COALESCE(sc.response_visibility, bs.response_visibility, 'thread') AS response_visibility,
 			COALESCE(sc.allowed_actions, bs.allowed_actions, ARRAY['session','preview']::text[]) AS allowed_actions,
-			COALESCE(sc.notification_preset, bs.notification_preset, 'balanced') AS notification_preset,
+			COALESCE(sc.notification_preset, bs.notification_preset, 'quiet') AS notification_preset,
 			COALESCE(sc.notification_subscriptions, bs.notification_subscriptions, '{}'::jsonb) AS notification_subscriptions,
 			(sc.id IS NOT NULL) AS has_channel_override
 		FROM slack_installations si

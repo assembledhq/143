@@ -264,6 +264,24 @@ func TestRunCLI_UnknownUnderscoreNameIsUnknownNamespace(t *testing.T) {
 	require.NotContains(t, stderr.String(), "no longer supported", "unknown underscore-name should not falsely claim the command was deprecated")
 }
 
+func TestRunCLI_PrintsOnlyTextContent(t *testing.T) {
+	t.Parallel()
+
+	source := staticToolSource{
+		tools: []Tool{{Name: "preview_observe", InputSchema: ToolSchema{Type: "object"}}},
+		result: &ToolCallResult{Content: []ToolContent{
+			{Type: "text", Text: `{"ready":true}`},
+			ImageContent("iVBORw0KGgo=", "image/png"),
+		}},
+	}
+	var stdout, stderr bytes.Buffer
+	code := RunCLI(context.Background(), source, []string{"preview", "observe"}, &stdout, &stderr)
+
+	require.Equal(t, 0, code, "CLI should succeed for compound tool content")
+	require.Equal(t, "{\"ready\":true}\n", stdout.String(), "CLI should print semantic text without image bytes or blank lines")
+	require.Empty(t, stderr.String(), "successful compound output should not write stderr")
+}
+
 func TestRunCLI_ParsingErrorsAreSelfCorrecting(t *testing.T) {
 	t.Parallel()
 

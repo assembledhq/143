@@ -2503,7 +2503,7 @@ func defaultSlackBotSettings(orgID, installationID uuid.UUID) models.SlackBotSet
 		RoutingMode:               models.SlackRoutingModeAuto,
 		ResponseVisibility:        models.SlackResponseVisibilityThread,
 		AllowedActions:            []string{string(models.SlackChannelActionSession), string(models.SlackChannelActionPreview)},
-		NotificationPreset:        models.SlackNotificationPresetBalanced,
+		NotificationPreset:        models.SlackNotificationPresetQuiet,
 		NotificationSubscriptions: json.RawMessage(`{}`),
 		Active:                    true,
 	}
@@ -2754,6 +2754,7 @@ type externalUserLinkRequest struct {
 	ExternalEmail       *string                         `json:"external_email,omitempty"`
 	ExternalHandle      *string                         `json:"external_handle,omitempty"`
 	ExternalDisplayName *string                         `json:"external_display_name,omitempty"`
+	Replace             bool                            `json:"replace,omitempty"`
 }
 
 func (req *externalUserLinkRequest) Validate() error {
@@ -2818,6 +2819,15 @@ func (h *IntegrationHandler) CreateExternalUserLink(w http.ResponseWriter, r *ht
 	if user != nil {
 		linkedBy = &user.ID
 	}
+	existing, existingErr := h.externalUserLinks.GetActiveByExternal(r.Context(), orgID, req.Provider, strings.TrimSpace(req.ProviderWorkspaceID), strings.TrimSpace(req.ProviderUserID))
+	if existingErr != nil && !errors.Is(existingErr, pgx.ErrNoRows) {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_USER_LINK_LOOKUP_FAILED", "failed to inspect existing external user link", existingErr)
+		return
+	}
+	if existingErr == nil && existing.UserID != req.UserID && !req.Replace {
+		writeError(w, r, http.StatusConflict, "EXTERNAL_USER_LINK_CONFLICT", "external identity is already linked; set replace=true to relink it")
+		return
+	}
 	link, err := h.externalUserLinks.UpsertAdminActive(r.Context(), models.ExternalUserLink{
 		OrgID:               orgID,
 		Provider:            req.Provider,
@@ -2835,7 +2845,16 @@ func (h *IntegrationHandler) CreateExternalUserLink(w http.ResponseWriter, r *ht
 		return
 	}
 	resourceID := link.ID.String()
-	emitUserAudit(h.audit, r, models.AuditActionExternalUserLinkCreated, models.AuditResourceExternalUserLink, &resourceID, nil)
+	action := models.AuditActionExternalUserLinkCreated
+	var details json.RawMessage
+	if existingErr == nil && existing.UserID != req.UserID {
+		action = models.AuditActionExternalUserLinkReplaced
+		details, err = json.Marshal(map[string]string{"previous_user_id": existing.UserID.String(), "user_id": req.UserID.String()})
+		if err != nil {
+			zerolog.Ctx(r.Context()).Warn().Err(err).Msg("failed to marshal external identity replacement audit details")
+		}
+	}
+	emitUserAudit(h.audit, r, action, models.AuditResourceExternalUserLink, &resourceID, details)
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.ExternalUserLink]{Data: link})
 }
 
@@ -2875,6 +2894,20 @@ func (h *IntegrationHandler) ListExternalUserLinkSuggestions(w http.ResponseWrit
 		return
 	}
 	writeJSON(w, http.StatusOK, models.ListResponse[models.ExternalUserLinkSuggestion]{Data: suggestions, Meta: models.PaginationMeta{}})
+}
+
+func (h *IntegrationHandler) ListUnmappedExternalUsers(w http.ResponseWriter, r *http.Request) {
+	if h.externalSuggestions == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "EXTERNAL_USER_LINKS_NOT_CONFIGURED", "external identity observations are not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	actors, err := h.externalSuggestions.ListUnmappedByOrg(r.Context(), orgID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "EXTERNAL_UNMAPPED_USERS_FAILED", "failed to list unmapped external users", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.ListResponse[models.ExternalUserObservation]{Data: actors, Meta: models.PaginationMeta{}})
 }
 
 func (h *IntegrationHandler) ApproveExternalUserLinkSuggestion(w http.ResponseWriter, r *http.Request) {

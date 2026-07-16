@@ -15,6 +15,7 @@ import { ApiError, api } from "@/lib/api";
 import type { Automation, AutomationGoalImprovement } from "@/lib/types";
 import { formatDateTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   Dialog,
   DialogContent,
@@ -214,7 +215,7 @@ export function AutomationGoalImprovementControl({
 
   return (
     <>
-      <div className="flex items-center">
+      <ButtonGroup size="sm">
         <Button
           type="button"
           variant="outline"
@@ -267,7 +268,7 @@ export function AutomationGoalImprovementControl({
             <History className="h-4 w-4" />
           </Button>
         )}
-      </div>
+      </ButtonGroup>
       {error && <p className="text-xs text-destructive">{error}</p>}
       <Dialog
         open={proposal !== null}

@@ -93,6 +93,41 @@ func TestParseConfig_MultiService(t *testing.T) {
 	}
 }
 
+func TestParseConfig_BrowserVerificationPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		policy               string
+		expectedBrowser      models.PreviewBrowserConfig
+		expectedVerification models.PreviewVerificationConfig
+	}{
+		{
+			name:                 "defaults policy from primary readiness",
+			policy:               "",
+			expectedBrowser:      models.PreviewBrowserConfig{PersistSession: true, DefaultViewport: models.ViewportSpec{Name: "desktop", Width: 1440, Height: 900}, AllowedPaths: []string{"/**"}},
+			expectedVerification: models.PreviewVerificationConfig{Auto: true, MaxAttempts: 3, TimeoutSeconds: 300, Viewports: []models.ViewportSpec{{Name: "desktop", Width: 1440, Height: 900}}, SmokePaths: []string{"/health"}, FailOnConsoleError: true},
+		},
+		{
+			name:                 "honors explicit policy",
+			policy:               `,"browser":{"persist_session":false,"default_viewport":{"name":"wide","width":1600,"height":1000},"allowed_paths":["/app/**"]},"verification":{"auto":false,"max_attempts":2,"timeout_seconds":120,"viewports":[{"name":"mobile","width":390,"height":844}],"smoke_paths":["/app"],"fail_on_console_error":false}`,
+			expectedBrowser:      models.PreviewBrowserConfig{PersistSession: false, DefaultViewport: models.ViewportSpec{Name: "wide", Width: 1600, Height: 1000}, AllowedPaths: []string{"/app/**"}},
+			expectedVerification: models.PreviewVerificationConfig{Auto: false, MaxAttempts: 2, TimeoutSeconds: 120, Viewports: []models.ViewportSpec{{Name: "mobile", Width: 390, Height: 844}}, SmokePaths: []string{"/app"}, FailOnConsoleError: false},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			raw := fmt.Sprintf(`{"primary":"web","services":{"web":{"command":["npm","run","dev"],"port":3000,"ready":{"http_path":"/health"}}}%s}`, tt.policy)
+			cfg, err := ParseConfig([]byte(raw))
+			require.NoError(t, err, "browser and verification policy should parse")
+			require.Equal(t, tt.expectedBrowser, cfg.Browser, "browser policy should be normalized")
+			require.Equal(t, tt.expectedVerification, cfg.Verification, "verification policy should be normalized")
+		})
+	}
+}
+
 func TestInspectConfigOptions(t *testing.T) {
 	t.Parallel()
 
@@ -2236,12 +2271,20 @@ func TestCommittedDogfoodFrontendScriptBindsExternally(t *testing.T) {
 			raw, err := os.ReadFile(candidate)
 			require.NoError(t, err, "test should read committed dogfood frontend preview script")
 			require.Contains(t, string(raw), "HOSTNAME=0.0.0.0", "dogfood Next preview must bind externally so the worker proxy can dial the sandbox IP")
-			require.Contains(t, string(raw), "npm run build", "dogfood Next preview should run a production build before serving")
-			require.Contains(t, string(raw), "sh .143/preview-install-frontend.sh", "dogfood Next preview should run the shared install script as a fallback when the platform install phase did not run")
-			require.Contains(t, string(raw), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview should stage generated CSS and other static chunks next to the standalone server")
-			require.Contains(t, string(raw), "cp -R public .next/standalone/frontend/public", "dogfood Next preview should stage public assets next to the standalone server")
 			require.Contains(t, string(raw), "node .next/standalone/frontend/server.js", "dogfood Next preview should serve the standalone production build")
+			require.Contains(t, string(raw), "sh .143/preview-build-frontend.sh", "dogfood Next preview run phase should rebuild via the build script as a restart fallback when standalone output is missing")
+			require.NotContains(t, string(raw), "npm run build", "dogfood Next preview must not run the multi-GB next build in the run phase; it belongs in the build phase to avoid OOM")
 			require.NotContains(t, string(raw), "npm run dev", "dogfood Next preview must avoid dev server HMR in the preview gateway")
+
+			// The production build moved out of the run-phase entrypoint into the
+			// build-phase script (see PR #1800). Assert the moved responsibilities
+			// still live there so we don't silently lose build coverage.
+			buildScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-build-frontend.sh"))
+			require.NoError(t, err, "test should read committed dogfood frontend build script")
+			require.Contains(t, string(buildScript), "npm run build", "dogfood Next preview build phase should run a production build before serving")
+			require.Contains(t, string(buildScript), "sh .143/preview-install-frontend.sh", "dogfood Next preview build phase should run the shared install script as a fallback when the platform install phase did not run")
+			require.Contains(t, string(buildScript), "cp -R .next/static .next/standalone/frontend/.next/static", "dogfood Next preview build phase should stage generated CSS and other static chunks next to the standalone server")
+			require.Contains(t, string(buildScript), "cp -R public .next/standalone/frontend/public", "dogfood Next preview build phase should stage public assets next to the standalone server")
 
 			installScript, err := os.ReadFile(filepath.Join(dir, ".143", "preview-install-frontend.sh"))
 			require.NoError(t, err, "test should read committed dogfood frontend install script")

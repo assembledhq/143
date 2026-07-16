@@ -31,6 +31,10 @@ var ErrPullRequestNotYetMergeable = errors.New("pull request is not yet in a mer
 // an earlier PR head SHA and the final pre-merge sync observes a different SHA.
 var ErrPullRequestHeadChanged = errors.New("pull request head changed")
 
+// ErrStackParentUnmerged prevents GitHub from merging a child into its parent
+// branch, which would not land the child on the stack's ultimate target.
+var ErrStackParentUnmerged = errors.New("stacked pull request parent is not merged")
+
 // ErrNoMergeMethodAllowed is returned when the repository has all merge
 // methods disabled — a misconfiguration the user must fix on GitHub.
 var ErrNoMergeMethodAllowed = errors.New("no merge method is allowed on this repository")
@@ -86,6 +90,9 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 	}
 	if pr.Status != models.PullRequestStatusOpen {
 		return nil, fmt.Errorf("%w: pull request status is %q", ErrPullRequestNotMergeable, pr.Status)
+	}
+	if err := s.ensureStackParentMerged(ctx, pr); err != nil {
+		return nil, err
 	}
 
 	// Refresh GitHub state so we don't merge based on a stale snapshot. The
@@ -234,6 +241,27 @@ func (s *PRService) mergePullRequest(ctx context.Context, orgID, pullRequestID, 
 		Message:     mergeResp.Message,
 		MergeMethod: method,
 	}, nil
+}
+
+func (s *PRService) ensureStackParentMerged(ctx context.Context, pr models.PullRequest) error {
+	if s.changesets == nil || pr.ChangesetID == nil || pr.SessionID == nil {
+		return nil
+	}
+	changeset, err := s.changesets.GetByID(ctx, pr.OrgID, *pr.SessionID, *pr.ChangesetID)
+	if err != nil {
+		return fmt.Errorf("load pull request changeset: %w", err)
+	}
+	if changeset.StackedOnChangesetID == nil {
+		return nil
+	}
+	parentPR, err := s.pullRequests.GetByChangesetID(ctx, pr.OrgID, *pr.SessionID, *changeset.StackedOnChangesetID)
+	if err != nil {
+		return fmt.Errorf("%w: parent pull request is unpublished", ErrStackParentUnmerged)
+	}
+	if parentPR.Status != models.PullRequestStatusMerged {
+		return fmt.Errorf("%w: parent pull request #%d is %s", ErrStackParentUnmerged, parentPR.GitHubPRNumber, parentPR.Status)
+	}
+	return nil
 }
 
 func validateExpectedMergeHead(currentHeadSHA string, expectedHeadSHA *string) error {

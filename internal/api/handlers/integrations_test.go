@@ -4269,6 +4269,14 @@ func TestIntegrationHandler_UpdateGitHubOrgAutoJoin_EnableNotAnOrganization(t *t
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestDefaultSlackBotSettingsUsesQuietNotifications(t *testing.T) {
+	t.Parallel()
+
+	settings := defaultSlackBotSettings(uuid.New(), uuid.New())
+
+	require.Equal(t, models.SlackNotificationPresetQuiet, settings.NotificationPreset, "new Slack integrations should default to quiet notifications")
+}
+
 func TestSlackSettingsPatchRequestApply(t *testing.T) {
 	t.Parallel()
 

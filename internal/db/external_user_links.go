@@ -362,6 +362,36 @@ func (s *ExternalUserLinkStore) ClaimSelfLink(ctx context.Context, orgID uuid.UU
 	return link, nil
 }
 
+func (s *ExternalUserLinkStore) CreateClaim(ctx context.Context, claim models.ExternalUserLinkClaim, tokenHash []byte) (models.ExternalUserLinkClaim, error) {
+	var created models.ExternalUserLinkClaim
+	err := s.db.QueryRow(ctx, `
+		INSERT INTO external_user_link_claims (
+			org_id, provider, provider_workspace_id, provider_user_id,
+			token_hash, source_context, expires_at
+		) VALUES (
+			@org_id, @provider, @provider_workspace_id, @provider_user_id,
+			@token_hash, @source_context, @expires_at
+		)
+		RETURNING id, org_id, provider, provider_workspace_id, provider_user_id,
+		          source_context, expires_at, claimed_by_user_id, claimed_at, created_at`,
+		pgx.NamedArgs{
+			"org_id": claim.OrgID, "provider": claim.Provider,
+			"provider_workspace_id": claim.ProviderWorkspaceID,
+			"provider_user_id":      claim.ProviderUserID,
+			"token_hash":            tokenHash, "source_context": claim.SourceContext,
+			"expires_at": claim.ExpiresAt,
+		},
+	).Scan(
+		&created.ID, &created.OrgID, &created.Provider, &created.ProviderWorkspaceID,
+		&created.ProviderUserID, &created.SourceContext, &created.ExpiresAt,
+		&created.ClaimedByUserID, &created.ClaimedAt, &created.CreatedAt,
+	)
+	if err != nil {
+		return models.ExternalUserLinkClaim{}, fmt.Errorf("insert external user link claim: %w", err)
+	}
+	return created, nil
+}
+
 func (s *ExternalUserLinkStore) UpsertSelfActive(ctx context.Context, link models.ExternalUserLink) (models.ExternalUserLink, error) {
 	rows, err := s.db.Query(ctx, fmt.Sprintf(`
 		INSERT INTO external_user_links (
@@ -405,6 +435,35 @@ func (s *ExternalUserLinkStore) UpsertSelfActive(ctx context.Context, link model
 
 type ExternalUserLinkSuggestionStore struct {
 	db DBTX
+}
+
+func (s *ExternalUserLinkSuggestionStore) ObserveUnmapped(ctx context.Context, observation models.ExternalUserObservation) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO external_user_observations (org_id, provider, provider_workspace_id, provider_user_id, external_email, external_handle, external_display_name)
+		VALUES (@org_id, @provider, @provider_workspace_id, @provider_user_id, @external_email, @external_handle, @external_display_name)
+		ON CONFLICT (org_id, provider, provider_workspace_id, provider_user_id) DO UPDATE SET
+			external_email = COALESCE(EXCLUDED.external_email, external_user_observations.external_email),
+			external_handle = COALESCE(EXCLUDED.external_handle, external_user_observations.external_handle),
+			external_display_name = COALESCE(EXCLUDED.external_display_name, external_user_observations.external_display_name),
+			last_seen_at = now()`, pgx.NamedArgs{"org_id": observation.OrgID, "provider": observation.Provider, "provider_workspace_id": observation.ProviderWorkspaceID, "provider_user_id": observation.ProviderUserID, "external_email": observation.ExternalEmail, "external_handle": observation.ExternalHandle, "external_display_name": observation.ExternalDisplayName})
+	if err != nil {
+		return fmt.Errorf("observe unmapped external user: %w", err)
+	}
+	return nil
+}
+
+func (s *ExternalUserLinkSuggestionStore) ListUnmappedByOrg(ctx context.Context, orgID uuid.UUID) ([]models.ExternalUserObservation, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT o.id, o.org_id, o.provider, o.provider_workspace_id, o.provider_user_id,
+		       o.external_email, o.external_handle, o.external_display_name, o.last_seen_at
+		FROM external_user_observations o
+		WHERE o.org_id = @org_id
+		  AND NOT EXISTS (SELECT 1 FROM external_user_links l WHERE l.org_id = o.org_id AND l.provider = o.provider AND l.provider_workspace_id = o.provider_workspace_id AND l.provider_user_id = o.provider_user_id AND l.status = 'active')
+		ORDER BY o.last_seen_at DESC LIMIT 200`, pgx.NamedArgs{"org_id": orgID})
+	if err != nil {
+		return nil, fmt.Errorf("list unmapped external users: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.ExternalUserObservation])
 }
 
 func NewExternalUserLinkSuggestionStore(db DBTX) *ExternalUserLinkSuggestionStore {

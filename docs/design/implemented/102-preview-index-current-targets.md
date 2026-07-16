@@ -1,10 +1,10 @@
 # Design: Current-Oriented Preview Index
 
-> **Status:** Not Started | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-07-14
 
 The `/previews` index should show the thing users are trying to use every day: the current runnable preview for a branch or pull request. Runtime attempts, pinned commits, and older preview targets remain available for debugging and audit, but they should not be the default table row.
 
-This builds on the implemented branch-preview primitive in [implemented/83-branch-and-pr-previews.md](../implemented/83-branch-and-pr-previews.md). The existing storage model is useful: `preview_targets` identify repo/branch/commit/config targets, and `preview_instances` identify runtime attempts. The product index needs a coarser grouping layer above that model so ten starts on the same branch do not look like ten separate previews.
+This builds on the implemented branch-preview primitive in [83-branch-and-pr-previews.md](83-branch-and-pr-previews.md). The existing storage model is useful: `preview_targets` identify repo/branch/commit/config targets, and `preview_instances` identify runtime attempts. The product index needs a coarser grouping layer above that model so ten starts on the same branch do not look like ten separate previews.
 
 ## Problem
 

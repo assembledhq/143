@@ -185,6 +185,14 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		filters.Decision = &decision
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("outcome")); raw != "" {
+		outcome := models.CodeReviewListOutcome(raw)
+		if err := outcome.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_OUTCOME", "invalid outcome")
+			return
+		}
+		filters.Outcome = &outcome
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("status")); raw != "" {
 		status := models.CodeReviewSessionStatus(raw)
 		if err := status.Validate(); err != nil {

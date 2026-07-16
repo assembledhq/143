@@ -16,23 +16,23 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
   return (
     <div
       className="relative min-h-screen"
-      style={{ background: isDark ? DARK.bg : "#FAFAFB" }}
+      style={{ background: isDark ? DARK.bg : LIGHT.bg }}
     >
       <HeroCanvas isDark={isDark} />
       <div
         className="pointer-events-none absolute inset-0 z-[1]"
         style={{
           background: isDark
-            ? "radial-gradient(circle at center, rgba(8,8,15,0.9) 0%, rgba(8,8,15,0.78) 36%, rgba(8,8,15,0.24) 68%, transparent 100%)"
-            : "radial-gradient(circle at center, rgba(250,250,251,0.94) 0%, rgba(250,250,251,0.84) 36%, rgba(250,250,251,0.24) 68%, transparent 100%)",
+            ? "radial-gradient(circle at center, rgba(17,17,15,0.92) 0%, rgba(17,17,15,0.8) 38%, rgba(17,17,15,0.28) 70%, transparent 100%)"
+            : "radial-gradient(circle at center, rgba(246,245,240,0.96) 0%, rgba(246,245,240,0.84) 38%, rgba(246,245,240,0.26) 70%, transparent 100%)",
         }}
       />
 
       {/* Top nav */}
-      <div className="relative z-10 flex items-center justify-between px-6 pt-6 pointer-events-auto sm:px-10 sm:pt-8">
+      <div className="pointer-events-auto relative z-10 mx-auto flex w-full max-w-[88rem] items-center justify-between px-6 pt-6 sm:px-10 sm:pt-8">
         <Link
           href="/"
-          className={`${type.navBrand} ${isDark ? "text-white/85" : "text-slate-900"}`}
+          className={`${type.navBrand} ${isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"}`}
         >
           143
         </Link>
@@ -43,8 +43,8 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
             variant="ghost"
             className={`${type.button} px-3 ${
               isDark
-                ? "text-white/60 hover:bg-white/5 hover:text-white"
-                : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
+                ? "text-[#aaa89f] hover:bg-white/[0.06] hover:text-[#f4f3ee]"
+                : "text-[#6b6b65] hover:bg-[#ebe9e2] hover:text-[#1b1b19]"
             }`}
           >
             <Link href="/docs">Docs</Link>
@@ -54,18 +54,18 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
             variant="ghost"
             className={`hidden ${type.button} px-3 sm:inline-flex ${
               isDark
-                ? "text-white/60 hover:bg-white/5 hover:text-white"
-                : "text-slate-600 hover:bg-slate-900/5 hover:text-slate-900"
+                ? "text-[#aaa89f] hover:bg-white/[0.06] hover:text-[#f4f3ee]"
+                : "text-[#6b6b65] hover:bg-[#ebe9e2] hover:text-[#1b1b19]"
             }`}
           >
             <Link href="/login">Sign in</Link>
           </Button>
           <Button
             asChild
-            className={`${type.button} rounded-full transition-all ${
+            className={`${type.button} rounded-full border border-transparent shadow-[0_8px_24px_rgb(49_92_232_/_18%)] transition-all ${
               isDark
-                ? "bg-white text-[#08080f] hover:bg-white/90"
-                : "bg-slate-900 text-white hover:bg-slate-800"
+                ? "bg-[#7992ff] text-[#11110f] hover:bg-[#8ba0ff]"
+                : "bg-[#315ce8] text-white hover:bg-[#294fc9]"
             }`}
           >
             <Link href="/login?tab=signup">
@@ -78,17 +78,17 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
 
       {/* Center hero */}
       <div className="relative z-10 flex min-h-[calc(100vh-80px)] flex-col items-center justify-center px-6 py-16 text-left select-none sm:px-10">
-        <div className="mx-auto max-w-3xl space-y-6">
+        <div className="mx-auto w-full max-w-4xl space-y-7">
           <h1
-            className={`max-w-3xl ${type.heroTitle} ${
-              isDark ? "text-white" : "text-slate-900"
+            className={`max-w-4xl ${type.heroTitle} ${
+              isDark ? "text-[#f4f3ee]" : "text-[#1b1b19]"
             }`}
           >
             Where your whole team builds software together
           </h1>
 
           <p
-            className={`max-w-2xl ${type.heroBody} ${isDark ? "text-white/52" : "text-slate-600"}`}
+            className={`max-w-2xl ${type.heroBody} ${isDark ? "text-[#aaa89f]" : "text-[#6b6b65]"}`}
           >
             Run Codex, Claude Code, and OpenCode in an open-source cloud with
             shared context, previews, review loops, and automations.
@@ -97,10 +97,10 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
           <div className="flex flex-wrap gap-4 pt-1 pointer-events-auto">
             <Button
               asChild
-              className={`${type.button} rounded-full transition-all ${
+              className={`${type.button} rounded-full border border-transparent shadow-[0_10px_30px_rgb(49_92_232_/_20%)] transition-all ${
                 isDark
-                  ? "bg-white text-[#08080f] hover:bg-white/90"
-                  : "bg-slate-900 text-white hover:bg-slate-800"
+                  ? "bg-[#7992ff] text-[#11110f] hover:bg-[#8ba0ff]"
+                  : "bg-[#315ce8] text-white hover:bg-[#294fc9]"
               }`}
             >
               <Link href="/login?tab=signup">
@@ -111,10 +111,10 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
             <Button
               asChild
               variant="outline"
-              className={`${type.button} rounded-md shadow-sm ${
+              className={`${type.button} rounded-full shadow-none ${
                 isDark
-                  ? "border-white/15 bg-white/[0.04] text-white/80 hover:border-white/35 hover:bg-white/[0.08] hover:text-white"
-                  : "border-slate-300 bg-white text-slate-900 hover:border-slate-500 hover:bg-slate-50"
+                  ? "border-white/15 bg-[#1d1d1a]/80 text-[#dddbd4] hover:border-[#7992ff]/45 hover:bg-[#242420] hover:text-[#f4f3ee]"
+                  : "border-[#cac6bb] bg-[#fefdfb]/85 text-[#252521] hover:border-[#315ce8]/40 hover:bg-[#e7ecff]/65"
               }`}
             >
               <a
@@ -133,7 +133,7 @@ export default function HeroSection({ isDark }: HeroSectionProps) {
       {/* Scroll indicator */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
         <div
-          className={`animate-bounce ${isDark ? "text-white/30" : "text-slate-400"}`}
+          className={`motion-safe:animate-bounce ${isDark ? "text-[#aaa89f]/45" : "text-[#6b6b65]/55"}`}
         >
           <ChevronDown className="size-6" aria-hidden="true" />
         </div>

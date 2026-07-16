@@ -155,6 +155,13 @@ func ParseRevisionContext(raw json.RawMessage) (*RevisionContext, error) {
 	if err := json.Unmarshal(raw, &parsed); err != nil {
 		return nil, fmt.Errorf("unmarshal revision context: %w", err)
 	}
+	if strings.TrimSpace(parsed.FormattedFeedback) == "" &&
+		strings.TrimSpace(parsed.PreviousDiff) == "" &&
+		strings.TrimSpace(parsed.CommentSummary) == "" &&
+		parsed.RepairAction == "" &&
+		parsed.RepairContext == nil {
+		return nil, nil
+	}
 	return &parsed, nil
 }
 

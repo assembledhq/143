@@ -355,6 +355,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent       *int                                      `json:"max_concurrent"`
 		BaseBranch          *string                                   `json:"base_branch"`
 		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
+		PublishPolicy       *models.AutomationPublishPolicy           `json:"publish_policy"`
 		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
 		IntervalValue       *int                                      `json:"interval_value"`
 		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
@@ -545,6 +546,14 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	publishPolicy := models.AutomationPublishPolicyPullRequest
+	if req.PublishPolicy != nil {
+		publishPolicy = *req.PublishPolicy
+		if err := publishPolicy.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PUBLISH_POLICY", err.Error())
+			return
+		}
+	}
 
 	timezone := "UTC"
 	if req.Timezone != nil && *req.Timezone != "" {
@@ -621,6 +630,7 @@ func (h *AutomationHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent:       maxConcurrent,
 		BaseBranch:          baseBranch,
 		IdentityScope:       identityScope,
+		PublishPolicy:       publishPolicy,
 		PrePRReviewLoops:    prePRReviewLoops,
 		ScheduleType:        scheduleType,
 		IntervalValue:       intervalValuePtr,
@@ -727,8 +737,9 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 			ReasoningEffort models.ReasoningEffort `json:"reasoning_effort"`
 		} `json:"agent"`
 		PullRequest struct {
-			BaseBranch       *string `json:"base_branch"`
-			PrePRReviewLoops *int    `json:"pre_pr_review_loops"`
+			BaseBranch       *string                         `json:"base_branch"`
+			PrePRReviewLoops *int                            `json:"pre_pr_review_loops"`
+			PublishPolicy    *models.AutomationPublishPolicy `json:"publish_policy"`
 		} `json:"pull_request"`
 		Identity struct {
 			Scope *models.AutomationIdentityScope `json:"scope"`
@@ -766,6 +777,7 @@ func (h *AutomationHandler) CreateExternal(w http.ResponseWriter, r *http.Reques
 		"reasoning_effort":      req.Agent.ReasoningEffort,
 		"base_branch":           req.PullRequest.BaseBranch,
 		"identity_scope":        identityScope,
+		"publish_policy":        req.PullRequest.PublishPolicy,
 		"pre_pr_review_loops":   req.PullRequest.PrePRReviewLoops,
 		"timezone":              req.Schedule.Timezone,
 		"metadata":              req.Metadata,
@@ -1266,6 +1278,7 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 		MaxConcurrent       *int                                      `json:"max_concurrent"`
 		BaseBranch          *string                                   `json:"base_branch"`
 		IdentityScope       *models.AutomationIdentityScope           `json:"identity_scope"`
+		PublishPolicy       *models.AutomationPublishPolicy           `json:"publish_policy"`
 		ScheduleType        *models.AutomationScheduleType            `json:"schedule_type"`
 		IntervalValue       *int                                      `json:"interval_value"`
 		IntervalUnit        *models.ScheduleUnit                      `json:"interval_unit"`
@@ -1403,6 +1416,13 @@ func (h *AutomationHandler) Update(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		automation.IdentityScope = identityScope.OrDefault()
+	}
+	if req.PublishPolicy != nil {
+		if err := req.PublishPolicy.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_PUBLISH_POLICY", err.Error())
+			return
+		}
+		automation.PublishPolicy = *req.PublishPolicy
 	}
 	if req.PrePRReviewLoops != nil {
 		if *req.PrePRReviewLoops < 0 || *req.PrePRReviewLoops > 5 {

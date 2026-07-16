@@ -1,10 +1,17 @@
-# Design: Scalable Live Updates Over SSE
+# Design: Scalable Low-Latency Live Updates Over SSE
 
-> **Status:** Not Started | **Last reviewed:** 2026-07-10
+> **Status:** Not Started | **Last reviewed:** 2026-07-11
 
 ## Summary
 
-143 should standardize live UI refresh on a single scalable Server-Sent Events architecture: durable database writes remain the source of truth, Redis-backed SSE events are low-latency invalidation hints, and long randomized polling intervals are only correctness backstops.
+143 should standardize live UI refresh on a shared Server-Sent Events architecture that is designed for both low tail latency and bounded production cost:
+
+- Postgres remains the source of truth.
+- User-visible state changes and a short-lived live-event outbox row commit atomically.
+- A low-latency publisher writes each event to a per-org Redis replay Stream and a fixed-shard Redis live bus.
+- Each API process holds only a bounded number of Redis live-bus subscriptions, independent of active org or browser count, and fans events out in-process.
+- Browsers apply safe, versioned status projections immediately for the most visible transitions, then selectively refetch canonical REST data.
+- Long polling intervals are correctness backstops, not the normal update path.
 
 The first migration targets the highest-polling dashboard surfaces:
 
@@ -15,649 +22,967 @@ The first migration targets the highest-polling dashboard surfaces:
 - `/automations`
 - automation detail and runs
 
-The same architecture should also become the shared replacement for the existing one-off SSE implementations across code reviews, PR health, eval batches, eval bootstrap, and session streams. Existing streams do not need to be removed in the first deployment, but new live-update work should use the shared event envelope and shared frontend subscription layer.
+The same transport and frontend dispatcher should become the shared replacement for the existing one-off SSE implementations across code reviews, PR health, eval batches, eval bootstrap, and session streams. Existing routes remain during migration.
 
-Two decisions are load-bearing for scale and are fixed up front in this revision:
+The following decisions are load-bearing and fixed in this design:
 
-1. **Fan-out model.** The shared org stream uses the per-process fan-out model already proven in `SessionStreams` (one Redis subscription per org per API process, multiplexed over a single connection, dispatched in-process to many clients). It does **not** copy the per-client subscription model used by `PullRequestStreams`/`CodeReviewStreams`, which opens one Redis subscription per connected browser and does not scale to large orgs. See [Backend Design](#backend-design).
-2. **Stream tiering.** The org stream carries only low/medium-frequency, list-level invalidation hints. High-frequency per-resource events (session logs, file events, transcript tailing) stay on resource-scoped streams. See [Subscription Topology](#subscription-topology).
+1. **Bounded Redis fan-out.** Live delivery uses a fixed number of Redis bus shards per API process, not one blocking Redis reader per active org or browser.
+2. **Replay is separate from live delivery.** A per-org Redis Stream provides short replay through one-shot range reads; API processes do not block on one `XREAD` per org.
+3. **No commit/publish gap.** State changes and a short-lived outbox row commit in the same Postgres transaction. Redis remains non-authoritative, but a process crash after commit cannot silently lose the low-latency notification.
+4. **Stream tiering.** The org stream carries low/medium-frequency list, summary, and ordinary detail updates. High-frequency logs, transcript appends, and file-event feeds stay resource-scoped and deliver append entries rather than repeatedly invalidating large queries.
+5. **Two UI paths.** Small typed and versioned projections update critical status UI immediately; selective REST refetch reconciles full canonical state.
 
 ## Problem
 
-Several frontend surfaces keep data fresh with fixed polling loops, many at 3s, 5s, or 10s intervals. This is simple and resilient, but it scales poorly in two ways that show up well before "thousands of users."
+Several frontend surfaces keep data fresh with fixed polling loops, many at 3s, 5s, or 10s intervals. Background polling usually stops when a tab is hidden, but foreground pages still run many concurrent polling queries against data that is unchanged most of the time.
 
-**Per-page query fan-out is the dominant cost, not idle tabs.** Background polling already stops when a tab is hidden (TanStack Query's default `refetchIntervalInBackground: false`, which the codebase relies on almost everywhere). The real load comes from *foreground* tabs running many concurrent polling queries against data that is usually unchanged. The worst offender today is **session detail, which runs 11+ simultaneous polling queries** while a session is active:
+The worst offender is session detail, which can run 11 or more simultaneous polling queries while a session is active:
 
-- session detail (3s), thread transcript (3s), human-input requests (3s), readiness checks (3s), timeline (3s)
-- PR health (5s), file events (5s)
-- runtime status (15s), plus several non-polling queries that refetch on the same activity
+- session detail, transcript, human-input requests, readiness checks, and timeline every 3s
+- PR health and file events every 5s
+- runtime status every 15s
+- additional queries that refetch on related activity
 
-Across the rest of the product the hot patterns are:
+Other hot patterns include:
 
-- sessions list, counts, and sidebar polling every 10s
-- previews index polling one section every 5s and three sections every 30s
-- preview detail and preview panels polling every 3-15s
-- automations list/detail/runs polling every 10s
-- automation goal-improvement status polling several queries every 3s
+- sessions list, counts, and sidebar every 10s
+- previews index sections every 5-30s
+- preview detail and panels every 3-15s
+- automations list, detail, and runs every 10s
+- automation goal-improvement queries every 3s
 
-Aggregate request rate for a foreground tab is roughly:
+A single active session-detail tab can sustain more than one request per second. At thousands of foreground tabs, that becomes avoidable API and Postgres load while still making users wait for the next polling boundary.
 
-```text
-request_rate = mounted_polling_queries / interval_seconds
-```
-
-A single active session-detail tab can sustain well over 1 request/second on its own. Multiply by foreground tabs at thousands of concurrent users and the list/detail polling becomes avoidable API and Postgres load even when nothing is changing.
-
-The product requirement is the opposite of what polling optimizes for: users need low latency when something changes, not constant read traffic when nothing changes — and they need their *own* actions to feel instant.
+The product requirement is the inverse: near-zero work when nothing changes, very low latency when something does, and immediate visual acknowledgement for the acting user's own mutation.
 
 ## Goals
 
-1. Deliver visible UI changes with p95 latency under 1s after the backend commits when SSE is healthy.
-2. Make the acting user's own changes feel instant via optimistic updates, independent of SSE round-trip latency.
-3. Reduce idle/unchanged foreground polling to near zero, and collapse the session-detail query fan-out.
-4. Keep Postgres as the source of truth; SSE must never be the only correctness path.
-5. Use long, jittered backup polling so missed events self-heal without synchronized thundering-herd reads.
-6. Use one org-scoped stream per active dashboard tab for list and index surfaces.
-7. Use resource-scoped streams for any high-volume per-resource event (session logs, file events, transcript tailing).
-8. Bound load amplification: a burst of writes in one org must not produce an unbounded refetch storm across that org's connected tabs.
-9. Centralize event schemas, backend stream plumbing, frontend connection handling, and query invalidation behavior.
-10. Consolidate existing ad hoc SSE streams onto the same envelope and frontend hook over time.
-11. Preserve multi-org tab isolation despite EventSource not supporting custom request headers, and revoke access on a stream when membership changes.
-12. Make live-update health observable with connection, reconnect, event, fallback-poll, and DB-QPS metrics.
+1. Make the acting user's own mutation visible immediately through optimistic intent state or the mutation response.
+2. Deliver critical status changes to other clients with p95 under 750ms and p99 under 2s after commit when the live path is healthy.
+3. Reduce idle and unchanged foreground polling to near zero.
+4. Collapse the session-detail polling fan-out without replacing it with event-triggered refetch fan-out.
+5. Keep Postgres authoritative and use Redis only for replay and low-latency delivery.
+6. Preserve low-latency notification across process crashes between database commit and Redis publication.
+7. Bound Redis connections by a fixed shard count rather than active orgs, resources, or clients.
+8. Bound browser-to-Postgres amplification during write bursts, reconnects, deploys, and Redis recovery.
+9. Suppress refetches in hidden tabs and perform one explicit catch-up when a tab becomes visible.
+10. Use resource-scoped append streams for any high-volume feed.
+11. Centralize event schemas, publication, replay, connection handling, visibility registration, query scheduling, and fallback polling.
+12. Preserve multi-org and narrower resource authorization for long-lived connections.
+13. Make event publication lag, replay health, connection health, browser freshness, and fallback load observable.
 
 ## Non-Goals
 
 1. Replacing Postgres reads with streamed full records.
-2. Guaranteeing exactly-once event delivery to browsers.
+2. Guaranteeing delivery of every individual state-transition event to every browser. Each materialized ordinary or aggregate outbox event is published to Redis at least once and idempotently; source rows may be folded, and browser delivery is best-effort and collapsible, with eventual canonical-state convergence through replay, resync, visibility catch-up, and polling.
 3. Building a user-visible notification inbox.
-4. Introducing WebSockets for these dashboard data refreshes.
-5. Removing the existing session log SSE stream before the new org event stream is proven.
-6. Requiring Redis for correctness. Redis loss should degrade freshness, not data integrity.
+4. Introducing WebSockets for dashboard invalidation.
+5. Moving existing session logs off their proven resource stream in the first deployment.
+6. Making Redis required for durable state changes.
+7. Streaming full transcripts, diffs, prompts, or other large records through the org event channel.
+
+Small, typed status projections and durable append entries on resource streams are explicitly allowed. They are not substitutes for canonical REST records.
 
 ## Current Baseline
 
-The codebase already has several SSE primitives, and they do **not** all use the same fan-out model. This distinction drives the design:
+The codebase already has several SSE primitives with different cost profiles:
 
-- `SessionStreams` (`internal/cache/session_streams.go`) — backs session logs/status/events on **Redis Streams**. One `XRead`-blocking goroutine per resource **per API process** maintains an in-memory fan-out to many per-client buffered channels (256 slots each), with a 1000-entry ring buffer for short replay and a 4 KiB Redis payload clamp. **This is the scalable pattern.**
-- `PullRequestStreams` and `CodeReviewStreams` (`internal/cache/*_streams.go`) — org-scoped, on **Redis pub/sub**, but they open **one Redis `SUBSCRIBE` per HTTP client**. This is fine at today's volumes but does not scale: every connected tab is its own Redis subscription, and in Redis Cluster non-sharded pub/sub fans every message to every node.
-- `EvalBatchStreams` and `EvalBootstrapStreams` — resource-scoped pub/sub, same per-client subscription shape.
-- `useResourceSSE` and `frontend/src/lib/sse.ts` — frontend EventSource handling (`withCredentials`, exponential backoff to a 15s ceiling, capped at 5 attempts, `healthy` flag that callers use to switch polling). Code reviews and bootstrap evals already implement the "healthy → 30s, unhealthy → 3-5s" polling switch, so the central policy below is partly proven in production.
-- The SSE HTTP handlers already solve EventSource's missing-header problem by accepting an optional `?org_id=` query param and validating org membership at the handshake, returning 400/401/403 before the stream opens.
+- `SessionStreams` uses Redis Streams. The session SSE handler currently subscribes to three separate per-session readers—logs, status, and narrow events. Each blocking `XREAD` goroutine holds a dedicated Redis connection, fans out to local clients, and exits when no clients remain. Logs have an in-memory replay ring and Postgres catch-up.
+- `PullRequestStreams`, `CodeReviewStreams`, `EvalBatchStreams`, and `EvalBootstrapStreams` use Redis Pub/Sub but open one subscription per browser connection.
+- `useResourceSSE` closes a failed `EventSource`, constructs a new one with exponential delay, and stops after five failures. Constructing a new object loses the browser-maintained `Last-Event-ID` unless the application carries it explicitly.
+- Existing SSE handlers accept `?org_id=` because EventSource cannot send the active-org header. Session logs also accept `?last_event_id=` for manual reconnection.
+- The shared SSE writer sends comment heartbeats and clears the server write deadline, but comment frames are invisible to browser JavaScript and writes do not currently have a per-frame deadline.
+- TanStack Query globally disables `refetchOnWindowFocus`, so a query marked stale while hidden will not automatically refetch merely because the document becomes visible again.
 
-The architectural direction is correct: lightweight events wake clients, clients refetch canonical state, and polling remains a fallback. The gaps are (a) the pattern is not generalized, (b) the only generalized-looking helpers use the non-scalable per-client subscription model, and (c) major dashboard surfaces still poll independently.
+The correct parts are durable state first, lightweight live delivery, replay or polling fallback, and optimistic local state. The gaps are unbounded Redis-reader cardinality, the commit/publish failure window, incomplete replay semantics, and insufficient control over browser refetch amplification.
 
 ## Architecture
 
-### Principle
+### End-To-End Flow
 
-Every live update follows this sequence:
+Every low/medium-frequency live update follows this sequence:
 
-1. Backend writes canonical state to Postgres.
-2. Transaction commits.
-3. Backend publishes a small event to Redis (best-effort, possibly coalesced).
-4. API SSE handler fans that event out to subscribed clients **from a single per-org subscription per process**.
-5. Frontend coalesces events and invalidates affected TanStack Query keys.
-6. Frontend refetches existing REST endpoints for canonical data.
-7. Long backup polling self-heals if the event was missed.
+1. A service writes canonical state and a validated `live_event_outbox` row in the same Postgres transaction.
+2. The transaction commits.
+3. The caller signals a process-local live-event dispatcher and returns without waiting on Redis.
+4. The dispatcher claims the outbox row and publishes it through the global coalescer.
+5. Publication performs `XADD` to the org replay Stream, obtains the Redis Stream ID, and publishes the event plus Stream ID to one fixed Redis live-bus shard.
+6. Every API process has a bounded subscription to the fixed live-bus shards and routes the event only to matching local org subscribers.
+7. Each SSE handler writes the Stream ID as the SSE `id:` field.
+8. The browser dispatcher applies a newer safe projection immediately when available, marks affected caches stale, and selectively refetches only visible registered queries.
+9. Sparse, jittered polling and explicit visibility catch-up remain correctness backstops.
 
-SSE events are invalidation hints. They may be dropped, duplicated, delayed, or reordered. They must carry enough information to choose which cached queries to refresh, but they must not be trusted as authoritative UI state.
-
-The acting user's own mutations are handled separately and optimistically — see [Optimistic Updates](#optimistic-updates-the-actors-own-changes). SSE is for propagating *other* clients' changes and backend-driven transitions.
+If the immediate dispatcher or Redis fails, the committed outbox row remains pending. A background outbox worker retries it. The user-facing state change does not depend on Redis availability.
 
 ### Subscription Topology
 
-Use two layers, with a strict frequency rule that resolves the prior draft's inconsistency:
+Use two product-facing stream tiers:
 
-| Layer | Scope | Carries | Frequency |
+| Layer | Browser scope | Carries | Frequency and semantics |
 | --- | --- | --- | --- |
-| Org event stream | One EventSource per active org/tab in v1; one per active org/browser is a v2 optimization | List/index/detail-level invalidation hints: `session.created`, coarse `session.updated`, `preview.updated`, `automation.updated`, `automation.run.updated`, `code_review.updated`, `pull_request.updated`, eval index notifications | Low / medium |
-| Resource stream | One EventSource per focused high-volume resource | Session logs, `session.file_events.changed`, transcript/thread tailing, and any future high-volume per-resource feed | High |
+| Org event stream | One logical connection per active org per browser profile; per-tab fallback where sharing is unavailable | List/summary invalidations, ordinary detail changes, small versioned status projections | Low/medium; collapsible and replayable |
+| Resource stream | One connection per focused high-volume resource | Logs, transcript/message appends, file-event appends, preview log appends | High; append entries with stable IDs and gap recovery |
 
-Rule: if an event can fire many times per second for a single resource, or only matters while a specific resource view is open, it belongs on a resource stream — never the org stream. The org stream must stay sparse, because every event on it is delivered to **every** connected tab in the org. This is what keeps a single busy session from flooding tabs that are sitting on the automations page.
+If an event can fire many times per second for one resource, grows an append-only feed, or only matters while a specific viewer is focused, it belongs on a resource stream. The org stream must remain sparse because its Redis bus message is received by every API process and its matching event is delivered to every connected browser for that org.
 
-The org stream is the default for list/detail freshness. Resource streams need (and now have) a frequency justification.
+For a focused active session, the resource stream owns detail-status and append updates. The org stream still wakes list/count/summary surfaces, but the page must not refetch the same session detail twice from both streams. Resource-stream registrations take precedence for that focused resource.
 
-The v1 browser contract intentionally keeps the connection model simple: one org EventSource per active dashboard tab. This is acceptable only because HTTP/2 is required and because backup polling is reduced sharply. A follow-up optimization should evaluate a same-browser leader model (`BroadcastChannel` or a shared worker) so one tab owns the EventSource for an org and broadcasts events to sibling tabs. That optimization is not required for the first rollout, but it should become the next lever if connection count grows faster than user count.
+### Redis Delivery Topology
+
+Live delivery and replay use different Redis structures:
+
+1. **Per-org replay Stream**
+   - Key: `143:stream:{org:<org_id>}:live_events`.
+   - Initial hard cap `MAXLEN ~ 1024`; the final cap is derived from measured event size/rate and the fleet replay-memory budget rather than chosen independently per org.
+   - Every publication pipelines `XADD`, `XTRIM MINID` for entries older than five minutes, and expiry refresh. This makes ordinary trimming write-driven and avoids a fleet-wide key scan.
+   - Key expiry refreshed to one hour on publication so inactive org keys disappear.
+   - Replay is capped at 1,000 returned entries per reconnect; a larger gap collapses to `live.resync`.
+   - A bounded active-key registry supports reconciliation of streams that missed write-driven trimming; maintenance scans the registry in small batches, never the full Redis keyspace.
+
+2. **Fixed-shard live bus**
+   - Default 32 stable shards, configurable only through an explicit capacity change.
+   - An org maps to one shard through a stable hash of `org_id`.
+   - Standalone/Sentinel deployments use bounded process-level Pub/Sub subscriptions.
+   - Redis Cluster uses sharded Pub/Sub (`SPUBLISH`/`SSUBSCRIBE`) so traffic is routed to the owning cluster shard.
+   - Every API process subscribes to the fixed shard set and filters by `org_id` in memory.
+   - Each local shard subscription has an explicit health epoch. It becomes healthy only after subscription acknowledgement and becomes unhealthy immediately on disconnect or read failure.
+
+The number of long-lived Redis live-bus connections is therefore bounded by the configured bus shards and Redis topology. It does not grow with active orgs or browsers. The tradeoff is that API processes see sparse events for orgs without local clients; this is acceptable for the deliberately low/medium-frequency org stream and must be measured.
+
+Replay storage has a fleet-level budget, initially 25% of configured Redis `maxmemory`. The publisher records average encoded event bytes and active Stream count and estimates replay working-set size. At 20% it warns and tightens retention for the noisiest Streams; at 25% it keeps live Pub/Sub delivery but trims affected replay Streams to a minimal tail so reconnecting clients receive `live.resync` instead of allowing replay data to pressure unrelated Redis workloads. Rollout configuration must provide a finite `maxmemory`; an unknown or unbounded Redis memory limit is not acceptable for enabling replay.
+
+An alternative fixed-partition Stream reader topology may be reconsidered only if measured Pub/Sub bandwidth dominates. It must preserve the same fixed upper bound and cannot regress to one blocking reader per active org.
 
 ## Backend Design
 
 ### Event Envelope
 
-Add a shared event envelope in `internal/models`:
+Add typed live-event contracts in `internal/models`:
 
 ```go
 type LiveEventType string
+type LiveResourceType string
+type LiveEventScope string
+type LiveAudienceScope string
 
 const (
-    LiveEventSessionCreated       LiveEventType = "session.created"
-    LiveEventSessionUpdated       LiveEventType = "session.updated"
-    LiveEventSessionThreadUpdated LiveEventType = "session.thread.updated"
-    LiveEventSessionInputUpdated  LiveEventType = "session.human_input.updated"
-    LiveEventSessionFilesChanged  LiveEventType = "session.file_events.changed"
-    LiveEventPreviewUpdated       LiveEventType = "preview.updated"
-    LiveEventPreviewLogsChanged   LiveEventType = "preview.logs.changed"
-    LiveEventAutomationUpdated    LiveEventType = "automation.updated"
-    LiveEventAutomationRunUpdated LiveEventType = "automation.run.updated"
-    LiveEventCodeReviewUpdated    LiveEventType = "code_review.updated"
-    LiveEventPullRequestUpdated   LiveEventType = "pull_request.updated"
-    LiveEventEvalBatchUpdated     LiveEventType = "eval_batch.updated"
-    LiveEventEvalBootstrapUpdated LiveEventType = "eval_bootstrap.updated"
+    LiveEventScopeResource   LiveEventScope = "resource"
+    LiveEventScopeCollection LiveEventScope = "collection"
+
+    LiveAudienceOrg        LiveAudienceScope = "org"
+    LiveAudienceRepository LiveAudienceScope = "repository"
+    LiveAudienceResource   LiveAudienceScope = "resource"
 )
 
 type LiveEvent struct {
-    ID             string                 `json:"id"` // Redis Stream ID used as the SSE id field.
-    Type           LiveEventType          `json:"type"`
-    OrgID          uuid.UUID              `json:"org_id"`
-    ResourceType   string                 `json:"resource_type"`
-    ResourceID     uuid.UUID              `json:"resource_id"`
-    ParentType     string                 `json:"parent_type,omitempty"`
-    ParentID       *uuid.UUID             `json:"parent_id,omitempty"`
-    Version        int64                  `json:"version,omitempty"`
-    ChangedAt      time.Time              `json:"changed_at"`
-    Reason         string                 `json:"reason,omitempty"`
-    Hints          map[string]interface{} `json:"hints,omitempty"`
+    SchemaVersion int                 `json:"schema_version"`
+    EventID       uuid.UUID           `json:"event_id"`
+    StreamID      string              `json:"-"` // assigned after XADD; emitted as SSE id
+    Type          LiveEventType       `json:"type"`
+    Scope         LiveEventScope      `json:"scope"`
+    OrgID         uuid.UUID           `json:"org_id"`
+    ResourceType  LiveResourceType    `json:"resource_type"`
+    ResourceID    *uuid.UUID          `json:"resource_id,omitempty"`
+    ParentType    *LiveResourceType   `json:"parent_type,omitempty"`
+    ParentID      *uuid.UUID          `json:"parent_id,omitempty"`
+    RepositoryID  *uuid.UUID          `json:"repository_id,omitempty"`
+    Audience      LiveAudienceScope   `json:"audience"`
+    Version       *int64              `json:"version,omitempty"`
+    CausationID   *uuid.UUID          `json:"causation_id,omitempty"`
+    ChangedAt     time.Time           `json:"changed_at"`
+    Payload       json.RawMessage     `json:"payload"`
 }
 ```
 
-`Hints` is intentionally small and optional. It may include fields like `status`, `thread_id`, `preview_id`, `automation_id`, or `repository_id` to help the frontend avoid broad invalidation. It must not include logs, transcripts, diffs, prompt text, secrets, or full list records.
+`EventID` is stable across retries and duplicate Redis entries. `StreamID` is Redis transport metadata and is assigned after `XADD`; it is not serialized into the stored payload. The SSE handler writes `StreamID` as `id:`. A Redis Stream ID looks like `1783684800123-0`.
 
-`ID` is the Redis Stream entry ID, and the SSE handler must write it as the SSE `id:` field. Clients send this value back through `Last-Event-ID` on reconnect so the API process can resume with `XREAD` from the Redis replay window. If a future durable event table needs a stable application UUID, add a separate field; do not overload the stream cursor.
+`LiveEventType`, `LiveResourceType`, `LiveEventScope`, and `LiveAudienceScope` have named constants and `Validate() error` methods. `LiveEvent.Validate()` enforces:
 
-`Version` is **optional and deferred for v1.** Because every handler refetches canonical state on invalidation, reordered or duplicated events are self-correcting (the last refetch reads DB truth). `Version` only buys dedup/coalescing optimization and a future durable cursor; do not block the first implementation on it. See [Open Questions](#open-questions).
+- supported schema version
+- event type and payload match
+- collection events have no `ResourceID`
+- resource events have a `ResourceID`
+- repository/resource audiences carry the identifiers needed for filtering
+- patchable projection events carry a positive monotonic `Version`
+- payload size remains within the transport limit
 
-### Redis Stream Helper
+`Payload` is never populated from an arbitrary map. Each event type has a typed payload and constructor, for example:
 
-Add `internal/cache/live_event_streams.go`, modeled on **`SessionStreams`, not on the per-client pub/sub helpers**:
+```go
+type SessionUpdatedPayload struct {
+    StatusProjection *SessionLiveProjection `json:"status_projection,omitempty"`
+    ListAffected     bool                   `json:"list_affected"`
+    CountsAffected   bool                   `json:"counts_affected"`
+}
 
-- `NewLiveEventStreams(client *cache.Client, logger zerolog.Logger) *LiveEventStreams`
-- `Publish(ctx context.Context, event models.LiveEvent) error`
-- `Subscribe(ctx context.Context, orgID uuid.UUID) (*LiveEventSubscription, error)`
-
-Transport and fan-out:
-
-- **Redis Streams, not bare pub/sub.** Channel/key per org: `143:stream:{org:<org_id>}:live_events`, written with `XADD` and a bounded `MAXLEN ~` cap (default 512). This gives a short replay window so a client that reconnects within seconds can resume from its last id instead of losing every event during the gap. This mirrors how `SessionStreams` already backs logs. Size memory as `active_org_stream_keys × maxlen × average_entry_bytes`, and alert before Redis memory pressure can evict unrelated cache state.
-- **One subscription per org per process.** Each API process maintains at most one `XRead`-blocking reader per org that currently has ≥1 connected client, multiplexed over the shared Redis connection. New browser connections for an org attach to the existing in-process fan-out; they do **not** create new Redis subscriptions. When the last client for an org disconnects, the process tears down that org's reader. This is the single most important scalability property of the design.
-- **In-process fan-out with collapsible overflow.** Per-subscriber bounded buffer, default 256. Because these are collapsible invalidation hints (not a must-deliver log), buffer overflow must **not** disconnect the client the way the log stream does. Instead, drop the buffered backlog and deliver a single `live.resync` sentinel telling the client to do one coalesced refetch of its visible queries. Disconnect-on-overflow is wrong here because it triggers reconnect → full refetch → more load.
-- **Heartbeats** as SSE comments every 15-30s, matching existing handlers.
-- **Publish errors** are best-effort: logged by the caller at warn level, never surfaced to the user-facing write path.
-
-This becomes the preferred primitive for new low/medium-volume product updates. New domain-specific stream helpers are disallowed unless they document why org-scoped live events are insufficient.
-
-### Per-Org Publish Coalescing
-
-Org-wide fan-out means each published event hits every connected tab, and each tab may refetch a list. A write burst in one org (e.g. an automation spawning 50 sessions) must not become `50 events × N tabs` list refetches inside one window. Add publish-side coalescing for **list-level** events:
-
-- Per org, per coalescable event class (e.g. `org_id:session:list`, `org_id:automation:list`, `org_id:preview:index`), debounce publishes to at most one event per ~500ms window, carrying a `Reason: "coalesced"` hint.
-- Publish the first event in a quiet window immediately, then collapse trailing events during the debounce window. This preserves the <1s perceived-latency target for normal low-frequency updates while still bounding bursts.
-- Coalesced list/index events should omit `resource_id` when multiple resources changed and should invalidate the relevant visible list/count queries only.
-- Detail-level events use a key like `org_id:event_type:resource_id`. They are not coalesced across resources, but repeated events for the *same* resource within the window collapse to one trailing event.
-- Coalescing must preserve all affected query families. If a burst touches both a session's detail and the sessions list, publish or encode enough events for both invalidations; do not rely on one broad event that wakes unrelated surfaces.
-- This bounds the worst case to `O(distinct changed lists) × N tabs` per window instead of `O(writes) × N tabs`.
-
-Server-side coalescing complements, and does not replace, the client-side coalescing in [Event Dispatcher](#event-dispatcher).
-
-### Publish Rules
-
-Publish only after durable state is committed. For explicit transactions, publish after `Commit`. If the code path cannot easily publish after commit, prefer a small post-commit service hook over publishing inside the transaction.
-
-Publishing must be best-effort unless a future feature explicitly requires a durable event log. If Redis is unavailable, the user action still succeeds and backup polling eventually refreshes the UI.
-
-### Event Sources
-
-Initial publish points. Note the stream column — high-frequency session sub-resource events publish to the **resource** stream, not the org stream:
-
-| Domain | Event | Stream | Publish when |
-| --- | --- | --- | --- |
-| Sessions | `session.created` | Org | manual/API/automation/session creation commits |
-| Sessions | `session.updated` | Org | status, display state, archive state, PR/branch/push state, sandbox state, title, linked summary changes (coalesced for list refresh) |
-| Threads | `session.thread.updated` | Resource (session) | thread status, active runtime state, label/model changes, archive state |
-| Human input | `session.human_input.updated` | Resource (session) | request created, answered, cancelled |
-| File events | `session.file_events.changed` | Resource (session) | thread file event batch persisted |
-| Previews | `preview.updated` | Org | preview instance/target/current state changes, freshness changes, prewarm state changes |
-| Previews | `preview.logs.changed` | Resource (preview) | startup/runtime logs appended when a viewer may be tailing |
-| Automations | `automation.updated` | Org | create/update/pause/resume/delete, capability/config changes |
-| Automation runs | `automation.run.updated` | Org | run created, status changes, linked session updates (coalesced for stats) |
-| Existing SSE domains | current event names | Org | bridge through `LiveEventStreams` while preserving old routes during migration |
-
-A session-detail tab therefore holds two streams: the **org stream** (for list/detail-level `session.updated`, plus everything else the dashboard shows) and a **session resource stream** (logs today; thread/human-input/file-event events as those migrate).
-
-### API Contract
-
-Add one new route:
-
-```text
-GET /api/v1/events/stream?org_id=<uuid>
+type SessionLiveProjection struct {
+    Status          SessionStatus `json:"status"`
+    PRCreationState PRActionState `json:"pr_creation_state"`
+    PRPushState     PRActionState `json:"pr_push_state"`
+}
 ```
 
-Auth and authorization:
+Payloads must not include logs, transcripts, diffs, prompts, branch names, titles, repository names, arbitrary user text, secrets, or full list records.
 
-- Requires an authenticated browser session.
-- `org_id` query param is required because EventSource cannot send the active-org header.
-- The server must verify the authenticated user is a member of `org_id` at handshake (existing handlers already do this — return 400/401/403 before opening the stream).
-- **Resource visibility gate.** Before enabling the org stream outside dogfood, the product/security decision must be explicit: either all authenticated org members may learn the existence and coarse state of every org-stream resource, or the stream must be filtered/scoped by the same repository/resource authorization used by the REST endpoints. The implementation must not rely on "IDs only" as the security boundary.
-- **Re-authorization for long-lived connections.** Because a stream can outlive a membership change, the server must revoke access when membership is lost: either re-check membership on a bounded interval (e.g. every 60-120s) and close the stream on failure, or cap connection lifetime (e.g. 15 min) and force a reconnect that re-checks. A revoked user must stop receiving org events promptly, not at the next deploy.
-- See [Authorization & Data Exposure](#authorization--data-exposure) for the RBAC gate that determines whether org-wide fan-out is even safe.
+### Monotonic Live Versions
 
-Response:
+Critical projections require a monotonic resource revision so reordered delivery cannot roll the UI backward.
 
-- `Content-Type: text/event-stream`
-- heartbeats as SSE comments every 15-30s
-- named event: `live_event`
-- SSE `id:` is the Redis Stream ID for the delivered entry
-- data: `models.LiveEvent` JSON
-- optional `Last-Event-ID` support to resume from the Redis Streams replay window after a brief disconnect
+- Add `live_version bigint NOT NULL DEFAULT 1` to the session, preview, automation, and automation-run records that emit projections.
+- Increment `live_version` in the same statement or transaction as any field represented in a live projection.
+- Return `live_version` from the corresponding REST endpoints.
+- Set the event envelope `Version` from the committed row.
+- A browser applies a projection only when its version is newer than the cached entity version.
 
-Example:
+Collection-only invalidations do not require a version. Versioning is not used as a global ordering mechanism across different resources.
 
-```text
-event: live_event
-data: {"id":"01J...","type":"session.updated","org_id":"...","resource_type":"session","resource_id":"...","version":42,"changed_at":"2026-06-28T12:00:00Z","hints":{"status":"running"}}
-```
+### Transactional Outbox
 
-Errors:
-
-| Status | Code | Meaning |
-| --- | --- | --- |
-| 400 | `INVALID_ORG_ID` | malformed `org_id` |
-| 401 | `UNAUTHORIZED` | no valid session |
-| 403 | `FORBIDDEN` | user is not a member of org |
-| 503 | `LIVE_EVENTS_UNAVAILABLE` | Redis/event backend unavailable |
-
-Existing SSE routes remain during migration:
-
-- `GET /api/v1/sessions/{id}/logs/stream`
-- `GET /api/v1/pull-requests/stream`
-- `GET /api/v1/code-reviews/stream`
-- `GET /api/v1/evals/batch/{batchId}/stream`
-- `GET /api/v1/evals/bootstrap/{runId}/stream`
-
-After consumers are migrated, these routes may either become compatibility wrappers around the shared stream or be removed in a later breaking cleanup if no clients use them.
-
-### Connection & Transport Requirements
-
-These are prerequisites, not nice-to-haves, because each dashboard tab now holds **two** long-lived SSE connections (org stream + a resource stream) plus normal REST traffic:
-
-- **HTTP/2 (or H3) is required on the API origin.** Under HTTP/1.1 browsers cap ~6 connections per origin; two SSE streams per tab, multiplied by a power user's open tabs, will starve REST calls. Confirm the edge/LB and any reverse proxy negotiate HTTP/2 end to end for the API origin, do not buffer `text/event-stream`, and use an idle timeout longer than the heartbeat interval.
-- **Per-node capacity target.** Establish and load-test a concrete target before rollout. The initial target should be at least 10,000 concurrent org-stream SSE connections per API node and 20,000 total SSE connections per node including resource streams, bounded by file descriptors, memory, goroutine count, and write latency. Adjust the number only with measured production instance limits.
-- **Admission and shedding.** If a node is over its active SSE connection budget or cannot allocate a new fan-out subscription, `/api/v1/events/stream` should return `503 LIVE_EVENTS_UNAVAILABLE` quickly with normal cache-control/no-buffer headers. Clients then use jittered fallback polling; they must not spin reconnects or immediately blanket-refetch.
-- **Connection math uses tabs, not users.** One user with several open tabs is several connections. Size for connections, not distinct users.
-
-### Authorization & Data Exposure
-
-Org-wide fan-out means **every subscribed member of an org receives every org-stream event sent to that subscriber**, including coarse hints (`status`, `repository_id`, the existence of a `resource_id`). This is safe without filtering **only if 143's access model is flat at the org level for those resources.**
-
-- **Required decision:** document whether coarse org-stream resource existence is visible to every org member. If yes, org-wide fan-out is fine and hints stay coarse. If no, the handler must apply per-subscriber filtering or the stream must be scoped below org.
-- **If sub-org RBAC exists or is planned:** the org stream handler must filter events per subscriber against the same authorization the REST endpoints use, or scope streams below the org. Do not ship org-wide fan-out that leaks resource existence/metadata across an authorization boundary.
-- **Repository/resource-scoped future proofing:** builder/viewer role restrictions, repository visibility, projects, or private sessions all count as possible narrower boundaries. Adding any such boundary later must include either stream filtering or a topology change before the boundary ships.
-- Regardless: hints carry IDs and coarse status only — never names, titles, diffs, prompts, branch names, repository names, user-entered text, or secrets — so that even within an org the stream reveals no content beyond what a list endpoint would show.
-
-This gate is a security-review item and must be resolved before the org stream is enabled beyond dogfood.
-
-### Database Schema
-
-No database schema is required for the first implementation. Events are transient invalidation hints backed by Redis Streams (short replay window) and never the source of truth.
-
-If later operational data shows missed events are a frequent user-visible problem even with the Redis Streams replay window, add an optional durable event cursor table:
+Add a short-lived outbox table:
 
 ```sql
-CREATE TABLE live_events (
+CREATE TABLE live_event_outbox (
     id uuid PRIMARY KEY,
     org_id uuid NOT NULL REFERENCES organizations(id),
     event_type text NOT NULL,
-    resource_type text NOT NULL,
-    resource_id uuid NOT NULL,
-    parent_type text,
-    parent_id uuid,
-    version bigint,
-    changed_at timestamptz NOT NULL DEFAULT now(),
-    hints jsonb NOT NULL DEFAULT '{}'::jsonb
+    coalesce_key text,
+    event jsonb NOT NULL,
+    attempts integer NOT NULL DEFAULT 0,
+    available_at timestamptz NOT NULL DEFAULT now(),
+    claim_owner text,
+    claim_expires_at timestamptz,
+    aggregate boolean NOT NULL DEFAULT false,
+    published_at timestamptz,
+    folded_into_event_id uuid,
+    last_error text,
+    originated_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX live_events_org_changed_at_idx
-    ON live_events (org_id, changed_at DESC);
+CREATE INDEX live_event_outbox_pending_idx
+    ON live_event_outbox (available_at, claim_expires_at, created_at)
+    WHERE published_at IS NULL AND folded_into_event_id IS NULL;
+
+CREATE INDEX live_event_outbox_pending_age_idx
+    ON live_event_outbox (originated_at)
+    WHERE published_at IS NULL AND folded_into_event_id IS NULL;
 ```
 
-Do not add this table unless replay beyond the Redis window becomes a real requirement. The initial design intentionally avoids a new hot append-only table.
+The outbox is a delivery mechanism, not a durable product event history:
+
+- State and outbox insert are atomic.
+- A process-local dispatcher receives an after-commit wake-up and claims the row immediately.
+- `live_event_outbox.id` is the event envelope's stable `EventID`.
+- `originated_at` is the original state-transition time used for lag SLOs. A materialized aggregate inherits the earliest `originated_at` of its source rows so coalescing cannot reset or hide delivery lag.
+- A claimant starts a short Postgres transaction, selects eligible rows with `FOR UPDATE SKIP LOCKED`, and atomically sets `claim_owner`, a bounded `claim_expires_at`, and `attempts`. It commits before any Redis I/O.
+- Redis publication occurs outside the database transaction. Only the current unexpired owner may mark the row published; losing a lease can create a duplicate publication but cannot lose the row.
+- A crashed or timed-out claim becomes eligible again when `claim_expires_at <= now()`. Workers use a unique process/worker claim owner, a default 30-second lease, and bounded renewal only when a measured publish attempt genuinely needs longer.
+- A background worker claims pending or expired rows with exponential backoff.
+- Successfully published or folded rows are deleted in bounded batches after a short retention period, initially one hour.
+- An alert fires when the oldest pending row exceeds the live-update latency SLO.
+- Validate static event inputs before opening the state transaction. Construct and validate the final event, including returned resource ID and `live_version`, inside the transaction before commit so a schema error rolls back both state and outbox insertion.
+
+Redis unavailability never rolls back an already committed state change. A general Postgres failure may still fail the transaction, as it does for any other durable write.
+
+### Publication And Global Coalescing
+
+Coalescing must work across API and worker processes. Per-process timers are not a correctness or load bound.
+
+Each outbox row may carry a stable `coalesce_key`, such as:
+
+- `<org_id>:session:list`
+- `<org_id>:session:<session_id>`
+- `<org_id>:preview:index`
+- `<org_id>:automation:stats`
+
+The global publisher follows leading-plus-trailing semantics:
+
+1. The first row for a quiet key acquires a short Redis lease and publishes immediately.
+2. Rows arriving while the lease is active remain pending rather than being marked delivered.
+3. At the end of the 250-500ms window, the outbox dispatcher—or the next fast-path publisher to acquire the expired lease—groups every pending row for the key.
+4. In one Postgres transaction it takes a transaction-scoped advisory lock derived from `(org_id, coalesce_key)`, locks the eligible source rows, builds the deterministic typed aggregate, inserts that aggregate as a new `live_event_outbox` row with a stable UUID/EventID and `aggregate = true`, and sets every source row's `folded_into_event_id` to the aggregate row ID. The Redis lease controls timing; the Postgres lock prevents two expired lease holders from materializing competing aggregates.
+5. Only after that transaction commits does a normal outbox claimant publish the materialized aggregate. A crash or retry therefore reuses the same event identity and payload.
+6. Continued writes create at most one trailing aggregate per window.
+7. If Redis is unavailable, the outbox worker materializes aggregates from pending rows before retry publication so recovery does not replay every original write.
+
+The coalescer must preserve all affected families. It may combine many resource changes into a collection event with `ResourceID == nil`, but it must not fold a required detail update into an unrelated broad list event.
+
+Publication order for one event is:
+
+1. `XADD` the validated event to the per-org replay Stream.
+2. Capture the returned Redis Stream ID.
+3. Publish `{stream_id, event}` to the org's fixed live-bus shard.
+4. Mark the outbox row published.
+
+A crash between these steps can create a duplicate, which is safe because both ordinary and aggregate `EventID` values are durably stable and browser handling is idempotent. It cannot create a permanent silent gap because the materialized outbox row remains retryable until marked published.
+
+### In-Process Fan-Out And Backpressure
+
+Each API process maintains:
+
+- one bounded live-bus subscriber set
+- an in-memory map from `org_id` to local SSE subscribers
+- no blocking Redis reader per org
+
+SSE health is coupled to the complete Redis delivery path for the org. It requires both a healthy local bus-shard subscription and publisher/outbox lag below the live-update degradation threshold:
+
+- A local shard disconnect/read failure atomically marks that shard unhealthy.
+- Repeated `XADD`/Pub/Sub publication failures or oldest-pending outbox age above two seconds mark the shared live service degraded even if subscriber sockets remain open.
+- The fan-out manager stops emitting healthy heartbeats for affected orgs, writes one local `live.degraded` control frame where possible, and closes their SSE connections within the bounded frame deadline.
+- The frontend immediately enters degraded polling and application-controlled reconnect.
+- The Redis subscriber must re-establish and acknowledge the shard subscription before new SSE handshakes for that shard return `live.ready`.
+- Existing browser connections are never kept open across a shard subscription gap. Reconnection is the replay barrier that recovers events published while the API node was disconnected.
+- A failure of one shard closes only connections for orgs mapped to that shard; a client-wide Redis failure closes all org live streams on the node.
+
+This prevents API-generated heartbeats from masking a disconnected subscriber, failed publisher, or growing outbox backlog. Bus disconnects degrade immediately. Lag/command health uses hysteresis: degrade after two consecutive one-second samples above the two-second lag threshold (or a configured consecutive command-failure threshold), and recover only after subscription acknowledgement, a successful publish probe, and three consecutive samples below 500ms. This avoids turning a single slow publish into a fleet reconnect wave.
+
+Each API node runs one bounded live-health monitor, not one monitor per connection. It samples the indexed oldest-pending outbox age at most once per second, combines it with local Redis command/subscription health, and publishes one in-process health state to all local handlers. This bounded database read is part of the capacity budget and is disabled when no org SSE connections exist on the node.
+
+Each browser subscriber uses a small collapsible mailbox, initially 16 distinct pending keys:
+
+- Resource events collapse by `(event_type, resource_id)` and retain the newest `Version`.
+- Collection events collapse by `(event_type, scope)`.
+- A one-slot wake channel tells the SSE writer that mailbox work exists.
+- If the number of distinct pending keys exceeds the limit, the mailbox clears and sets `needs_resync` instead of buffering hundreds of events.
+- The handler captures the latest replay high-water ID, emits `live.resync` with that checkpoint, flushes, and closes the HTTP connection. It does not continue delivering live events past an unacknowledged gap.
+
+Every SSE frame and flush uses a bounded write deadline, initially five seconds. A client that cannot accept a heartbeat or control frame within the deadline is disconnected as a slow network consumer. The frontend reconnects and replays or resyncs. The shared SSE writer must expose flush errors rather than silently ignoring them.
+
+### Race-Free Replay
+
+On connection or manual reconnect:
+
+1. Validate authentication, active org, and authorization before opening the stream.
+2. Register the browser subscriber in buffering mode so newly published live-bus events cannot race past catch-up.
+3. Capture the current replay Stream tail as the connection high-water mark.
+4. If no cursor is supplied, do not replay older entries and set `initial_sync_required: true` for the eventual `live.ready`. The browser must complete one canonical synchronization of visible registered queries before acknowledging that high-water mark as its resume cursor. Events published after the high-water mark remain buffered/delivered normally and mark affected queries dirty.
+5. If a cursor is supplied, compare it with the Stream's first and last IDs.
+6. If the cursor is retained, run a bounded `XRANGE` from the cursor through the captured high-water mark.
+7. Deliver replay entries in Stream-ID order, deduplicating by `EventID`.
+8. Drain buffered live events, skipping Stream IDs at or below the high-water mark.
+9. Switch the subscriber to live mode.
+10. Emit and flush `live.ready` with the high-water mark, initial-sync flag, and current bus-health epoch.
+
+An org with no replay Stream or no entries uses the sentinel high-water `0-0`, which is a valid application resume cursor before the first auto-generated Redis Stream ID.
+
+If the cursor is older than the first retained entry, malformed, ahead of the current Stream, or would require more than 1,000 replay entries:
+
+1. Capture the current replay high-water mark.
+2. Send `live.resync` with `through_stream_id` set to that mark.
+3. Flush and close the SSE connection.
+4. The frontend pauses reconnect, performs one canonical synchronization of visible registered query families, and retains its old resume cursor if synchronization fails.
+5. After successful synchronization, the frontend advances its application-managed resume cursor to `through_stream_id` and reconnects. Events published after that checkpoint replay on the new connection.
+
+A resync is a correctness fallback, not an HTTP error. The client tracks separate `received_cursor` and `resume_cursor` values; only successfully processed ordinary events or a successfully completed initial/resync synchronization advance `resume_cursor`.
+
+Synthetic control events (`live.ready`, `live.heartbeat`, `live.degraded`, `live.resync`, and `server.draining`) do not carry SSE IDs and therefore do not implicitly advance the browser cursor. `live.ready` and `live.resync` carry explicit high-water fields whose acknowledgement follows the rules above.
+
+### Publish Sources
+
+Initial org-stream events:
+
+| Domain | Event | Scope | Projection | Publish when |
+| --- | --- | --- | --- | --- |
+| Sessions | `session.created` | Collection | optional new-row summary deferred | session and primary thread commit |
+| Sessions | `session.updated` | Resource or collection aggregate | status/PR action projection | status, archive, title, PR/branch/push, sandbox, or linked-summary version commits |
+| Previews | `preview.updated` | Resource or collection aggregate | preview status/freshness projection | preview instance/target/current/freshness/prewarm state commits |
+| Automations | `automation.updated` | Resource or collection aggregate | enabled/status projection | create/update/pause/resume/delete/config commits |
+| Automation runs | `automation.run.updated` | Resource or collection aggregate | run status projection | run creation/status/linked-session commits |
+| Code reviews | `code_review.updated` | Resource or collection aggregate | status/decision projection where safe | current code-review update commits |
+| Pull requests | `pull_request.updated` | Resource | health/action projection where safe | current PR health update commits |
+| Evals | `eval_batch.updated` | Resource | status projection | batch/run state commits |
+| Evals | `eval_bootstrap.updated` | Resource | status projection | bootstrap state commits |
+
+Initial resource-stream events:
+
+| Resource | Event | Semantics |
+| --- | --- | --- |
+| Session | log/message append | deliver the durable append entry with stable ID |
+| Session | `session.thread.updated` | focused detail status projection/invalidation |
+| Session | `session.human_input.updated` | typed request transition or narrow invalidation |
+| Session | `session.file_event.appended` | deliver durable append entries, batch where appropriate |
+| Preview | `preview.log.appended` | deliver durable append entries while the log panel is visible |
+
+Do not emit an org `session.updated` detail refetch when the focused session resource stream already carries the same version. The org event may still update session lists, counts, and other tabs.
+
+### Authorization And Mid-Stream Revocation
+
+The org stream must enforce the same visibility boundary as REST. IDs alone are not a security boundary.
+
+At handshake, the server computes a cached authorization snapshot for the user and org:
+
+- org-visible resources accept `Audience == org`
+- repository-scoped events require the repository in the snapshot
+- resource-scoped/private events require an explicit resource grant or a narrower stream
+
+Filtering is performed in memory from the event envelope and snapshot. It must not query Postgres once per event or once per browser connection on every heartbeat.
+
+Membership and authorization changes use an event-driven connection registry:
+
+1. Membership/permission state commits.
+2. A control event is written through the same transactional outbox and published to all API nodes after commit.
+3. Each node closes matching `(user_id, org_id)` connections or forces their authorization snapshot to refresh.
+4. As a Redis-loss safety net, authorization is singleflight-revalidated per unique `(user_id, org_id)` at most once every 60 seconds, shared by all local connections for that pair.
+5. Connections also have a randomized maximum lifetime of 15-30 minutes and must reauthorize on reconnect.
+
+Target revocation latency is under five seconds when the control bus is healthy and under 60 seconds during a Redis outage. Session expiry is enforced independently through the connection's auth expiry timer.
+
+## SSE API Contract
+
+Add:
+
+```text
+GET /api/v1/events/stream?org_id=<uuid>&last_event_id=<redis-stream-id>
+```
+
+`org_id` is required. `last_event_id` is optional and is used when application-controlled reconnect constructs a new EventSource. The server also accepts the standard `Last-Event-ID` header for native browser reconnects.
+
+Handshake errors:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `INVALID_ORG_ID` | malformed or missing `org_id` |
+| 400 | `INVALID_LAST_EVENT_ID` | malformed cursor; client should reconnect without it and resync |
+| 401 | `UNAUTHORIZED` | no valid session |
+| 403 | `FORBIDDEN` | user cannot subscribe to the org |
+| 503 | `LIVE_EVENTS_UNAVAILABLE` | live bus unavailable or node over capacity |
+
+Response headers:
+
+- `Content-Type: text/event-stream`
+- `Cache-Control: no-cache, no-transform`
+- proxy-specific no-buffer header where supported
+- compression disabled for the event stream
+
+Events:
+
+```text
+event: live.ready
+data: {"server_time":"2026-07-11T12:00:00Z","schema_version":1,"initial_sync_required":false,"through_stream_id":"1783684800123-0","bus_health_epoch":17}
+
+id: 1783684800124-0
+event: live.event
+data: {"schema_version":1,"event_id":"8f...","type":"session.updated","scope":"resource","org_id":"...","resource_type":"session","resource_id":"...","audience":"org","version":42,"changed_at":"2026-07-11T12:00:00Z","payload":{"status_projection":{"status":"running"},"list_affected":true,"counts_affected":false}}
+
+event: live.heartbeat
+data: {"server_time":"2026-07-11T12:00:15Z","bus_health_epoch":17}
+
+event: live.degraded
+data: {"cause":"redis_bus_disconnected","bus_shard":7}
+
+event: live.resync
+data: {"cause":"replay_window_missed","through_stream_id":"1783684800999-0"}
+
+event: server.draining
+data: {"retry_after_ms":3742}
+```
+
+The handler flushes `live.ready` after applicable replay entries and the connection's buffered-through-high-water entries have been written. `initial_sync_required` is true whenever no trusted resume cursor was supplied. A handler must not return `live.ready` while its bus shard or the shared publisher/outbox health is degraded. Heartbeats are real named events every 15-25 seconds with per-connection jitter so browser JavaScript can detect a stalled connection; they may be emitted only while the complete delivery path remains healthy at the advertised epoch. Optional comment heartbeats may also be sent for intermediary compatibility, but they do not count as client health evidence.
+
+### Connection And Process Lifecycle
+
+- Browser-to-edge HTTP/2 or HTTP/3 is required to avoid HTTP/1.1 per-origin connection starvation. Upstream proxy hops may use another protocol if they preserve streaming, capacity, flush behavior, and idle timeouts.
+- Every proxy hop must disable event-stream buffering and use an idle timeout longer than the heartbeat interval.
+- Admission control has global, per-org, and per-user connection budgets. Rejected connections return `503` with `Retry-After` where possible.
+- Rate limiting for ordinary API requests must not turn a legitimate reconnect wave into a permanent lockout; stream handshakes use a dedicated limiter.
+- On shutdown, the node first becomes unhealthy for new traffic, then sends `server.draining` with randomized retry guidance, flushes, and closes live connections before `http.Server.Shutdown` waits for completion.
+- Maximum connection age is jittered so routine reauthorization does not synchronize clients.
 
 ## Frontend Design
 
-### Optimistic Updates (The Actor's Own Changes)
+### Optimistic Mutations And Causation
 
-The largest perceived-latency win is not seeing other people's changes — it is the user's own action feeling instant. SSE must **not** be on the critical path for the acting user.
+The acting user's own action must never wait on SSE.
 
-- For a user's own mutation, optimistically update the relevant query cache from the mutation's own response (or `onMutate`), immediately. Do not wait for an SSE round-trip or a fallback poll to reflect the user's click.
-- SSE and backup polling then reconcile the optimistic state against canonical truth and propagate the change to the user's *other* tabs and to other users.
-- This replaces the old "explicit user action in flight → 2-5s polling" pattern as the primary mechanism. Short scoped polling remains only as a convergence backstop for multi-step server-side state machines (e.g. PR/branch/push), not as the way the actor sees their own action land.
+- Generate a UUID `client_mutation_id` for each user mutation and send it through `X-Client-Mutation-ID`.
+- On `onMutate`, cancel relevant stale reads, write an honest pending/intent state into affected caches, and keep rollback data.
+- On mutation failure, roll back or show a scoped error state.
+- On success, merge the mutation response into all affected caches.
+- The backend propagates the ID into `LiveEvent.CausationID` and into follow-up job payloads where practical.
+- The originating tab suppresses redundant refetches that would only echo its still-current optimistic transition. Other tabs and users process the event normally.
+- A later higher `Version` from backend-driven convergence always wins over the optimistic state.
 
-### Shared Connection
+Optimism must not claim a terminal success before the backend has achieved it. For multi-step PR, branch, push, preview-start, and automation workflows, the immediate state is `starting`, `queued`, or equivalent intent.
 
-Add `useLiveEventStream()` mounted once in the authenticated dashboard layout:
+### Shared Connection And Reconnect
 
-- builds `/api/v1/events/stream?org_id=...`
-- uses EventSource with credentials
-- tracks health: `healthy`, `reconnecting`, `unavailable`
-- uses capped exponential reconnect with jitter
-- sends `Last-Event-ID` on reconnect to resume from the Redis replay window when possible
-- emits events into a lightweight client-side dispatcher
-- closes and recreates on active org change
+Add `useLiveEventStream()` once in the authenticated dashboard layout.
 
-The hook replaces one-off page-level EventSource setup for list/detail invalidations. A page must not open its own org-scoped SSE connection. Resource streams (session logs, etc.) remain page/component-scoped.
+The v1 transport uses EventSource with application-controlled reconnect:
 
-Same-browser multi-tab sharing is intentionally deferred from v1, but the hook should be written so the transport can later be swapped behind the same dispatcher. A future leader-tab implementation should keep exactly one EventSource per `org_id` per browser profile and broadcast received events and health state through `BroadcastChannel`; follower tabs should not independently reconnect unless leadership is lost.
+- track separate `received_cursor` and safely acknowledged `resume_cursor` values
+- rebuild the URL from `resume_cursor` when constructing a new EventSource
+- use `withCredentials`
+- close and recreate on active-org change
+- treat `live.ready` as transport establishment, but do not consider live queries synchronized until any required initial synchronization completes
+- when `initial_sync_required` is true, mark all visible registered live-query families dirty and complete one canonical synchronization before acknowledging `through_stream_id`
+- on `live.resync`, pause reconnect, complete canonical synchronization, acknowledge `through_stream_id` only on success, and then reconnect so post-checkpoint events replay
+- on `live.degraded`, immediately mark the stream unhealthy, enter degraded polling, honor reconnect jitter, and allow the server to close the connection
+- reset a liveness timer on `live.heartbeat` and `live.event`
+- mark unhealthy after two missed heartbeats or any EventSource error
+- use full-jitter backoff: 1s, 2s, 4s, 8s, 15s, then 30-120s probes indefinitely
+- pause reconnect timers while offline
+- when no shared leader exists, pause aggressive reconnect while hidden and resume immediately on visibility
+- never stop retrying permanently after a fixed attempt count
 
-### Event Dispatcher
+Native EventSource does not expose useful structured HTTP error bodies. After repeated failures, the hook may use the existing TanStack auth/membership query to determine whether the active org was revoked; otherwise it reports a generic unavailable state and continues low-rate probes.
 
-Add a registry that maps event types to invalidation handlers:
+### Same-Browser Connection Sharing
+
+Before rollout beyond internal dogfood, one browser profile should hold at most one org EventSource where platform support permits:
+
+- Prefer a SharedWorker as the connection owner.
+- Use BroadcastChannel to distribute events, cursor, and health state to tabs.
+- If a SharedWorker is unavailable, use a BroadcastChannel leader with a lease/election mechanism.
+- Fall back to one EventSource per tab only when neither sharing mechanism is available.
+- Follower tabs never independently reconnect while a healthy leader exists.
+
+Cross-tab sharing reduces browser and API connections; it does not imply cross-tab TanStack cache sharing. Hidden follower tabs record dirty event families without refetching and catch up once visible.
+
+### Visibility-Aware Query Registration
+
+TanStack's “active” query state is not sufficient to decide whether a user can see a query. Add a shared registration API, for example:
 
 ```ts
-type LiveEventHandler = {
-  eventTypes: LiveEventType[];
-  handle: (event: LiveEvent, queryClient: QueryClient) => void;
-};
+useLiveQueryRegistration({
+  queryKey,
+  families: ["session.detail"],
+  resourceId: sessionId,
+  priority: "critical",
+  visible: documentVisible && panelVisible,
+});
 ```
 
-Handlers must:
+Pages and shared components register live query families with:
 
-- invalidate narrow query keys when the resource is known
-- coalesce repeated invalidations for the same key within a window (~250-500ms, leading + trailing, so single low-frequency changes are not delayed against the <1s goal)
-- only refetch mounted queries; never refetch unmounted ones
-- prioritize visible, user-critical queries over mounted but collapsed/secondary panels
-- avoid fan-out from noisy resources to unrelated pages
-- never directly mutate complex canonical records from the event payload
-- on a `live.resync` sentinel or on reconnect, perform **one** coalesced, jittered refetch of currently-visible queries — never a blanket invalidate-everything, which would synchronize thousands of clients into a refetch storm
+- exact query key
+- resource ID where applicable
+- `critical`, `secondary`, or `inactive` priority
+- actual visibility, including document, selected tab, collapsed panel, and focused resource
+- whether a resource stream already owns the focused resource
 
-Use three frontend priority classes:
+When `document.visibilityState == "hidden"`, the dispatcher performs no event-triggered REST refetch. It records the newest cursor, projection versions, and dirty families. On visibility, it performs one prioritized catch-up of currently visible dirty queries because global `refetchOnWindowFocus` is disabled.
 
-| Priority | Examples | Behavior |
+### Version-Safe Query Results
+
+A projection must not be rolled back by a REST request that began before the represented commit.
+
+All migrated live queries follow these rules:
+
+- Detail/entity queries use a shared version-aware structural-sharing helper. When an incoming REST entity has a lower `live_version` than the cached entity, accept canonical non-projected fields but preserve the newer cached projection fields and version, then keep the query dirty for reconciliation.
+- List helpers merge existing rows by resource ID and preserve newer projected fields when an incoming row has a lower `live_version`.
+- Every migrated query function consumes TanStack's `AbortSignal` and passes it to the API request.
+- If an affecting event arrives while a query is fetching and the request may have observed an older snapshot, the scheduler cancels that fetch once for the current dirty generation, applies the projection, and schedules one replacement fetch. Subsequent events in the same burst only update the dirty/version watermark; they do not repeatedly cancel and restart the replacement.
+- Creation, deletion, or ordering events that cannot be protected by per-row versions always cancel a possibly stale list request once and require a replacement list fetch. They are never resolved solely through row merging.
+- A cancelled or superseded response must not commit to TanStack cache even if the underlying network stack completes later.
+
+The scheduler keeps a `minimum_accepted_version` per `(query_key, resource_id)` and a dirty generation per query key. Query helpers clear those guards only after a canonical response at or above the watermark is committed.
+
+### Invalidation Scheduler
+
+Do not call broad `invalidateQueries` directly from event listeners. The central scheduler:
+
+1. Maps typed events to registered query families.
+2. Applies a safe newer projection synchronously with immutable `setQueryData`/`setQueriesData`.
+3. Marks matching queries stale with `refetchType: "none"`.
+4. Starts refetches only for currently visible registered queries.
+5. Maintains per-query `idle`, `fetching`, and `dirty_during_fetch` state.
+6. Allows at most one active fetch and one trailing fetch per query key.
+7. Uses leading-edge execution for critical queries and a 250-500ms debounce for secondary queries.
+8. Cancels at most one potentially stale in-flight request per dirty generation and never repeatedly restarts its replacement during an event burst.
+9. Marks inactive/unmounted cache entries stale without fetching them.
+10. On resync, reconnect miss, or visibility catch-up, refreshes only visible registered queries with cause-specific jitter.
+
+Jitter depends on the cause:
+
+- individual mailbox overflow: 0-250ms
+- ordinary reconnect: 0-1s
+- fleet event such as deploy or Redis recovery: server-provided 1-10s window
+
+Resource-stream ownership suppresses duplicate org-stream detail work for the focused resource while still allowing list and count refreshes.
+
+### Projection Fast Path
+
+For critical status UI, a valid newer projection updates visible state before REST refetch:
+
+- session status and PR/branch/push action state
+- preview status and freshness state
+- automation enabled/state
+- automation-run status
+- later, code-review and PR-health badges where the payload is safe and versioned
+
+Projection application is optional per event type but strict when enabled:
+
+- reject unknown schema versions
+- reject missing or non-increasing versions
+- never create a complex missing record from a projection
+- never reorder lists solely from a projection unless the event provides a complete typed ordering contract
+- always retain a canonical reconciliation refetch according to query priority
+
+This fast path targets the extra event-to-REST round trip without turning Redis into the source of truth.
+
+### Polling And Degraded-Mode Policy
+
+Create `frontend/src/lib/live-refresh-policy.ts` and remove local raw intervals from migrated surfaces.
+
+| Situation | Policy |
+| --- | --- |
+| SSE healthy, list/index backup | 2-5 minutes with stable per-query jitter |
+| SSE healthy, active detail backup | 30-60 seconds with stable jitter |
+| SSE newly unhealthy, active detail | immediate visible-query refresh, then 5-15 seconds |
+| SSE newly unhealthy, visible list/index | immediate visible-query refresh, then 10-30 seconds |
+| SSE unhealthy for more than 2 minutes | active detail 15-30 seconds; list/index 30-90 seconds |
+| explicit server-side state machine converging | 2-5 seconds for that resource only |
+| hidden document | no polling; record dirty state and catch up on visibility |
+| browser offline | no polling or reconnect until online |
+
+Jitter is generated once per `(browser_client_id, query_key, policy_state)` rather than recomputed on every React render. A fleet-wide degradation signal may widen intervals, but an isolated client failure should not make an active detail view stale for 90 seconds.
+
+### Query Effect Matrix
+
+| Event | Immediate projection | Scheduled canonical work |
 | --- | --- | --- |
-| Critical visible | active session detail status, active preview detail state, modal/action result state | invalidate immediately, with only same-key micro-coalescing |
-| Visible secondary | visible lists, sidebars, stats cards, visible but non-focused tabs | debounce within the standard 250-500ms window |
-| Mounted inactive | collapsed panels, inactive tabs, offscreen sections | mark stale only; refetch when visible or on sparse backup polling |
-
-If stream health is unhealthy on an active detail view, the UI may show a small non-blocking reconnecting state for live status surfaces. Do not show global warning banners for routine short reconnects.
-
-### Polling Policy
-
-Create a central polling policy module, for example `frontend/src/lib/live-refresh-policy.ts`. Code reviews and bootstrap evals already implement this shape, so this generalizes a proven pattern:
-
-| Situation | Interval |
-| --- | --- |
-| SSE healthy, list/index backup | 2-5 minutes with jitter |
-| SSE unhealthy, list/index fallback | 30-90 seconds with jitter |
-| SSE healthy, active detail backup | 30-60 seconds with jitter |
-| SSE unhealthy, active detail fallback | 10-30 seconds with jitter |
-| explicit server-side state machine converging | 2-5 seconds, scoped to that resource only |
-| hidden document | disabled unless a server-side state machine is mid-transition |
-
-A user's own action is handled by [optimistic updates](#optimistic-updates-the-actors-own-changes), not by switching to aggressive polling. All remaining polling should use this policy instead of raw `10000`, `30000`, or local constants.
-
-### Query Invalidation Matrix
-
-| Event | Frontend effect |
-| --- | --- |
-| `session.created` | invalidate sessions list, sidebar list, session counts (coalesced) |
-| `session.updated` | invalidate matching session detail; invalidate sessions list/counts if visible (coalesced) |
-| `session.thread.updated` | (resource stream) invalidate matching session detail; invalidate active transcript only if the open thread matches |
-| `session.human_input.updated` | (resource stream) invalidate human-input query and session detail for matching session |
-| `session.file_events.changed` | (resource stream) invalidate file-events query only for matching session |
-| `preview.updated` | invalidate preview detail/panel for matching preview/session; invalidate preview index sections with debounce |
-| `preview.logs.changed` | (resource stream) invalidate/tail logs only when logs panel is visible |
-| `automation.updated` | invalidate automations list and matching automation detail |
-| `automation.run.updated` | invalidate latest run/runs tab first page; debounce stats refresh |
-| `code_review.updated` | replace current code-review stream invalidation |
-| `pull_request.updated` | replace current PR-health stream invalidation |
-| `eval_batch.updated` | replace eval batch stream invalidation when migrated |
-| `eval_bootstrap.updated` | replace eval bootstrap stream invalidation when migrated |
-| `live.resync` | one coalesced jittered refetch of visible queries |
+| `session.created` | none initially | visible sessions list, sidebar, and counts |
+| `session.updated` resource | newer status/action projection | matching visible detail unless resource stream owns it; visible affected lists/counts |
+| `session.updated` collection | none | visible sessions list/counts only |
+| `session.thread.updated` | focused thread/session projection | matching visible detail; transcript only if payload says transcript metadata changed |
+| `session.human_input.updated` | request state where cached | matching human-input query and detail |
+| `session.file_event.appended` | append stable entry | gap recovery only; no full refetch per append |
+| `preview.updated` | newer status/freshness projection | matching visible detail/panel and affected visible index section |
+| `preview.log.appended` | append stable entry | gap recovery only |
+| `automation.updated` | newer enabled/status projection | matching visible detail and visible list |
+| `automation.run.updated` | newer run projection | visible current run/runs page; stats on terminal event or trailing debounce |
+| `code_review.updated` | safe status projection when versioned | matching/list queries as registered |
+| `pull_request.updated` | safe health/action projection when versioned | matching PR-health query |
+| `eval_batch.updated` | newer status projection | matching batch query |
+| `eval_bootstrap.updated` | newer status projection | matching bootstrap query |
+| `live.resync` | retain current UI | one cause-jittered refresh of visible dirty queries |
 
 ## Surface Migration Plan
 
 ### Sessions List And Sidebar
 
-Replace the current 10s list/count polling with org events:
+Replace 10s polling with `session.created` and `session.updated` collection effects.
 
-- `session.created`
-- `session.updated`
-
-Backup intervals:
-
-- healthy SSE: 3 minutes
-- unhealthy SSE: jittered 45-90 seconds
-- hidden document: no backup polling
-
-Coalesce list and count invalidations separately. A burst of ten session updates should produce at most one list refetch and one count refetch per coalescing window — enforced on both the publish side (per-org coalescing) and the client side.
+- Update safe list-row status projections by `session_id` and `live_version` when the row is already cached.
+- Coalesce list and count queries independently.
+- Hidden tabs never refetch from events.
+- Healthy backup: 3 minutes.
+- Newly unhealthy: immediate visible refresh, then 10-30s.
+- Extended unhealthy: 30-90s.
 
 ### Session Detail
 
-This page is the biggest win — it collapses 11+ concurrent polls into events plus a sparse backstop. Session detail should use:
+Session detail uses:
 
-- the existing session **log** stream for high-volume logs while active
-- the **session resource stream** for thread/human-input/file-event invalidation
-- the **org stream** for list/detail-level `session.updated`
-- optimistic updates for the user's own PR/branch/push actions
-- short scoped polling only as a convergence backstop for those server-side state machines
+- the existing resource SSE route for log/message append delivery
+- resource events for thread, human-input, file-event, and focused status changes
+- the org stream for list/summary effects and detail changes not already owned by the resource stream
+- versioned projections for session status and action state
+- optimistic pending state for the user's PR/branch/push actions
+- short scoped polling only for a server-side state machine that is actively converging
 
-Backup intervals:
+Healthy backup is 60s while active and disabled or 5 minutes after terminal settle. Newly unhealthy detail refreshes immediately and then every 5-15s. Transcript, human input, file events, timeline, readiness, and detail must not independently poll every 3-5s when the resource stream is healthy.
 
-- active session with healthy SSE: 60 seconds
-- active session with unhealthy SSE: jittered 10-30 seconds
-- terminal session: 5 minutes or disabled after initial settle
-- server-side PR/branch/push state machine converging: 2 seconds until terminal state
-
-The detail page must not poll transcript, human input, file events, and detail independently every 3-5s when SSE is healthy.
+As a follow-up consolidation, merge the current three per-session Redis readers into one typed per-session Redis Stream so a focused session costs one backend blocking reader rather than separate log, status, and event readers. This is not required to prove the org bus but is required before resource-stream concurrency materially exceeds current levels.
 
 ### Previews
 
-Publish `preview.updated` (org stream) for all preview state transitions. The preview index, preview detail page, PR preview page, and embedded preview panel listen through the shared org event stream.
+Publish `preview.updated` for every preview state transition in the same transaction through the outbox. Apply versioned status/freshness projections immediately.
 
-Backup intervals:
+- Healthy index backup: 2-3 minutes.
+- Newly unhealthy index: immediate visible refresh, then 10-30s.
+- Healthy starting detail/panel backup: 60s.
+- Newly unhealthy starting detail: immediate refresh, then 5-15s.
+- Terminal detail: disabled or 5 minutes.
 
-- preview index healthy: 2-3 minutes
-- preview index unhealthy: jittered 45-90 seconds
-- starting preview detail/panel healthy: 60 seconds
-- starting preview detail/panel unhealthy: jittered 10-20 seconds
-- stopped/failed/expired preview: disabled or 5 minutes
-
-Preview logs tailing may keep a short interval while visible, but should move to `preview.logs.changed` on the preview resource stream if startup log traffic becomes material.
+Preview logs move to append events on a preview resource stream when visible traffic justifies replacing the current short poll. Do not implement a log-appended event that refetches the complete log repeatedly.
 
 ### Automations
 
-Publish `automation.updated` and `automation.run.updated` (org stream, run events coalesced for stats).
+Publish `automation.updated` and `automation.run.updated` through the outbox. Apply versioned status projections immediately.
 
-Backup intervals:
+- Healthy list/detail backup: 3 minutes.
+- Newly unhealthy visible list/detail: immediate refresh, then 10-30s.
+- Active run detail newly unhealthy: immediate refresh, then 5-15s.
+- Stats refetch on terminal run transitions or one 10-30s trailing refresh while runs remain active.
 
-- automations list healthy: 3-5 minutes
-- automations list unhealthy: jittered 60-120 seconds
-- automation detail healthy: 2-3 minutes
-- active runs visible and unhealthy: jittered 15-30 seconds
-
-Automation stats should not refetch on every run event. It should refetch on terminal run events or on a 10-30s debounce if runs are actively changing.
-
-Automation goal improvement should publish an event when the proposal status changes. The modal can keep short scoped polling during the transition, but the target architecture is event-driven status and transcript invalidation, with optimistic UI for the user's accept/reject action.
+Goal improvement publishes proposal and transcript status events. User accept/reject actions update optimistically with causation IDs; scoped polling remains only while the backend state machine is converging.
 
 ## Existing SSE Consolidation
 
-The repo should converge on these shared pieces:
+The repository converges on:
 
-- one backend `LiveEventStreams` helper (per-org fan-out model) for low/medium-volume org events
-- one frontend `useLiveEventStream` hook
-- one event type registry in `frontend/src/lib/sse.ts` or a successor module
-- one route builder for the org stream
-- one reconnect/health model
-- one polling fallback policy
+- one outbox-backed org event publisher
+- one bounded fixed-shard Redis live bus
+- one per-org replay Stream contract
+- one backend in-process org fan-out manager
+- one shared SSE writer with bounded frame deadlines and error-aware flush
+- one frontend live transport and cross-tab sharing layer
+- one typed event registry
+- one visibility registration and invalidation scheduler
+- one fallback policy
+- resource append streams for high-frequency feeds
 
 Migration sequence:
 
-1. Keep `SessionStreams` for logs and high-frequency session resource events.
-2. Bridge `PullRequestStreams` events into `LiveEventStreams`; migrate frontend PR health invalidation to org stream.
-3. Bridge `CodeReviewStreams` events into `LiveEventStreams`; remove page-level code review EventSource.
-4. Bridge eval batch/bootstrap events into `LiveEventStreams` for ordinary page invalidation. Keep resource streams only if batch event volume makes org fan-out expensive.
-5. Delete duplicated frontend route builders and page-specific SSE hooks once no longer used.
-6. Prevent new domain-specific SSE helpers unless they document why org-scoped live events are insufficient.
+1. Keep the current session resource stream while the org path is proven.
+2. Introduce stable event IDs and schema-versioned typed payloads.
+3. Bridge PR health and code-review invalidations through the outbox-backed org bus.
+4. Bridge eval batch/bootstrap ordinary status events through the org bus.
+5. Keep resource streams where event volume or append semantics justify them.
+6. Remove per-client Redis Pub/Sub subscriptions and duplicated frontend route builders after consumers migrate.
+7. Consolidate the three per-session Redis readers when resource-stream scale requires it.
 
-As these migrate, retire the per-client subscription model in favor of the per-process fan-out model so we are not running two fan-out architectures long-term.
+New domain-specific SSE helpers require a documented frequency, authorization, and replay reason.
 
 ## Performance And Scalability Requirements
 
-### Browser And API
+### Capacity Model
 
-- One org EventSource per dashboard tab; resource streams only for high-volume focused resources.
-- Same-browser org-stream sharing through `BroadcastChannel` or shared worker is the preferred v2 connection-reduction path if tab multiplication becomes material.
-- No list/index page opens a second org-scoped EventSource.
-- HTTP/2 (or H3) required on the API origin; verify no proxy buffers `text/event-stream`.
-- EventSource reconnects use jitter and capped exponential backoff; reconnect resumes via `Last-Event-ID` where possible and never blanket-invalidates.
-- Over-capacity stream attempts fail fast with `503 LIVE_EVENTS_UNAVAILABLE`; clients rely on jittered fallback polling and capped reconnects.
-- Heartbeats keep intermediaries from closing quiet streams.
-- Event payloads stay under 4 KiB.
-- Client invalidation is coalesced by query key.
+Track these dimensions separately:
+
+```text
+browser_sse_connections_per_node
+redis_live_bus_connections_per_node <= bounded(topology, live_bus_shards)
+local_org_fanout_groups_per_node
+resource_stream_readers_per_node
+events_per_second_per_bus_shard
+fanout_deliveries_per_second
+event_triggered_rest_requests_per_second
+bytes_per_second_to_browsers
+```
+
+Capacity is not defined only by distinct users. Tests must cover both high fan-out and high org cardinality:
+
+- one org with 1,000 connected foreground tabs
+- 10,000 orgs with one connected tab each
+- realistic average tabs per browser profile
+- active resource streams in addition to the org stream
+- slow and stalled browser sockets
+
+Initial targets remain 10,000 logical org-stream clients and 20,000 total SSE connections per API node on the chosen production instance class, but rollout is gated on measured file descriptors, heap, goroutines, per-frame write latency, live-bus bandwidth, and reconnect behavior. Browser-profile connection sharing should materially reduce physical connections below logical tab count.
 
 ### Redis
 
-- **One subscription per org per API process**, multiplexed over the shared connection — not one per client. This is the core scaling property.
-- Use Redis Streams (`XADD` with bounded `MAXLEN`) for a short replay window, not bare pub/sub.
-- SSE `id:` and `Last-Event-ID` use Redis Stream IDs, not application UUIDs.
-- Default `MAXLEN ~ 512` is the starting point; validate memory with `active_org_stream_keys × maxlen × average_entry_bytes` and revisit if reconnect miss-rate is user-visible.
-- In Redis Cluster, account for non-sharded pub/sub broadcast behavior; the per-process subscription model keeps subscription count proportional to `orgs × nodes`, not `clients`. Evaluate sharded streams / keyspace partitioning if cluster fan-out becomes hot.
-- Publish once per committed state transition, with per-org coalescing for list-level events.
-- High-volume logs remain resource-scoped.
-- Publish failure must not fail the user-facing write.
+- Org live delivery uses fixed-shard Pub/Sub, not blocking `XREAD` per org.
+- Per-org Streams are read only for bounded replay and inspected for replay-window misses.
+- Live-bus connection count is bounded by topology and configured shards.
+- Replay Streams use both entry-count and age limits plus key expiry.
+- Replay storage has a configured fleet budget and sheds replay retention—not live delivery—before exceeding it.
+- A local bus-shard failure closes affected SSE connections; API heartbeats cannot report healthy through a Redis subscription gap.
+- Payloads remain under 4KiB; critical projections should normally remain under 1KiB.
+- Outbox publication is idempotent by stable `EventID`.
+- Redis Cluster uses sharded Pub/Sub rather than non-sharded broadcast.
+- High-volume resource appends remain resource-scoped.
+- Redis failure never fails a committed user state change.
 
 ### Postgres
 
-- Idle/unchanged foreground dashboards should not produce repeated list reads every 10s.
-- The session-detail query fan-out (11+ polls) collapses to events plus a sparse backstop.
-- **Burst amplification is bounded:** a write burst in one org must not produce `O(writes) × tabs` refetches. Server-side per-org coalescing plus client-side coalescing cap this at `O(distinct changed lists) × tabs` per window.
-- Backup polling must be sparse and jittered.
-- Existing REST endpoints remain optimized with org filters and cursor limits.
-- Event handlers must not create new N+1 reads.
+- Idle foreground dashboards produce no repeated 10s list reads.
+- Hidden tabs produce no event-triggered reads.
+- A write burst is bounded by global publication coalescing plus browser query scheduling.
+- The outbox worker uses bounded batches, expiring claims, `SKIP LOCKED`, backoff, and cleanup without holding a database transaction across Redis I/O.
+- Outbox insertion adds one small row in the state transaction; measure commit latency and WAL volume.
+- Live-service health adds at most one indexed oldest-pending-outbox query per API node per second while that node has org SSE clients.
+- Event handlers and authorization filtering create no per-event or per-connection N+1 reads.
+- Existing REST endpoints retain org filters, cursor limits, and focused query plans.
 
 ### Latency Targets
 
+Measure both projection and reconciliation paths:
+
 | Path | Target |
 | --- | --- |
-| commit to Redis publish | p95 < 50ms |
-| publish to browser event handler | p95 < 500ms |
-| event to query invalidation, critical visible query | p95 < 100ms |
-| event to query invalidation, visible secondary query | p95 < 500ms including coalescing |
-| commit to visible UI update (other clients) | p95 < 1s when SSE healthy |
-| user's own action to visible UI update | immediate (optimistic), independent of SSE |
-| missed event self-heal | within Redis replay window on reconnect, else within backup interval |
+| commit to outbox-dispatch wake | p95 < 10ms |
+| commit to Redis replay append/live-bus publish | p95 < 50ms, p99 < 150ms |
+| Redis publish to browser handler | p95 < 200ms, p99 < 750ms |
+| browser handler to critical projection render | p95 < 50ms |
+| event to critical REST request start | p95 < 50ms when no projection satisfies the surface |
+| critical REST request start to response | p95 < 350ms |
+| response to rendered canonical UI | p95 < 50ms |
+| commit to visible critical UI, other clients | p95 < 750ms, p99 < 2s |
+| acting user's click to visible intent state | next render frame |
+| outbox oldest unpublished age | p99 < 2s while Redis is healthy |
+| missed replay self-heal | immediate resync on reconnect; otherwise within fallback policy |
 
-The <1s visible-update target depends on leading-edge event delivery. Server-side and client-side coalescing may delay trailing burst updates, but the first visible state transition after a quiet period must not wait for a full debounce window on both sides.
+Targets must be segmented by client region and endpoint. The end-to-end SLO includes REST completion and React render, not only event delivery or invalidation scheduling.
 
 ## Observability
 
-Add metrics with labels for event type and stream scope:
+### Server Metrics
 
-- active SSE connections (gauge — does not exist today; required)
-- active per-org in-process fan-out subscriptions (gauge)
-- rejected SSE connections by reason (`over_capacity`, `redis_unavailable`, `auth_failed`)
-- SSE connection duration
-- reconnect count
-- publish attempts
-- publish failures
-- events published vs events coalesced (to validate per-org coalescing)
-- events sent to clients
-- client buffer overflows collapsed to `live.resync`
-- fallback poll count
-- fallback poll reason: healthy backstop, stream unhealthy, state machine converging
-- stream unavailable responses
-- reconnect replay outcome: replayed from Redis window vs replay window missed
+Use bounded-cardinality labels such as event type, scope, bus shard, and result. Never label metrics by org or resource ID.
 
-Add logs:
+- active physical SSE connections
+- logical tabs served through shared browser leaders, where reported
+- active local org fan-out groups
+- Redis live-bus connections and reconnects
+- live-bus shard health epoch, disconnect duration, and affected SSE closures
+- replay Stream key count, memory estimate, and trim count
+- replay budget utilization and retention-shedding count
+- live-bus publish/receive rate and bytes by shard
+- fan-out deliveries
+- mailbox collapse/resync count
+- SSE frame write and flush latency
+- slow-consumer disconnects
+- outbox inserted, published, folded, retried, failed, and cleaned
+- oldest unpublished outbox row age
+- commit-to-publish latency
+- replay result: hit, cursor missed, too large, malformed
+- membership-revocation disconnect latency
+- fallback poll count and reason
+- event-triggered REST QPS by query family
 
-- warn on publish failure with `org_id`, event type, resource type, resource ID
-- info/debug on stream subscribe/unsubscribe only if sampled
-- warn on client buffer overflow / resync
+### Client Telemetry
 
-Dashboards should compare before/after:
+Sample browser telemetry to control volume:
 
-- API QPS for sessions/previews/automations endpoints
-- Postgres CPU and read IOPS
-- p95 freshness from backend commit to frontend refetch completion, where measurable
-- Redis stream publish rate and per-process subscription count
-- active SSE connection count, including a write-heavy multi-tab org
+- connection establishment and duration
+- reconnect attempts and backoff state
+- initial synchronization and resync checkpoint acknowledgement/failure
+- heartbeat age and liveness timeout
+- event receive lag from `ChangedAt`
+- projection applied/rejected and reason
+- event-to-refetch-start latency
+- refetch completion latency
+- response-to-render latency where measurable
+- dirty-during-fetch trailing refresh count
+- hidden-tab refetch suppression count
+- visibility catch-up count
+- shared-leader/follower state and failover
+- fallback polling state
+
+Sampled telemetry must avoid payload contents and user-entered data.
+
+### Dashboards And Alerts
+
+Compare before and after rollout:
+
+- API QPS and Postgres read IOPS for sessions, previews, and automations
+- Postgres transaction/WAL cost from the outbox
+- p50/p95/p99 end-to-end freshness
+- outbox pending age and retry rate
+- Redis memory, connections, bus traffic, and replay misses
+- SSE write tail latency and slow-consumer rate
+- physical connections per active browser/user/org
+- event burst to REST amplification
+
+Alert on sustained outbox lag, live-bus disconnects, replay-miss spikes, SSE write p99 regressions, unexpected Redis connection growth, or fallback polling that remains elevated after Redis recovery.
 
 ## Testing Strategy
 
 ### Backend
 
-- Unit test event envelope validation.
-- Unit test `LiveEventStreams.Publish` and `Subscribe`, specifically the **per-process single-subscription fan-out** (multiple subscribers for one org share one Redis reader) and the **overflow-collapses-to-resync** behavior.
-- Unit test per-org publish coalescing windows.
-- Handler tests for `/api/v1/events/stream`: auth, org membership, malformed `org_id`, Redis unavailable, over-capacity `503`, heartbeat, event serialization with SSE `id:`, `Last-Event-ID` resume, replay-window miss behavior, and **mid-stream re-authorization** (revoked membership closes the stream).
-- Store/service tests for publish-after-commit behavior on sessions, previews, and automations.
-- Regression tests that publish failure does not fail the committed write.
+- Table-driven validation tests for every typed event enum and payload.
+- Tests that resource/collection and audience invariants reject malformed envelopes.
+- Transaction tests proving state and outbox rows commit or roll back together.
+- Tests that Redis failure does not fail an already committed state change.
+- Outbox claim expiry/reclaim, ownership, retry, cleanup, duplicate, and process-crash tests that prove no transaction remains open during Redis I/O.
+- Global coalescing tests across two publisher instances, including process death before aggregate materialization, after materialization, and after Redis publication. Retries must reuse the persisted aggregate EventID and payload.
+- Tests that fixed live-bus subscriptions do not grow with org/client count.
+- Tests that a live-bus shard disconnect suppresses heartbeats, emits `live.degraded`, closes only affected connections, rejects premature handshakes, and requires replay after subscription acknowledgement; publisher-lag tests cover degradation/recovery hysteresis without flapping.
+- Fan-out mailbox tests for resource/version collapse and `needs_resync` overflow.
+- Replay tests for attach-before-range buffering, cursorless initial synchronization, high-water dedupe, malformed/ahead/trimmed cursors, duplicate EventIDs, replay limit overflow, resync checkpoint success, and resync failure that retains the old cursor.
+- Handler tests for auth, audience filtering, initial ready flush, named heartbeat, per-frame deadline, slow consumer, server drain, and mid-stream revocation.
+- Tests that authorization checks are shared per `(user, org)` rather than executed per connection.
+- Tests that projection versions increment in the same transaction as represented state.
 
 ### Frontend
 
-- Unit test event-to-query invalidation mappings.
-- Unit test coalescing so event bursts produce bounded invalidations.
-- Unit test priority classes so visible critical queries refetch immediately, visible secondary queries debounce, and mounted inactive queries are marked stale without eager refetch.
-- Unit test optimistic-update paths so the actor's own change renders without SSE.
-- Unit test that reconnect / `live.resync` produces one coalesced refetch, not blanket invalidation.
-- Component tests for sessions/previews/automations pages with polling disabled and SSE events driving updates.
-- Tests for fallback intervals when stream health changes.
-- Tests that hidden documents do not keep list backup polls running.
+- EventSource tests that capture `lastEventId` as the received cursor, reconstruct `last_event_id` from the separately acknowledged resume cursor, and retry indefinitely with full jitter.
+- Tests for distinct received/resume cursors, including cursorless first load, failed initial synchronization, and post-checkpoint event replay.
+- Heartbeat timeout and recovery tests.
+- Tests that `live.degraded` immediately enters fallback and that an API heartbeat cannot mask a bus outage.
+- SharedWorker/leader election, follower, and leader-failover tests.
+- Typed event decode and unknown-schema rejection tests.
+- Projection tests for newer, duplicate, stale, missing-record, and causation-echo cases.
+- Visibility registration tests covering hidden documents, collapsed panels, inactive tabs, and focused resources.
+- Scheduler tests proving one active and at most one trailing fetch per query key.
+- Tests where an old detail/list REST response completes after a newer projection; it must not roll back projected fields, remove a newly created row, or commit after cancellation.
+- Tests that event bursts cancel at most one stale fetch per dirty generation and do not repeatedly cancel/restart the replacement.
+- Tests that resource-stream ownership suppresses duplicate org detail refetches.
+- Tests that hidden tabs make zero event-triggered REST requests and perform one catch-up on visibility.
+- Optimistic mutation rollback and convergence tests.
+- Fallback policy tests for newly degraded, sustained degraded, offline, and recovery states.
 
 ### Load And Failure Testing
 
-- Simulate at least 10,000 concurrent org-stream EventSource connections per API node and 20,000 total SSE connections per node including resource streams, or document a lower measured target for the chosen production instance class.
-- Verify Redis subscription count scales with `orgs × nodes`, not with client count.
-- Simulate one org with 1,000 foreground tabs connected to the same API fleet and a burst of at least 100 writes/second for 60 seconds.
-- Simulate bursts of session/thread/preview/automation events **in a write-heavy, many-tab org**, and assert no Postgres QPS regression at the burst moment (per-org coalescing holds).
-- Kill Redis and verify clients fall back to jittered intervals and writes still succeed.
-- Restore Redis and verify clients reconnect, resume via replay window, and reduce fallback polling.
-- Force replay-window misses and verify clients do one jittered visible-query resync rather than broad invalidation.
-- Verify no synchronized thundering herd after deploy, Redis restart, or network blip.
+- 10,000 distinct orgs with one logical client each per node.
+- One org with 1,000 foreground clients and 100 writes/second for 60 seconds.
+- 20,000 total physical SSE connections where per-tab fallback is active.
+- Browser-profile connection sharing with multiple visible and hidden tabs.
+- Slow readers, zero-window/stalled sockets, and clients that stop consuming heartbeats.
+- Redis command failure between `XADD` and Pub/Sub publish.
+- Publisher process death before and after outbox claim and during a coalescing window.
+- Redis outage and restoration with outbox backlog coalescing.
+- Replay-memory pressure across 10,000 active org Streams, including warning and hard retention-shedding thresholds without loss of live Pub/Sub delivery.
+- Replay-window hits, misses, and oversized catch-up.
+- Rolling API deployment with `server.draining` and reconnect jitter.
+- Membership revocation during Redis availability and outage.
+- Verify that burst-time Postgres QPS remains bounded and hidden tabs contribute no reads.
+
+Run transport tests through the production-equivalent edge/proxy path, not only directly against a Go test server.
 
 ## Rollout Plan
 
-Staged to de-risk the two items that could make this net-negative (fan-out model and burst amplification) **before** touching six surfaces.
+### Phase A — Core Infrastructure And Sessions
 
-**Phase A — Infra + one surface, proven end to end:**
+1. Add typed events, monotonic live versions for session projections, and `live_event_outbox` behind a feature flag.
+2. Add the fixed-shard Redis live bus, per-org replay Streams, global coalescer, outbox worker, and telemetry.
+3. Add the race-free `/api/v1/events/stream` handler with authorization snapshots, named heartbeats, bounded writes, drain behavior, and admission control.
+4. Add the EventSource transport, cursor persistence, visibility registration, invalidation scheduler, projection path, and polling policy.
+5. Validate browser-to-edge HTTP/2/H3, proxy buffering, compression, idle timeout, and production-equivalent frame flush latency.
+6. Resolve and test org/repository/resource audiences before any non-internal org receives events.
+7. Wire session publication only. In internal development, compare event effects while existing polling still runs.
+8. Migrate sessions list/sidebar, then session detail, to projections plus selective refetch and sparse fallback.
+9. Enable same-browser connection sharing before expanding beyond dogfood, retaining per-tab fallback for unsupported browsers.
+10. Gate on end-to-end freshness, bus-disconnect propagation, cursorless initial synchronization, resync checkpointing, stale-response rejection, outbox reclaim/materialization, replay-memory admission, 10,000-distinct-org capacity, write-heavy fan-out, slow-consumer, hidden-tab, and rolling-deploy tests.
 
-1. Add backend `LiveEventStreams` (per-process fan-out, Redis Streams, per-org coalescing), the `/api/v1/events/stream` route, the `useLiveEventStream` hook, and telemetry — all behind a feature flag.
-2. Confirm the [HTTP/2](#connection--transport-requirements), capacity/admission, and [RBAC](#authorization--data-exposure) prerequisites. The RBAC decision must be written down before dogfood expands beyond internal trusted orgs.
-3. Wire event publishing for **sessions** only. Dogfood with the org stream logging events and invalidations while polling still runs (accept the temporary double-load in dev only).
-4. Migrate sessions list/sidebar and session detail to event-driven invalidation + optimistic updates + sparse backup polling.
-5. **Gate:** measure the real Postgres/QPS delta and p95 freshness, and run the write-heavy multi-tab load test. Only proceed if burst amplification is bounded and QPS drops materially with no regression at burst.
+### Phase B — Remaining Product Surfaces
 
-**Phase B — Remaining product surfaces:**
+11. Add live versions and migrate automations list/detail/runs.
+12. Add live versions and migrate previews index/detail/panel.
+13. Add preview resource append streaming if measured log polling remains material.
 
-6. Migrate automations list/detail/runs.
-7. Migrate previews index/detail/panel.
+### Phase C — Consolidation
 
-**Phase C — Consolidation and cleanup:**
-
-8. Bridge and then refactor code reviews, PR health, and eval streams onto the shared architecture, retiring the per-client subscription model.
-9. Remove raw fixed intervals from migrated pages and enforce the central live-refresh policy.
-10. Remove obsolete domain-specific stream helpers after all consumers have moved.
-11. Re-evaluate same-browser multi-tab sharing once production telemetry shows connection count per active user and per org; implement it if tab multiplication materially affects capacity or cost.
+14. Bridge code reviews, PR health, and eval streams through the shared outbox/live bus.
+15. Retire per-client Redis Pub/Sub subscriptions.
+16. Remove raw fixed intervals and duplicated frontend SSE helpers from migrated surfaces.
+17. Consolidate session logs/status/events to one per-session Redis resource Stream when resource-reader capacity warrants it.
+18. Delete obsolete compatibility routes only after all supported clients migrate.
 
 ## Acceptance Criteria
 
-1. Sessions list/count/sidebar no longer poll every 10s when SSE is healthy.
-2. Session detail no longer runs 11+ independent 3-5s polls while SSE is healthy.
-3. The acting user's own session/preview/automation changes render optimistically, without waiting on SSE.
-4. Previews index no longer polls running previews every 5s when SSE is healthy.
-5. Automations list/detail/runs no longer poll every 10s when SSE is healthy.
-6. The org stream uses one Redis subscription per org per API process; Redis subscription count scales with `orgs × nodes`, not with connected clients.
-7. A write-heavy, many-tab org load test shows bounded refetch amplification and no Postgres QPS regression at the burst moment.
-8. Healthy SSE p95 visible update latency is under 1s for session, preview, and automation status changes (other clients).
-9. Redis outage does not break correctness and does not cause clients to synchronize on aggressive fallback polling; recovery resumes via the replay window.
-10. A user removed from an org stops receiving that org's events promptly (mid-stream re-authorization), not at the next deploy.
-11. Existing code-review, PR-health, and eval live updates use the shared frontend hook or are explicitly documented as temporary compatibility paths.
-12. All new polling intervals in migrated surfaces come from the central live-refresh policy.
-13. The org-stream authorization contract is resolved: either coarse resource existence is explicitly org-visible, or stream filtering/scoping matches REST resource authorization.
-14. Over-capacity stream attempts fail fast and fall back to jittered polling without reconnect storms or blanket refetches.
-15. `Last-Event-ID` resume is tested with Redis Stream IDs, including the replay-window-miss path.
+1. Acting-user session, preview, and automation mutations render an honest optimistic state in the next frame and reconcile without flicker.
+2. Other-client critical status changes render with p95 under 750ms and p99 under 2s when the live path is healthy.
+3. Sessions list/count/sidebar no longer poll every 10s when live updates are healthy.
+4. Session detail no longer runs independent 3-5s polls for detail, transcript, human input, timeline, readiness, and file events while streams are healthy.
+5. Previews index no longer polls running previews every 5s when healthy.
+6. Automations list/detail/runs no longer poll every 10s when healthy.
+7. Redis live-bus connection count is bounded by configured shards/topology and does not grow with org/client count.
+8. A 10,000-distinct-org test stays within measured Redis, API heap, file descriptor, and latency budgets; replay remains below its 25% fleet budget or sheds retention without disrupting live delivery.
+9. A write-heavy 1,000-tab org produces bounded REST amplification and no hidden-tab reads.
+10. State plus outbox is atomic; claims expire safely; aggregates are durably materialized with stable IDs; and a process crash after commit cannot permanently lose the event.
+11. Redis publication/subscription degradation stops healthy SSE heartbeats and does not fail committed writes; recovery coalesces the backlog instead of replaying every write.
+12. Replay is race-free and tested for cursorless initial synchronization, hit, duplicate, trimmed, malformed, ahead, oversized, and resync-checkpoint success/failure paths.
+13. A new EventSource carries the last cursor explicitly; reconnect never depends accidentally on browser state from a destroyed object.
+14. Named heartbeats detect a stalled connection, bus-shard loss closes affected streams before another healthy heartbeat, and slow network consumers cannot block a handler indefinitely.
+15. Hidden tabs issue no event-triggered refetches and perform one prioritized catch-up when visible.
+16. Projection updates reject stale versions, and an older in-flight REST response cannot roll back projected state or list membership.
+17. Resource append streams do not refetch complete growing logs/transcripts per append.
+18. Org, repository, and resource audiences match REST authorization; revocation meets the healthy and Redis-outage latency targets.
+19. Rolling deploys drain live connections with randomized reconnect guidance and no synchronized refetch storm.
+20. All migrated fallback intervals come from the central policy and continue low-rate reconnect probes indefinitely.
+21. End-to-end browser telemetry measures event receipt, projection/render, REST reconciliation, and p99 freshness.
 
 ## Open Questions
 
-1. **Redis Streams replay window size.** This revision adopts Redis Streams (resolving the prior pub/sub-vs-streams question in favor of streams for the org channel). Remaining question: what `MAXLEN` / retention best balances reconnect recovery against memory for large orgs?
-2. **Durable cursor.** `Version` and the optional `live_events` table are deferred. What production miss-rate (even with the replay window) would justify adding a durable per-resource version or cursor table?
-3. **Automation stats cadence.** Refresh from terminal run events only, or from a debounced stream of all run changes?
-4. **Preview startup logs.** Stay query-invalidated through `preview.logs.changed`, or get a dedicated resource-scoped log stream like session logs, if startup log traffic grows?
-5. **Adaptive fallback SLO.** What production freshness SLO should trigger temporarily tightening fallback intervals?
-6. **Sharded fan-out in cluster.** If org fan-out becomes hot in Redis Cluster, do we move to sharded streams / keyspace partitioning, and on what trigger?
+1. **Live-bus shard count.** Default 32; finalize from measured bus throughput, Redis topology, and per-process subscription cost.
+2. **Replay retention.** Initial five minutes, 1,024 entries, one-hour key expiry, and a 25% fleet replay-memory budget; tune downward or upward only from reconnect duration, miss rate, encoded event size, and Redis headroom.
+3. **Projection coverage.** Session/preview/automation status is required initially. Which PR-health and code-review fields are safe and valuable enough to patch directly?
+4. **Resource Stream consolidation timing.** At what active-session count do the current three backend session readers justify migration to one typed resource Stream?
+5. **Automation stats cadence.** Terminal events only, or a trailing aggregate during long-running bursts?
+6. **Preview logs.** At what visible polling QPS should preview logs move to append streaming?
+7. **Degraded-mode control.** Should the API expose a small live-service status endpoint so clients can distinguish isolated failure from a fleet-wide outage and widen polling centrally?

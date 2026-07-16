@@ -88,7 +88,7 @@ export function ManualSessionCreatePageContent() {
           heroSlot={
             <div className="flex-1 flex flex-col items-center justify-center px-2 pt-16 pb-4">
               <div className="text-center mb-8">
-                <p className="text-3xl font-semibold tracking-tight bg-[image:var(--gradient-primary)] bg-clip-text text-transparent">
+                <p className="font-display text-3xl font-semibold tracking-[-0.035em] text-foreground">
                   Let&apos;s build
                 </p>
                 <p className="mt-2 text-xs text-muted-foreground">

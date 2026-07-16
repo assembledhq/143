@@ -57,11 +57,12 @@ func TestResolver_ResolveExternalActor(t *testing.T) {
 			wantLinkWrite: true,
 		},
 		{
-			name:     "verified email falls back when auto link disabled",
-			links:    &fakeLinkStore{getErr: pgx.ErrNoRows},
-			users:    &fakeUserLookup{user: models.User{ID: emailUserID}},
-			input:    actorInput(email, true, handle, displayName),
-			wantTeam: true,
+			name:        "verified email falls back when auto link disabled",
+			links:       &fakeLinkStore{getErr: pgx.ErrNoRows},
+			users:       &fakeUserLookup{user: models.User{ID: emailUserID}},
+			input:       actorInput(email, true, handle, displayName),
+			wantTeam:    true,
+			wantSuggest: true,
 		},
 		{
 			name:     "unverified email does not map",
@@ -106,6 +107,21 @@ func TestResolver_ResolveExternalActor(t *testing.T) {
 			require.Equal(t, tt.wantLinkWrite, tt.links.upserted != nil, "resolver should persist only authoritative automatic links")
 		})
 	}
+}
+
+func TestResolver_CreateSelfLinkClaim(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	claims := &fakeClaimStore{}
+	resolver := NewResolver(&fakeLinkStore{}, nil, claims, &fakeUserLookup{}, Options{})
+	claim, rawToken, err := resolver.CreateSelfLinkClaim(context.Background(), orgID, actorInput("", false, "", ""), []byte(`{"surface":"slack"}`))
+
+	require.NoError(t, err, "CreateSelfLinkClaim should create a valid one-time claim")
+	require.NotEmpty(t, rawToken, "CreateSelfLinkClaim should return the bearer token only to the caller")
+	require.Equal(t, orgID, claim.OrgID, "claim should remain scoped to the requested organization")
+	require.Equal(t, HashClaimToken(rawToken), claims.tokenHash, "claim store should receive only the token hash")
+	require.LessOrEqual(t, claim.ExpiresAt, time.Now().UTC().Add(30*time.Minute), "claim should expire within the maximum lifetime")
 }
 
 func actorInput(email string, emailVerified bool, handle string, displayName string) ExternalActorInput {
@@ -156,6 +172,17 @@ func (f *fakeLinkStore) UpsertActive(_ context.Context, link models.ExternalUser
 
 type fakeSuggestionStore struct {
 	upserted *models.ExternalUserLinkSuggestion
+}
+
+type fakeClaimStore struct {
+	tokenHash []byte
+}
+
+func (f *fakeClaimStore) CreateClaim(_ context.Context, claim models.ExternalUserLinkClaim, tokenHash []byte) (models.ExternalUserLinkClaim, error) {
+	f.tokenHash = append([]byte(nil), tokenHash...)
+	claim.ID = uuid.New()
+	claim.CreatedAt = time.Now().UTC()
+	return claim, nil
 }
 
 func (f *fakeSuggestionStore) UpsertOpen(_ context.Context, suggestion models.ExternalUserLinkSuggestion) (models.ExternalUserLinkSuggestion, error) {
