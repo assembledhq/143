@@ -183,7 +183,45 @@ function reviewStatusTone(status: string): StatusTone {
   return "neutral";
 }
 
-function ReviewActions({
+function ReviewTitle({ review }: { review: CodeReviewListItem }) {
+  const title = `#${review.github_pr_number} ${review.pull_request_title}`;
+
+  if (!review.github_review_url) return title;
+
+  return (
+    <Link
+      href={review.github_review_url}
+      target="_blank"
+      rel="noreferrer"
+      title="Open final review"
+      className="underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {title}
+    </Link>
+  );
+}
+
+function EvidenceButton({
+  selected,
+  onToggleEvidence,
+}: {
+  selected: boolean;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <Button
+      variant={selected ? "secondary" : "ghost"}
+      size="sm"
+      className="-ml-2 min-h-8 px-2 text-muted-foreground"
+      onClick={onToggleEvidence}
+    >
+      <FileSearch className="h-4 w-4" />
+      Evidence
+    </Button>
+  );
+}
+
+function ReviewOutcome({
   review,
   selected,
   onToggleEvidence,
@@ -193,17 +231,20 @@ function ReviewActions({
   onToggleEvidence: () => void;
 }) {
   return (
+    <div className="space-y-1">
+      <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+      {decisionDetailLabel(review) ? (
+        <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
+      ) : null}
+      <EvidenceButton selected={selected} onToggleEvidence={onToggleEvidence} />
+    </div>
+  );
+}
+
+function ReviewActions({ review }: { review: CodeReviewListItem }) {
+  return (
     <TooltipProvider>
       <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
-        <Button
-          variant={selected ? "secondary" : "ghost"}
-          size="sm"
-          className="min-h-11 justify-center md:min-h-0"
-          onClick={onToggleEvidence}
-        >
-          <FileSearch className="h-4 w-4" />
-          Evidence
-        </Button>
         <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
           <Link href={`/sessions/${review.session_id}`}>
             <ExternalLink className="h-4 w-4 md:hidden" />
@@ -213,7 +254,7 @@ function ReviewActions({
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              className={`min-h-11 justify-center md:size-7 md:min-h-0 ${review.github_review_url ? "" : "col-span-2 md:col-span-1"}`}
+              className="min-h-11 justify-center md:size-7 md:min-h-0"
               variant="ghost"
               size="sm"
               asChild
@@ -227,19 +268,6 @@ function ReviewActions({
           </TooltipTrigger>
           <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
         </Tooltip>
-        {review.github_review_url ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button className="min-h-11 justify-center md:size-7 md:min-h-0" variant="ghost" size="sm" asChild aria-label="Open final review">
-                <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-                  <ClipboardCheck className="h-4 w-4" />
-                  <span className="md:sr-only">Final review</span>
-                </Link>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="hidden md:block">Open final review</TooltipContent>
-          </Tooltip>
-        ) : null}
       </div>
     </TooltipProvider>
   );
@@ -659,34 +687,16 @@ export default function CodeReviewsPage() {
                         <TableRow key={review.id}>
                           <TableCell className="min-w-[18rem]">
                             <div className="font-medium text-foreground">
-                              #{review.github_pr_number} {review.pull_request_title}
+                              <ReviewTitle review={review} />
                             </div>
                             <div className="mt-1 text-xs text-muted-foreground">
                               {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                             </div>
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
+                          <TableCell>{review.acceptable ? "Acceptable" : "Needs review"}</TableCell>
                           <TableCell>
-                            <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
-                          </TableCell>
-                          <TableCell>
-                            <div className="space-y-1">
-                              <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
-                              {decisionDetailLabel(review) ? (
-                                <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
-                              ) : null}
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <StatusLabel
-                              label={reviewStatusLabel(review)}
-                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
-                              active={!review.stale && (review.status === "running" || review.status === "queued")}
-                            />
-                          </TableCell>
-                          <TableCell>{formatDate(review.completed_at)}</TableCell>
-                          <TableCell>
-                            <ReviewActions
+                            <ReviewOutcome
                               review={review}
                               selected={selectedEvidenceSessionId === review.session_id}
                               onToggleEvidence={() =>
@@ -696,6 +706,11 @@ export default function CodeReviewsPage() {
                               }
                             />
                           </TableCell>
+                          <TableCell>{reviewStatusLabel(review)}</TableCell>
+                          <TableCell>{formatDate(review.completed_at)}</TableCell>
+                          <TableCell>
+                            <ReviewActions review={review} />
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -703,38 +718,29 @@ export default function CodeReviewsPage() {
                 </CardContent>
               </Card>
               <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
-                {reviews.map((review) => {
-                  const effectiveStatus = review.stale ? "stale" : review.status;
-                  return (
-                    <ResourceRow
-                      key={review.id}
-                      title={(
-                        <span className="break-words text-sm">
-                          #{review.github_pr_number} {review.pull_request_title}
-                        </span>
-                      )}
-                      metadata={(
-                        <span>
-                          {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
-                        </span>
-                      )}
-                      status={(
-                        <StatusLabel
-                          label={reviewStatusLabel(review)}
-                          tone={reviewStatusTone(effectiveStatus)}
-                          active={!review.stale && (review.status === "running" || review.status === "queued")}
-                        />
-                      )}
-                      detail={(
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                          <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
-                          <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
-                          {decisionDetailLabel(review) ? <span>{decisionDetailLabel(review)}</span> : null}
+                {reviews.map((review) => (
+                  <ResourceRow
+                    key={review.id}
+                    title={(
+                      <span className="break-words text-sm">
+                        <ReviewTitle review={review} />
+                      </span>
+                    )}
+                    metadata={(
+                      <span>
+                        {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                      </span>
+                    )}
+                    status={(
+                      <span className="text-foreground">{reviewStatusLabel(review)}</span>
+                    )}
+                    detail={(
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
+                          <span>{review.acceptable ? "Acceptable" : "Needs review"}</span>
                           <span>Completed {formatDate(review.completed_at)}</span>
                         </div>
-                      )}
-                      actions={(
-                        <ReviewActions
+                        <ReviewOutcome
                           review={review}
                           selected={selectedEvidenceSessionId === review.session_id}
                           onToggleEvidence={() =>
@@ -743,11 +749,14 @@ export default function CodeReviewsPage() {
                             )
                           }
                         />
-                      )}
-                      className="[&_[data-slot=resource-row-actions]]:ml-0"
-                    />
-                  );
-                })}
+                      </div>
+                    )}
+                    actions={(
+                      <ReviewActions review={review} />
+                    )}
+                    className="[&_[data-slot=resource-row-actions]]:ml-0"
+                  />
+                ))}
               </Card>
               <CodeReviewEvidenceSheet
                 review={selectedEvidenceReview}
