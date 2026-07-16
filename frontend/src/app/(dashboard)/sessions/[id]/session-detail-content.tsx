@@ -3467,9 +3467,9 @@ export function PullRequestList({
                 <span className="block truncate text-xs text-muted-foreground">
                   {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
                 </span>
-                {changeset.has_unpushed_changes && <span className="block text-xs text-amber-600">Unpushed changes</span>}
+                {changeset.has_unpushed_changes && <span className="block text-xs text-warning">Unpushed changes</span>}
                 {changeset.active_lease_holder_label && (
-                  <span className="block truncate text-xs text-blue-600">
+                  <span className="block truncate text-xs text-info">
                     {changeset.active_lease_holder_type === "agent_turn" ? "Being edited in" : "In use by"} {changeset.active_lease_holder_label}
                   </span>
                 )}
