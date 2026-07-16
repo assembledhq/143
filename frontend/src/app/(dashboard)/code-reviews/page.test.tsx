@@ -126,6 +126,7 @@ const review: CodeReviewListItem = {
   github_repo: "acme/api",
   github_pr_number: 428,
   github_pr_url: "https://github.com/acme/api/pull/428",
+  github_review_url: "https://github.com/acme/api/pull/428#pullrequestreview-143428",
   pull_request_title: "Fix invoice rounding",
   pull_request_author: "anya",
 };
@@ -270,12 +271,26 @@ describe("CodeReviewsPage", () => {
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Automatically approved")).toHaveLength(2);
     expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    const finalReviewLinks = screen.getAllByRole("link", { name: "#428 Fix invoice rounding" });
+    expect(finalReviewLinks).toHaveLength(2);
+    for (const link of finalReviewLinks) {
+      expect(link).toHaveAttribute("href", review.github_review_url);
+    }
+    expect(screen.queryByRole("link", { name: "Open final review" })).not.toBeInTheDocument();
     const filterToggle = screen.getByRole("button", { name: /Filter reviews/i });
     expect(filterToggle).toHaveAttribute("aria-expanded", "false");
     await user.click(filterToggle);
     expect(filterToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
+    const reviewTable = screen.getByRole("table");
+    const reviewRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const reviewCells = within(reviewRow).getAllByRole("cell");
+    expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).toBeNull();
+    expect(within(reviewCells[3]).getByText("Automatically approved").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[3]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(reviewCells[4]).getByText("Ran successfully").closest('[data-slot="status-label"]')).toBeNull();
+    expect(within(reviewCells[6]).queryByRole("button", { name: "Evidence" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(evidenceSheet).toBeInTheDocument();
