@@ -1067,7 +1067,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		HeadSHA:                job.HeadSHA,
 		PolicyVersion:          policyVersion,
 		ApprovalMode:           cfg.ApprovalMode,
-		RequiredReviewerQuorum: cfg.AgentRoster.RequireReviewerQuorum,
+		RequiredReviewerQuorum: codeReviewRequiredReviewerQuorum(cfg, agentResults),
 		InlineCommentLimit:     cfg.InlineCommentLimit,
 		DescriptionResults:     append([]string(nil), description.RequirementSummaries...),
 		RiskReasons:            models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings)),
@@ -1107,8 +1107,9 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		UnresolvedHumanThreads: unresolvedHumanThreads,
 		PromptInjectionFound:   description.PromptInjectionFound,
 	})
-	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
-		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: cfg.AgentRoster.RequireReviewerQuorum})
+	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
+	if reviewerQuorum < requiredReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
 	return risk.ReasonDetails
 }
@@ -1966,7 +1967,8 @@ type liveCodeReviewOutcomeInput struct {
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
 	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
-	reviewerQuorumWaived := reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
+	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(policy, input.AgentResults)
+	reviewerQuorumWaived := reviewerQuorum < requiredReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
@@ -1998,8 +2000,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
 		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !reviewerQuorumWaived {
-		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: policy.AgentRoster.RequireReviewerQuorum})
+	if reviewerQuorum < requiredReviewerQuorum && !reviewerQuorumWaived {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
 	if orchestratorPresent, orchestratorUsable := codeReviewOrchestratorEvidence(input.AgentResults); orchestratorPresent && !orchestratorUsable {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
@@ -2021,7 +2023,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		LinesChanged:              codeReviewLinesChanged(input.ChangedFiles),
 		ChecksRequired:            policy.RiskPolicy.RequirePassingChecks || len(policy.RiskPolicy.RequiredChecks) > 0,
 		ReviewerQuorum:            reviewerQuorum,
-		RequiredReviewerQuorum:    policy.AgentRoster.RequireReviewerQuorum,
+		RequiredReviewerQuorum:    requiredReviewerQuorum,
 		ReviewerQuorumWaived:      reviewerQuorumWaived,
 	})
 	return decision, body
@@ -2244,6 +2246,33 @@ func codeReviewReviewerEvidence(results []models.CodeReviewAgentResult) (quorum 
 		}
 	}
 	return quorum, failures
+}
+
+// codeReviewRequiredReviewerQuorum returns the reviewer quorum this run is
+// held to: the configured requirement clamped to the number of roster
+// reviewers that could actually run. Reviewers skipped because their
+// credential is unavailable can never produce a report, so they shrink the
+// requirement instead of making approval impossible; reviewers that ran and
+// failed or timed out still count against the configured quorum. The
+// requirement never drops below one reviewer.
+func codeReviewRequiredReviewerQuorum(cfg models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) int {
+	required := cfg.AgentRoster.RequireReviewerQuorum
+	available := len(cfg.AgentRoster.Reviewers)
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleReviewer {
+			continue
+		}
+		if state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult); ok && state.Unavailable {
+			available--
+		}
+	}
+	if available < 1 {
+		available = 1
+	}
+	if required > available {
+		return available
+	}
+	return required
 }
 
 func codeReviewReviewerResultHasUsableOutput(result models.CodeReviewAgentResult) bool {

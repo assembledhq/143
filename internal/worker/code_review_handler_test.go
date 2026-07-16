@@ -1050,6 +1050,76 @@ func TestCodeReviewReviewerExecutionFailed(t *testing.T) {
 	}
 }
 
+func TestCodeReviewRequiredReviewerQuorum(t *testing.T) {
+	t.Parallel()
+
+	policy := models.DefaultCodeReviewPolicyConfig()
+	unavailableState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey: codeReviewReviewerKey(1, models.AgentTypeClaudeCode),
+		Unavailable: true,
+		Error:       "reviewer skipped because claude_code authentication is not configured",
+	})
+	failedState := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		ReviewerKey: codeReviewReviewerKey(1, models.AgentTypeClaudeCode),
+		Error:       "reviewer thread did not complete successfully",
+	})
+
+	tests := []struct {
+		name     string
+		results  []models.CodeReviewAgentResult
+		expected int
+	}{
+		{
+			name:     "keeps the configured quorum before results exist",
+			results:  nil,
+			expected: 2,
+		},
+		{
+			name: "keeps the configured quorum when every reviewer could run",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusCompleted},
+			},
+			expected: 2,
+		},
+		{
+			name: "keeps the configured quorum when a reviewer ran and failed",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: failedState},
+			},
+			expected: 2,
+		},
+		{
+			name: "clamps the quorum when a reviewer credential is unavailable",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: unavailableState},
+			},
+			expected: 1,
+		},
+		{
+			name: "never drops the quorum below one reviewer",
+			results: []models.CodeReviewAgentResult{
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+					ReviewerKey: codeReviewReviewerKey(0, models.AgentTypeCodex),
+					Unavailable: true,
+				})},
+				{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed, StructuredResult: unavailableState},
+			},
+			expected: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, codeReviewRequiredReviewerQuorum(policy, tt.results), "required quorum should clamp to reviewers that could actually run")
+		})
+	}
+}
+
 func TestCodeReviewReviewerAgentModel(t *testing.T) {
 	t.Parallel()
 
@@ -1828,6 +1898,51 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			},
 			expected:     models.CodeReviewDecisionApproved,
 			bodyContains: "2 usable reviewer reports met the required quorum of 2",
+		},
+		{
+			name: "clamps reviewer quorum to reviewers whose credentials are available",
+			input: liveCodeReviewOutcomeInput{
+				Policy: policy,
+				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
+				PullRequest: models.PullRequest{
+					OrgID:   orgID,
+					Body:    &prBody,
+					HeadSHA: stringPtr("head"),
+					Status:  models.PullRequestStatusOpen,
+				},
+				Health: &models.PullRequestHealthResponse{
+					HeadSHA:         "head",
+					Status:          models.PullRequestStatusOpen,
+					CanMerge:        true,
+					ChecksConfirmed: true,
+					Checks: []models.PullRequestCheckSummary{
+						{Name: "tests", Status: models.PullRequestCheckStatusPassed},
+					},
+					MergeState: models.PullRequestMergeStateClean,
+				},
+				AgentResults: []models.CodeReviewAgentResult{
+					{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusCompleted},
+					{
+						Role:          models.CodeReviewAgentRoleReviewer,
+						AgentProvider: "claude_code",
+						Status:        models.CodeReviewAgentResultStatusFailed,
+						StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+							Unavailable: true,
+							Error:       "reviewer skipped because claude_code authentication is not configured",
+						}),
+					},
+					validOrchestratorResult,
+				},
+				ChangedFiles: []codereview.PullRequestFile{
+					{Filename: "internal/api/router.go", Additions: 10, Deletions: 2},
+				},
+				ChangedFilesAvailable: true,
+				OrchestratorSynthesis: codeReviewOrchestratorSynthesis{
+					ReviewSummary: "The only available reviewer found no blocking issues.",
+				},
+			},
+			expected:     models.CodeReviewDecisionApproved,
+			bodyContains: "reviewer quorum 1/1",
 		},
 		{
 			name: "still requires human review for a docs change above the low-risk lane ceiling",
