@@ -303,7 +303,7 @@ describe("AutomationsPage", () => {
 
   it("renders the automation workspace skeleton while automations load", () => {
     server.use(
-      http.get("*/api/v1/automations", async () => new Promise<HttpResponse>(() => {})),
+      http.get("*/api/v1/automations", async () => new Promise<never>(() => {})),
     );
 
     renderWithProviders(<AutomationsPage />);

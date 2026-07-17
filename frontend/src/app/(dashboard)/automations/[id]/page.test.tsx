@@ -84,7 +84,7 @@ describe("AutomationDetailPage", () => {
 
   it("renders the automation detail skeleton while the automation loads", () => {
     server.use(
-      http.get("*/api/v1/automations/auto-1", async () => new Promise<HttpResponse>(() => {})),
+      http.get("*/api/v1/automations/auto-1", async () => new Promise<never>(() => {})),
     );
 
     renderWithProviders(<AutomationDetailPage />);
