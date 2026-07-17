@@ -531,6 +531,18 @@ func main() {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
+					if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+						var sessionBrowserInspector preview.SessionBrowserInspector
+						if inspector, ok := previewManager.Inspector().(preview.SessionBrowserInspector); ok {
+							sessionBrowserInspector = inspector
+						}
+						concreteOrchestrator.SetSuccessfulTurnVerifier(preview.NewSuccessfulTurnVerifier(
+							previewManager,
+							previewStore,
+							preview.NewBrowserSessionService(db.NewPreviewBrowserSessionStore(pool), sessionBrowserInspector),
+							db.NewPreviewVerificationRunStore(pool),
+						))
+					}
 					var prewarmDependencyCache preview.PreviewPathCache
 					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
 						prewarmDependencyCache = pathCache
@@ -1539,7 +1551,7 @@ func buildServices(
 		SandboxAuth:                orchestratorSandboxAuth,
 		Users:                      userStore,
 		EvalBootstraps:             evalBootstrapStore,
-		InternalAPIURL:             cfg.BaseURL + "/api/v1/internal",
+		InternalAPIURL:             cfg.BaseURL,
 		InternalAPISecret:          cfg.SessionSecret,
 		NodeID:                     cfg.NodeID,
 		Logger:                     logger,
@@ -1603,7 +1615,7 @@ func buildServices(
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetSessionMessageStore(sessionMessageStore)
-	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
+	pmSvc.SetInternalAPI(cfg.BaseURL, cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,

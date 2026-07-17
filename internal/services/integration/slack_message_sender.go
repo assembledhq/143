@@ -22,7 +22,7 @@ type InternalSlackMessageSender struct {
 func NewInternalSlackMessageSender(token, baseURL string) *InternalSlackMessageSender {
 	return &InternalSlackMessageSender{
 		token:   token,
-		baseURL: strings.TrimRight(baseURL, "/"),
+		baseURL: internalAPIBaseURL(baseURL),
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }

@@ -14,7 +14,7 @@ func TestInternalPullRequestCreator_CreatePullRequest(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/sessions/session-123/pr", r.URL.Path, "CreatePullRequest should target the internal session PR endpoint")
+		require.Equal(t, "/api/v1/internal/sessions/session-123/pr", r.URL.Path, "CreatePullRequest should target the internal session PR endpoint")
 		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "CreatePullRequest should send the internal bearer token")
 
 		var got CreatePullRequestParams

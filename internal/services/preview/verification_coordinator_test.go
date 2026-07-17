@@ -78,6 +78,7 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 		maxAttempts     int
 		withoutFixer    bool
 		withoutObserver bool
+		skipReason      string
 		expectedStatus  models.PreviewVerificationStatus
 		expectedFixes   int
 		expectedAttempt int
@@ -86,6 +87,7 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 		{name: "passes and records screenshot", auto: true, observations: []*models.PreviewObservation{{Ready: true, Screenshot: &models.ScreenshotResult{Artifact: &models.PreviewArtifact{ID: "shot-1"}}}}, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusPassed, expectedAttempt: 1, expectedSteps: 1},
 		{name: "fixes console failure and retains both attempts", auto: true, observations: []*models.PreviewObservation{{Ready: true, Console: []models.ConsoleMessage{{Level: "error"}}}, {Ready: true}}, maxAttempts: 2, expectedStatus: models.PreviewVerificationStatusPassed, expectedFixes: 1, expectedAttempt: 2, expectedSteps: 2},
 		{name: "records disabled skip", auto: false, maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusSkipped},
+		{name: "records orchestration skip", auto: true, skipReason: "session has no active configured preview", maxAttempts: 1, expectedStatus: models.PreviewVerificationStatusSkipped},
 		{name: "reports the real attempt when no fixer is wired", auto: true, observations: []*models.PreviewObservation{{Ready: false}}, maxAttempts: 3, withoutFixer: true, expectedStatus: models.PreviewVerificationStatusFailed, expectedAttempt: 1},
 		{name: "fails when the observer is unavailable", auto: true, maxAttempts: 3, withoutObserver: true, expectedStatus: models.PreviewVerificationStatusFailed, expectedAttempt: 1},
 	}
@@ -98,7 +100,8 @@ func TestVerificationCoordinatorRun(t *testing.T) {
 			request := VerificationRequest{
 				OrgID: uuid.New(), SessionID: uuid.New(), WorkspaceRevision: 4,
 				Diff: "+++ b/frontend/src/page.tsx", Observer: observer, Fixer: fixer,
-				Config: models.PreviewVerificationConfig{Auto: tt.auto, MaxAttempts: tt.maxAttempts, FailOnConsoleError: true, SmokePaths: []string{"/"}, Viewports: []models.ViewportSpec{{Width: 1440, Height: 900}}},
+				SkipReason: tt.skipReason,
+				Config:     models.PreviewVerificationConfig{Auto: tt.auto, MaxAttempts: tt.maxAttempts, FailOnConsoleError: true, SmokePaths: []string{"/"}, Viewports: []models.ViewportSpec{{Width: 1440, Height: 900}}},
 			}
 			if tt.withoutFixer {
 				request.Fixer = nil

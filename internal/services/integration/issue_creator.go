@@ -23,7 +23,7 @@ type InternalIssueCreator struct {
 func NewInternalIssueCreator(token, baseURL string) *InternalIssueCreator {
 	return &InternalIssueCreator{
 		token:   token,
-		baseURL: baseURL,
+		baseURL: internalAPIBaseURL(baseURL),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},

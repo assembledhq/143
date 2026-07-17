@@ -21,7 +21,7 @@ func TestInternalIssueCreator_CreateIssue_Success(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodPost, r.Method)
-		require.Equal(t, "/issues", r.URL.Path)
+		require.Equal(t, "/api/v1/internal/issues", r.URL.Path)
 		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
 		require.Equal(t, "application/json", r.Header.Get("Content-Type"))
 

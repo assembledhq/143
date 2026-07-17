@@ -1302,6 +1302,12 @@ func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models
 	if err := o.successfulTurnVerifier.VerifySuccessfulTurn(ctx, SuccessfulTurnVerification{
 		Session: session, Sandbox: sandbox, Result: result, WorkspaceRevision: revision, Diff: diff,
 	}); err != nil {
+		// Automatic preview verification is advisory: it records durable
+		// evidence and surfaces results in the session preview UI, but must not
+		// fail an otherwise-successful coding turn. Adapter fix-and-resume is not
+		// yet wired (see design doc Phase 3), so a verification failure has no
+		// in-turn remediation path and gating it would drop the completed turn's
+		// output and mark the session failed with no way to recover.
 		log.Warn().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
 	}
 }

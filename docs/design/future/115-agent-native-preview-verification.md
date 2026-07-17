@@ -1,6 +1,6 @@
 # Design: Agent-Native Preview Verification
 
-> **Status:** In progress — Phases 1–2 complete; Phase 3 evidence core and shared turn hook implemented | **Last reviewed:** 2026-07-14
+> **Status:** In progress — Phases 1–2 complete; Phase 3 automatic verification wired, adapter fix re-entry pending | **Last reviewed:** 2026-07-14
 
 ## Implementation Status
 
@@ -20,10 +20,11 @@ Adapter-by-adapter native-image compatibility still needs rollout validation;
 CLI-only runtimes can use the implemented workspace fallback. Verification
 evidence now has a durable revision-keyed run model, a bounded coordinator,
 diff-aware smoke planning, and a session preview summary surface. Successful
-initial and continuation turns now share one adapter-independent verification
-hook, so every supported adapter has the same integration seam. Binding that
-hook to the worker-local coordinator, preview lifecycle, and fix callback remains
-rollout work. Repository
+initial and continuation turns share one adapter-independent verification hook.
+Production workers bind it to the active session preview, refresh stale runtimes
+to the completed workspace revision, observe through the session-owned browser,
+and persist passes, failures, or explicit skips. Adapter fix-and-resume re-entry
+remains rollout work. Repository
 `browser` and `verification` policy parsing, defaults, and validation are already
 implemented as groundwork for Phase 3.
 
@@ -364,8 +365,10 @@ New responsibilities should remain separated:
 - **Complete:** Render the latest evidence and handoff result in the session preview UI.
 - **Complete:** Invoke one shared verification hook from successful initial and
   continuation turns, covering every supported adapter without branching.
-- **Pending rollout wiring:** Bind the shared hook to the worker-local coordinator and
-  preview ensure/update path, and supply the adapter-specific fix-and-resume callback.
+- **Complete:** Bind the shared hook to the worker-local coordinator, active
+  session preview update path, shared browser observation, and durable evidence.
+- **Pending rollout wiring:** Supply an adapter-specific fix-and-resume callback
+  that can safely re-enter the same turn before completion is reported.
 
 ### Phase 4: Quality Improvements
 
@@ -392,7 +395,7 @@ The P0 product is complete when a fresh coding-agent session can:
 Criteria 1, 2, 3, 5, and 7 are implemented at the platform/tool-contract
 level. Criteria 4 and 6 now have the bounded retry coordinator, durable
 verification-run evidence, and UI summary contracts; production completion
-still requires the pending worker-local coordinator binding described in Phase 3. Criterion 2
+still requires the pending adapter fix-and-resume binding described in Phase 3. Criterion 2
 also retains adapter rollout validation before native image consumption can be
 claimed uniformly across every supported coding-agent runtime.
 
