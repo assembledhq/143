@@ -2850,6 +2850,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 			Path:       path,
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
+			Header:     resp.Header.Clone(),
 		}
 	}
 
@@ -2896,6 +2897,7 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 			Path:       "/graphql",
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
+			Header:     resp.Header.Clone(),
 		}
 	}
 
@@ -2910,6 +2912,7 @@ type GitHubAPIError struct {
 	Path       string
 	StatusCode int
 	Body       []byte
+	Header     http.Header
 }
 
 func (e *GitHubAPIError) Error() string {

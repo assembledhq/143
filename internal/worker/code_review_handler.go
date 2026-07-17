@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
@@ -69,6 +72,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
 			return fmt.Errorf("org_id and session_id are required")
 		}
+		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -348,6 +352,18 @@ func reconcileCodeReviewSessionCompletion(ctx context.Context, stores *Stores, l
 }
 
 func reconcileCodeReviewSessionFailure(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason string) error {
+	return reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason,
+		"code_review_no_reviewer_output",
+		[]string{"Configure at least one reviewer credential and request the review again."})
+}
+
+func reconcileCodeReviewSessionJobFailure(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason string) error {
+	return reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason,
+		"code_review_job_failed",
+		[]string{"Request the code reviewer again to start a fresh attempt."})
+}
+
+func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason, category string, nextSteps []string) error {
 	if stores == nil || stores.Sessions == nil {
 		return nil
 	}
@@ -366,10 +382,72 @@ func reconcileCodeReviewSessionFailure(ctx context.Context, stores *Stores, job 
 			return fmt.Errorf("reconcile code review parent session to failed: %w", err)
 		}
 	}
-	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, "code_review_no_reviewer_output", []string{"Configure at least one reviewer credential and request the review again."}, true); err != nil {
+	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, category, nextSteps, true); err != nil {
 		return fmt.Errorf("record code review parent session failure details: %w", err)
 	}
 	return nil
+}
+
+func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		reason := codeReviewDeadLetterReason(deadLetterErr)
+		if stores != nil && stores.CodeReviews != nil {
+			if _, err := stores.CodeReviews.FailReview(hookCtx, job.OrgID, job.SessionID, reason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).
+					Str("session_id", job.SessionID.String()).
+					Msg("failed to reconcile dead-lettered code review metadata")
+			}
+		}
+		if err := reconcileCodeReviewSessionJobFailure(hookCtx, stores, job, reason); err != nil {
+			logger.Warn().Err(err).
+				Str("session_id", job.SessionID.String()).
+				Msg("failed to reconcile dead-lettered code review session")
+		}
+		removeCodeReviewRequestedReviewerAfterDeadLetter(hookCtx, stores, services, logger, job)
+	})
+}
+
+func removeCodeReviewRequestedReviewerAfterDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
+	if strings.TrimSpace(job.RequestedReviewerLogin) == "" && strings.TrimSpace(job.RequestedTeamSlug) == "" {
+		return
+	}
+	if services == nil || services.CodeReviews == nil {
+		return
+	}
+	if _, ok := services.CodeReviews.(codeReviewRequestedReviewerRemover); !ok {
+		return
+	}
+	if stores == nil || stores.PullRequests == nil {
+		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping dead-lettered requested reviewer cleanup: pull request store unavailable")
+		return
+	}
+	pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("pull_request_id", job.PullRequestID.String()).
+			Msg("failed to load pull request for dead-lettered requested reviewer cleanup")
+		return
+	}
+	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
+}
+
+func codeReviewDeadLetterReason(err error) string {
+	const maxRunes = 2000
+
+	detail := "unknown worker failure"
+	var apiErr *ghservice.GitHubAPIError
+	if errors.As(err, &apiErr) {
+		detail = fmt.Sprintf("GitHub API %s %s returned %d", apiErr.Method, apiErr.Path, apiErr.StatusCode)
+	} else if err != nil && strings.TrimSpace(err.Error()) != "" {
+		detail = strings.TrimSpace(err.Error())
+	}
+	reason := "code review job exhausted retries: " + detail
+	runes := []rune(reason)
+	if len(runes) > maxRunes {
+		reason = string(runes[:maxRunes-1]) + "…"
+	}
+	return reason
 }
 
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
@@ -388,9 +466,77 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 				Msg("skipping code review PR state sync for disconnected repository")
 			return nil
 		}
-		return fmt.Errorf("sync code review pull request state: %w", err)
+		wrapped := fmt.Errorf("sync code review pull request state: %w", err)
+		if retryable, retryAfter := codeReviewGitHubSyncRetry(err); retryable {
+			return &RetryableError{Err: wrapped, ConsumeAttempt: true, RetryAfter: retryAfter}
+		}
+		var apiErr *ghservice.GitHubAPIError
+		if errors.As(err, &apiErr) {
+			return &FatalError{Err: wrapped}
+		}
+		return wrapped
 	}
 	return nil
+}
+
+func codeReviewGitHubSyncRetry(err error) (bool, *time.Duration) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false, nil
+	}
+	var apiErr *ghservice.GitHubAPIError
+	if errors.As(err, &apiErr) {
+		retryable := apiErr.StatusCode == http.StatusRequestTimeout ||
+			apiErr.StatusCode == http.StatusTooEarly ||
+			apiErr.StatusCode == http.StatusTooManyRequests ||
+			apiErr.StatusCode >= http.StatusInternalServerError ||
+			codeReviewGitHubRateLimited(apiErr)
+		if !retryable {
+			return false, nil
+		}
+		return true, codeReviewGitHubRetryAfter(apiErr)
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr), nil
+}
+
+func codeReviewGitHubRateLimited(apiErr *ghservice.GitHubAPIError) bool {
+	if apiErr == nil || apiErr.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if strings.TrimSpace(apiErr.Header.Get("Retry-After")) != "" || strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Remaining")) == "0" {
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(apiErr.Message()))
+	return strings.Contains(message, "rate limit") || strings.Contains(message, "abuse detection")
+}
+
+func codeReviewGitHubRetryAfter(apiErr *ghservice.GitHubAPIError) *time.Duration {
+	if apiErr == nil {
+		return nil
+	}
+	if raw := strings.TrimSpace(apiErr.Header.Get("Retry-After")); raw != "" {
+		if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
+			delay := time.Duration(seconds) * time.Second
+			return &delay
+		}
+		if retryAt, err := http.ParseTime(raw); err == nil {
+			return nonNegativeCodeReviewRetryDelay(retryAt)
+		}
+	}
+	if strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Remaining")) == "0" {
+		if resetUnix, err := strconv.ParseInt(strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
+			return nonNegativeCodeReviewRetryDelay(time.Unix(resetUnix, 0))
+		}
+	}
+	return nil
+}
+
+func nonNegativeCodeReviewRetryDelay(retryAt time.Time) *time.Duration {
+	delay := time.Until(retryAt)
+	if delay < 0 {
+		delay = 0
+	}
+	return &delay
 }
 
 func codeReviewCanRunReviewerThreads(stores *Stores) bool {

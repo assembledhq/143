@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -298,6 +299,52 @@ func TestJobStore_EnqueueWithOpts_PinsTargetNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, generatedID, id, "EnqueueWithOpts should return the generated job id when the pin lands cleanly")
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestJobStore_EnqueueWithOpts_SetsCustomMaxAttempts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	generatedID := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO jobs[\\s\\S]+max_attempts").
+		WithArgs(orgID, "agent", models.JobTypeRunCodeReview, pgxmock.AnyArg(), 5, jobDedupeKeyPtr("review"), 8).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
+
+	id, err := store.EnqueueWithOpts(context.Background(), orgID, EnqueueOpts{
+		Queue:       "agent",
+		JobType:     models.JobTypeRunCodeReview,
+		Payload:     map[string]string{"session_id": "abc"},
+		Priority:    5,
+		DedupeKey:   jobDedupeKeyPtr("review"),
+		MaxAttempts: 8,
+	})
+	require.NoError(t, err, "custom retry budget enqueue should succeed")
+	require.Equal(t, generatedID, id, "custom retry budget enqueue should return the job id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_HasActiveByDedupeKeyFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectQuery("SELECT EXISTS[\\s\\S]+org_id[\\s\\S]+dedupe_key[\\s\\S]+status IN").
+		WithArgs(orgID, "agent", "code_review:key").
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	active, err := NewJobStore(mock).HasActiveByDedupeKey(context.Background(), orgID, "agent", "code_review:key")
+	require.NoError(t, err, "active dedupe lookup should succeed")
+	require.True(t, active, "active dedupe lookup should return the stored state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
 func TestJobStore_RetryWithoutConsumingAttemptWithLeaseAndTarget_PinsRetry(t *testing.T) {

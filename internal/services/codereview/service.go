@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -22,18 +23,26 @@ type PolicyStore interface {
 
 type MetadataStore interface {
 	CreateSessionMetadata(ctx context.Context, metadata *models.CodeReviewSessionMetadata) error
-	GetByOutputKey(ctx context.Context, orgID uuid.UUID, outputKey string) (models.CodeReviewSessionMetadata, error)
-	GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
+	GetLatestByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
+	FailReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error)
 	MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) (int64, error)
 }
 
 type SessionStore interface {
 	Create(ctx context.Context, session *models.Session) error
+	UpdateStatus(ctx context.Context, orgID, sessionID uuid.UUID, status models.SessionStatus) error
+	UpdateFailure(ctx context.Context, orgID, sessionID uuid.UUID, explanation, category string, nextSteps []string, retryAdvised bool) error
 }
 
 type JobStore interface {
-	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueWithOpts(ctx context.Context, orgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error)
+	HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (bool, error)
 }
+
+const (
+	codeReviewJobMaxAttempts        = 8
+	codeReviewJobEnqueueGracePeriod = time.Minute
+)
 
 type Service struct {
 	policies PolicyStore
@@ -146,22 +155,60 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		}
 		policy = &record
 	}
-	if existing, err := s.metadata.GetRunningByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID); err == nil {
-		if _, staleErr := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &existing.SessionID); staleErr != nil {
-			return ReviewRequestedResult{}, staleErr
-		}
-		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: existing.SessionID, MetadataID: existing.ID, TriggerSource: source}, nil
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return ReviewRequestedResult{}, fmt.Errorf("lookup running code review: %w", err)
-	}
 	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
-	if existing, err := s.metadata.GetByOutputKey(ctx, input.OrgID, outputKey); err == nil {
-		if _, staleErr := s.metadata.MarkStaleForPullRequestExceptHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, &existing.SessionID); staleErr != nil {
-			return ReviewRequestedResult{}, staleErr
+	latest, err := s.metadata.GetLatestByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID)
+	if err == nil {
+	resolveLatest:
+		for {
+			switch latest.Status {
+			case models.CodeReviewSessionStatusCompleted:
+				return reusedReviewRequestedResult(latest, source), nil
+			case models.CodeReviewSessionStatusQueued, models.CodeReviewSessionStatusRunning:
+				activeOutputKey := strings.TrimSpace(latest.ReviewOutputKey)
+				if activeOutputKey == "" {
+					activeOutputKey = outputKey
+				}
+				active, activeErr := s.jobs.HasActiveByDedupeKey(ctx, input.OrgID, "agent", "code_review:"+activeOutputKey)
+				if activeErr != nil {
+					return ReviewRequestedResult{}, fmt.Errorf("lookup active code review job: %w", activeErr)
+				}
+				if active {
+					return reusedReviewRequestedResult(latest, source), nil
+				}
+				if !latest.CreatedAt.IsZero() && time.Since(latest.CreatedAt) < codeReviewJobEnqueueGracePeriod {
+					return reusedReviewRequestedResult(latest, source), nil
+				}
+
+				const reason = "code review job is no longer active; replaced by a new reviewer request"
+				failed, failErr := s.metadata.FailReview(ctx, input.OrgID, latest.SessionID, reason)
+				if errors.Is(failErr, pgx.ErrNoRows) {
+					// Another request changed the latest attempt after our lookup.
+					// Re-run the complete state check so a newly queued winner gets
+					// the active-job and enqueue-grace protections above.
+					latest, failErr = s.metadata.GetLatestByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID)
+					if failErr != nil {
+						return ReviewRequestedResult{}, fmt.Errorf("reload code review after concurrent takeover: %w", failErr)
+					}
+					continue
+				}
+				if failErr != nil {
+					return ReviewRequestedResult{}, fmt.Errorf("fail stranded code review: %w", failErr)
+				}
+				s.reconcileStrandedSession(ctx, input.OrgID, failed.SessionID, reason)
+				latest = failed
+				break resolveLatest
+			case models.CodeReviewSessionStatusFailed, models.CodeReviewSessionStatusStale, models.CodeReviewSessionStatusCancelled:
+				// A reviewer rerequest is an explicit request for another attempt.
+				// Derive the next key from the latest terminal row so concurrent
+				// rerequests collapse onto the same replacement attempt.
+				break resolveLatest
+			default:
+				return ReviewRequestedResult{}, fmt.Errorf("unsupported existing code review status %q", latest.Status)
+			}
 		}
-		return ReviewRequestedResult{Processed: true, Reused: true, SessionID: existing.SessionID, MetadataID: existing.ID, TriggerSource: source}, nil
+		outputKey = retryOutputKey(outputKey, latest.ID)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return ReviewRequestedResult{}, fmt.Errorf("lookup code review by output key: %w", err)
+		return ReviewRequestedResult{}, fmt.Errorf("lookup latest code review: %w", err)
 	}
 
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
@@ -244,7 +291,14 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		RequestedTeamSlug:      input.RequestedTeam,
 	}
 	dedupeKey := "code_review:" + outputKey
-	jobID, err := s.jobs.Enqueue(ctx, input.OrgID, "agent", models.JobTypeRunCodeReview, payload, 5, &dedupeKey)
+	jobID, err := s.jobs.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
+		Queue:       "agent",
+		JobType:     models.JobTypeRunCodeReview,
+		Payload:     payload,
+		Priority:    5,
+		DedupeKey:   &dedupeKey,
+		MaxAttempts: codeReviewJobMaxAttempts,
+	})
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("enqueue code review job: %w", err)
 	}
@@ -257,8 +311,37 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	}, nil
 }
 
+func (s *Service) reconcileStrandedSession(ctx context.Context, orgID, sessionID uuid.UUID, reason string) {
+	if err := s.sessions.UpdateStatus(ctx, orgID, sessionID, models.SessionStatusFailed); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to mark stranded code review session failed")
+		return
+	}
+	if err := s.sessions.UpdateFailure(ctx, orgID, sessionID, reason, "code_review_job_failed",
+		[]string{"Request the code reviewer again to start a fresh attempt."}, true); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID.String()).
+			Msg("failed to record stranded code review session failure")
+	}
+}
+
 func StableOutputKey(pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID, policyVersion int) string {
 	return fmt.Sprintf("pr:%s:head:%s:policy:%s:v%d", pullRequestID, headSHA, policyID, policyVersion)
+}
+
+func retryOutputKey(base string, previousAttemptID uuid.UUID) string {
+	return fmt.Sprintf("%s:retry:%s", base, previousAttemptID)
+}
+
+func reusedReviewRequestedResult(metadata models.CodeReviewSessionMetadata, source models.CodeReviewTriggerSource) ReviewRequestedResult {
+	return ReviewRequestedResult{
+		Processed:     true,
+		Reused:        true,
+		SessionID:     metadata.SessionID,
+		MetadataID:    metadata.ID,
+		TriggerSource: source,
+	}
 }
 
 func (s *Service) matchRequestedReviewer(ctx context.Context, input ReviewRequestedInput) (models.CodeReviewTriggerSource, bool, error) {

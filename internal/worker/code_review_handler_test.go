@@ -4,19 +4,186 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		status             int
+		body               string
+		header             http.Header
+		retryable          bool
+		fatal              bool
+		expectedRetryAfter time.Duration
+	}{
+		{name: "retries service unavailable", status: http.StatusServiceUnavailable, retryable: true},
+		{name: "retries rate limiting", status: http.StatusTooManyRequests, retryable: true},
+		{
+			name:               "retries forbidden secondary rate limit using server delay",
+			status:             http.StatusForbidden,
+			body:               `{"message":"You have exceeded a secondary rate limit"}`,
+			header:             http.Header{"Retry-After": []string{"17"}},
+			retryable:          true,
+			expectedRetryAfter: 17 * time.Second,
+		},
+		{name: "does not retry forbidden permission failure", status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`, fatal: true},
+		{name: "does not retry validation failure", status: http.StatusUnprocessableEntity, fatal: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := tt.body
+			if body == "" {
+				body = "upstream response"
+			}
+			upstreamErr := &ghservice.GitHubAPIError{
+				Method:     http.MethodGet,
+				Path:       "/repos/acme/repo/pulls/42",
+				StatusCode: tt.status,
+				Body:       []byte(body),
+				Header:     tt.header,
+			}
+			services := &Services{PR: &stubPRService{
+				syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+					return upstreamErr
+				},
+			}}
+
+			err := syncCodeReviewPullRequestState(context.Background(), services, zerolog.Nop(), runCodeReviewPayload{
+				OrgID:         uuid.New(),
+				PullRequestID: uuid.New(),
+			})
+
+			var retryErr *RetryableError
+			require.Equal(t, tt.retryable, errors.As(err, &retryErr), "GitHub status should receive the expected retry classification")
+			var fatalErr *FatalError
+			require.Equal(t, tt.fatal, errors.As(err, &fatalErr), "non-transient GitHub status should receive the expected fatal classification")
+			if tt.retryable {
+				require.True(t, retryErr.ConsumeAttempt, "transient GitHub retries should consume attempts so exponential backoff increases")
+				if tt.expectedRetryAfter > 0 {
+					require.NotNil(t, retryErr.RetryAfter, "rate-limited response should preserve the upstream retry delay")
+					require.Equal(t, tt.expectedRetryAfter, *retryErr.RetryAfter, "rate-limited response should use the upstream retry delay")
+				} else {
+					require.Nil(t, retryErr.RetryAfter, "transient GitHub retries without a hint should use exponential backoff")
+				}
+			}
+		})
+	}
+}
+
+func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	pullRequestID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 7, 16, 22, 56, 4, 0, time.UTC)
+	deadLetterErr := &ghservice.GitHubAPIError{
+		Method:     http.MethodGet,
+		Path:       "/repos/acme/repo/pulls/42",
+		StatusCode: http.StatusServiceUnavailable,
+		Body:       []byte("unavailable"),
+	}
+	reason := codeReviewDeadLetterReason(deadLetterErr)
+	decision := models.CodeReviewDecisionBlocked
+	acceptable := false
+
+	mock.ExpectQuery("UPDATE code_review_session_metadata").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WillReturnRows(newCodeReviewMetadataRows().
+			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
+				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
+				models.CodeReviewSessionStatusFailed, &decision, &acceptable, false, nil,
+				"output-key", nil, nil, nil, nil, &reason, &now, now))
+	idleRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusIdle, 0, nil, nil)
+	setWorkerSessionColumn(idleRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(idleRow...))
+	failedRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusFailed, 0, nil, nil)
+	setWorkerSessionColumn(failedRow, "origin", models.SessionOriginCodeReview)
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now").
+		WithArgs(workerAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(failedRow...))
+	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
+		WithArgs(workerAnyArgs(6)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).
+			AddRow(workerPullRequestRow(pullRequestID, sessionID, orgID, "acme/repo", "feature", now)...))
+	mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+		WillReturnRows(workerRepositoryRows(models.Repository{
+			ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), GitHubID: 42,
+			FullName: "acme/repo", DefaultBranch: "main", CloneURL: "https://github.com/acme/repo.git",
+			InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+			CreatedAt: now, UpdatedAt: now,
+		}))
+
+	remover := &capturingCodeReviewSubmitter{}
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+	registerCodeReviewDeadLetterReconciliation(ctx, &Stores{
+		CodeReviews:  db.NewCodeReviewStore(mock),
+		Sessions:     db.NewSessionStore(mock),
+		PullRequests: db.NewPullRequestStore(mock),
+		Repositories: db.NewRepositoryStore(mock),
+	}, &Services{CodeReviews: remover}, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:                  orgID,
+		SessionID:              sessionID,
+		RepositoryID:           repositoryID,
+		PullRequestID:          pullRequestID,
+		RequestedReviewerLogin: "143-code-reviewer",
+	})
+	jobctx.RunDeadLetterHooks(ctx, deadLetterErr)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the review metadata and parent session")
+	require.Equal(t, []codereview.RequestedReviewersRequest{{
+		InstallationID: 143,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		Reviewers:      []string{"143-code-reviewer"},
+	}}, remover.removeRequests, "dead-letter hook should remove the pending reviewer so GitHub can emit a new request")
+}
+
+type capturingCodeReviewSubmitter struct {
+	removeRequests []codereview.RequestedReviewersRequest
+}
+
+func (s *capturingCodeReviewSubmitter) SubmitReview(context.Context, codereview.SubmitReviewRequest) (codereview.SubmitReviewResult, error) {
+	return codereview.SubmitReviewResult{}, nil
+}
+
+func (s *capturingCodeReviewSubmitter) RemoveRequestedReviewers(_ context.Context, req codereview.RequestedReviewersRequest) error {
+	s.removeRequests = append(s.removeRequests, req)
+	return nil
+}
 
 func TestCodeReviewInlineComments(t *testing.T) {
 	t.Parallel()
