@@ -44,6 +44,7 @@ import { VerifiedDomainsSection } from "@/components/settings/verified-domains-s
 import { CLIJoinTokensCard } from "@/components/cli-join-tokens-card";
 import { useAuth } from "@/hooks/use-auth";
 import { SettingsLastActivity } from "@/components/settings/settings-last-activity";
+import { ExternalIdentitiesCard } from "@/components/settings/external-identities-card";
 import { roleLabel } from "@/lib/roles";
 import type {
   User,
@@ -84,6 +85,13 @@ export default function TeamSettingsPage() {
     queryFn: () => api.team.listInvitations(),
     enabled: canManageTeam,
   });
+  const { data: externalLinksData } = useQuery({
+    queryKey: ["external-identities", "admin"],
+    queryFn: () => api.integrations.listExternalUserLinks(),
+    enabled: canManageTeam,
+  });
+  const identityFor = (memberID: string, provider: "slack" | "linear") =>
+    externalLinksData?.data.find((link) => link.user_id === memberID && link.provider === provider && link.status === "active");
 
   const { data: ghStatusData } = useQuery<SingleResponse<GitHubInviteStatus>>({
     queryKey: ["team-github-status"],
@@ -303,9 +311,11 @@ export default function TeamSettingsPage() {
               </div>
             ) : (
               <div className="divide-y divide-border/50">
-                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground md:grid md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px]">
+                <div className="hidden items-center gap-4 bg-muted/30 px-4 py-2 text-xs font-medium uppercase tracking-wider text-muted-foreground md:grid md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_110px_110px_110px_90px]">
                   <div>Name</div>
                   <div>Email</div>
+                  <div>Slack</div>
+                  <div>Linear</div>
                   <div>Role</div>
                   <div>Actions</div>
                 </div>
@@ -315,7 +325,7 @@ export default function TeamSettingsPage() {
                     <div
                       key={member.id}
                       data-testid="team-member-row"
-                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 px-3 py-3 transition-colors hover:bg-muted/40 md:grid-cols-[minmax(0,1.3fr)_minmax(0,1.3fr)_140px_100px] md:items-center md:gap-4 md:px-4 dark:hover:bg-primary/[0.03]"
+                      className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-2 px-3 py-3 transition-colors hover:bg-muted/40 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1.2fr)_110px_110px_110px_90px] md:items-center md:gap-4 md:px-4 dark:hover:bg-primary/[0.03]"
                     >
                       <div className="col-span-2 flex min-w-0 items-center gap-3 md:col-span-1">
                         {member.avatar_url ? (
@@ -348,6 +358,10 @@ export default function TeamSettingsPage() {
                           {member.email}
                         </div>
                       </div>
+                      {(["slack", "linear"] as const).map((provider) => {
+                        const identity = identityFor(member.id, provider);
+                        return <div key={provider} className="hidden min-w-0 md:block"><Badge variant="outline" className="max-w-full truncate">{identity ? identity.external_handle || identity.external_display_name || "Linked" : "Unlinked"}</Badge></div>;
+                      })}
                       <div className="flex items-center justify-self-end md:justify-self-auto">
                         {isSelf || !canManageTeam ? (
                           <Badge variant={roleBadgeVariant(member.role)}>
@@ -408,6 +422,8 @@ export default function TeamSettingsPage() {
           </CardContent>
         </Card>
       </section>
+
+      {canManageTeam && <ExternalIdentitiesCard admin members={members} />}
 
       {/* Pending Invitations */}
       {canManageTeam && invitations.length > 0 && (

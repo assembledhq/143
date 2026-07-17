@@ -119,12 +119,14 @@ const review: CodeReviewListItem = {
   acceptable: true,
   stale: false,
   review_output_key: "pr-1:abcdef:policy-1",
+  github_review_id: 143428,
   completed_at: "2026-06-26T12:05:00Z",
   created_at: "2026-06-26T12:00:00Z",
   repository_name: "api",
   github_repo: "acme/api",
   github_pr_number: 428,
   github_pr_url: "https://github.com/acme/api/pull/428",
+  github_review_url: "https://github.com/acme/api/pull/428#pullrequestreview-143428",
   pull_request_title: "Fix invoice rounding",
   pull_request_author: "anya",
 };
@@ -267,13 +269,28 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
-    expect(screen.getAllByText("Approved")).toHaveLength(2);
+    expect(screen.getAllByText("Automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    const finalReviewLinks = screen.getAllByRole("link", { name: "#428 Fix invoice rounding" });
+    expect(finalReviewLinks).toHaveLength(2);
+    for (const link of finalReviewLinks) {
+      expect(link).toHaveAttribute("href", review.github_review_url);
+    }
+    expect(screen.queryByRole("link", { name: "Open final review" })).not.toBeInTheDocument();
     const filterToggle = screen.getByRole("button", { name: /Filter reviews/i });
     expect(filterToggle).toHaveAttribute("aria-expanded", "false");
     await user.click(filterToggle);
     expect(filterToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
+    const reviewTable = screen.getByRole("table");
+    const reviewRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
+    const reviewCells = within(reviewRow).getAllByRole("cell");
+    expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).toBeNull();
+    expect(within(reviewCells[3]).getByText("Automatically approved").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[3]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
+    expect(within(reviewCells[4]).getByText("Ran successfully").closest('[data-slot="status-label"]')).toBeNull();
+    expect(within(reviewCells[6]).queryByRole("button", { name: "Evidence" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
     expect(evidenceSheet).toBeInTheDocument();
@@ -347,6 +364,86 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
+  });
+
+  it("uses the standard error notice and retries evidence loading", async () => {
+    const user = userEvent.setup();
+    let evidenceRequests = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews/session-1/evidence", () => {
+        evidenceRequests += 1;
+        if (evidenceRequests === 1) {
+          return HttpResponse.json({ error: { code: "unavailable", message: "temporarily unavailable" } }, { status: 503 });
+        }
+        return HttpResponse.json({ data: evidence } satisfies SingleResponse<CodeReviewEvidence>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
+    const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
+    expect(within(evidenceSheet).getByRole("alert")).toHaveTextContent("Evidence could not be loaded");
+
+    await user.click(within(evidenceSheet).getByRole("button", { name: "Retry" }));
+
+    expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
+    expect(evidenceRequests).toBe(2);
+  });
+
+  it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
+    const user = userEvent.setup();
+    const requestedOutcomes: string[] = [];
+    const successfulNotApproved: CodeReviewListItem = {
+      ...review,
+      id: "review-2",
+      session_id: "session-2",
+      pull_request_id: "pr-2",
+      status: "completed",
+      decision: "needs_human_review",
+      acceptable: false,
+      github_review_id: 143429,
+      github_pr_number: 429,
+      github_pr_url: "https://github.com/acme/api/pull/429",
+      pull_request_title: "Keep manual approval",
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-reviews", ({ request }) => {
+        const outcome = new URL(request.url).searchParams.get("outcome") ?? "";
+        requestedOutcomes.push(outcome);
+        return HttpResponse.json({
+          data: outcome === "completed_not_approved" ? [successfulNotApproved] : [review],
+          meta: {},
+        } satisfies ListResponse<CodeReviewListItem>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
+
+    expect(await screen.findAllByText("Automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Ran successfully — not approved" }));
+
+    expect(await screen.findAllByText("#429 Keep manual approval")).toHaveLength(2);
+    expect(screen.getAllByText("Not automatically approved")).toHaveLength(2);
+    expect(screen.getAllByText("Needs human review")).toHaveLength(2);
+    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("completed_not_approved");
+    });
+
+    await user.click(screen.getByRole("combobox", { name: "Outcome" }));
+    await user.click(await screen.findByRole("option", { name: "Automatically approved" }));
+
+    expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
+    await waitFor(() => {
+      expect(requestedOutcomes).toContain("automatically_approved");
+    });
   });
 
   it("edits description requirements in a focused side sheet", async () => {

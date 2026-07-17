@@ -272,7 +272,7 @@ export function PRHealthBanner({
                         <Button
                           size="xs"
                           variant="default"
-                          className={cn(canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
+                          className={cn("shadow-none", canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
                           disabled={mergeAction.disabled}
                           title={mergeAction.disabledReason ?? "Merge PR (p m)"}
                           onClick={onMerge}
@@ -291,7 +291,7 @@ export function PRHealthBanner({
                             <Button
                               size="icon-xs"
                               variant="default"
-                              className="rounded-l-none"
+                              className="rounded-l-none shadow-none"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"

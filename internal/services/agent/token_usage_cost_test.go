@@ -320,10 +320,15 @@ func TestFinalizeTokenUsage_DerivesGPT56PublishedRates(t *testing.T) {
 		model                 string
 		expectedAPIAmount     float64
 		expectedCreditsAmount float64
+		expectedAPIDetail     string
+		expectedCreditsDetail string
 	}{
-		{name: "sol", model: models.CodexModelGPT56Sol, expectedAPIAmount: 41.75, expectedCreditsAmount: 887.5},
-		{name: "terra", model: models.CodexModelGPT56Terra, expectedAPIAmount: 20.875, expectedCreditsAmount: 443.75},
-		{name: "luna", model: models.CodexModelGPT56Luna, expectedAPIAmount: 8.35, expectedCreditsAmount: 177.5},
+		{name: "sol", model: models.CodexModelGPT56Sol, expectedAPIAmount: 41.75, expectedCreditsAmount: 887.5, expectedAPIDetail: "openai_api_pricing", expectedCreditsDetail: "codex_rate_card"},
+		{name: "sol fast", model: models.CodexModelGPT56SolFast, expectedAPIAmount: 83.5, expectedCreditsAmount: 1775, expectedAPIDetail: "openai_priority_pricing", expectedCreditsDetail: "codex_priority_rate_card"},
+		{name: "terra", model: models.CodexModelGPT56Terra, expectedAPIAmount: 20.875, expectedCreditsAmount: 443.75, expectedAPIDetail: "openai_api_pricing", expectedCreditsDetail: "codex_rate_card"},
+		{name: "terra fast", model: models.CodexModelGPT56TerraFast, expectedAPIAmount: 41.75, expectedCreditsAmount: 887.5, expectedAPIDetail: "openai_priority_pricing", expectedCreditsDetail: "codex_priority_rate_card"},
+		{name: "luna", model: models.CodexModelGPT56Luna, expectedAPIAmount: 8.35, expectedCreditsAmount: 177.5, expectedAPIDetail: "openai_api_pricing", expectedCreditsDetail: "codex_rate_card"},
+		{name: "luna fast", model: models.CodexModelGPT56LunaFast, expectedAPIAmount: 16.7, expectedCreditsAmount: 355, expectedAPIDetail: "openai_priority_pricing", expectedCreditsDetail: "codex_priority_rate_card"},
 	}
 
 	for _, tt := range tests {
@@ -345,6 +350,7 @@ func TestFinalizeTokenUsage_DerivesGPT56PublishedRates(t *testing.T) {
 			require.NotNil(t, apiUsage.Cost, "GPT-5.6 API-key usage should derive a published USD cost")
 			require.Equal(t, TokenCostUnitUSD, apiUsage.Cost.Unit, "GPT-5.6 API-key cost should use USD")
 			require.Equal(t, TokenCostSourceDerived, apiUsage.Cost.Source, "GPT-5.6 API-key cost should be marked derived")
+			require.Equal(t, tt.expectedAPIDetail, apiUsage.Cost.Detail, "GPT-5.6 API-key cost should identify standard or priority pricing")
 			require.InDelta(t, tt.expectedAPIAmount, apiUsage.Cost.Amount, 0.0001, "GPT-5.6 API cost should include input, cache read, cache write, and output pricing")
 			require.InDelta(t, tt.expectedAPIAmount, apiUsage.TotalCostUSD, 0.0001, "GPT-5.6 total_cost_usd should mirror the derived amount")
 
@@ -361,6 +367,7 @@ func TestFinalizeTokenUsage_DerivesGPT56PublishedRates(t *testing.T) {
 			require.NotNil(t, subscriptionUsage.NativeCost, "GPT-5.6 subscription usage should derive published Codex credits")
 			require.Equal(t, TokenCostUnitCredits, subscriptionUsage.NativeCost.Unit, "GPT-5.6 subscription cost should use credits")
 			require.Equal(t, TokenCostSourceDerived, subscriptionUsage.NativeCost.Source, "GPT-5.6 subscription cost should be marked derived")
+			require.Equal(t, tt.expectedCreditsDetail, subscriptionUsage.NativeCost.Detail, "GPT-5.6 subscription cost should identify standard or priority pricing")
 			require.InDelta(t, tt.expectedCreditsAmount, subscriptionUsage.NativeCost.Amount, 0.0001, "GPT-5.6 subscription cost should include input, cache read, and output credit rates")
 		})
 	}

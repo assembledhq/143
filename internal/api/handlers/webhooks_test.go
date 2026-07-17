@@ -819,12 +819,12 @@ func (s *codeReviewWebhookMetadataStore) CreateSessionMetadata(_ context.Context
 	return nil
 }
 
-func (s *codeReviewWebhookMetadataStore) GetByOutputKey(context.Context, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+func (s *codeReviewWebhookMetadataStore) GetLatestByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
-func (s *codeReviewWebhookMetadataStore) GetRunningByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
-	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+func (s *codeReviewWebhookMetadataStore) FailReview(context.Context, uuid.UUID, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, nil
 }
 
 func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) (int64, error) {
@@ -838,15 +838,27 @@ func (s *codeReviewWebhookSessionStore) Create(_ context.Context, session *model
 	return nil
 }
 
+func (s *codeReviewWebhookSessionStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus) error {
+	return nil
+}
+
+func (s *codeReviewWebhookSessionStore) UpdateFailure(context.Context, uuid.UUID, uuid.UUID, string, string, []string, bool) error {
+	return nil
+}
+
 type codeReviewWebhookJobStore struct {
 	jobID   uuid.UUID
 	payload codereviewsvc.RunCodeReviewJobPayload
 }
 
-func (s *codeReviewWebhookJobStore) Enqueue(_ context.Context, _ uuid.UUID, _, _ string, payload any, _ int, _ *string) (uuid.UUID, error) {
-	typed, ok := payload.(codereviewsvc.RunCodeReviewJobPayload)
+func (s *codeReviewWebhookJobStore) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	typed, ok := opts.Payload.(codereviewsvc.RunCodeReviewJobPayload)
 	if ok {
 		s.payload = typed
 	}
 	return s.jobID, nil
+}
+
+func (s *codeReviewWebhookJobStore) HasActiveByDedupeKey(context.Context, uuid.UUID, string, string) (bool, error) {
+	return true, nil
 }

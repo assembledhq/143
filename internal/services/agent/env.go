@@ -951,6 +951,89 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 	return merged
 }
 
+// IsAgentAvailable reports whether the resolved coding-credential stack has
+// an active, structurally usable credential for agentType and model. This is
+// intended for schedulers that choose among several interchangeable coding
+// agents and need to avoid dispatching work that is guaranteed to fail
+// authentication or model routing.
+//
+// The unified coding-credential store is authoritative here. ListResolvable
+// already excludes disabled, invalid, and pending-auth rows; the compatibility
+// check additionally rejects incomplete API keys, subscriptions, and expired
+// Claude Code setup tokens.
+func (e *AgentEnv) IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error) {
+	if e == nil || e.codingCredentials == nil {
+		return false, nil
+	}
+
+	var providers []models.ProviderName
+	switch agentType {
+	case models.AgentTypeCodex:
+		providers = []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}
+	case models.AgentTypeClaudeCode:
+		providers = []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}
+	case models.AgentTypeAmp:
+		providers = []models.ProviderName{models.ProviderAmp}
+	case models.AgentTypePi:
+		providers = []models.ProviderName{models.ProviderPi}
+	case models.AgentTypeOpenCode:
+		credentials, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, models.ProviderOpenCode)
+		if err != nil {
+			return false, fmt.Errorf("resolve %s availability: %w", agentType, err)
+		}
+		_, routes, modelAware := e.openCodeRuntimeRoutes(ctx, orgID, model)
+		if !modelAware {
+			return hasCompatibleCodingCredential(credentials), nil
+		}
+		for _, route := range routes {
+			for _, credential := range credentials {
+				if !credentialRunnableForModelAwarePick(credential) {
+					continue
+				}
+				cfg, ok := compatibleCodingProviderConfig(credential.Provider, credential.Config)
+				if !ok {
+					continue
+				}
+				openCode, ok := cfg.(models.OpenCodeConfig)
+				if ok && openCode.NormalizedBackingProvider() == route.Backing {
+					return true, nil
+				}
+			}
+		}
+		return false, nil
+	default:
+		return false, nil
+	}
+
+	for _, provider := range providers {
+		credentials, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
+		if err != nil {
+			return false, fmt.Errorf("resolve %s availability: %w", agentType, err)
+		}
+		for _, credential := range credentials {
+			if credential.Status != models.CodingCredentialStatusActive {
+				continue
+			}
+			if _, ok := compatibleCodingProviderConfig(credential.Provider, credential.Config); ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func hasCompatibleCodingCredential(credentials []models.DecryptedCodingCredential) bool {
+	for _, credential := range credentials {
+		if credential.Status != models.CodingCredentialStatusActive {
+			continue
+		}
+		if _, ok := compatibleCodingProviderConfig(credential.Provider, credential.Config); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *AgentEnv) applyAgentModelDefault(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, modelOverride string, merged map[string]string) {
 	envVar := models.ModelEnvVarForAgentType(agentType)
 	if envVar == "" || merged[envVar] != "" {
@@ -1087,38 +1170,49 @@ func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, 
 // Returns nil and records a structured credential block when no route is
 // runnable.
 func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
-	selection := strings.TrimSpace(modelOverride)
+	selection, routes, modelAware := e.openCodeRuntimeRoutes(ctx, orgID, modelOverride)
+	if !modelAware {
+		// With no model preference (or an unknown bare slug), pick any runnable
+		// OpenCode credential and let the caller derive a backing-compatible
+		// default model. This keeps orgs that configured a first-party-backed
+		// OpenCode key without a default model working — forcing the product
+		// default would route only to OpenRouter/native.
+		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+	}
+
+	return e.resolveAcrossOpenCodeRoutes(ctx, orgID, userID, selection, routes)
+}
+
+// openCodeRuntimeRoutes normalizes the requested/default OpenCode selection
+// into the exact route set used at execution time. modelAware is false for the
+// generic no-model and unknown bare-slug paths, where any runnable OpenCode
+// credential is valid and the runtime derives a backing-compatible default.
+func (e *AgentEnv) openCodeRuntimeRoutes(ctx context.Context, orgID uuid.UUID, modelOverride string) (selection string, routes []models.OpenCodeRoute, modelAware bool) {
+	selection = strings.TrimSpace(modelOverride)
 	if selection == "" {
 		selection = e.openCodeModelFromAgentConfig(ctx, orgID)
 	}
 	if selection == "" {
-		// No model preference at all: pick any runnable OpenCode credential and
-		// let the caller derive a backing-compatible default model. This keeps
-		// orgs that configured a first-party-backed OpenCode key (OpenAI /
-		// Anthropic / Gemini) without a default model working — forcing the
-		// product default (GLM 5.2) would route only to OpenRouter/native. The
-		// frontend picker sends an explicit default, so this path is rare.
-		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+		return selection, nil, false
 	}
 
 	routes, recognized := e.openCodeRoutesForSelection(ctx, orgID, selection)
-	if !recognized {
-		// Uncurated custom slug ("provider/model"): pin a single route whose
-		// backing is inferred from the prefix, preserving the slug verbatim as
-		// the model. Any uncurated "vendor/model" slug routes through OpenRouter
-		// (the universal proxy); only non-"provider/model" shapes defer to the
-		// generic resolver so an existing OpenCode key still serves the run.
-		backing := openCodeBackingProviderForModel(selection)
-		if backing == "" {
-			if !strings.Contains(selection, "/") {
-				return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
-			}
-			backing = models.ProviderOpenRouter
-		}
-		routes = []models.OpenCodeRoute{{Backing: backing, PhysicalModelID: selection}}
+	if recognized {
+		return selection, routes, true
 	}
 
-	return e.resolveAcrossOpenCodeRoutes(ctx, orgID, userID, selection, routes)
+	// Uncurated custom slug ("provider/model"): pin a single route whose
+	// backing is inferred from the prefix, preserving the slug verbatim as the
+	// model. Any uncurated "vendor/model" slug routes through OpenRouter (the
+	// universal proxy); only non-"provider/model" shapes use generic routing.
+	backing := openCodeBackingProviderForModel(selection)
+	if backing == "" {
+		if !strings.Contains(selection, "/") {
+			return selection, nil, false
+		}
+		backing = models.ProviderOpenRouter
+	}
+	return selection, []models.OpenCodeRoute{{Backing: backing, PhysicalModelID: selection}}, true
 }
 
 // openCodeRoutesForSelection returns the ordered routes to try for a selection

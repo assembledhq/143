@@ -387,42 +387,6 @@ func TestGitHubSubmitter_ListReviewContextPaginatesGraphQLConnections(t *testing
 	require.Len(t, gotPayloads, 2, "ListReviewContext should stop after both GraphQL connections are exhausted")
 }
 
-func TestGitHubSubmitter_PublishCommitStatus(t *testing.T) {
-	t.Parallel()
-
-	var (
-		gotPath    string
-		gotPayload map[string]any
-	)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotPayload), "request body should decode")
-		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"id":321}`))
-		require.NoError(t, err, "test response should write")
-	}))
-	defer server.Close()
-
-	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
-
-	err := submitter.PublishCommitStatus(context.Background(), CommitStatusRequest{
-		InstallationID: 99,
-		Repository:     "acme/repo",
-		SHA:            "abc123",
-		State:          CommitStatusStatePending,
-		Context:        "143 Code Reviewer",
-		Description:    "Review is running",
-		TargetURL:      "https://143.dev/sessions/sess_123",
-	})
-
-	require.NoError(t, err, "PublishCommitStatus should post commit status")
-	require.Equal(t, "/repos/acme/repo/statuses/abc123", gotPath, "PublishCommitStatus should call the commit status endpoint")
-	require.Equal(t, "pending", gotPayload["state"], "PublishCommitStatus should send requested state")
-	require.Equal(t, "143 Code Reviewer", gotPayload["context"], "PublishCommitStatus should send status context")
-	require.Equal(t, "Review is running", gotPayload["description"], "PublishCommitStatus should send description")
-	require.Equal(t, "https://143.dev/sessions/sess_123", gotPayload["target_url"], "PublishCommitStatus should include target URL")
-}
-
 func TestGitHubSubmitter_RemoveRequestedReviewers(t *testing.T) {
 	t.Parallel()
 

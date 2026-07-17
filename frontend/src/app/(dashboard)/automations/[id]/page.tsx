@@ -84,7 +84,7 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import { RunsTab } from "./runs-tab";
+import { DecisionHistory } from "./decision-history";
 import {
   browserTimezone,
   formatAutomationSchedule,
@@ -188,6 +188,9 @@ function SettingsTab({
   );
   const [identityScope, setIdentityScope] = useState<"org" | "personal">(
     automation.identity_scope ?? "org",
+  );
+  const [publishPolicy, setPublishPolicy] = useState<"pull_request" | "none">(
+    automation.publish_policy ?? "pull_request",
   );
   const [prePRReviewLoops, setPrePRReviewLoops] = useState(
     automation.pre_pr_review_loops ?? 0,
@@ -304,6 +307,7 @@ function SettingsTab({
         github_event_filters: githubEventFilters,
         model: model ?? "",
         identity_scope: identityScope,
+        publish_policy: publishPolicy,
         pre_pr_review_loops: effectivePrePRReviewLoops,
         reasoning_effort:
           showReasoningSelector && reasoningEffort ? reasoningEffort : "",
@@ -357,9 +361,9 @@ function SettingsTab({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">
-          Organization automations use team credentials and open PRs as 143-bot.
-          Personal automations use the creator&apos;s coding-agent preferences
-          and GitHub identity.
+          Organization automations use team credentials and publish as 143-bot.
+          Personal automations use the creator&apos;s coding-agent preferences and
+          GitHub identity.
         </p>
       </div>
       <div className="space-y-2">
@@ -553,6 +557,29 @@ function SettingsTab({
               buttonClassName="w-full justify-between"
               contentClassName="w-[var(--radix-popover-trigger-width)]"
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label>After a successful run</Label>
+            <Select
+              value={publishPolicy}
+              onValueChange={(value) => {
+                if (value === "pull_request" || value === "none") {
+                  setPublishPolicy(value);
+                }
+              }}
+              disabled={!canManage}
+            >
+              <SelectTrigger aria-label="After a successful run">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pull_request">Open a pull request</SelectItem>
+                <SelectItem value="none">Do not publish</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Pull requests are also skipped when the run produces no diff.
+            </p>
           </div>
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-3">
@@ -885,6 +912,51 @@ function InlineAutomationText({
   );
 }
 
+function AutomationDetailPageSkeleton() {
+  return (
+    <PageContainer size="wide">
+      <div className="space-y-6" aria-busy="true" aria-label="Loading automation">
+        <MobileBackButton to="/automations" label="Back to automations" />
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-muted" />
+            <div
+              className="min-w-0 flex-1 space-y-2"
+              data-testid="automation-detail-header-skeleton-copy"
+            >
+              <div className="h-6 w-full max-w-56 animate-pulse rounded bg-muted sm:max-w-72" />
+              <div className="h-4 w-full max-w-72 animate-pulse rounded bg-muted/70 sm:max-w-96" />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <div className="h-8 w-16 animate-pulse rounded-lg bg-muted" />
+            <div className="h-8 w-20 animate-pulse rounded-lg bg-muted" />
+          </div>
+        </div>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="space-y-4">
+            <div className="h-9 w-64 animate-pulse rounded-lg bg-muted" />
+            <div className="space-y-3">
+              <div className="h-28 animate-pulse rounded-xl border border-border bg-muted/30" />
+              <div className="h-20 animate-pulse rounded-xl border border-border bg-muted/30" />
+              <div className="h-20 animate-pulse rounded-xl border border-border bg-muted/30" />
+            </div>
+          </div>
+          <div className="hidden space-y-4 rounded-xl border border-border p-4 lg:block">
+            <div className="h-4 w-28 animate-pulse rounded bg-muted" />
+            {[0, 1, 2, 3].map((row) => (
+              <div key={row} className="space-y-2">
+                <div className="h-3 w-20 animate-pulse rounded bg-muted/70" />
+                <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </PageContainer>
+  );
+}
+
 export default function AutomationDetailPage() {
   const params = useParams();
   const router = useRouter();
@@ -1025,16 +1097,7 @@ export default function AutomationDetailPage() {
   });
 
   if (isLoading) {
-    return (
-      <PageContainer size="default">
-        <div className="space-y-6">
-          <MobileBackButton to="/automations" label="Back to automations" />
-          <div className="text-center py-12 text-sm text-muted-foreground">
-            Loading...
-          </div>
-        </div>
-      </PageContainer>
-    );
+    return <AutomationDetailPageSkeleton />;
   }
 
   if (!automation) {
@@ -1233,12 +1296,7 @@ export default function AutomationDetailPage() {
 
             <LatestRunSummary automationId={automationId} />
 
-            <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Run history
-              </h2>
-              <RunsTab automationId={automationId} />
-            </section>
+            <DecisionHistory automationId={automationId} />
           </main>
 
           <aside className="hidden space-y-4 lg:sticky lg:top-4 lg:block">
@@ -1320,6 +1378,12 @@ function AutomationDetailRail({
             ],
             ["Reasoning", automation.reasoning_effort || "Default"],
             ["Base branch", automation.base_branch || "-"],
+            [
+              "After success",
+              automation.publish_policy === "none"
+                ? "Do not publish"
+                : "Open a pull request",
+            ],
             ["Priority", priorityLabel(automation.priority)],
             ["Scope", automation.scope || "-"],
           ]}
@@ -1365,7 +1429,12 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-5">
-      <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
+      <h2 className="text-sm font-semibold text-foreground">
+        Latest execution
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Operational status only. Review outcomes are shown in PR decisions.
+      </p>
       {isLoading ? (
         <p className="mt-3 text-sm text-muted-foreground">
           Loading latest run...
@@ -1389,7 +1458,7 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
-          {statusLabel(run.status)}
+          Execution: {statusLabel(run.status)}
         </Badge>
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
@@ -1411,6 +1480,8 @@ function statusLabel(status: AutomationRun["status"]): string {
     case "completed_noop":
       return "No-op";
     default:
-      return status.replaceAll("_", " ");
+      return status
+        .replaceAll("_", " ")
+        .replace(/^./, (letter) => letter.toUpperCase());
   }
 }

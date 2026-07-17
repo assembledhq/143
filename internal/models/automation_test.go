@@ -306,6 +306,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 		ReasoningEffort:  &reasoning,
 		Scope:            &scope,
 		IdentityScope:    AutomationIdentityScopePersonal,
+		PublishPolicy:    AutomationPublishPolicyNone,
 		PrePRReviewLoops: 2,
 		BaseBranch:       "main",
 		LastRunAt:        &lastRunAt,
@@ -322,6 +323,7 @@ func TestBuildConfigSnapshot(t *testing.T) {
 	require.Equal(t, "xhigh", decoded["reasoning_effort"], "config snapshot should include reasoning effort")
 	require.Equal(t, "src/", decoded["scope"], "config snapshot should include scope")
 	require.Equal(t, string(AutomationIdentityScopePersonal), decoded["identity_scope"], "config snapshot should include identity scope")
+	require.Equal(t, string(AutomationPublishPolicyNone), decoded["publish_policy"], "config snapshot should include the publish policy")
 	require.Equal(t, float64(2), decoded["pre_pr_review_loops"], "config snapshot should include the pre-PR review pass count")
 	require.Equal(t, "main", decoded["base_branch"], "config snapshot should include base branch")
 	require.Equal(t, "2026-06-27T13:30:00Z", decoded["previous_run_at"], "config snapshot should include the previous automation run time in UTC")
@@ -341,9 +343,70 @@ func TestBuildConfigSnapshot_NilOptionalFields(t *testing.T) {
 	require.Nil(t, decoded["reasoning_effort"], "config snapshot should preserve nil reasoning effort")
 	require.Nil(t, decoded["scope"], "config snapshot should preserve nil scope")
 	require.Equal(t, string(AutomationIdentityScopeOrg), decoded["identity_scope"], "config snapshot should default identity scope")
+	require.Equal(t, string(AutomationPublishPolicyPullRequest), decoded["publish_policy"], "config snapshot should default to pull request publication")
 	require.Equal(t, float64(0), decoded["pre_pr_review_loops"], "config snapshot should include disabled pre-PR review by default")
 	require.Equal(t, "develop", decoded["base_branch"], "config snapshot should include base branch")
 	require.Nil(t, decoded["previous_run_at"], "config snapshot should preserve missing previous automation run time")
+}
+
+func TestAutomationPublishPolicyValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		policy  AutomationPublishPolicy
+		wantErr bool
+	}{
+		{name: "pull request", policy: AutomationPublishPolicyPullRequest},
+		{name: "none", policy: AutomationPublishPolicyNone},
+		{name: "branch is unsupported", policy: AutomationPublishPolicy("branch"), wantErr: true},
+		{name: "empty is invalid when explicitly provided", policy: "", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tt.policy.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "invalid publish policy should be rejected")
+				return
+			}
+			require.NoError(t, err, "supported publish policy should be accepted")
+		})
+	}
+}
+
+func TestAutomationPublishPolicyFromConfigSnapshot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		expected AutomationPublishPolicy
+		wantErr  bool
+	}{
+		{name: "pull request", raw: json.RawMessage(`{"publish_policy":"pull_request"}`), expected: AutomationPublishPolicyPullRequest},
+		{name: "none", raw: json.RawMessage(`{"publish_policy":"none"}`), expected: AutomationPublishPolicyNone},
+		{name: "legacy snapshot", raw: json.RawMessage(`{}`), expected: AutomationPublishPolicyPullRequest},
+		{name: "missing snapshot", expected: AutomationPublishPolicyPullRequest},
+		{name: "branch is unsupported", raw: json.RawMessage(`{"publish_policy":"branch"}`), wantErr: true},
+		{name: "malformed snapshot", raw: json.RawMessage(`{`), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, err := AutomationPublishPolicyFromConfigSnapshot(tt.raw)
+			if tt.wantErr {
+				require.Error(t, err, "invalid publish policy snapshot should be rejected")
+				return
+			}
+			require.NoError(t, err, "valid publish policy snapshot should resolve")
+			require.Equal(t, tt.expected, actual, "snapshot should resolve to the expected publish policy")
+		})
+	}
 }
 
 func TestAutomationGitHubEventValidate(t *testing.T) {

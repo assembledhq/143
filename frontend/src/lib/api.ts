@@ -130,13 +130,6 @@ function patch<T>(path: string, body: unknown): Promise<T> {
   });
 }
 
-function put<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, {
-    method: 'PUT',
-    body: JSON.stringify(body),
-  });
-}
-
 function del<T>(path: string): Promise<T> {
   return request<T>(path, { method: 'DELETE' });
 }
@@ -274,6 +267,7 @@ export const api = {
     list: (params?: {
       repository_id?: string;
       decision?: import('./types').CodeReviewDecision;
+      outcome?: import('./types').CodeReviewListOutcome;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
@@ -282,6 +276,7 @@ export const api = {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);
@@ -562,16 +557,6 @@ export const api = {
       post<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets`, body),
     updateChangeset: (sessionId: string, changesetId: string, body: { title?: string; summary?: string }) =>
       patch<import('./types').SingleResponse<import('./types').ChangesetSummary>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}`, body),
-    getChangesetSplitStatus: (sessionId: string) =>
-      get<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-status`),
-    replaceChangesetSplitPaths: (sessionId: string, changesetId: string, paths: string[]) =>
-      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/split-paths`, { paths }),
-    initializeChangesetSplit: (sessionId: string) =>
-      post<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split`),
-    replaceChangesetSplitOmissions: (sessionId: string, omissions: Array<{ path: string; reason: string }>) =>
-      put<import('./types').SingleResponse<import('./types').ChangesetSplitStatus>>(`/api/v1/sessions/${sessionId}/changesets/split-omissions`, { omissions }),
-    materializeChangeset: (sessionId: string, changesetId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/materialize`),
     publishChangeset: (sessionId: string, changesetId: string) =>
       post<{ status: string; job_id?: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/publish`),
     publishChangesetStack: (sessionId: string) =>
@@ -580,14 +565,6 @@ export const api = {
       post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/restack-descendants`),
     confirmChangesetRestack: (sessionId: string, changesetId: string) =>
       post<{ status: string }>(`/api/v1/sessions/${sessionId}/changesets/${changesetId}/confirm-restack`),
-    verifyChangesetSplit: (sessionId: string) =>
-      post<{ status: string; job_id: string }>(`/api/v1/sessions/${sessionId}/changesets/verify`),
-    acceptChangesetSplit: (sessionId: string) =>
-      post<void>(`/api/v1/sessions/${sessionId}/changesets/accept-split`),
-    reorderChangesets: (sessionId: string, changesetIds: string[]) =>
-      put<void>(`/api/v1/sessions/${sessionId}/changesets/order`, { changeset_ids: changesetIds }),
-    foldChangeset: (sessionId: string, sourceId: string, targetId: string) =>
-      post<void>(`/api/v1/sessions/${sessionId}/changesets/${sourceId}/fold`, { target_changeset_id: targetId }),
     getReadiness: (sessionId: string, changesetId?: string) =>
       get<import('./types').SingleResponse<import('./types').PRReadinessResponse>>(`/api/v1/sessions/${sessionId}/pr-readiness-runs/latest${changesetId ? `?changeset_id=${encodeURIComponent(changesetId)}` : ''}`),
     runReadiness: (sessionId: string, changesetId?: string) =>
@@ -898,6 +875,17 @@ export const api = {
   },
   integrations: {
     list: () => get<import('./types').ListResponse<import('./types').Integration>>('/api/v1/integrations'),
+    listExternalUserLinks: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/integrations/external-user-links'),
+    createExternalUserLink: (body: { provider: import('./types').ExternalIdentityProvider; provider_workspace_id: string; provider_user_id: string; user_id: string; external_email?: string; external_handle?: string; external_display_name?: string; replace?: boolean }) =>
+      post<import('./types').SingleResponse<import('./types').ExternalUserLink>>('/api/v1/integrations/external-user-links', body),
+    deleteExternalUserLink: (id: string) => del<void>(`/api/v1/integrations/external-user-links/${encodeURIComponent(id)}`),
+    listExternalUserLinkSuggestions: () => get<import('./types').ListResponse<import('./types').ExternalUserLinkSuggestion>>('/api/v1/integrations/external-user-link-suggestions'),
+    listUnmappedExternalUsers: () => get<import('./types').ListResponse<import('./types').ExternalUserObservation>>('/api/v1/integrations/external-unmapped-users'),
+    approveExternalUserLinkSuggestion: (id: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-suggestions/${encodeURIComponent(id)}/approve`),
+    dismissExternalUserLinkSuggestion: (id: string) => post<void>(`/api/v1/integrations/external-user-link-suggestions/${encodeURIComponent(id)}/dismiss`),
+    listMyExternalIdentities: () => get<import('./types').ListResponse<import('./types').ExternalUserLink>>('/api/v1/users/me/external-identities'),
+    deleteMyExternalIdentity: (id: string) => del<void>(`/api/v1/users/me/external-identities/${encodeURIComponent(id)}`),
+    claimExternalIdentity: (token: string) => post<import('./types').SingleResponse<import('./types').ExternalUserLink>>(`/api/v1/integrations/external-user-link-claims/${encodeURIComponent(token)}/claim`),
     loginGitHub: () => {
       window.location.href = `${API_BASE}/api/v1/integrations/github/login`;
     },
@@ -1315,6 +1303,17 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`);
     },
+    listDecisions: (id: string, params?: { cursor?: string; limit?: number; outcome?: string; pr?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.pr) searchParams.set('pr', params.pr);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AutomationDecision>>(`/api/v1/automations/${id}/decisions${qs ? `?${qs}` : ''}`);
+    },
+    decisionStats: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationDecisionStats>>(`/api/v1/automations/${id}/decision-stats`),
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
     getCapabilities: (id: string) =>

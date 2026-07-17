@@ -499,6 +499,35 @@ func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetLatestByPullRequestHeadFiltersByOrgAndPolicy(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 7, 16, 22, 55, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("pull_request_id = @pull_request_id[\\s\\S]+head_sha = @head_sha[\\s\\S]+policy_id = @policy_id[\\s\\S]+ORDER BY created_at DESC").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusFailed, nil, nil, false, nil, "output", nil, nil, nil, nil, nil, &now, now))
+
+	metadata, err := NewCodeReviewStore(mock).GetLatestByPullRequestHead(context.Background(), orgID, prID, "head", policyID)
+	require.NoError(t, err, "latest review lookup should succeed")
+	require.Equal(t, metadataID, metadata.ID, "latest review lookup should return the newest matching attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	t.Parallel()
 
@@ -620,6 +649,56 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.Equal(t, "Fix auth bug", reviews[0].PullRequestTitle, "ListReviews should return pull request metadata")
 	require.Equal(t, "devin", reviews[0].PullRequestAuthor, "ListReviews should return the GitHub pull request author")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		outcome         models.CodeReviewListOutcome
+		expectedPattern string
+	}{
+		{
+			name:            "automatically approved requires a completed posted approval",
+			outcome:         models.CodeReviewListOutcomeAutomaticallyApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND m\.decision = 'approved'\s+AND m\.github_review_id IS NOT NULL`,
+		},
+		{
+			name:            "completed not approved includes approval decisions that were not posted",
+			outcome:         models.CodeReviewListOutcomeCompletedNotApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND \(m\.decision IS DISTINCT FROM 'approved'\s+OR m\.github_review_id IS NULL\)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for each outcome filter")
+			defer mock.Close()
+
+			mock.ExpectQuery(tt.expectedPattern).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
+					"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+				}))
+
+			reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
+				Outcome: &tt.outcome,
+			})
+
+			require.NoError(t, err, "ListReviews should accept the selected outcome filter")
+			require.Equal(t, []models.CodeReviewListItem{}, reviews, "ListReviews should return the mocked empty outcome result")
+			require.NoError(t, mock.ExpectationsWereMet(), "the outcome filter should add the expected SQL conditions")
+		})
+	}
 }
 
 func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *testing.T) {

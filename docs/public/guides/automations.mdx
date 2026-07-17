@@ -1,0 +1,58 @@
+---
+title: Automations
+description: Configure recurring or GitHub-triggered work and interpret PR decisions separately from execution runs.
+section: Guides
+order: 14
+status: stable
+audience: engineer
+tags:
+  - automations
+  - pull requests
+  - review outcomes
+llm_summary: Automations create agent sessions from schedules or GitHub events; the automation page groups PR decisions by revision and keeps review outcomes separate from execution status.
+---
+
+Use automations for work that should start from a repeatable schedule or a repository event instead of a person opening a session. Choose a narrow goal, the repository and base branch, the identity and model, and one or more triggers.
+
+## Choose a trigger
+
+An automation can run on a schedule, a supported integration event, or GitHub pull-request activity. GitHub triggers include PR creation and updates, completed checks, review submissions, inline review comments, and issue comments on a PR.
+
+Filters such as base branch, author, path, feedback type, and review state reduce unnecessary runs. Keep filters as specific as the workflow allows; an automation that reacts to every comment and every check can evaluate the same revision several times.
+
+## Read PR decisions
+
+For GitHub-triggered review work, the default history view shows one decision for each pull-request revision. The summary separates:
+
+- **PRs**: distinct pull requests evaluated.
+- **Revisions**: distinct PR head revisions evaluated.
+- **Attempts**: raw automation executions, including retries or repeated events for the same revision.
+
+Each decision identifies the repository, PR number, revision SHA when available, and the number of evaluation attempts. Open the PR directly from the decision card.
+
+## Understand outcome labels
+
+Review outcomes and execution status answer different questions:
+
+| Label | Meaning |
+| --- | --- |
+| Passed | The automation reported that the evaluated revision passed its review criteria. |
+| Changes requested | The automation found blocking changes and reported a rejection-style review outcome. |
+| Advisory | The automation reported non-blocking guidance. |
+| Not applicable | The automation determined that its review did not apply to this revision. |
+| Evaluating | The latest run for the revision is still pending or running. |
+| Execution failed | The automation failed before it reported a review decision. |
+| Outcome not reported | The run finished, but no structured decision was recorded. Do not infer that the PR passed. |
+
+When an outcome includes a GitHub review or comment, use the action link to inspect the exact external result. Some older outcomes are marked **Inferred from legacy summary**; these were recovered only from a strict historical summary format rather than reported through the structured outcome contract.
+
+<AgentNote>
+A completed run means the automation infrastructure finished. It does not, by itself, mean the pull request passed review.
+</AgentNote>
+
+## Debug raw runs
+
+Switch to **Raw runs** when you need every execution attempt, session failure details, or retry history. This view is intentionally operational: statuses such as completed, failed, skipped, and no-op describe execution, not the business decision about a PR.
+
+If structured decisions are not available on a deployment yet, the page falls back to execution history and displays this distinction inline.
+

@@ -50,6 +50,25 @@ func TestSessionChangesetSplitMigrationPinsPhaseThreeContracts(t *testing.T) {
 	require.Contains(t, sql, "pr_readiness_bypasses_changeset_scope_fkey", "readiness bypasses should be changeset scoped")
 }
 
+func TestAutomationNoChangeBackfillPinsSafeNoopPredicates(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000248_automation_no_change_noop.up.sql")
+	require.NoError(t, err, "test should read the automation no-change backfill migration")
+	sql := string(body)
+
+	require.Contains(t, sql, "SET status = 'completed_noop'", "backfill should reclassify eligible automation runs as no-ops")
+	require.Contains(t, sql, "target_sessions AS MATERIALIZED", "backfill should resolve its narrow target set once before applying updates")
+	require.Contains(t, sql, "ar.org_id = sal.org_id", "automation run backfill should preserve tenant ownership")
+	require.Contains(t, sql, "s.id = sal.session_id", "backfill should resolve the session through its durable automation link")
+	require.Contains(t, sql, "COALESCE(s.diff, '') = ''", "backfill should only touch sessions with no captured changes")
+	require.Contains(t, sql, "pr_creation_error = 'No changes to push.'", "backfill should require the exact historical no-change outcome")
+	require.Contains(t, sql, "NOT EXISTS", "backfill should exclude sessions that already have pull requests")
+	require.Contains(t, sql, "UPDATE session_publish_state", "backfill should clear the session publish read model")
+	require.Contains(t, sql, "pr_creation_state = 'idle'", "historical no-op sessions should no longer display a failed PR state")
+	require.Contains(t, sql, "session_publish_state update trigger mirrors this reset", "migration should document the existing primary-changeset mirror contract")
+}
+
 func TestSessionChangesetsMigrationPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

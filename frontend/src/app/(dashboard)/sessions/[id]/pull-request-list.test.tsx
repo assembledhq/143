@@ -1,11 +1,10 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ChangesetSummary } from '@/lib/types';
 import {
   CHANGESET_SPLIT_MIN_ADDITIONS,
-  ChangesetSplitPlanner,
+  ChangesetSplitPrompt,
   PullRequestList,
   shouldOfferChangesetSplit,
 } from './session-detail-content';
@@ -63,13 +62,34 @@ describe('PullRequestList', () => {
 
     expect(screen.getByTestId('pull-request-list')).toBeInTheDocument();
     expect(screen.getByText('#102 · open')).toBeInTheDocument();
-    expect(screen.getByText('Being edited in Tab 2')).toBeInTheDocument();
+    expect(screen.getByText('Being edited in Tab 2')).toHaveClass('text-info');
     await userEvent.click(screen.getByRole('button', { name: /API integration/ }));
     expect(onSelect).toHaveBeenCalledWith('changeset-2');
   });
+
+  it('uses the warning token for unpushed changes', () => {
+    render(
+      <PullRequestList
+        changesets={[
+          changeset(),
+          changeset({
+            id: 'changeset-2',
+            is_primary: false,
+            order_index: 1,
+            title: 'Unpushed work',
+            has_unpushed_changes: true,
+          }),
+        ]}
+        selectedID="changeset-1"
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Unpushed changes')).toHaveClass('text-warning');
+  });
 });
 
-describe('ChangesetSplitPlanner', () => {
+describe('ChangesetSplitPrompt', () => {
   it.each([
     { additions: undefined, expected: false },
     { additions: CHANGESET_SPLIT_MIN_ADDITIONS - 1, expected: false },
@@ -79,25 +99,18 @@ describe('ChangesetSplitPlanner', () => {
     expect(shouldOfferChangesetSplit(additions)).toBe(expected);
   });
 
-  it('shows verified split progress and enables acceptance only when complete', () => {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
-    queryClient.setQueryData(['session', 'session-1', 'changeset-split'], {
-      data: {
-        status: 'draft', source_diff_snapshot_id: 'snapshot-1', source_paths: ['api.go'],
-        assignments: [{ changeset_id: 'changeset-2', paths: ['api.go'] }], unassigned_paths: [],
-        duplicates: [], conflicts: [], omissions: [], unexpected_paths: [], verification: 'verified', complete: true,
-      },
-    });
+  it('asks the coding agent to split the diff instead of initializing a manual split', async () => {
+    const onRequestSplit = vi.fn();
+
     render(
-      <QueryClientProvider client={queryClient}>
-        <ChangesetSplitPlanner sessionID="session-1" changesets={[
-          changeset(),
-          changeset({ id: 'changeset-2', is_primary: false, order_index: 1, title: 'API', worktree_path: '/work/api' }),
-        ]} />
-      </QueryClientProvider>,
+      <ChangesetSplitPrompt
+        additions={CHANGESET_SPLIT_MIN_ADDITIONS}
+        onRequestSplit={onRequestSplit}
+      />,
     );
-    expect(screen.getByTestId('changeset-split-planner')).toBeInTheDocument();
-    expect(screen.getByText('1 of 1 files accounted for')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Accept split' })).toBeEnabled();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Split PRs' }));
+
+    expect(onRequestSplit).toHaveBeenCalledOnce();
   });
 });

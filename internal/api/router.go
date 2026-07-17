@@ -1731,6 +1731,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/integrations/external-user-links", integrationHandler.CreateExternalUserLink)
 				r.Delete("/api/v1/integrations/external-user-links/{id}", integrationHandler.DeleteExternalUserLink)
 				r.Get("/api/v1/integrations/external-user-link-suggestions", integrationHandler.ListExternalUserLinkSuggestions)
+				r.Get("/api/v1/integrations/external-unmapped-users", integrationHandler.ListUnmappedExternalUsers)
 				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/approve", integrationHandler.ApproveExternalUserLinkSuggestion)
 				r.Post("/api/v1/integrations/external-user-link-suggestions/{id}/dismiss", integrationHandler.DismissExternalUserLinkSuggestion)
 

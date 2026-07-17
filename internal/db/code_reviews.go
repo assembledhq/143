@@ -549,6 +549,27 @@ func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID
 	return collectOneCodeReviewMetadata(rows)
 }
 
+func (s *CodeReviewStore) GetLatestByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND head_sha = @head_sha
+		  AND policy_id = @policy_id
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+		"head_sha":        headSHA,
+		"policy_id":       policyID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest code review: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
 func (s *CodeReviewStore) MarkRunning(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
@@ -720,6 +741,7 @@ func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.
 		    completed_at = now()
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":         orgID,
 		"session_id":     sessionID,
@@ -736,9 +758,35 @@ func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.
 	return metadata, nil
 }
 
+func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET status = 'cancelled',
+		    failure_reason = @failure_reason,
+		    completed_at = COALESCE(completed_at, now())
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id":         orgID,
+		"session_id":     sessionID,
+		"failure_reason": reason,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("cancel code review: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
 type CodeReviewListFilters struct {
 	RepositoryID *uuid.UUID
 	Decision     *models.CodeReviewDecision
+	Outcome      *models.CodeReviewListOutcome
 	Status       *models.CodeReviewSessionStatus
 	Acceptable   *bool
 	Search       string
@@ -779,6 +827,23 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 		query += `
 			  AND m.decision = @decision`
 		args["decision"] = *filters.Decision
+	}
+	if filters.Outcome != nil {
+		if err := filters.Outcome.Validate(); err != nil {
+			return nil, err
+		}
+		switch *filters.Outcome {
+		case models.CodeReviewListOutcomeAutomaticallyApproved:
+			query += `
+			  AND m.status = 'completed'
+			  AND m.decision = 'approved'
+			  AND m.github_review_id IS NOT NULL`
+		case models.CodeReviewListOutcomeCompletedNotApproved:
+			query += `
+			  AND m.status = 'completed'
+			  AND (m.decision IS DISTINCT FROM 'approved'
+			       OR m.github_review_id IS NULL)`
+		}
 	}
 	if filters.Status != nil {
 		if err := filters.Status.Validate(); err != nil {

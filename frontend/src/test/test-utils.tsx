@@ -31,6 +31,7 @@ function TestProviders({ children }: { children: React.ReactNode }) {
 interface RenderWithProvidersOptions extends Omit<RenderOptions, 'wrapper'> {
   searchParams?: Record<string, string>;
   queryClient?: QueryClient;
+  nuqsHasMemory?: boolean;
 }
 
 function renderWithProviders(
@@ -40,14 +41,15 @@ function renderWithProviders(
   const {
     searchParams,
     queryClient: providedQueryClient,
+    nuqsHasMemory,
     ...renderOptions
   } = options ?? {};
 
-  if (searchParams || providedQueryClient) {
+  if (searchParams || providedQueryClient || nuqsHasMemory) {
     const wrapper = ({ children }: { children: React.ReactNode }) => {
       const queryClient = providedQueryClient ?? createTestQueryClient();
       return (
-        <NuqsTestingAdapter searchParams={searchParams}>
+        <NuqsTestingAdapter searchParams={searchParams} hasMemory={nuqsHasMemory}>
           <QueryClientProvider client={queryClient}>
             <OptimisticSessionsProvider>
               {children}

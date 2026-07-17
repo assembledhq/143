@@ -16,33 +16,37 @@ type tokenRate struct {
 }
 
 var openAIAPIRates = map[string]tokenRate{
-	models.CodexModelGPT56Sol:   {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT56Terra: {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, cacheCreationPerMTok: 3.125, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT56Luna:  {inputPerMTok: 1.00, cachedInputPerMTok: 0.10, cacheCreationPerMTok: 1.25, outputPerMTok: 6.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	// GPT-5.6 priority rates are not published, so fast aliases remain cost-unavailable.
-	models.CodexModelGPT55:      {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT55Fast:  {inputPerMTok: 12.50, cachedInputPerMTok: 1.25, outputPerMTok: 75.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
-	models.CodexModelGPT54:      {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT54Fast:  {inputPerMTok: 6.25, cachedInputPerMTok: 0.625, outputPerMTok: 37.50, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
-	models.CodexModelGPT54Mini:  {inputPerMTok: 0.75, cachedInputPerMTok: 0.075, outputPerMTok: 4.50, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT5Codex:  {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT53Codex: {inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.CodexModelGPT52Codex: {inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
-	models.PiModelGPT54:         {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56Sol:       {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56SolFast:   {inputPerMTok: 10.00, cachedInputPerMTok: 1.00, cacheCreationPerMTok: 12.50, outputPerMTok: 60.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
+	models.CodexModelGPT56Terra:     {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, cacheCreationPerMTok: 3.125, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56TerraFast: {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, cacheCreationPerMTok: 6.25, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
+	models.CodexModelGPT56Luna:      {inputPerMTok: 1.00, cachedInputPerMTok: 0.10, cacheCreationPerMTok: 1.25, outputPerMTok: 6.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT56LunaFast:  {inputPerMTok: 2.00, cachedInputPerMTok: 0.20, cacheCreationPerMTok: 2.50, outputPerMTok: 12.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
+	models.CodexModelGPT55:          {inputPerMTok: 5.00, cachedInputPerMTok: 0.50, outputPerMTok: 30.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT55Fast:      {inputPerMTok: 12.50, cachedInputPerMTok: 1.25, outputPerMTok: 75.00, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
+	models.CodexModelGPT54:          {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT54Fast:      {inputPerMTok: 6.25, cachedInputPerMTok: 0.625, outputPerMTok: 37.50, unit: TokenCostUnitUSD, detail: "openai_priority_pricing"},
+	models.CodexModelGPT54Mini:      {inputPerMTok: 0.75, cachedInputPerMTok: 0.075, outputPerMTok: 4.50, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT5Codex:      {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT53Codex:     {inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.CodexModelGPT52Codex:     {inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
+	models.PiModelGPT54:             {inputPerMTok: 2.50, cachedInputPerMTok: 0.25, outputPerMTok: 15.00, unit: TokenCostUnitUSD, detail: "openai_api_pricing"},
 }
 
 var codexCreditRates = map[string]tokenRate{
-	models.CodexModelGPT56Sol:   {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT56Terra: {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT56Luna:  {inputPerMTok: 25.00, cachedInputPerMTok: 2.50, outputPerMTok: 150.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	// GPT-5.6 fast-mode credit rates are not published, so fast aliases remain cost-unavailable.
-	models.CodexModelGPT55:      {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT55Fast:  {inputPerMTok: 312.50, cachedInputPerMTok: 31.25, outputPerMTok: 1875.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
-	models.CodexModelGPT54:      {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT54Fast:  {inputPerMTok: 156.25, cachedInputPerMTok: 15.625, outputPerMTok: 937.50, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
-	models.CodexModelGPT54Mini:  {inputPerMTok: 18.75, cachedInputPerMTok: 1.875, outputPerMTok: 113.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT53Codex: {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
-	models.CodexModelGPT52Codex: {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56Sol:       {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56SolFast:   {inputPerMTok: 250.00, cachedInputPerMTok: 25.00, outputPerMTok: 1500.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
+	models.CodexModelGPT56Terra:     {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56TerraFast: {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
+	models.CodexModelGPT56Luna:      {inputPerMTok: 25.00, cachedInputPerMTok: 2.50, outputPerMTok: 150.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT56LunaFast:  {inputPerMTok: 50.00, cachedInputPerMTok: 5.00, outputPerMTok: 300.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
+	models.CodexModelGPT55:          {inputPerMTok: 125.00, cachedInputPerMTok: 12.50, outputPerMTok: 750.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT55Fast:      {inputPerMTok: 312.50, cachedInputPerMTok: 31.25, outputPerMTok: 1875.00, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
+	models.CodexModelGPT54:          {inputPerMTok: 62.50, cachedInputPerMTok: 6.250, outputPerMTok: 375.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT54Fast:      {inputPerMTok: 156.25, cachedInputPerMTok: 15.625, outputPerMTok: 937.50, unit: TokenCostUnitCredits, detail: "codex_priority_rate_card"},
+	models.CodexModelGPT54Mini:      {inputPerMTok: 18.75, cachedInputPerMTok: 1.875, outputPerMTok: 113.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT53Codex:     {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
+	models.CodexModelGPT52Codex:     {inputPerMTok: 43.75, cachedInputPerMTok: 4.375, outputPerMTok: 350.00, unit: TokenCostUnitCredits, detail: "codex_rate_card"},
 }
 
 var anthropicRates = map[string]tokenRate{
@@ -60,7 +64,7 @@ var anthropicRates = map[string]tokenRate{
 }
 
 var googleRates = map[string]tokenRate{
-	models.PiModelGemini25Pro:        {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
+	models.PiModelGemini25Pro: {inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10.00, unit: TokenCostUnitUSD, detail: "google_api_pricing"},
 }
 
 // FinalizeTokenUsage normalizes adapter-parsed usage into a single persisted

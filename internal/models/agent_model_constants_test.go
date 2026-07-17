@@ -302,6 +302,7 @@ func TestAgentTypeForModel(t *testing.T) {
 	}{
 		{"", ""},
 		{CodexModelGPT56Sol, AgentTypeCodex},
+		{CodexModelGPT56Luna, AgentTypeCodex},
 		{CodexModelGPT56LunaFast, AgentTypeCodex},
 		{CodexModelGPT54, AgentTypeCodex},
 		{ClaudeCodeModelOpus48, AgentTypeClaudeCode},

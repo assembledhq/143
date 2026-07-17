@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { parseAsStringLiteral, useQueryState } from "nuqs";
 import {
   AlertTriangle,
   ChevronDown,
@@ -25,6 +26,7 @@ import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -77,6 +79,7 @@ import type {
   CodeReviewEvidence,
   CodeReviewGitHubTriggerResponse,
   CodeReviewListItem,
+  CodeReviewListOutcome,
   CodeReviewPolicyConfig,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
@@ -86,9 +89,20 @@ import type {
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
-const ALL_DECISIONS = "all";
+const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
+const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
+const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
+const OUTCOME_FILTER_VALUES = [
+  ALL_OUTCOMES,
+  AUTOMATICALLY_APPROVED,
+  COMPLETED_NOT_APPROVED,
+  "needs_human_review",
+  "comment_only",
+  "blocked",
+] as const;
+type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
@@ -130,12 +144,22 @@ function formatDate(value?: string): string {
   }).format(new Date(value));
 }
 
+function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
+  return review.status === "completed" && review.decision === "approved" && Boolean(review.github_review_id);
+}
+
 function decisionLabel(review: CodeReviewListItem): string {
-  if (review.decision === "approved") return "Approved";
-  if (review.decision === "needs_human_review") return "Needs human";
-  if (review.decision === "blocked") return "Blocked";
-  if (review.decision === "comment_only") return "Comment only";
-  return "Pending";
+  if (wasAutomaticallyApproved(review)) return "Automatically approved";
+  if (review.decision) return "Not automatically approved";
+  return "Pending decision";
+}
+
+function decisionDetailLabel(review: CodeReviewListItem): string | null {
+  if (review.decision === "approved" && !wasAutomaticallyApproved(review)) return "Approval was not posted";
+  if (review.decision === "needs_human_review") return "Needs human review";
+  if (review.decision === "blocked") return "Blocked by policy";
+  if (review.decision === "comment_only") return "Comment-only policy";
+  return null;
 }
 
 function statusLabel(status: string): string {
@@ -146,7 +170,7 @@ function statusLabel(status: string): string {
 }
 
 function reviewDecisionTone(review: CodeReviewListItem): StatusTone {
-  if (review.decision === "approved") return "success";
+  if (wasAutomaticallyApproved(review)) return "success";
   if (review.decision === "blocked") return "destructive";
   if (review.decision === "needs_human_review") return "warning";
   return "neutral";
@@ -159,7 +183,45 @@ function reviewStatusTone(status: string): StatusTone {
   return "neutral";
 }
 
-function ReviewActions({
+function ReviewTitle({ review }: { review: CodeReviewListItem }) {
+  const title = `#${review.github_pr_number} ${review.pull_request_title}`;
+
+  if (!review.github_review_url) return title;
+
+  return (
+    <Link
+      href={review.github_review_url}
+      target="_blank"
+      rel="noreferrer"
+      title="Open final review"
+      className="underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {title}
+    </Link>
+  );
+}
+
+function EvidenceButton({
+  selected,
+  onToggleEvidence,
+}: {
+  selected: boolean;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <Button
+      variant={selected ? "secondary" : "ghost"}
+      size="sm"
+      className="-ml-2 min-h-8 px-2 text-muted-foreground"
+      onClick={onToggleEvidence}
+    >
+      <FileSearch className="h-4 w-4" />
+      Evidence
+    </Button>
+  );
+}
+
+function ReviewOutcome({
   review,
   selected,
   onToggleEvidence,
@@ -169,17 +231,20 @@ function ReviewActions({
   onToggleEvidence: () => void;
 }) {
   return (
+    <div className="space-y-1">
+      <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+      {decisionDetailLabel(review) ? (
+        <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
+      ) : null}
+      <EvidenceButton selected={selected} onToggleEvidence={onToggleEvidence} />
+    </div>
+  );
+}
+
+function ReviewActions({ review }: { review: CodeReviewListItem }) {
+  return (
     <TooltipProvider>
       <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
-        <Button
-          variant={selected ? "secondary" : "ghost"}
-          size="sm"
-          className="min-h-11 justify-center md:min-h-0"
-          onClick={onToggleEvidence}
-        >
-          <FileSearch className="h-4 w-4" />
-          Evidence
-        </Button>
         <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
           <Link href={`/sessions/${review.session_id}`}>
             <ExternalLink className="h-4 w-4 md:hidden" />
@@ -189,7 +254,7 @@ function ReviewActions({
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
-              className={`min-h-11 justify-center md:size-7 md:min-h-0 ${review.github_review_url ? "" : "col-span-2 md:col-span-1"}`}
+              className="min-h-11 justify-center md:size-7 md:min-h-0"
               variant="ghost"
               size="sm"
               asChild
@@ -203,22 +268,19 @@ function ReviewActions({
           </TooltipTrigger>
           <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
         </Tooltip>
-        {review.github_review_url ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button className="min-h-11 justify-center md:size-7 md:min-h-0" variant="ghost" size="sm" asChild aria-label="Open final review">
-                <Link href={review.github_review_url} target="_blank" rel="noreferrer">
-                  <ClipboardCheck className="h-4 w-4" />
-                  <span className="md:sr-only">Final review</span>
-                </Link>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent className="hidden md:block">Open final review</TooltipContent>
-          </Tooltip>
-        ) : null}
       </div>
     </TooltipProvider>
   );
+}
+
+function reviewStatusLabel(review: CodeReviewListItem): string {
+  if (review.stale || review.status === "stale") return "Stale after PR update";
+  if (review.status === "completed") return "Ran successfully";
+  if (review.status === "failed") return "Run failed";
+  if (review.status === "running") return "Running";
+  if (review.status === "queued") return "Queued";
+  if (review.status === "cancelled") return "Cancelled";
+  return review.status;
 }
 
 function clonePolicy(config: CodeReviewPolicyConfig): CodeReviewPolicyConfig {
@@ -260,7 +322,10 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
-  const [decisionFilter, setDecisionFilter] = useState(ALL_DECISIONS);
+  const [outcomeFilter, setOutcomeParam] = useQueryState(
+    "outcome",
+    parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
+  );
   const [riskFilter, setRiskFilter] = useState(ALL_RISKS);
   const [statusFilter, setStatusFilter] = useState(ALL_STATUSES);
   const [search, setSearch] = useState("");
@@ -269,17 +334,32 @@ export default function CodeReviewsPage() {
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
+  const setOutcomeFilter = useCallback(
+    (value: string) => {
+      void setOutcomeParam(value as OutcomeFilter);
+    },
+    [setOutcomeParam],
+  );
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
       repository_id: repositoryId,
-      decision: decisionFilter === ALL_DECISIONS ? undefined : (decisionFilter as CodeReviewDecision),
+      decision:
+        outcomeFilter !== ALL_OUTCOMES &&
+        outcomeFilter !== AUTOMATICALLY_APPROVED &&
+        outcomeFilter !== COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewDecision)
+          : undefined,
+      outcome:
+        outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED
+          ? (outcomeFilter as CodeReviewListOutcome)
+          : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
       search: search.trim() || undefined,
       limit: 100,
     }),
-    [decisionFilter, repositoryId, riskFilter, search, statusFilter],
+    [outcomeFilter, repositoryId, riskFilter, search, statusFilter],
   );
 
   const repositoriesQuery = useQuery({
@@ -544,11 +624,12 @@ export default function CodeReviewsPage() {
                   </SelectItem>
                 ))}
               </FilterSelect>
-              <FilterSelect label="Decision" value={decisionFilter} onValueChange={setDecisionFilter}>
-                <SelectItem value={ALL_DECISIONS}>All decisions</SelectItem>
-                <SelectItem value="approved">Approved</SelectItem>
-                <SelectItem value="comment_only">Comment only</SelectItem>
-                <SelectItem value="needs_human_review">Needs human</SelectItem>
+              <FilterSelect label="Outcome" value={outcomeFilter} onValueChange={setOutcomeFilter}>
+                <SelectItem value={ALL_OUTCOMES}>All outcomes</SelectItem>
+                <SelectItem value={AUTOMATICALLY_APPROVED}>Automatically approved</SelectItem>
+                <SelectItem value={COMPLETED_NOT_APPROVED}>Ran successfully — not approved</SelectItem>
+                <SelectItem value="needs_human_review">Needs human review</SelectItem>
+                <SelectItem value="comment_only">Comment-only decision</SelectItem>
                 <SelectItem value="blocked">Blocked</SelectItem>
               </FilterSelect>
               <FilterSelect label="Risk" value={riskFilter} onValueChange={setRiskFilter}>
@@ -595,8 +676,8 @@ export default function CodeReviewsPage() {
                         <TableHead>PR</TableHead>
                         <TableHead>Repo</TableHead>
                         <TableHead>Risk</TableHead>
-                        <TableHead>Decision</TableHead>
-                        <TableHead>Status</TableHead>
+                        <TableHead>Outcome</TableHead>
+                        <TableHead>Run status</TableHead>
                         <TableHead>Completed</TableHead>
                         <TableHead className="text-right">Actions</TableHead>
                       </TableRow>
@@ -606,29 +687,16 @@ export default function CodeReviewsPage() {
                         <TableRow key={review.id}>
                           <TableCell className="min-w-[18rem]">
                             <div className="font-medium text-foreground">
-                              #{review.github_pr_number} {review.pull_request_title}
+                              <ReviewTitle review={review} />
                             </div>
                             <div className="mt-1 text-xs text-muted-foreground">
                               {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                             </div>
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
+                          <TableCell>{review.acceptable ? "Acceptable" : "Needs review"}</TableCell>
                           <TableCell>
-                            <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
-                          </TableCell>
-                          <TableCell>
-                            <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
-                          </TableCell>
-                          <TableCell>
-                            <StatusLabel
-                              label={statusLabel(review.stale ? "stale" : review.status)}
-                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
-                              active={!review.stale && (review.status === "running" || review.status === "queued")}
-                            />
-                          </TableCell>
-                          <TableCell>{formatDate(review.completed_at)}</TableCell>
-                          <TableCell>
-                            <ReviewActions
+                            <ReviewOutcome
                               review={review}
                               selected={selectedEvidenceSessionId === review.session_id}
                               onToggleEvidence={() =>
@@ -638,6 +706,11 @@ export default function CodeReviewsPage() {
                               }
                             />
                           </TableCell>
+                          <TableCell>{reviewStatusLabel(review)}</TableCell>
+                          <TableCell>{formatDate(review.completed_at)}</TableCell>
+                          <TableCell>
+                            <ReviewActions review={review} />
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -645,37 +718,29 @@ export default function CodeReviewsPage() {
                 </CardContent>
               </Card>
               <Card className="divide-y divide-border/70 md:hidden" aria-label="Code review activity">
-                {reviews.map((review) => {
-                  const effectiveStatus = review.stale ? "stale" : review.status;
-                  return (
-                    <ResourceRow
-                      key={review.id}
-                      title={(
-                        <span className="break-words text-sm">
-                          #{review.github_pr_number} {review.pull_request_title}
-                        </span>
-                      )}
-                      metadata={(
-                        <span>
-                          {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
-                        </span>
-                      )}
-                      status={(
-                        <StatusLabel
-                          label={statusLabel(effectiveStatus)}
-                          tone={reviewStatusTone(effectiveStatus)}
-                          active={!review.stale && (review.status === "running" || review.status === "queued")}
-                        />
-                      )}
-                      detail={(
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                          <StatusLabel label={review.acceptable ? "Acceptable" : "Needs review"} tone={review.acceptable ? "success" : "warning"} />
-                          <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
+                {reviews.map((review) => (
+                  <ResourceRow
+                    key={review.id}
+                    title={(
+                      <span className="break-words text-sm">
+                        <ReviewTitle review={review} />
+                      </span>
+                    )}
+                    metadata={(
+                      <span>
+                        {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
+                      </span>
+                    )}
+                    status={(
+                      <span className="text-foreground">{reviewStatusLabel(review)}</span>
+                    )}
+                    detail={(
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
+                          <span>{review.acceptable ? "Acceptable" : "Needs review"}</span>
                           <span>Completed {formatDate(review.completed_at)}</span>
                         </div>
-                      )}
-                      actions={(
-                        <ReviewActions
+                        <ReviewOutcome
                           review={review}
                           selected={selectedEvidenceSessionId === review.session_id}
                           onToggleEvidence={() =>
@@ -684,17 +749,21 @@ export default function CodeReviewsPage() {
                             )
                           }
                         />
-                      )}
-                      className="[&_[data-slot=resource-row-actions]]:ml-0"
-                    />
-                  );
-                })}
+                      </div>
+                    )}
+                    actions={(
+                      <ReviewActions review={review} />
+                    )}
+                    className="[&_[data-slot=resource-row-actions]]:ml-0"
+                  />
+                ))}
               </Card>
               <CodeReviewEvidenceSheet
                 review={selectedEvidenceReview}
                 evidence={evidenceQuery.data?.data}
                 isLoading={evidenceQuery.isLoading}
                 error={evidenceQuery.error}
+                onRetry={() => void evidenceQuery.refetch()}
                 open={Boolean(selectedEvidenceReview)}
                 onOpenChange={(open) => {
                   if (!open) setSelectedEvidenceSessionId(null);
@@ -2184,6 +2253,7 @@ function CodeReviewEvidenceSheet({
   evidence,
   isLoading,
   error,
+  onRetry,
   open,
   onOpenChange,
 }: {
@@ -2191,6 +2261,7 @@ function CodeReviewEvidenceSheet({
   evidence?: CodeReviewEvidence;
   isLoading: boolean;
   error: Error | null;
+  onRetry: () => void;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -2213,7 +2284,13 @@ function CodeReviewEvidenceSheet({
         </SheetHeader>
         <div className="space-y-6 px-6 py-5">
           {isLoading ? <div className="text-sm text-muted-foreground">Loading evidence...</div> : null}
-          {error ? <div className="text-sm text-destructive">Evidence could not be loaded.</div> : null}
+          {error ? (
+            <ErrorNotice
+              title="Evidence could not be loaded"
+              description="Retry the request to view this review's evidence."
+              action={{ label: "Retry", onClick: onRetry }}
+            />
+          ) : null}
           {!isLoading && !error && !evidence ? (
             <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
           ) : null}

@@ -1231,6 +1231,57 @@ describe('api client', () => {
         },
       ]);
     });
+
+    it('lists structured decisions with outcome and PR filters', async () => {
+      let capturedURL = '';
+      server.use(
+        http.get('/api/v1/automations/:id/decisions', ({ params, request }) => {
+          expect(params.id).toBe('automation-1');
+          capturedURL = request.url;
+          return HttpResponse.json({ data: [], meta: { next_cursor: '' } });
+        }),
+      );
+
+      const result = await api.automations.listDecisions('automation-1', {
+        limit: 25,
+        cursor: 'run-1',
+        outcome: 'changes_requested',
+        pr: '42',
+      });
+
+      const url = new URL(capturedURL);
+      expect(url.searchParams.get('limit')).toBe('25');
+      expect(url.searchParams.get('cursor')).toBe('run-1');
+      expect(url.searchParams.get('outcome')).toBe('changes_requested');
+      expect(url.searchParams.get('pr')).toBe('42');
+      expect(result.data).toEqual([]);
+    });
+
+    it('gets structured decision totals', async () => {
+      server.use(
+        http.get('/api/v1/automations/:id/decision-stats', ({ params }) => {
+          expect(params.id).toBe('automation-1');
+          return HttpResponse.json({
+            data: {
+              unique_pull_requests: 2,
+              unique_revisions: 3,
+              total_runs: 4,
+              evaluating: 0,
+              passed: 1,
+              changes_requested: 1,
+              advisory: 0,
+              not_applicable: 0,
+              outcome_not_reported: 1,
+              execution_failed: 0,
+            },
+          });
+        }),
+      );
+
+      const result = await api.automations.decisionStats('automation-1');
+      expect(result.data.unique_revisions).toBe(3);
+      expect(result.data.changes_requested).toBe(1);
+    });
   });
 
   describe('memories', () => {
@@ -1558,19 +1609,6 @@ describe('api client', () => {
           calls.push(JSON.stringify(await request.json()));
           return HttpResponse.json({ data: { id: 'changeset-2' } });
         }),
-        http.get('/api/v1/sessions/:id/changesets/split-status', ({ request }) => {
-          calls.push(new URL(request.url).pathname);
-          return HttpResponse.json({ data: { source_paths: [], assignments: [], unassigned_paths: [], duplicates: [], complete: false } });
-        }),
-        http.put('/api/v1/sessions/:id/changesets/:changesetId/split-paths', async ({ request }) => {
-          calls.push(JSON.stringify(await request.json()));
-          return HttpResponse.json({ data: { source_paths: ['api.go'], assignments: [], unassigned_paths: [], duplicates: [], complete: true } });
-        }),
-        http.post('/api/v1/sessions/:id/changesets/split', () => HttpResponse.json({ data: { status: 'draft' } }, { status: 201 })),
-        http.post('/api/v1/sessions/:id/changesets/:changesetId/materialize', () => HttpResponse.json({ status: 'queued', job_id: 'job-1' })),
-        http.post('/api/v1/sessions/:id/changesets/verify', () => HttpResponse.json({ status: 'queued', job_id: 'job-2' })),
-        http.put('/api/v1/sessions/:id/changesets/order', async ({ request }) => { calls.push(JSON.stringify(await request.json())); return new HttpResponse(null, { status: 204 }); }),
-        http.post('/api/v1/sessions/:id/changesets/:changesetId/fold', async ({ request }) => { calls.push(JSON.stringify(await request.json())); return new HttpResponse(null, { status: 204 }); }),
         http.get('/api/v1/sessions/:id/pr', ({ request }) => {
           calls.push(new URL(request.url).search);
           return HttpResponse.json({ data: null });
@@ -1580,23 +1618,12 @@ describe('api client', () => {
       await api.sessions.listChangesets('session-1');
       await api.sessions.createChangeset('session-1', { title: 'API', summary: 'Endpoints' });
       await api.sessions.updateChangeset('session-1', 'changeset-2', { title: 'API integration' });
-      await api.sessions.getChangesetSplitStatus('session-1');
-      await api.sessions.replaceChangesetSplitPaths('session-1', 'changeset-2', ['api.go']);
-      await api.sessions.initializeChangesetSplit('session-1');
-      await api.sessions.materializeChangeset('session-1', 'changeset-2');
-      await api.sessions.verifyChangesetSplit('session-1');
-      await api.sessions.reorderChangesets('session-1', ['changeset-2']);
-      await api.sessions.foldChangeset('session-1', 'changeset-2', 'changeset-1');
       await api.sessions.getPR('session-1', 'changeset-2');
 
       expect(calls).toEqual([
         '/api/v1/sessions/session-1/changesets',
         JSON.stringify({ title: 'API', summary: 'Endpoints' }),
         JSON.stringify({ title: 'API integration' }),
-        '/api/v1/sessions/session-1/changesets/split-status',
-        JSON.stringify({ paths: ['api.go'] }),
-        JSON.stringify({ changeset_ids: ['changeset-2'] }),
-        JSON.stringify({ target_changeset_id: 'changeset-1' }),
         '?changeset_id=changeset-2',
       ]);
     });

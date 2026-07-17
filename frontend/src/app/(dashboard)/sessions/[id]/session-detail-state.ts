@@ -226,7 +226,7 @@ export function applyThreadRuntimeEventToThreads(
 ): SessionThread[] {
   return threads.map((thread) => {
     if (thread.id !== event.thread_id) return thread;
-    return {
+    const updated: SessionThread = {
       ...thread,
       status: event.status,
       agent_session_id: event.agent_session_id ?? thread.agent_session_id,
@@ -236,6 +236,13 @@ export function applyThreadRuntimeEventToThreads(
       started_at: event.started_at ?? thread.started_at,
       completed_at: event.completed_at ?? thread.completed_at,
     };
+    if ("failure_explanation" in event) {
+      updated.failure_explanation = event.failure_explanation ?? undefined;
+    }
+    if ("failure_category" in event) {
+      updated.failure_category = event.failure_category ?? undefined;
+    }
+    return updated;
   });
 }
 

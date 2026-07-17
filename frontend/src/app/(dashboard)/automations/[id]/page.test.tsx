@@ -82,6 +82,19 @@ describe("AutomationDetailPage", () => {
     );
   });
 
+  it("renders the automation detail skeleton while the automation loads", () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", async () => new Promise<never>(() => {})),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    expect(screen.getByLabelText("Loading automation")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("link", { name: "Back to automations" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
+    expect(screen.getByTestId("automation-detail-header-skeleton-copy")).toHaveClass("min-w-0", "flex-1");
+  });
+
   it("matches the schedule controls and labels to the app input sizing", async () => {
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
@@ -625,8 +638,12 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "Run history" }),
+      await screen.findByRole("heading", { name: "Execution history" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Latest execution" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Operational status only/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Previous runs" }),
     ).not.toBeInTheDocument();
@@ -912,10 +929,18 @@ describe("AutomationDetailPage", () => {
     await user.click(screen.getByRole("button", { name: "Edit" }));
     await user.click(screen.getByRole("combobox", { name: "Run as" }));
     await user.click(await screen.findByText("Personal automation"));
+    await user.click(screen.getByText("Advanced settings"));
+    await user.click(
+      screen.getByRole("combobox", { name: "After a successful run" }),
+    );
+    await user.click(await screen.findByText("Do not publish"));
     await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
-      expect(updateBody).toMatchObject({ identity_scope: "personal" });
+      expect(updateBody).toMatchObject({
+        identity_scope: "personal",
+        publish_policy: "none",
+      });
     });
   });
 
