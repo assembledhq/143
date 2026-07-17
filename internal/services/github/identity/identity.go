@@ -1,8 +1,10 @@
 // Package identity resolves the GitHub token and commit-author attribution
 // for a session. It is the single source of truth for "who acts as whom"
 // across the codebase — the PR-creation flow and the per-session sandbox
-// credential helper both call into the same Resolver, so an agent's pushes
-// and the user's "Create PR" click produce identical attribution.
+// credential helper both call into the same Resolver. Server-side PR creation
+// may use the triggering user's credential according to org policy; sandbox
+// calls always use repository-bound App tokens while retaining the triggering
+// user for commit attribution.
 //
 // The resolver tries the triggering user's GitHub App user-to-server token
 // first (via AppUserAuthService, which transparently refreshes within a
@@ -84,6 +86,14 @@ func (r *Resolution) AuthoredBy() string {
 // Implemented by *github.Service.
 type InstallationTokenSource interface {
 	GetInstallationToken(ctx context.Context, installationID int64) (string, error)
+}
+
+// SandboxInstallationTokenSource issues repository-bound, action-scoped App
+// tokens. Sandbox resolution intentionally requires this stronger interface:
+// falling back to a full installation or user token would reintroduce the PR
+// publication bypass this boundary is designed to prevent.
+type SandboxInstallationTokenSource interface {
+	GetSandboxInstallationToken(ctx context.Context, installationID, repositoryID int64, action string) (string, error)
 }
 
 // AppUserAuthService exchanges and refreshes GitHub App user-to-server
@@ -211,6 +221,43 @@ func (r *Resolver) Resolve(ctx context.Context, run *models.Session, repo *model
 	return r.installationTokenResolution(ctx, run.OrgID, repo, true)
 }
 
+// ResolveSandbox returns a least-privilege, repository-bound App token for an
+// in-sandbox GitHub operation. Commit attribution remains tied to the human
+// triggerer when available, but user credentials are never exposed inside the
+// sandbox. The API profile is read-only and the push profile cannot write pull
+// requests, forcing PR creation through the durable server-owned workflow.
+func (r *Resolver) ResolveSandbox(ctx context.Context, run *models.Session, repo *models.Repository, action string) (*Resolution, error) {
+	if run == nil || repo == nil {
+		return nil, errors.New("sandbox identity requires session and repository")
+	}
+	tokens, ok := r.tokens.(SandboxInstallationTokenSource)
+	if !ok {
+		return nil, errors.New("sandbox-scoped GitHub token issuer is not configured")
+	}
+	if repo.GitHubID <= 0 {
+		return nil, fmt.Errorf("repository %s has no github_id for sandbox token scoping", repo.FullName)
+	}
+
+	token, err := r.installationTokenWith(ctx, run.OrgID, repo, func(installationID int64) (string, error) {
+		return tokens.GetSandboxInstallationToken(ctx, installationID, repo.GitHubID, action)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get sandbox installation token: %w", err)
+	}
+	resolution := &Resolution{Token: token, Source: SourceApp}
+	if run.TriggeredByUserID != nil && r.users != nil {
+		if user, userErr := r.users.GetByID(ctx, run.OrgID, *run.TriggeredByUserID); userErr == nil {
+			resolution.User = &user
+		} else {
+			r.logger.Warn().Err(userErr).
+				Str("org_id", run.OrgID.String()).
+				Str("user_id", run.TriggeredByUserID.String()).
+				Msg("identity: failed to attach user to sandbox resolution")
+		}
+	}
+	return resolution, nil
+}
+
 // InstallationTokenForRepo issues an App installation token for repo without
 // any user-token resolution. Useful for callers that always want an App
 // token (webhook-triggered jobs, system-initiated syncs) and want
@@ -251,11 +298,17 @@ func (r *Resolver) installationTokenResolution(ctx context.Context, orgID uuid.U
 // to the integration's stored installation_id when the repo row is missing
 // or stale (404 from the installations API).
 func (r *Resolver) installationToken(ctx context.Context, orgID uuid.UUID, repo *models.Repository) (string, error) {
+	return r.installationTokenWith(ctx, orgID, repo, func(installationID int64) (string, error) {
+		return r.tokens.GetInstallationToken(ctx, installationID)
+	})
+}
+
+func (r *Resolver) installationTokenWith(ctx context.Context, orgID uuid.UUID, repo *models.Repository, issueToken func(int64) (string, error)) (string, error) {
 	tryInstallation := func(installationID int64) (string, error) {
 		if installationID <= 0 {
 			return "", fmt.Errorf("repository %s has no github installation_id", repo.FullName)
 		}
-		token, err := r.tokens.GetInstallationToken(ctx, installationID)
+		token, err := issueToken(installationID)
 		if err != nil {
 			return "", fmt.Errorf("get installation token for installation %d: %w", installationID, err)
 		}

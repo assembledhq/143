@@ -2,9 +2,8 @@
 // 143-tools helpers call into for fresh GitHub credentials. One socket per
 // session, opened by the orchestrator just before container creation and
 // closed when the run ends. Identity is resolved on every request via the
-// shared identity.Resolver, so refreshes happen automatically and any
-// change in org PR-authorship policy takes effect on the next git push
-// without restarting the session.
+// shared identity.Resolver, so each request receives a fresh repository-bound,
+// action-scoped GitHub App credential.
 
 package sandboxauth
 
@@ -31,7 +30,7 @@ import (
 // Defined as an interface so the server is unit-testable without spinning
 // up the full identity package's dependencies.
 type Resolver interface {
-	Resolve(ctx context.Context, run *models.Session, repo *models.Repository, orgSettings models.OrgSettings, mode string) (*identity.Resolution, error)
+	ResolveSandbox(ctx context.Context, run *models.Session, repo *models.Repository, action string) (*identity.Resolution, error)
 }
 
 // Server owns the on-disk socket directory and the goroutines for active
@@ -97,21 +96,18 @@ func NewServer(resolver Resolver, socketDir string, logger zerolog.Logger) *Serv
 // container's bind-mount target keeps resolving to the live socket file
 // even after a turn-end close+reopen cycle.
 //
-// The capture closure (run, repo, orgSettings) is held in memory for the
-// listener's lifetime. Each credential request still re-runs the resolver,
-// so the user-token vs installation-token decision picks up fresh OAuth
-// state (token refreshes, repo-access changes) on every push without a
-// DB hit. The org settings snapshot, however, is fixed for the listener:
-// the orchestrator opens a new listener at every turn boundary (including
-// the reusedExisting / preview-held branch), so a PR-authorship-mode flip
-// takes effect on the next turn — not within an in-flight turn. That
-// tradeoff matches what the PR-creation flow gives users today.
+// The capture closure (run, repo) is held in memory for the listener's
+// lifetime. Each credential request re-runs least-privilege resolution so a
+// new short-lived token is available after expiry or revocation. The
+// orgSettings argument remains on the shared SandboxAuthServer interface for
+// compatibility with non-socket implementations; scoped sandbox credentials
+// intentionally do not depend on PR-authorship policy.
 func (s *Server) Listen(
 	ctx context.Context,
 	sessionID uuid.UUID,
 	run *models.Session,
 	repo *models.Repository,
-	orgSettings models.OrgSettings,
+	_ models.OrgSettings,
 ) (string, error) {
 	if s.socketDir == "" {
 		return "", errors.New("sandboxauth: socket directory not configured")
@@ -167,7 +163,7 @@ func (s *Server) Listen(
 		Logger()
 
 	loopCtx, cancel := context.WithCancel(context.Background())
-	go s.acceptLoop(loopCtx, ln, run, repo, orgSettings, logger)
+	go s.acceptLoop(loopCtx, ln, run, repo, logger)
 
 	var closeOnce sync.Once
 	entry := &activeListener{}
@@ -266,13 +262,12 @@ func (s *Server) detach(sessionID uuid.UUID) func() {
 // acceptLoop runs until the listener is closed. Each connection is handled
 // in its own goroutine so a slow Resolve call doesn't block other
 // in-flight credential requests (e.g. an agent running `git push` and
-// `gh pr comment` concurrently).
+// `gh pr view` concurrently).
 func (s *Server) acceptLoop(
 	ctx context.Context,
 	ln net.Listener,
 	run *models.Session,
 	repo *models.Repository,
-	orgSettings models.OrgSettings,
 	logger zerolog.Logger,
 ) {
 	for {
@@ -285,7 +280,7 @@ func (s *Server) acceptLoop(
 			}
 			return
 		}
-		go s.handleConn(ctx, conn, run, repo, orgSettings, logger)
+		go s.handleConn(ctx, conn, run, repo, logger)
 	}
 }
 
@@ -298,7 +293,6 @@ func (s *Server) handleConn(
 	conn net.Conn,
 	run *models.Session,
 	repo *models.Repository,
-	orgSettings models.OrgSettings,
 	logger zerolog.Logger,
 ) {
 	defer conn.Close()
@@ -324,7 +318,7 @@ func (s *Server) handleConn(
 
 	resolveCtx, cancel := context.WithTimeout(ctx, s.resolveTimeout)
 	defer cancel()
-	res, err := s.resolver.Resolve(resolveCtx, run, repo, orgSettings, "")
+	res, err := s.resolver.ResolveSandbox(resolveCtx, run, repo, string(req.Action))
 	if err != nil {
 		s.writeError(conn, fmt.Sprintf("resolve identity: %s", err))
 		logger.Warn().Err(err).Str("action", string(req.Action)).Msg("sandboxauth: resolve failed")

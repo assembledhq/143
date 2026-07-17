@@ -604,7 +604,7 @@ Queue first-class 143 pull request creation for the current session.
 
 | Flag | Type | Required | Description |
 |---|---|---:|---|
-| `--session_id` | string | No | Session UUID. Defaults to `143_SESSION_ID`. |
+| `--session_id` | string | No | Compatibility override. Normally omit it: the backend derives the current session from the signed tool token. If supplied, it must match that token. |
 | `--draft` | boolean | No | Whether to create a draft PR. Omit to use the repo default. |
 | `--author_mode` | `auto` \| `app` \| `user` | No | PR author mode. Omit to use the default. |
 
@@ -613,6 +613,10 @@ Common use: open a PR through the same workflow as the app after tests pass.
 ```bash
 143-tools pr create --draft false
 ```
+
+This command queues the durable 143 publication workflow; it does not call the
+GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
+requests, while git push uses a separate repository-bound contents token.
 
 ### `project propose`
 

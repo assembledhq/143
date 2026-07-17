@@ -856,6 +856,164 @@ func TestHandlePullRequestEvent_Merged(t *testing.T) {
 	require.Equal(t, 42, decoded.Number, "decoded PR number should be 42")
 }
 
+func TestPublicationMarkerRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	sessionID, changesetID := uuid.New(), uuid.New()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty body", body: ""},
+		{name: "existing description", body: "Implements the requested change."},
+		{name: "replaces stale marker", body: "Description\n\n<!-- 143-publication session=" + uuid.NewString() + " changeset=" + uuid.NewString() + " -->"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			marked := upsertPublicationMarker(tt.body, sessionID, &changesetID)
+			parsedSessionID, parsedChangesetID, ok := parsePublicationMarker(marked)
+			require.True(t, ok, "publication marker should parse after being added to a PR body")
+			require.Equal(t, sessionID, parsedSessionID, "publication marker should preserve the authoritative session ID")
+			require.Equal(t, changesetID, parsedChangesetID, "publication marker should preserve the authoritative changeset ID")
+			require.Equal(t, 1, strings.Count(marked, "<!-- 143-publication "), "PR body should contain exactly one publication marker")
+		})
+	}
+}
+
+func TestWebhookPullRequestNeedsReconciliation(t *testing.T) {
+	t.Parallel()
+
+	sessionID := uuid.New()
+	tests := []struct {
+		name     string
+		pr       models.PullRequest
+		err      error
+		action   string
+		expected bool
+	}{
+		{name: "missing mirror", err: pgx.ErrNoRows, action: "opened", expected: true},
+		{name: "unowned mirror on publication event", action: "opened", expected: true},
+		{name: "unowned mirror on close", action: "closed", expected: true},
+		{name: "owned mirror", pr: models.PullRequest{SessionID: &sessionID}, action: "opened"},
+		{name: "lookup failure", err: errors.New("database unavailable"), action: "opened"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			actual := webhookPullRequestNeedsReconciliation(tt.pr, tt.err, tt.action)
+			require.Equal(t, tt.expected, actual, "webhook reconciliation should adopt only missing or unowned publication mirrors")
+		})
+	}
+}
+
+func TestValidatePublicationReviewGateForCreate(t *testing.T) {
+	t.Parallel()
+
+	automationRunID := uuid.New()
+	tests := []struct {
+		name    string
+		run     *models.Session
+		gate    models.SessionPublicationReviewGateState
+		wantErr bool
+	}{
+		{name: "automation passed", run: &models.Session{AutomationRunID: &automationRunID}, gate: models.SessionPublicationReviewGatePassed},
+		{name: "automation pending", run: &models.Session{AutomationRunID: &automationRunID}, gate: models.SessionPublicationReviewGatePending, wantErr: true},
+		{name: "automation needs human", run: &models.Session{AutomationRunID: &automationRunID}, gate: models.SessionPublicationReviewGateNeedsHuman, wantErr: true},
+		{name: "user publication does not require automation gate", run: &models.Session{}, gate: models.SessionPublicationReviewGateNotRequired},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validatePublicationReviewGateForCreate(tt.run, tt.gate)
+			if tt.wantErr {
+				require.Error(t, err, "direct PR creation should fail closed until the persisted automation review gate passes")
+				return
+			}
+			require.NoError(t, err, "PR creation should proceed only for an allowed review-gate state")
+		})
+	}
+}
+
+func TestParsePublicationMarkerRejectsMalformedIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing marker", body: "ordinary PR description"},
+		{name: "invalid session", body: "<!-- 143-publication session=invalid changeset=" + uuid.NewString() + " -->"},
+		{name: "invalid changeset", body: "<!-- 143-publication session=" + uuid.NewString() + " changeset=invalid -->"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, _, ok := parsePublicationMarker(tt.body)
+			require.False(t, ok, "malformed publication identity should never be trusted for webhook association")
+		})
+	}
+}
+
+func TestPublicationWebhookOwnsChangesetBranch(t *testing.T) {
+	t.Parallel()
+
+	branch := "143/session/changes"
+	tests := []struct {
+		name        string
+		branch      *string
+		headRef     string
+		headRepo    string
+		webhookRepo string
+		expected    bool
+	}{
+		{name: "exact owned branch", branch: &branch, headRef: branch, headRepo: "owner/repo", webhookRepo: "owner/repo", expected: true},
+		{name: "missing head repository fails closed", branch: &branch, headRef: branch, webhookRepo: "owner/repo"},
+		{name: "marker points at a different branch", branch: &branch, headRef: "attacker/branch", headRepo: "owner/repo", webhookRepo: "owner/repo"},
+		{name: "fork branch is not repository owned", branch: &branch, headRef: branch, headRepo: "fork/repo", webhookRepo: "owner/repo"},
+		{name: "changeset has no materialized branch", headRef: branch, headRepo: "owner/repo", webhookRepo: "owner/repo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			event := PullRequestEvent{}
+			event.PR.Head.Ref = tt.headRef
+			event.PR.Head.Repo.FullName = tt.headRepo
+			event.Repository.FullName = tt.webhookRepo
+			actual := publicationWebhookOwnsChangesetBranch(event, models.SessionChangeset{WorkingBranch: tt.branch})
+			require.Equal(t, tt.expected, actual, "webhook adoption should require the exact repository-owned changeset branch")
+		})
+	}
+}
+
+func TestGitIdentitySourceForGitHubAuthor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		login       string
+		accountType string
+		expected    models.GitIdentitySource
+	}{
+		{name: "human account", login: "octocat", accountType: "User", expected: models.GitIdentitySourceUser},
+		{name: "app bot account", login: "assembled-143[bot]", accountType: "Bot", expected: models.GitIdentitySourceApp},
+		{name: "bot suffix survives missing type", login: "assembled-143[bot]", expected: models.GitIdentitySourceApp},
+		{name: "missing author fails toward server identity", expected: models.GitIdentitySourceApp},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, gitIdentitySourceForGitHubAuthor(tt.login, tt.accountType), "recovered PR authorship should reflect the GitHub author account")
+		})
+	}
+}
+
 func TestHandlePullRequestEvent_ClosedWithoutMerge(t *testing.T) {
 	t.Parallel()
 
@@ -4154,8 +4312,12 @@ func TestBuildPushScript_Structure(t *testing.T) {
 	require.Contains(t, script, "exit 78", "push script should use the divergent-branch sentinel exit code")
 	require.Contains(t, script, `git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"`, "push script should lease against the observed remote SHA")
 
-	// No-changes sentinel exit code is present in the upstream-ancestor branch.
-	require.Contains(t, script, "exit 77")
+	// A remote branch already at HEAD is an idempotent success. The no-change
+	// sentinel remains reserved for an empty replay against the current base.
+	require.NotContains(t, script, `git merge-base --is-ancestor HEAD @{u}`, "push script should not confuse an already-pushed branch with a base no-op")
+	require.Contains(t, script, `push_outcome=already_at_desired_head`, "push script should classify an already-published remote head")
+	require.Contains(t, script, `echo "__143_PUSH_OUTCOME=${push_outcome}"`, "push script should report its publication outcome")
+	require.Contains(t, script, "exit 77", "push script should retain the empty-base-replay sentinel")
 
 	// Defense in depth: the script must not embed userinfo in the URL or
 	// reference any GIT_ASKPASS-style helper. Both auth mechanisms are gone.
@@ -4241,6 +4403,44 @@ func TestBuildPushScript_TransplantsUnrelatedBaseHistory(t *testing.T) {
 	runPRTestGit(t, oldRepo, "merge-base", "--is-ancestor", "refs/remotes/check/main", "refs/remotes/check/session")
 	require.Equal(t, "session change", runPRTestGit(t, oldRepo, "show", "refs/remotes/check/session:feature.txt"), "replayed branch should preserve the session change")
 	require.Equal(t, runPRTestGit(t, oldRepo, "rev-parse", "refs/remotes/check/main"), runPRTestGit(t, oldRepo, "rev-parse", "refs/remotes/check/session^"), "replayed branch should be based directly on the rewritten main branch")
+}
+
+func TestBuildPushScript_AlreadyPublishedBranchIsSuccessful(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git is required for this test: %v", err)
+	}
+
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	repo := filepath.Join(root, "repo")
+	runPRTestGit(t, root, "init", "--bare", remote)
+	runPRTestGit(t, root, "init", repo)
+	configurePRTestGitIdentity(t, repo)
+	runPRTestGit(t, repo, "checkout", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "README.md"), []byte("base\n"), 0o644), "base file should be written")
+	runPRTestGit(t, repo, "add", "README.md")
+	runPRTestGit(t, repo, "commit", "-m", "base")
+	runPRTestGit(t, repo, "remote", "add", "origin", remote)
+	runPRTestGit(t, repo, "push", "-u", "origin", "main")
+
+	branch := "143/session/already-published"
+	runPRTestGit(t, repo, "checkout", "-b", branch)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("change\n"), 0o644), "feature file should be written")
+	runPRTestGit(t, repo, "add", "feature.txt")
+	runPRTestGit(t, repo, "commit", "-m", "feature")
+	runPRTestGit(t, repo, "push", "-u", "origin", branch)
+
+	commitMsgPath := filepath.Join(root, "commit-message")
+	require.NoError(t, os.WriteFile(commitMsgPath, []byte("publish\n"), 0o644), "commit message should be written")
+	script := buildPushScript(repo, commitMsgPath, "143 Agent", "noreply@143.dev", branch, "main", "", remote)
+	cmd := exec.Command("sh", "-c", script) // #nosec G204 -- generated script uses fixed test data and temporary repositories.
+	cmd.Dir = repo
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "an already-published branch should be an idempotent success: %s", string(output))
+	require.Contains(t, string(output), pushOutcomeSentinel+string(branchPublishOutcomeAlreadyAtHead), "push should report the already-at-head outcome")
+	require.Contains(t, string(output), pushHeadSHASentinel+runPRTestGit(t, repo, "rev-parse", "HEAD"), "push should report the existing remote head")
 }
 
 func configurePRTestGitIdentity(t *testing.T, dir string) {
@@ -4661,6 +4861,36 @@ func (f *fakeSandboxAuth) Listen(_ context.Context, sessionID uuid.UUID, _ *mode
 func (f *fakeSandboxAuth) Close(sessionID uuid.UUID) {
 	f.closeCount++
 	f.lastCloseKey = sessionID
+}
+
+func TestPushChangesetBranchAcceptsOwnPreviouslyPublishedHead(t *testing.T) {
+	t.Parallel()
+
+	const headSHA = "abc1234567890abcdef1234567890abcdef12345"
+	provider := &prTestSandboxProvider{execSequence: []prTestExecResponse{
+		{exit: 0, stdout: headSHA + "\trefs/heads/143/session/changes\n"},
+		{exit: 0, stdout: headSHA + "\n"},
+		{exit: 0, stdout: pushHeadSHASentinel + headSHA + "\n" + pushOutcomeSentinel + string(branchPublishOutcomeAlreadyAtHead) + "\n"},
+	}}
+	auth := &fakeSandboxAuth{socketPath: "/tmp/fake.sock"}
+	service := &PRService{sandboxProvider: provider, sandboxAuth: auth, logger: zerolog.Nop()}
+	containerID, worktree, branch := "sandbox-1", "/workspace/repo", "143/session/changes"
+	run := &models.Session{ID: uuid.New(), OrgID: uuid.New(), ContainerID: &containerID}
+	changeset := models.SessionChangeset{
+		ID: uuid.New(), SessionID: run.ID, OrgID: run.OrgID,
+		WorktreePath: &worktree, WorkingBranch: &branch, BaseBranch: "main",
+	}
+
+	result, err := service.pushChangesetBranch(
+		context.Background(), run, &models.Repository{FullName: "owner/repo"}, models.OrgSettings{},
+		changeset, "commit message", "Bot", "bot@example.com",
+	)
+	require.NoError(t, err, "a retry after the branch push checkpoint gap should accept a remote already at local HEAD")
+	require.Equal(t, headSHA, result.HeadSHA, "the recovered push should preserve the already-published head SHA")
+	require.Equal(t, branchPublishOutcomeAlreadyAtHead, result.Outcome, "the recovered push should retain its idempotent outcome")
+	require.Equal(t, 3, provider.execCallCount, "recovery should inspect the remote, verify local HEAD, and run the idempotent push script")
+	require.Equal(t, 1, auth.listenCount, "changeset publication should open one sandbox auth listener")
+	require.Equal(t, 1, auth.closeCount, "changeset publication should close its sandbox auth listener")
 }
 
 // TestPushSessionBranch_RetryOnRejection_Succeeds locks in the self-healing
@@ -5266,12 +5496,11 @@ func TestCreatePR_SuccessPushesSnapshotBranchAndStoresPR(t *testing.T) {
 	mock.ExpectExec("UPDATE session_diff_snapshots").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	updatedSessionRow := newPRHealthSessionRow(runID, orgID, now, models.SessionStatusPRCreated)
+	setPRHealthSessionRowValue(updatedSessionRow, "primary_issue_id", &issueID)
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "primary_issue_id", "created_at", "last_activity_at"}).
-				AddRow(runID, orgID, &issueID, now, now),
-		)
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(updatedSessionRow...))
 	mock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -5430,12 +5659,11 @@ func TestCreatePR_SuccessDispatchesPostPRSnapshotUpload(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), wantPendingKey).
 		WillReturnRows(pgxmock.NewRows([]string{"workspace_revision", "workspace_revision_updated_at"}).
 			AddRow(int64(2), time.Now().UTC()))
+	updatedSessionRow := newPRHealthSessionRow(runID, orgID, now, models.SessionStatusPRCreated)
+	setPRHealthSessionRowValue(updatedSessionRow, "primary_issue_id", &issueID)
 	mock.ExpectQuery("UPDATE sessions SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(
-			pgxmock.NewRows([]string{"id", "org_id", "primary_issue_id", "created_at", "last_activity_at"}).
-				AddRow(runID, orgID, &issueID, now, now),
-		)
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(updatedSessionRow...))
 	mock.ExpectExec("UPDATE issues SET status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -5649,6 +5877,170 @@ func TestFindOpenPullRequestByHead_ErrorPaths(t *testing.T) {
 			require.Contains(t, err.Error(), tt.wantErrSubstr, "findOpenPullRequestByHead should include the expected error context")
 		})
 	}
+}
+
+func TestFindPullRequestByHead_AllIncludesClosed(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/repos/owner/repo/pulls", r.URL.Path, "lookup should target the repository pull request collection")
+		require.Equal(t, "owner:head-branch", r.URL.Query().Get("head"), "lookup should remain scoped to the owned head branch")
+		require.Equal(t, "all", r.URL.Query().Get("state"), "reconciliation lookup should include closed and merged pull requests")
+		require.NoError(t, json.NewEncoder(w).Encode([]map[string]any{{
+			"number":   42,
+			"html_url": "https://github.com/owner/repo/pull/42",
+			"state":    "closed",
+		}}), "mock server should encode a closed pull request")
+	}))
+	defer server.Close()
+
+	svc := &PRService{baseURL: server.URL, httpClient: server.Client(), logger: zerolog.Nop()}
+	prNumber, prURL, err := svc.findPullRequestByHead(context.Background(), "token", "owner", "repo", "head-branch", "all")
+	require.NoError(t, err, "findPullRequestByHead should recover a closed pull request")
+	require.Equal(t, 42, prNumber, "findPullRequestByHead should return the recovered pull request number")
+	require.Equal(t, "https://github.com/owner/repo/pull/42", prURL, "findPullRequestByHead should return the recovered pull request URL")
+}
+
+func TestCompletePublicationLocalStateWritesTerminalStateLast(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	run := &models.Session{ID: sessionID, OrgID: orgID}
+	changeset := &models.SessionChangeset{ID: changesetID, OrgID: orgID, SessionID: sessionID}
+
+	// pgxmock enforces expectation order: the terminal publication write must
+	// remain after both local convergence checkpoints.
+	mock.ExpectExec("UPDATE session_changesets SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	updatedSessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(updatedSessionRow...))
+	mock.ExpectExec("UPDATE session_publications").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	err = svc.completePublicationLocalState(context.Background(), run, changeset, headSHA)
+	require.NoError(t, err, "publication completion should succeed after both local checkpoints")
+	require.NoError(t, mock.ExpectationsWereMet(), "publication completion should preserve checkpoint ordering")
+}
+
+func TestCompletePublicationLocalStateDefersTerminalStateWhenCheckpointFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	run := &models.Session{ID: sessionID, OrgID: orgID}
+	changeset := &models.SessionChangeset{ID: changesetID, OrgID: orgID, SessionID: sessionID}
+	mock.ExpectExec("UPDATE session_changesets SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnError(errors.New("database unavailable"))
+
+	svc := &PRService{
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	err = svc.completePublicationLocalState(
+		context.Background(),
+		run,
+		changeset,
+		"0123456789abcdef0123456789abcdef01234567",
+	)
+	require.ErrorContains(t, err, "record published changeset head", "publication completion should surface the failed local checkpoint")
+	require.NoError(t, mock.ExpectationsWereMet(), "publication completion should stop before session and terminal publication writes")
+}
+
+func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	headBranch := "143/session/changes"
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `"}`)
+	run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repositoryID}
+	changeset := &models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID,
+		BaseBranch: "main", WorkingBranch: &headBranch, HeadSHA: &headSHA,
+	}
+	existing := &models.PullRequest{
+		GitHubPRNumber: 42,
+		GitHubPRURL:    "https://github.com/owner/repo/pull/42",
+		HeadSHA:        &headSHA,
+		HeadRef:        &headBranch,
+	}
+	storedPublication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateRequested, Source: models.SessionPublicationSourceBackend,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue:        models.SessionPublicationJobQueueDefault, RequestPayload: payload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: headBranch, DesiredHeadSHA: &headSHA,
+		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+
+	// The ordered expectations model a retry that finds the server PR row but
+	// must reconstruct every durable checkpoint before terminal completion.
+	mock.ExpectQuery("INSERT INTO session_publications").
+		WithArgs(
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+		).
+		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*github_pr_number").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets SET head_sha").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	updatedSessionRow := newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(updatedSessionRow...))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	err = svc.checkpointExistingPullRequestPublication(
+		context.Background(), run, changeset, existing,
+		models.SessionPublicationSourceBackend, models.SessionPublicationJobQueueDefault, payload, now,
+	)
+	require.NoError(t, err, "existing pull request recovery should replay all publication checkpoints")
+	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request recovery should complete only after every durable checkpoint")
 }
 
 // TestCollectLinearIdentifiers locks the order contract: primary first then

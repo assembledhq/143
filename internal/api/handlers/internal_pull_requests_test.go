@@ -184,3 +184,24 @@ func TestInternalPullRequestHandler_Create_InvalidAuthorMode(t *testing.T) {
 	require.Contains(t, rr.Body.String(), "INVALID_AUTHOR_MODE")
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestInternalPullRequestHandler_Create_CurrentSessionDerivesIdentityFromToken(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "mock pool should be created")
+	t.Cleanup(mock.Close)
+	orgID, repoID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	token, err := auth.GenerateSessionToken(prHandlerSecret, orgID, repoID, sessionID, 5*time.Minute)
+	require.NoError(t, err, "session-scoped token should be generated")
+
+	body := bytes.NewBufferString(`{"author_mode":"unknown"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/session/pr", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	newPRHandler(mock).Create(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "current-session route should derive the valid session ID from token claims before body validation")
+	require.Contains(t, rr.Body.String(), "INVALID_AUTHOR_MODE", "current-session route should reach body validation without a path session ID")
+	require.NoError(t, mock.ExpectationsWereMet(), "current-session identity validation should not query the database for an invalid body")
+}

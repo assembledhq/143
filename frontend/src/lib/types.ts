@@ -1692,7 +1692,52 @@ export interface ForkResult {
 export interface SessionDetail extends Session {
   threads: SessionThread[];
   changesets: ChangesetSummary[];
+  publications?: SessionPublication[];
   changeset_stack_state?: ChangesetStackState;
+}
+
+export type SessionPublicationState =
+  | "requested"
+  | "review_pending"
+  | "ready_to_publish"
+  | "branch_published"
+  | "pr_resolved"
+  | "recorded"
+  | "completed"
+  | "completed_noop"
+  | "retryable_failed"
+  | "terminal_failed";
+
+export type SessionPublicationReviewGateState =
+  | "not_required"
+  | "pending"
+  | "passed"
+  | "needs_human"
+  | "failed";
+
+export interface SessionPublication {
+  id: string;
+  session_id: string;
+  changeset_id: string;
+  repository_id: string;
+  state: SessionPublicationState;
+  source: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
+  review_gate_state: SessionPublicationReviewGateState;
+  base_branch: string;
+  head_branch: string;
+  desired_head_sha?: string;
+  published_head_sha?: string;
+  github_pr_number?: number;
+  github_pr_url?: string;
+  attempt_count: number;
+  last_error_code?: string;
+  last_error_message?: string;
+  requested_at: string;
+  last_attempt_at?: string;
+  branch_published_at?: string;
+  pr_resolved_at?: string;
+  completed_at?: string;
+  updated_at: string;
 }
 
 export type ChangesetStackState = "one-pr" | "draft-stack" | "published" | "coherent" | "needs-restack" | "restacking" | "blocked" | "external-update-detected" | "partially-merged" | "merged";

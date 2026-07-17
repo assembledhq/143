@@ -59,7 +59,9 @@ type internalCreatePullRequestResponse struct {
 	SessionID string `json:"session_id"`
 }
 
-// Create handles POST /api/v1/internal/sessions/{sessionID}/pr.
+// Create handles POST /api/v1/internal/sessions/{sessionID}/pr and the
+// current-session POST /api/v1/internal/session/pr route. The latter derives
+// session identity exclusively from the signed internal token.
 func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Request) {
 	tokenStr := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if tokenStr == "" {
@@ -76,9 +78,17 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	sessionID, err := uuid.Parse(chi.URLParam(r, "sessionID"))
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+	var sessionID uuid.UUID
+	if rawSessionID := strings.TrimSpace(chi.URLParam(r, "sessionID")); rawSessionID != "" {
+		sessionID, err = uuid.Parse(rawSessionID)
+		if err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+			return
+		}
+	} else if claims.SessionID != nil {
+		sessionID = *claims.SessionID
+	} else {
+		writeError(w, r, http.StatusForbidden, "SESSION_MISMATCH", "token is not authorized for a session")
 		return
 	}
 
@@ -90,7 +100,7 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if req.SessionID != "" && req.SessionID != sessionID.String() {
-		writeError(w, r, http.StatusBadRequest, "SESSION_MISMATCH", "session_id must match the URL session ID")
+		writeError(w, r, http.StatusBadRequest, "SESSION_MISMATCH", "session_id must match the token-scoped session ID")
 		return
 	}
 	switch req.AuthorMode {
@@ -159,9 +169,11 @@ func (h *InternalPullRequestHandler) Create(w http.ResponseWriter, r *http.Reque
 	}
 
 	payload := map[string]any{
-		"session_id":   sessionID.String(),
-		"changeset_id": changesetID.String(),
-		"org_id":       claims.OrgID.String(),
+		"session_id":         sessionID.String(),
+		"changeset_id":       changesetID.String(),
+		"org_id":             claims.OrgID.String(),
+		"publication_source": string(models.SessionPublicationSourceAgentTool),
+		"publication_queue":  string(models.SessionPublicationJobQueueAgent),
 	}
 	if req.Draft != nil {
 		payload["draft"] = *req.Draft

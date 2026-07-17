@@ -128,6 +128,41 @@ func TestSessionChangesetStoreGetPrimaryScopesByOrgAndSession(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestSessionChangesetStoreGetByWorkingBranchScopesRepositoryAndTenant(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	workingBranch := "143/session-branch"
+	expected := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true, OrderIndex: 0,
+		Title: "Primary", Summary: "", Status: models.ChangesetStatusReady,
+		TargetBranch: "main", BaseBranch: "main", WorkingBranch: &workingBranch,
+		PRCreationState: models.PRCreationStateIdle, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets.*EXISTS.*FROM sessions").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "repository_id": repositoryID, "working_branch": workingBranch,
+	}).WillReturnRows(pgxmock.NewRows([]string{
+		"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
+		"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id", "head_sha",
+		"expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff",
+		"restack_delta_kind", "restack_delta_summary", "restack_confirmation_required",
+		"pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+	}).AddRow(
+		changesetID, orgID, sessionID, true, 0, "Primary", "", models.ChangesetStatusReady,
+		"main", "main", &workingBranch, nil, nil, nil, nil, nil, nil, nil, nil, nil, false,
+		models.PRCreationStateIdle, nil, now, now,
+	))
+
+	actual, err := NewSessionChangesetStore(mock).GetByWorkingBranch(context.Background(), orgID, repositoryID, workingBranch)
+	require.NoError(t, err, "GetByWorkingBranch should find the owned branch in the requested repository")
+	require.Equal(t, expected, actual, "GetByWorkingBranch should return the exact tenant-scoped changeset")
+	require.NoError(t, mock.ExpectationsWereMet(), "working-branch lookup should filter by org and repository")
+}
+
 func TestSessionChangesetStoreListBySessionIncludesActiveLeaseOwnership(t *testing.T) {
 	t.Parallel()
 

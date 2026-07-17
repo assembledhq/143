@@ -101,6 +101,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pullRequestStore := db.NewPullRequestStore(pool)
 	pullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	sessionChangesetStore := db.NewSessionChangesetStore(pool)
+	sessionPublicationStore := db.NewSessionPublicationStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 	pullRequestFeedbackStore.SetJobStore(jobStore)
@@ -191,6 +192,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				deployStore, repoStore, jobStore, logger,
 			)
 			prService.SetChangesetStore(sessionChangesetStore)
+			prService.SetPublicationStore(sessionPublicationStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -393,6 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	sessionHandler.SetChangesetStore(sessionChangesetStore)
+	sessionHandler.SetPublicationStore(sessionPublicationStore)
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
@@ -1060,6 +1063,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/sessions/{id}/preview/visual-diff", internalAgentPreviewHandler.VisualDiff)
 			r.Post("/sessions/{id}/preview/assert", internalAgentPreviewHandler.Assert)
 			r.Post("/issues", internalIssueHandler.Create)
+			r.Post("/session/pr", internalPullRequestHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Get("/sessions/{id}/changesets", internalChangesetHandler.List)
 			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)

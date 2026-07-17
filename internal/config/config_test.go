@@ -485,13 +485,44 @@ func TestValidateSecrets_ProductionAllValid(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
-		Env:                 "production",
-		SessionSecret:       strings.Repeat("s", 32),
-		EncryptionMasterKey: strings.Repeat("k", 32),
-		CSRFSigningKey:      strings.Repeat("c", 32),
-		GitHubWebhookSecret: "github-webhook-secret",
+		Env:                  "production",
+		Mode:                 "all",
+		SessionSecret:        strings.Repeat("s", 32),
+		EncryptionMasterKey:  strings.Repeat("k", 32),
+		CSRFSigningKey:       strings.Repeat("c", 32),
+		GitHubWebhookSecret:  "github-webhook-secret",
+		SandboxAuthSocketDir: "/var/run/143/sandbox-auth",
 	}
 	require.NoError(t, cfg.ValidateSecrets(), "valid production config should not error")
+}
+
+func TestValidateSecrets_ProductionWorkerRequiresSandboxAuthSocket(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "combined mode", mode: "all"},
+		{name: "worker mode", mode: "worker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{
+				Env:                 "production",
+				Mode:                tt.mode,
+				SessionSecret:       strings.Repeat("s", 32),
+				EncryptionMasterKey: strings.Repeat("k", 32),
+				CSRFSigningKey:      strings.Repeat("c", 32),
+				GitHubWebhookSecret: "github-webhook-secret",
+			}
+
+			err := cfg.ValidateSecrets()
+			require.Error(t, err, "production workers should fail closed without the sandbox auth socket")
+			require.Contains(t, err.Error(), "SANDBOX_AUTH_SOCKET_DIR", "validation should identify the missing credential socket")
+		})
+	}
 }
 
 func TestValidateSecrets_NegativeRetentionDays(t *testing.T) {

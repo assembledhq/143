@@ -65,6 +65,210 @@ type pullRequestHealthSummaryArg struct {
 	wantChecksConfirmed  bool
 }
 
+var publicationHealthTestColumns = []string{
+	"id", "org_id", "session_id", "changeset_id", "repository_id",
+	"state", "source", "review_gate_state", "job_queue", "request_payload", "request_generation_at",
+	"base_branch", "head_branch", "desired_head_sha",
+	"published_head_sha", "github_pr_number", "github_pr_url", "attempt_count",
+	"last_error_code", "last_error_message", "requested_at", "last_attempt_at",
+	"branch_published_at", "pr_resolved_at", "completed_at", "created_at", "updated_at",
+}
+
+func publicationHealthTestRow(publication models.SessionPublication) []any {
+	return []any{
+		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
+		publication.State, publication.Source, publication.ReviewGateState, publication.JobQueue, publication.RequestPayload, publication.RequestGenerationAt,
+		publication.BaseBranch, publication.HeadBranch, publication.DesiredHeadSHA,
+		publication.PublishedHeadSHA, publication.GitHubPRNumber, publication.GitHubPRURL, publication.AttemptCount,
+		publication.LastErrorCode, publication.LastErrorMessage, publication.RequestedAt, publication.LastAttemptAt,
+		publication.BranchPublishedAt, publication.PRResolvedAt, publication.CompletedAt, publication.CreatedAt, publication.UpdatedAt,
+	}
+}
+
+func TestPRServiceReconcileSessionPublicationDefersCompletionWhenLocalCheckpointFails(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	prRow := newPRTestRow(uuid.New(), &sessionID, orgID, "assembledhq/143", now, nil)
+	prRow[12] = &headSHA
+	mock.ExpectQuery("SELECT .+FROM pull_requests.+changeset_id = @changeset_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.SessionPublicationStateRecorded, "error_code": (*string)(nil), "error_message": (*string)(nil), "completed": false,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"head_sha": headSHA, "status": models.ChangesetStatusPROpen,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID, "status": string(models.SessionStatusPRCreated)}).
+		WillReturnError(errors.New("status update unavailable"))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		State: models.SessionPublicationStateRequested, GitHubPRNumber: ptrInt(42),
+	}
+
+	err = service.reconcileSessionPublication(context.Background(), publication)
+	require.ErrorContains(t, err, "update already-recorded publication session status", "reconciliation should remain retryable when a required local checkpoint fails")
+	require.NoError(t, mock.ExpectationsWereMet(), "failed local convergence must not write the terminal publication checkpoint")
+}
+
+func TestPRServiceReconcileSessionPublicationsRotatesErroredCandidate(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateBranchPublished, Source: models.SessionPublicationSourceAutomation,
+		ReviewGateState: models.SessionPublicationReviewGatePassed,
+		JobQueue:        models.SessionPublicationJobQueueDefault, RequestPayload: json.RawMessage(`{"org_id":"` + orgID.String() + `"}`),
+		BaseBranch: "main", HeadBranch: "143/session", RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery(`SELECT[\s\S]+FROM session_publications[\s\S]+ORDER BY updated_at`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "updated_before": pgxmock.AnyArg(), "limit": 10}).
+		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(publication)...))
+	mock.ExpectQuery(`SELECT[\s\S]+FROM pull_requests[\s\S]+changeset_id = @changeset_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnError(errors.New("database unavailable"))
+	errorCode := "reconciliation_failed"
+	errorMessage := "look up publication pull request: query pull request by changeset: database unavailable"
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.SessionPublicationStateRetryableFailed, "error_code": &errorCode,
+		"error_message": &errorMessage, "completed": false,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock), publications: db.NewSessionPublicationStore(mock),
+		changesets: db.NewSessionChangesetStore(mock), sessions: db.NewSessionStore(mock),
+		repos: db.NewRepositoryStore(mock), logger: zerolog.New(io.Discard),
+	}
+	service.reconcileSessionPublications(context.Background(), orgID, 10)
+	require.NoError(t, mock.ExpectationsWereMet(), "errored reconciliation should advance updated_at through a retryable failure checkpoint")
+}
+
+func TestValidatedPublicationReplayIntent(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	validPayload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user","publication_queue":"agent","draft":false,"author_mode":"user","merge_when_ready":true}`)
+	tests := []struct {
+		name        string
+		publication models.SessionPublication
+		expected    json.RawMessage
+		expectedQ   models.SessionPublicationJobQueue
+		wantErr     bool
+	}{
+		{
+			name: "preserves complete agent queue intent",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: validPayload,
+			},
+			expected: validPayload, expectedQ: models.SessionPublicationJobQueueAgent,
+		},
+		{
+			name: "defaults legacy queue when payload omits queue",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				RequestPayload: json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","draft":true}`),
+			},
+			expected:  json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","draft":true}`),
+			expectedQ: models.SessionPublicationJobQueueDefault,
+		},
+		{
+			name: "rejects missing payload",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				JobQueue: models.SessionPublicationJobQueueDefault, RequestPayload: json.RawMessage(`{}`),
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects mismatched changeset scope",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: uuid.New(),
+				JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: validPayload,
+			},
+			wantErr: true,
+		},
+		{
+			name: "rejects mismatched queue",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				JobQueue: models.SessionPublicationJobQueueDefault, RequestPayload: validPayload,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, queue, err := validatedPublicationReplayIntent(tt.publication)
+			if tt.wantErr {
+				require.Error(t, err, "invalid durable replay intent should be rejected before enqueue")
+				return
+			}
+			require.NoError(t, err, "valid durable replay intent should be accepted")
+			require.Equal(t, tt.expected, actual, "replay validation should preserve the complete original open_pr payload")
+			require.Equal(t, tt.expectedQ, queue, "replay validation should preserve the original worker queue")
+		})
+	}
+}
+
+func TestPRServiceResumeSessionPublicationCreationRequeuesGuardedWorkflow(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"automation","publication_queue":"agent","draft":false,"author_mode":"app","merge_when_ready":true}`)
+	dedupeKey := db.OpenPRDedupeKey(changesetID)
+	mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "queue": string(models.SessionPublicationJobQueueAgent), "job_type": "open_pr",
+		"payload": pgxmock.AnyArg(), "priority": 5, "dedupe_key": &dedupeKey,
+	}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	service := &PRService{
+		jobs: db.NewJobStore(mock), publications: db.NewSessionPublicationStore(mock), logger: zerolog.New(io.Discard),
+	}
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		JobQueue: models.SessionPublicationJobQueueAgent, RequestPayload: payload,
+	}
+
+	err = service.resumeSessionPublicationCreation(context.Background(), publication)
+	require.NoError(t, err, "reconciliation should requeue the original guarded open_pr workflow instead of calling GitHub directly")
+	require.NoError(t, mock.ExpectationsWereMet(), "reconciliation should enqueue one deduplicated job and checkpoint the requeue")
+}
+
 func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
 	var payload []byte
 	switch v := value.(type) {

@@ -20,8 +20,16 @@ import (
 
 // stubInstallationTokens is a programmable InstallationTokenSource for tests.
 type stubInstallationTokens struct {
-	tokens map[int64]string
-	errs   map[int64]error
+	tokens       map[int64]string
+	errs         map[int64]error
+	sandboxToken string
+	sandboxCalls []sandboxTokenCall
+}
+
+type sandboxTokenCall struct {
+	installationID int64
+	repositoryID   int64
+	action         string
 }
 
 func (s *stubInstallationTokens) GetInstallationToken(_ context.Context, installationID int64) (string, error) {
@@ -32,6 +40,23 @@ func (s *stubInstallationTokens) GetInstallationToken(_ context.Context, install
 		return tok, nil
 	}
 	return "", errors.New("no token configured for installation")
+}
+
+func (s *stubInstallationTokens) GetSandboxInstallationToken(_ context.Context, installationID, repositoryID int64, action string) (string, error) {
+	s.sandboxCalls = append(s.sandboxCalls, sandboxTokenCall{installationID: installationID, repositoryID: repositoryID, action: action})
+	if err, ok := s.errs[installationID]; ok {
+		return "", err
+	}
+	if s.sandboxToken != "" {
+		return s.sandboxToken, nil
+	}
+	return "", errors.New("no sandbox token configured for installation")
+}
+
+type legacyInstallationTokens struct{}
+
+func (legacyInstallationTokens) GetInstallationToken(context.Context, int64) (string, error) {
+	return "full-token", nil
 }
 
 // stubAppUserAuth is a programmable AppUserAuthService for tests.
@@ -86,6 +111,44 @@ func TestResolve_AppOnly(t *testing.T) {
 	require.Equal(t, "app-token-123", res.Token)
 	require.False(t, res.IsUserToken())
 	require.Equal(t, "app", res.AuthoredBy())
+}
+
+func TestResolveSandbox_UsesRepositoryBoundAppTokenAndRetainsAttribution(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	userID := uuid.New()
+	tokens := &stubInstallationTokens{sandboxToken: "scoped-app-token"}
+	resolver := NewResolver(tokens, zerolog.Nop())
+	resolver.SetAppUserAuth(&stubAppUserAuth{cfg: &models.GitHubAppUserConfig{AccessToken: "must-not-enter-sandbox"}})
+	resolver.SetUsers(&stubUserStore{user: models.User{ID: userID, OrgID: orgID, Name: "Alice"}})
+
+	resolution, err := resolver.ResolveSandbox(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: orgID, TriggeredByUserID: &userID},
+		&models.Repository{InstallationID: 42, GitHubID: 9876, FullName: "owner/repo"},
+		"push",
+	)
+	require.NoError(t, err, "sandbox resolution should issue a scoped app token")
+	require.Equal(t, "scoped-app-token", resolution.Token, "sandbox resolution should never return the available user token")
+	require.Equal(t, SourceApp, resolution.Source, "sandbox resolution should always identify the credential as an app token")
+	require.NotNil(t, resolution.User, "sandbox resolution should retain the triggering user for commit attribution")
+	require.Equal(t, "Alice", resolution.User.Name, "sandbox resolution should attach the expected triggering user")
+	require.Equal(t, []sandboxTokenCall{{installationID: 42, repositoryID: 9876, action: "push"}}, tokens.sandboxCalls, "sandbox resolution should bind the token to the repository and requested action")
+}
+
+func TestResolveSandbox_FailsClosedWithoutScopedIssuer(t *testing.T) {
+	t.Parallel()
+
+	resolver := NewResolver(legacyInstallationTokens{}, zerolog.Nop())
+	_, err := resolver.ResolveSandbox(
+		context.Background(),
+		&models.Session{ID: uuid.New(), OrgID: uuid.New()},
+		&models.Repository{InstallationID: 42, GitHubID: 9876, FullName: "owner/repo"},
+		"api",
+	)
+	require.Error(t, err, "sandbox resolution should fail instead of falling back to a full installation token")
+	require.Contains(t, err.Error(), "scoped GitHub token issuer", "sandbox resolution should explain the missing least-privilege issuer")
 }
 
 func TestResolver_HasAppUserAuth(t *testing.T) {
