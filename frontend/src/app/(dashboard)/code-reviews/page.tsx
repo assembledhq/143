@@ -149,17 +149,12 @@ function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
 }
 
 function decisionLabel(review: CodeReviewListItem): string {
-  if (wasAutomaticallyApproved(review)) return "Automatically approved";
-  if (review.decision) return "Not automatically approved";
-  return "Pending decision";
-}
-
-function decisionDetailLabel(review: CodeReviewListItem): string | null {
-  if (review.decision === "approved" && !wasAutomaticallyApproved(review)) return "Approval was not posted";
-  if (review.decision === "needs_human_review") return "Needs human review";
-  if (review.decision === "blocked") return "Blocked by policy";
-  if (review.decision === "comment_only") return "Comment-only policy";
-  return null;
+  if (wasAutomaticallyApproved(review)) return "Approved";
+  if (review.decision === "approved") return "Approval not posted";
+  if (review.decision === "needs_human_review") return "Review needed";
+  if (review.decision === "blocked") return "Blocked";
+  if (review.decision === "comment_only") return "Comment only";
+  return "Pending";
 }
 
 function statusLabel(status: string): string {
@@ -181,6 +176,10 @@ function reviewStatusTone(status: string): StatusTone {
   if (status === "failed" || status === "stale") return "destructive";
   if (status === "running" || status === "queued") return "primary";
   return "neutral";
+}
+
+function reviewRiskTone(review: CodeReviewListItem): StatusTone {
+  return review.acceptable ? "success" : "warning";
 }
 
 function ReviewTitle({ review }: { review: CodeReviewListItem }) {
@@ -232,10 +231,7 @@ function ReviewOutcome({
 }) {
   return (
     <div className="space-y-1">
-      <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} />
-      {decisionDetailLabel(review) ? (
-        <div className="text-xs text-muted-foreground">{decisionDetailLabel(review)}</div>
-      ) : null}
+      <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} indicator={false} />
       <EvidenceButton selected={selected} onToggleEvidence={onToggleEvidence} />
     </div>
   );
@@ -274,9 +270,9 @@ function ReviewActions({ review }: { review: CodeReviewListItem }) {
 }
 
 function reviewStatusLabel(review: CodeReviewListItem): string {
-  if (review.stale || review.status === "stale") return "Stale after PR update";
-  if (review.status === "completed") return "Ran successfully";
-  if (review.status === "failed") return "Run failed";
+  if (review.stale || review.status === "stale") return "Stale";
+  if (review.status === "completed") return "Completed";
+  if (review.status === "failed") return "Failed";
   if (review.status === "running") return "Running";
   if (review.status === "queued") return "Queued";
   if (review.status === "cancelled") return "Cancelled";
@@ -694,7 +690,13 @@ export default function CodeReviewsPage() {
                             </div>
                           </TableCell>
                           <TableCell>{review.repository_name || review.github_repo}</TableCell>
-                          <TableCell>{review.acceptable ? "Acceptable" : "Needs review"}</TableCell>
+                          <TableCell>
+                            <StatusLabel
+                              label={review.acceptable ? "Acceptable" : "Review needed"}
+                              tone={reviewRiskTone(review)}
+                              indicator={false}
+                            />
+                          </TableCell>
                           <TableCell>
                             <ReviewOutcome
                               review={review}
@@ -706,7 +708,13 @@ export default function CodeReviewsPage() {
                               }
                             />
                           </TableCell>
-                          <TableCell>{reviewStatusLabel(review)}</TableCell>
+                          <TableCell>
+                            <StatusLabel
+                              label={reviewStatusLabel(review)}
+                              tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                              indicator={false}
+                            />
+                          </TableCell>
                           <TableCell>{formatDate(review.completed_at)}</TableCell>
                           <TableCell>
                             <ReviewActions review={review} />
@@ -732,12 +740,20 @@ export default function CodeReviewsPage() {
                       </span>
                     )}
                     status={(
-                      <span className="text-foreground">{reviewStatusLabel(review)}</span>
+                      <StatusLabel
+                        label={reviewStatusLabel(review)}
+                        tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                        indicator={false}
+                      />
                     )}
                     detail={(
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
-                          <span>{review.acceptable ? "Acceptable" : "Needs review"}</span>
+                          <StatusLabel
+                            label={review.acceptable ? "Acceptable" : "Review needed"}
+                            tone={reviewRiskTone(review)}
+                            indicator={false}
+                          />
                           <span>Completed {formatDate(review.completed_at)}</span>
                         </div>
                         <ReviewOutcome
