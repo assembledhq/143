@@ -950,6 +950,7 @@ func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "19")
 		w.WriteHeader(http.StatusNotFound)
 		_, err := w.Write([]byte(`{"message":"Not Found"}`))
 		require.NoError(t, err, "test server should write not found response body")
@@ -966,6 +967,9 @@ func TestDoGitHubRequest_ErrorResponse(t *testing.T) {
 	require.Error(t, err, "doGitHubRequest should return an error for 404 response")
 	require.Contains(t, err.Error(), "404", "error should contain the HTTP status code")
 	require.Contains(t, err.Error(), "Not Found", "error should contain the response message")
+	var apiErr *GitHubAPIError
+	require.ErrorAs(t, err, &apiErr, "error response should retain its typed GitHub API details")
+	require.Equal(t, "19", apiErr.Header.Get("Retry-After"), "GitHub API error should preserve response headers for retry classification")
 }
 
 func TestDoGitHubRequest_SetsHeaders(t *testing.T) {
