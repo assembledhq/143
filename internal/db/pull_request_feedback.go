@@ -22,6 +22,7 @@ func NewPullRequestFeedbackStore(db TxStarter) *PullRequestFeedbackStore {
 	return &PullRequestFeedbackStore{db: db}
 }
 
+// SetJobStore wires the async job store used to enqueue feedback collection.
 // lint:allow-no-orgid reason="dependency injection only; this method performs no database query"
 func (s *PullRequestFeedbackStore) SetJobStore(jobs *JobStore) { s.jobs = jobs }
 
