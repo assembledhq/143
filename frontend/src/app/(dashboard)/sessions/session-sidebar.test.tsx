@@ -182,6 +182,12 @@ describe('SessionSidebar', () => {
     expect(capturedUserId).toBe('user-1');
   });
 
+  it('keeps the desktop search field aligned with the people filter', () => {
+    renderWithProviders(<SessionSidebar />);
+
+    expect(screen.getByPlaceholderText('Search sessions...')).toHaveClass('h-8', 'sm:h-8');
+  });
+
   it('does not fetch sessions until the Mine scope can resolve the current user', async () => {
     mockAuthState.isAuthenticated = false;
     mockAuthState.user = null;
