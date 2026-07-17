@@ -5750,6 +5750,44 @@ func TestPublishChangesetStackCreatePRParamsBuildsReplayableIntent(t *testing.T)
 	}, replay, "stack publication should persist the complete replay contract")
 }
 
+func TestEnsurePublishChangesetStackPublicationPersistsLedger(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	branch, headSHA := "143/session/stack", "0123456789abcdef0123456789abcdef01234567"
+	draft := true
+	params, err := publishChangesetStackCreatePRParams(publishChangesetStackJobInput{
+		OrgID: orgID.String(), SessionID: sessionID.String(), AuthorMode: "user", Draft: &draft,
+	}, orgID, sessionID, changesetID, now)
+	require.NoError(t, err, "stack publication should build its durable replay intent")
+	expected := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateRequested, Source: models.SessionPublicationSourceUser,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: params.PublicationRequestPayload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: branch, DesiredHeadSHA: &headSHA,
+		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(workerAnyArgs(12)...).
+		WillReturnRows(pgxmock.NewRows(workerPublicationTestColumns).AddRow(workerPublicationTestRow(expected)...))
+	session := models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repositoryID}
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID,
+		BaseBranch: "main", WorkingBranch: &branch, HeadSHA: &headSHA,
+	}
+
+	publication, err := ensurePublishChangesetStackPublication(
+		context.Background(), db.NewSessionPublicationStore(mock), session, changeset, params,
+	)
+	require.NoError(t, err, "stack publication should persist its ledger before entering PRService")
+	require.Equal(t, expected, publication, "stack publication should preserve the complete durable request")
+	require.NoError(t, mock.ExpectationsWereMet(), "stack publication should write exactly one durable ledger request")
+}
+
 func TestPublicationRequestGenerationAtUsesOriginalJobEnqueueTime(t *testing.T) {
 	t.Parallel()
 

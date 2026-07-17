@@ -1171,6 +1171,43 @@ func publishChangesetStackCreatePRParams(input publishChangesetStackJobInput, or
 	}, nil
 }
 
+func ensurePublishChangesetStackPublication(
+	ctx context.Context,
+	store *db.SessionPublicationStore,
+	session models.Session,
+	changeset models.SessionChangeset,
+	params ghservice.CreatePRParams,
+) (models.SessionPublication, error) {
+	if store == nil {
+		return models.SessionPublication{}, errors.New("session publication store is unavailable")
+	}
+	if session.RepositoryID == nil {
+		return models.SessionPublication{}, fmt.Errorf("session %s has no repository", session.ID)
+	}
+	headBranch := strings.TrimSpace(stringValue(changeset.WorkingBranch))
+	if headBranch == "" {
+		return models.SessionPublication{}, fmt.Errorf("changeset %s has no working branch", changeset.ID)
+	}
+	publication := models.SessionPublication{
+		OrgID:               session.OrgID,
+		SessionID:           session.ID,
+		ChangesetID:         changeset.ID,
+		RepositoryID:        *session.RepositoryID,
+		Source:              params.PublicationSource,
+		ReviewGateState:     models.SessionPublicationReviewGateNotRequired,
+		JobQueue:            params.PublicationQueue,
+		RequestPayload:      append(json.RawMessage(nil), params.PublicationRequestPayload...),
+		RequestGenerationAt: params.PublicationGenerationAt,
+		BaseBranch:          changeset.BaseBranch,
+		HeadBranch:          headBranch,
+		DesiredHeadSHA:      changeset.HeadSHA,
+	}
+	if err := store.EnsureRequested(ctx, session.OrgID, &publication); err != nil {
+		return models.SessionPublication{}, fmt.Errorf("ensure stack publication: %w", err)
+	}
+	return publication, nil
+}
+
 func newPublishChangesetStackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input publishChangesetStackJobInput
@@ -1218,12 +1255,18 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 						logger.Warn().Err(releaseErr).Str("changeset_id", changeset.ID.String()).Msg("failed to release stack publish lease")
 					}
 				}()
-				if err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStatePushing, ""); err != nil {
-					return
-				}
 				params, paramsErr := publishChangesetStackCreatePRParams(input, orgID, sessionID, changeset.ID, publicationRequestGenerationAt(ctx))
 				if paramsErr != nil {
 					err = paramsErr
+					return
+				}
+				if stores.SessionPublications != nil {
+					if _, publicationErr := ensurePublishChangesetStackPublication(ctx, stores.SessionPublications, session, changeset, params); publicationErr != nil {
+						err = publicationErr
+						return
+					}
+				}
+				if err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStatePushing, ""); err != nil {
 					return
 				}
 				_, err = services.PR.CreatePR(ctx, &session, params)
