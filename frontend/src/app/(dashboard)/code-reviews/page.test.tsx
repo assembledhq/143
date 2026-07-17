@@ -270,7 +270,9 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
     expect(screen.getAllByText("Approved")).toHaveLength(2);
-    expect(screen.getAllByText("Completed")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
     const finalReviewLinks = screen.getAllByRole("link", { name: "#428 Fix invoice rounding" });
     expect(finalReviewLinks).toHaveLength(2);
     for (const link of finalReviewLinks) {
@@ -425,14 +427,18 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
 
     expect(await screen.findAllByText("Approved")).toHaveLength(2);
-    expect(screen.getAllByText("Completed")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
 
     await user.click(screen.getByRole("combobox", { name: "Outcome" }));
     await user.click(await screen.findByRole("option", { name: "Ran successfully — not approved" }));
 
     expect(await screen.findAllByText("#429 Keep manual approval")).toHaveLength(2);
     expect(screen.getAllByText("Review needed")).toHaveLength(4);
-    expect(screen.getAllByText("Completed")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
     await waitFor(() => {
       expect(requestedOutcomes).toContain("completed_not_approved");
     });
