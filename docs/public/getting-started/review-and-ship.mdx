@@ -45,6 +45,16 @@ Previews let you click through the app inside the session instead of pulling the
 
 Repository-native CI remains the source of truth. 143 can help repair failures, resolve conflicts, or continue the session, but branch protection and required checks should still live in GitHub.
 
+PR publication is durable. If GitHub accepts the branch or PR while a worker
+restarts or a webhook arrives first, the session shows the current publication
+checkpoint and reconciles the GitHub artifact back into 143. A “Publication
+retrying” state means recovery is active; avoid opening a second PR manually.
+
+Agents use `143-tools pr create` to request this workflow. Direct `gh pr
+create` from a session sandbox is intentionally unavailable because it would
+bypass review gates, repository templates, deduplication, audit state, and
+recovery.
+
 ## Split a session into multiple pull requests
 
 For a large result, the Pull requests panel can divide the session diff into

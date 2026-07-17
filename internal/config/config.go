@@ -230,9 +230,10 @@ type Config struct {
 	// GitHub credential sockets are created (one Unix-domain socket per
 	// session, bind-mounted into the container). The orchestrator must be
 	// able to mkdir / chmod this path; the directory is provisioned out of
-	// band by deploy/scripts/provision.sh next to the resolv.conf file. If
-	// empty, the credential-helper path is disabled and sessions fall back
-	// to the legacy GITHUB_TOKEN env-var injection.
+	// band by deploy/scripts/provision.sh next to the resolv.conf file. Local
+	// development can leave it empty and use the legacy GITHUB_TOKEN env-var
+	// fallback. Production worker/all modes reject an empty value so sandbox
+	// credentials always use the repository-scoped socket flow.
 	SandboxAuthSocketDir string `env:"SANDBOX_AUTH_SOCKET_DIR" envDefault:"/var/run/143/sandbox-auth"`
 	// Data retention
 	DataRetentionWebhookDays              int `env:"DATA_RETENTION_WEBHOOK_DAYS" envDefault:"30"`
@@ -670,6 +671,9 @@ func (c *Config) ValidateSecrets() error {
 
 	if c.GitHubWebhookSecret == "" {
 		return errors.New("GITHUB_WEBHOOK_SECRET must be set in production")
+	}
+	if (c.Mode == "worker" || c.Mode == "all") && strings.TrimSpace(c.SandboxAuthSocketDir) == "" {
+		return errors.New("SANDBOX_AUTH_SOCKET_DIR must be set in production worker/all mode")
 	}
 
 	return nil

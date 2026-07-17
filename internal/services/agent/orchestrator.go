@@ -1532,6 +1532,10 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
+	sandboxCfg.Env["ASSEMBLED_SESSION_ID"] = session.ID.String()
+	// Compatibility for existing skills and older 143-tools binaries. New
+	// clients use the token-derived current-session endpoint and do not depend
+	// on either environment variable for authorization.
 	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
@@ -3555,8 +3559,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		payload := map[string]interface{}{
-			"session_id": run.ID.String(),
-			"org_id":     run.OrgID.String(),
+			"session_id":        run.ID.String(),
+			"org_id":            run.OrgID.String(),
+			"publication_queue": string(models.SessionPublicationJobQueueDefault),
+		}
+		if run.AutomationRunID != nil {
+			payload["publication_source"] = string(models.SessionPublicationSourceAutomation)
+		} else {
+			payload["publication_source"] = string(models.SessionPublicationSourceBackend)
 		}
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()

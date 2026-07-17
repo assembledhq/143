@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -162,6 +163,89 @@ func TestService_GetInstallationToken_FetchesAndCaches(t *testing.T) {
 	require.NoError(t, err, "second GetInstallationToken call should not return an error")
 	require.Equal(t, "ghs_cached", second, "second GetInstallationToken call should return the cached token")
 	require.Equal(t, 1, callCount, "GetInstallationToken should exchange only once and use cache on subsequent calls")
+}
+
+func TestService_GetSandboxInstallationToken_ScopesRepositoryAndPermissions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		action              string
+		expectedPermissions map[string]string
+	}{
+		{
+			name:                "push can write contents and workflow files",
+			action:              "push",
+			expectedPermissions: map[string]string{"contents": "write", "workflows": "write"},
+		},
+		{
+			name:                "api can only read contents and pull requests",
+			action:              "api",
+			expectedPermissions: map[string]string{"contents": "read", "pull_requests": "read"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			svc, err := NewService(143, testPrivateKeyPEM(t))
+			require.NoError(t, err, "NewService should create a service for scoped sandbox tokens")
+			callCount := 0
+			svc.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				callCount++
+				require.Equal(t, http.MethodPost, req.Method, "sandbox token exchange should use POST")
+				require.Equal(t, "application/json", req.Header.Get("Content-Type"), "sandbox token exchange should send a JSON permission request")
+				var body installationTokenRequest
+				require.NoError(t, json.NewDecoder(req.Body).Decode(&body), "sandbox token request body should be valid JSON")
+				require.Equal(t, []int64{9876}, body.RepositoryIDs, "sandbox token should be bound to the requested GitHub repository")
+				require.Equal(t, tt.expectedPermissions, body.Permissions, "sandbox token should request the exact least-privilege permissions")
+				if tt.action == "push" {
+					require.NotContains(t, body.Permissions, "pull_requests", "push token should not receive pull request permissions")
+				} else {
+					require.Equal(t, "read", body.Permissions["pull_requests"], "API token should receive read-only pull request access")
+				}
+				return &http.Response{
+					StatusCode: http.StatusCreated,
+					Body: io.NopCloser(strings.NewReader(
+						`{"token":"ghs_sandbox","expires_at":"2030-01-01T00:00:00Z"}`,
+					)),
+					Header: make(http.Header),
+				}, nil
+			})}
+
+			first, err := svc.GetSandboxInstallationToken(context.Background(), 77, 9876, tt.action)
+			require.NoError(t, err, "first sandbox token request should succeed")
+			require.Equal(t, "ghs_sandbox", first, "sandbox token request should return GitHub's token")
+			second, err := svc.GetSandboxInstallationToken(context.Background(), 77, 9876, tt.action)
+			require.NoError(t, err, "cached sandbox token request should succeed")
+			require.Equal(t, first, second, "cached sandbox token should match the exchanged token")
+			require.Equal(t, 1, callCount, "sandbox token should be cached by installation, repository, and action")
+		})
+	}
+}
+
+func TestService_GetSandboxInstallationToken_RejectsInvalidScope(t *testing.T) {
+	t.Parallel()
+
+	svc := &Service{}
+	tests := []struct {
+		name           string
+		installationID int64
+		repositoryID   int64
+		action         string
+	}{
+		{name: "missing installation", repositoryID: 1, action: "push"},
+		{name: "missing repository", installationID: 1, action: "push"},
+		{name: "unknown action", installationID: 1, repositoryID: 2, action: "write"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := svc.GetSandboxInstallationToken(context.Background(), tt.installationID, tt.repositoryID, tt.action)
+			require.Error(t, err, "invalid sandbox token scope should be rejected before token exchange")
+		})
+	}
 }
 
 func TestService_GenerateJWT(t *testing.T) {

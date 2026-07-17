@@ -14,6 +14,88 @@ import (
 
 func ptrStr(s string) *string { return &s }
 
+func TestPullRequestStoreAssociateGitHubPullRequestScopesAndAdopts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now()
+	body, headSHA, headRef, baseSHA := "body", "head-sha", "143/session", "base-sha"
+	expected := models.PullRequest{
+		ID: prID, SessionID: &sessionID, ChangesetID: &changesetID, OrgID: orgID,
+		GitHubPRNumber: 42, GitHubPRURL: "https://github.com/org/repo/pull/42", GitHubRepo: "org/repo",
+		Title: "Fix bug", Body: &body, Status: models.PullRequestStatusOpen,
+		ReviewStatus: models.PullRequestReviewStatusPending, AuthoredBy: models.GitIdentitySourceUser,
+		HeadSHA: &headSHA, HeadRef: &headRef, BaseSHA: &baseSHA,
+		MergeState: models.PullRequestMergeStateUnknown, MergeWhenReadyState: models.PullRequestMergeWhenReadyStateOff,
+		FeedbackMonitoring: models.PRFeedbackMonitoringInherit, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("INSERT INTO pull_requests .+authored_by = EXCLUDED.authored_by.+pull_requests.changeset_id = EXCLUDED.changeset_id").WithArgs(pgx.NamedArgs{
+		"session_id": &sessionID, "changeset_id": &changesetID, "org_id": orgID,
+		"github_pr_number": 42, "github_pr_url": expected.GitHubPRURL, "github_repo": expected.GitHubRepo,
+		"title": expected.Title, "body": &body, "status": expected.Status,
+		"review_status": expected.ReviewStatus, "authored_by": expected.AuthoredBy,
+		"head_sha": &headSHA, "head_ref": &headRef, "base_sha": &baseSHA,
+	}).WillReturnRows(pgxmock.NewRows([]string{
+		"id", "session_id", "changeset_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+		"title", "body", "status", "review_status", "authored_by", "ci_status", "head_sha", "head_ref", "base_sha",
+		"merge_state", "has_conflicts", "failing_test_count", "needs_agent_action", "github_state_synced_at",
+		"health_version", "merge_when_ready_state", "merge_when_ready_requested_by", "merge_when_ready_requested_at",
+		"merge_when_ready_head_sha", "merge_when_ready_health_version", "merge_when_ready_error",
+		"merge_when_ready_updated_at", "feedback_monitoring", "feedback_bot_epoch", "feedback_bot_cycles_in_epoch",
+		"merged_at", "created_at", "updated_at",
+	}).AddRow(
+		prID, &sessionID, &changesetID, orgID, 42, expected.GitHubPRURL, expected.GitHubRepo,
+		expected.Title, &body, expected.Status, expected.ReviewStatus, expected.AuthoredBy, "", &headSHA, &headRef, &baseSHA,
+		models.PullRequestMergeStateUnknown, false, 0, false, nil, int64(0), models.PullRequestMergeWhenReadyStateOff,
+		nil, nil, "", nil, "", nil, models.PRFeedbackMonitoringInherit, int64(0), 0, nil, now, now,
+	))
+
+	actual := models.PullRequest{
+		SessionID: &sessionID, ChangesetID: &changesetID, OrgID: orgID,
+		GitHubPRNumber: 42, GitHubPRURL: expected.GitHubPRURL, GitHubRepo: expected.GitHubRepo,
+		Title: expected.Title, Body: &body, Status: expected.Status, ReviewStatus: expected.ReviewStatus,
+		AuthoredBy: expected.AuthoredBy, HeadSHA: &headSHA, HeadRef: &headRef, BaseSHA: &baseSHA,
+	}
+	err = NewPullRequestStore(mock).AssociateGitHubPullRequest(context.Background(), orgID, &actual)
+	require.NoError(t, err, "AssociateGitHubPullRequest should adopt the org-scoped GitHub PR")
+	require.Equal(t, expected, actual, "AssociateGitHubPullRequest should return the exact persisted association")
+	require.NoError(t, mock.ExpectationsWereMet(), "GitHub PR association should include the tenant and session identity")
+}
+
+func TestPullRequestStoreAssociateGitHubPullRequestValidatesIdentity(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	validSessionID, validChangesetID := uuid.New(), uuid.New()
+	tests := []struct {
+		name string
+		pr   *models.PullRequest
+	}{
+		{name: "nil pull request", pr: nil},
+		{name: "mismatched org", pr: &models.PullRequest{OrgID: uuid.New(), SessionID: &validSessionID, ChangesetID: &validChangesetID, GitHubRepo: "org/repo", GitHubPRNumber: 1}},
+		{name: "missing session", pr: &models.PullRequest{OrgID: orgID, ChangesetID: &validChangesetID, GitHubRepo: "org/repo", GitHubPRNumber: 1}},
+		{name: "missing changeset", pr: &models.PullRequest{OrgID: orgID, SessionID: &validSessionID, GitHubRepo: "org/repo", GitHubPRNumber: 1}},
+		{name: "missing repository", pr: &models.PullRequest{OrgID: orgID, SessionID: &validSessionID, ChangesetID: &validChangesetID, GitHubPRNumber: 1}},
+		{name: "invalid PR number", pr: &models.PullRequest{OrgID: orgID, SessionID: &validSessionID, ChangesetID: &validChangesetID, GitHubRepo: "org/repo"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+
+			err = NewPullRequestStore(mock).AssociateGitHubPullRequest(context.Background(), orgID, tt.pr)
+			require.Error(t, err, "invalid association identity should fail before querying the database")
+			require.NoError(t, mock.ExpectationsWereMet(), "invalid association should perform no database writes")
+		})
+	}
+}
+
 func TestPullRequestStore_GetByRepoAndNumber(t *testing.T) {
 	t.Parallel()
 

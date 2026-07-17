@@ -131,7 +131,7 @@ func runGitCredential(args []string, stdin io.Reader, stdout, stderr io.Writer) 
 
 // runAuthToken prints just the token to stdout for use by the `gh` wrapper:
 //
-//	GH_TOKEN=$(143-tools auth-token) gh pr comment ...
+//	GH_TOKEN=$(143-tools auth-token) gh pr view ...
 //
 // Errors go to stderr and produce a non-zero exit so the wrapper aborts
 // cleanly rather than running gh with an unset GH_TOKEN.

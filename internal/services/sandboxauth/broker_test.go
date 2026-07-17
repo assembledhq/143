@@ -71,7 +71,7 @@ type lockedResolver struct {
 	calls      int
 }
 
-func (r *lockedResolver) Resolve(context.Context, *models.Session, *models.Repository, models.OrgSettings, string) (*identity.Resolution, error) {
+func (r *lockedResolver) ResolveSandbox(context.Context, *models.Session, *models.Repository, string) (*identity.Resolution, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

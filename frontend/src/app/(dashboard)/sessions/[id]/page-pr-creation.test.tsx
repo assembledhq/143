@@ -5,7 +5,7 @@ import { act } from '@testing-library/react';
 import { server } from '@/test/mocks/server';
 import { mockSessions, mockMembers, mockPR } from '@/test/mocks/handlers';
 import { SessionDetailContent } from './session-detail-content';
-import type { Session, User, SingleResponse } from '@/lib/types';
+import type { Session, SessionDetail, User, SingleResponse } from '@/lib/types';
 import { installSessionDetailPageTestHooks, mockSessionDetailWithLazyDiff, setMobileViewport } from './session-detail-test-kit';
 
 const { toast } = vi.hoisted(() => ({
@@ -188,6 +188,114 @@ describe('SessionDetailPage PR creation', () => {
     await user.click(screen.getByRole('button', { name: 'More publish actions' }));
 
     expect(await screen.findByRole('menuitem', { name: /Create branch/ })).toHaveClass('text-xs');
+  });
+
+  it('shows durable publication recovery state while GitHub reconciliation is active', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary',
+        is_primary: true,
+        order_index: 0,
+        title: 'Primary pull request',
+        summary: '',
+        status: 'ready',
+        target_branch: 'main',
+        base_branch: 'main',
+        working_branch: '143/session-branch',
+        created_at: now,
+        updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1',
+        session_id: mockSessions[0].id,
+        changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1',
+        state: 'retryable_failed',
+        source: 'automation',
+        review_gate_state: 'passed',
+        base_branch: 'main',
+        head_branch: '143/session-branch',
+        attempt_count: 1,
+        last_error_code: 'legacy_false_no_changes',
+        last_error_message: 'GitHub accepted the PR; reconciling local state.',
+        requested_at: now,
+        updated_at: now,
+      }],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json(
+        { error: { code: 'NOT_FOUND', message: 'pull request not found' } },
+        { status: 404 },
+      )),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    const publicationBadge = await screen.findByText('Publication retrying');
+    expect(publicationBadge).toHaveAttribute('title', 'GitHub accepted the PR; reconciling local state.');
+  });
+
+  it('keeps a review-gate warning visible after the pull request exists', async () => {
+    const now = '2026-07-15T12:00:00Z';
+    const detail: SessionDetail = {
+      ...mockSessions[0],
+      status: 'completed',
+      diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new',
+      diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      snapshot_key: 'snap-abc',
+      threads: [],
+      changesets: [{
+        id: 'changeset-primary',
+        is_primary: true,
+        order_index: 0,
+        title: 'Primary pull request',
+        summary: '',
+        status: 'pr_open',
+        target_branch: 'main',
+        base_branch: 'main',
+        working_branch: '143/session-branch',
+        created_at: now,
+        updated_at: now,
+      }],
+      publications: [{
+        id: 'publication-1',
+        session_id: mockSessions[0].id,
+        changeset_id: 'changeset-primary',
+        repository_id: mockSessions[0].repository_id ?? 'repository-1',
+        state: 'completed',
+        source: 'automation',
+        review_gate_state: 'pending',
+        base_branch: 'main',
+        head_branch: '143/session-branch',
+        github_pr_number: 42,
+        github_pr_url: mockPR.github_pr_url,
+        attempt_count: 1,
+        requested_at: now,
+        completed_at: now,
+        updated_at: now,
+      }],
+    };
+
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: detail } satisfies SingleResponse<SessionDetail>)),
+      http.get('/api/v1/sessions/:id/pr', () => HttpResponse.json({
+        data: { ...mockPR, changeset_id: 'changeset-primary' },
+      })),
+    );
+
+    renderWithProviders(<SessionDetailContent id={detail.id} />);
+
+    expect(await screen.findByRole('link', { name: /View PR/ })).toBeInTheDocument();
+    expect(screen.getByText('Review gate bypassed')).toBeInTheDocument();
   });
 
   it('uses xs publish actions on mobile', async () => {

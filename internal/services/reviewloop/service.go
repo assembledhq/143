@@ -462,9 +462,11 @@ func (s *Service) automationOpenPRTarget(ctx context.Context, orgID uuid.UUID, l
 
 func automationOpenPRPayload(loop models.SessionReviewLoop, changesetID uuid.UUID) map[string]any {
 	return map[string]any{
-		"session_id":   loop.SessionID.String(),
-		"changeset_id": changesetID.String(),
-		"org_id":       loop.OrgID.String(),
+		"session_id":         loop.SessionID.String(),
+		"changeset_id":       changesetID.String(),
+		"org_id":             loop.OrgID.String(),
+		"publication_source": string(models.SessionPublicationSourceAutomation),
+		"publication_queue":  string(models.SessionPublicationJobQueueDefault),
 	}
 }
 
