@@ -269,8 +269,10 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("heading", { name: "Code reviews" })).toBeInTheDocument();
     expect(await screen.findAllByText("#428 Fix invoice rounding")).toHaveLength(2);
     expect(screen.getAllByText("Acceptable")).toHaveLength(2);
-    expect(screen.getAllByText("Automatically approved")).toHaveLength(2);
-    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    expect(screen.getAllByText("Approved")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
     const finalReviewLinks = screen.getAllByRole("link", { name: "#428 Fix invoice rounding" });
     expect(finalReviewLinks).toHaveLength(2);
     for (const link of finalReviewLinks) {
@@ -286,10 +288,11 @@ describe("CodeReviewsPage", () => {
     const reviewTable = screen.getByRole("table");
     const reviewRow = within(reviewTable).getByRole("row", { name: /#428 Fix invoice rounding/i });
     const reviewCells = within(reviewRow).getAllByRole("cell");
-    expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).toBeNull();
-    expect(within(reviewCells[3]).getByText("Automatically approved").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[2]).getByText("Acceptable").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(within(reviewCells[3]).getByText("Approved").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[3]).getByRole("button", { name: "Evidence" })).toBeInTheDocument();
-    expect(within(reviewCells[4]).getByText("Ran successfully").closest('[data-slot="status-label"]')).toBeNull();
+    expect(within(reviewCells[4]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
+    expect(reviewCells[2].querySelector('[aria-hidden="true"]')).toBeNull();
     expect(within(reviewCells[6]).queryByRole("button", { name: "Evidence" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /Evidence/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", { name: /Evidence for #428/i });
@@ -423,16 +426,19 @@ describe("CodeReviewsPage", () => {
 
     renderWithProviders(<CodeReviewsPage />, { nuqsHasMemory: true });
 
-    expect(await screen.findAllByText("Automatically approved")).toHaveLength(2);
-    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    expect(await screen.findAllByText("Approved")).toHaveLength(2);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
 
     await user.click(screen.getByRole("combobox", { name: "Outcome" }));
     await user.click(await screen.findByRole("option", { name: "Ran successfully — not approved" }));
 
     expect(await screen.findAllByText("#429 Keep manual approval")).toHaveLength(2);
-    expect(screen.getAllByText("Not automatically approved")).toHaveLength(2);
-    expect(screen.getAllByText("Needs human review")).toHaveLength(2);
-    expect(screen.getAllByText("Ran successfully")).toHaveLength(2);
+    expect(screen.getAllByText("Review needed")).toHaveLength(4);
+    expect(
+      screen.getAllByText("Completed").filter((element) => element.closest('[data-slot="status-label"]')),
+    ).toHaveLength(2);
     await waitFor(() => {
       expect(requestedOutcomes).toContain("completed_not_approved");
     });
