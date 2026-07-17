@@ -10,6 +10,17 @@ export interface UseDebouncedTextFieldOptions {
    * 400ms convention shared by every settings text/textarea field.
    */
   debounceMs?: number;
+  /**
+   * Optional predicate marking a typed value as invalid (e.g. a required field
+   * left blank). A rejected value is never committed — neither the debounce nor
+   * the blur fires `onCommit`, and `lastSent` is not advanced, so it can't be
+   * "remembered" as sent. On blur the field reverts to the last committed value
+   * so a required field can't be left in a dropped/blank state. Mid-typing the
+   * user still sees their input; rejection only suppresses the save and the
+   * blur snaps it back. Omit for fields where an invalid value should stay
+   * visible with its own error affordance (e.g. an over-length editor).
+   */
+  rejectValue?: (value: string) => boolean;
 }
 
 export interface UseDebouncedTextFieldResult {
@@ -42,6 +53,7 @@ export function useDebouncedTextField({
   serverValue,
   onCommit,
   debounceMs = 400,
+  rejectValue,
 }: UseDebouncedTextFieldOptions): UseDebouncedTextFieldResult {
   const [trackedServer, setTrackedServer] = useState(serverValue);
   const [local, setLocal] = useState(serverValue);
@@ -55,8 +67,10 @@ export function useDebouncedTextField({
   // render-N cache snapshot). Assignment lives in an effect per
   // react-hooks/refs.
   const onCommitRef = useRef(onCommit);
+  const rejectValueRef = useRef(rejectValue);
   useEffect(() => {
     onCommitRef.current = onCommit;
+    rejectValueRef.current = rejectValue;
   });
 
   // Resync when the server value changes for reasons other than our own
@@ -85,6 +99,9 @@ export function useDebouncedTextField({
 
   const commit = (value: string) => {
     if (value === lastSent) return;
+    // A rejected value is never sent and never recorded as `lastSent`, so it
+    // can't poison the resync baseline or be mistaken for a saved value.
+    if (rejectValueRef.current?.(value)) return;
     setLastSent(value);
     onCommitRef.current(value);
   };
@@ -102,6 +119,12 @@ export function useDebouncedTextField({
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
+    }
+    // Revert an invalid value on blur so a required field can't be left in a
+    // dropped/blank state with the stale server value silently still in effect.
+    if (rejectValueRef.current?.(local)) {
+      if (local !== lastSent) setLocal(lastSent);
+      return;
     }
     commit(local);
   };

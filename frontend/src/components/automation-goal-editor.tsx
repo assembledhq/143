@@ -25,6 +25,7 @@ type AutomationGoalEditorProps = {
   id: string;
   value: string;
   onChange: (value: string) => void;
+  onBlur?: () => void;
   repositoryId?: string;
   branch?: string;
   agentType: string;
@@ -39,6 +40,7 @@ export function AutomationGoalEditor({
   id,
   value,
   onChange,
+  onBlur,
   repositoryId,
   branch,
   agentType,
@@ -256,6 +258,7 @@ export function AutomationGoalEditor({
           onChange(event.target.value);
           updateCaret(event.target.selectionStart ?? event.target.value.length);
         }}
+        onBlur={onBlur}
         onClick={(event) => updateCaret(event.currentTarget.selectionStart ?? value.length)}
         onKeyUp={(event) => updateCaret(event.currentTarget.selectionStart ?? value.length)}
         onSelect={(event) => updateCaret(event.currentTarget.selectionStart ?? value.length)}
