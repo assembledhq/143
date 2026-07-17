@@ -462,6 +462,8 @@ func main() {
 			jobStore.SetNotifier(jobNotifier)
 		}
 
+		workerPullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
+		workerPullRequestFeedbackStore.SetJobStore(jobStore)
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
@@ -499,6 +501,7 @@ func main() {
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
+			PullRequestFeedback: workerPullRequestFeedbackStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
 			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
 			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
@@ -1548,6 +1551,9 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	workerFeedbackStore := db.NewPullRequestFeedbackStore(pool)
+	workerFeedbackStore.SetJobStore(jobStore)
+	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
 	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(

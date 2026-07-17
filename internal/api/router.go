@@ -99,9 +99,11 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	slackChannelSettingsStore := db.NewSlackChannelSettingsStore(pool)
 	slackSessionLinkStore := db.NewSlackSessionLinkStore(pool)
 	pullRequestStore := db.NewPullRequestStore(pool)
+	pullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	sessionChangesetStore := db.NewSessionChangesetStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
+	pullRequestFeedbackStore.SetJobStore(jobStore)
 	pagerDutyIntegrationStore := db.NewPagerDutyIntegrationStore(pool)
 	pagerDutyServiceRepoMappingStore := db.NewPagerDutyServiceRepoMappingStore(pool)
 	pagerDutyIncidentStore := db.NewPagerDutyIncidentStore(pool)
@@ -192,6 +194,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
+			prService.SetPullRequestFeedbackStore(pullRequestFeedbackStore)
 			prService.SetIntegrationStore(integrationStore)
 			prService.SetSandboxPushDeps(sandboxProvider, snapshotStore)
 			// Linear milestone enqueuer fires post-PR-event Linear writes.
@@ -368,6 +371,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
 	sessionViewStore := db.NewSessionViewStore(pool)
 	pullRequestHandler := handlers.NewPullRequestHandler(prService)
+	if prService != nil {
+		pullRequestHandler.SetFeedbackService(prService)
+	}
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
@@ -1320,6 +1326,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/previews/{preview_id}/snapshots", previewHandler.GetSnapshots)
 				r.Get("/api/v1/pull-requests/stream", pullRequestHandler.StreamUpdates)
 				r.Get("/api/v1/pull-requests/{id}/health", pullRequestHandler.GetHealth)
+				r.Get("/api/v1/pull-requests/{id}/feedback-follow-through", pullRequestHandler.GetFeedbackFollowThrough)
 				r.Get("/api/v1/repos/{owner}/{repo}/preview/detect", previewHandler.DetectReadiness)
 				r.Get(uploadFilesRoutePattern, uploadHandler.ServeUpload)
 				r.Get("/api/v1/sessions/{id}/files", sessionFileHandler.ListFiles)
@@ -1570,6 +1577,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/evals/release-gates", evalHandler.ListReleaseGates)
 
 				r.Post("/api/v1/pull-requests/{id}/repair/fix-tests", pullRequestHandler.FixTests)
+				r.Patch("/api/v1/pull-requests/{id}/feedback-follow-through", pullRequestHandler.UpdateFeedbackFollowThrough)
+				r.Post("/api/v1/pull-requests/{id}/feedback-follow-through/{batch}/retry", pullRequestHandler.RetryFeedbackFollowThrough)
 				r.Post("/api/v1/pull-requests/{id}/repair/resolve-conflicts", pullRequestHandler.ResolveConflicts)
 				r.Post("/api/v1/pull-requests/{id}/merge", pullRequestHandler.Merge)
 				r.Post("/api/v1/pull-requests/{id}/merge-when-ready", pullRequestHandler.QueueMergeWhenReady)

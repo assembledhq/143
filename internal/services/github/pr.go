@@ -90,6 +90,7 @@ type PRService struct {
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
+	feedback        *db.PullRequestFeedbackStore
 	readiness       *db.PRReadinessStore
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
@@ -191,6 +192,10 @@ func NewPRService(
 // SetReviewCommentStore sets the review comment store for the feedback loop.
 func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
+}
+
+func (s *PRService) SetPullRequestFeedbackStore(store *db.PullRequestFeedbackStore) {
+	s.feedback = store
 }
 
 // SetReadinessStore wires PR readiness data for best-effort PR body footers.
@@ -2515,9 +2520,10 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 
 // PullRequestReviewEvent represents a GitHub pull_request_review webhook event.
 type PullRequestReviewEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 	} `json:"sender"`
 	Review struct {
@@ -2526,7 +2532,10 @@ type PullRequestReviewEvent struct {
 		Body  string `json:"body"`
 		User  struct {
 			Login string `json:"login"`
+			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"review"`
 	PullRequest struct {
 		Number int `json:"number"`
@@ -2542,6 +2551,16 @@ type PullRequestReviewEvent struct {
 
 // HandlePullRequestReviewEvent processes pull_request_review webhook events.
 func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event PullRequestReviewEvent) error {
+	if (event.Action == "submitted" && event.Review.Body != "") || event.Action == "dismissed" {
+		appID, appSlug := feedbackGitHubAppIdentity(event.Review.PerformedViaGitHubApp)
+		body := event.Review.Body
+		if event.Action == "dismissed" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewBody, ProviderObjectID: event.Review.ID, GitHubReviewID: &event.Review.ID, AuthorLogin: event.Review.User.Login, AuthorType: event.Review.User.Type, AuthorAssociation: event.Review.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "submitted" {
 		return nil
 	}
@@ -2610,9 +2629,10 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 
 // PullRequestReviewCommentEvent represents a GitHub pull_request_review_comment webhook event.
 type PullRequestReviewCommentEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 	} `json:"sender"`
 	Comment struct {
@@ -2623,7 +2643,15 @@ type PullRequestReviewCommentEvent struct {
 		Position            *int   `json:"position"`
 		User                struct {
 			Login string `json:"login"`
+			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		InReplyToID           *int64                     `json:"in_reply_to_id"`
+		Line                  *int                       `json:"line"`
+		Side                  string                     `json:"side"`
+		DiffHunk              string                     `json:"diff_hunk"`
+		CommitID              string                     `json:"commit_id"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	PullRequest struct {
 		Number int `json:"number"`
@@ -2640,6 +2668,20 @@ type PullRequestReviewCommentEvent struct {
 // HandlePullRequestReviewCommentEvent processes pull_request_review_comment webhook events.
 // These are inline comments on specific diff lines.
 func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, event PullRequestReviewCommentEvent) error {
+	if event.Action == "created" || event.Action == "edited" || event.Action == "deleted" {
+		rootID := event.Comment.ID
+		if event.Comment.InReplyToID != nil {
+			rootID = *event.Comment.InReplyToID
+		}
+		appID, appSlug := feedbackGitHubAppIdentity(event.Comment.PerformedViaGitHubApp)
+		body := event.Comment.Body
+		if event.Action == "deleted" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "created" {
 		return nil
 	}
@@ -2690,9 +2732,10 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 }
 
 type IssueCommentEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 	} `json:"sender"`
 	Comment struct {
@@ -2700,7 +2743,10 @@ type IssueCommentEvent struct {
 		Body string `json:"body"`
 		User struct {
 			Login string `json:"login"`
+			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	Issue struct {
 		Number      int       `json:"number"`
@@ -2712,7 +2758,58 @@ type IssueCommentEvent struct {
 	} `json:"repository"`
 }
 
+type PullRequestReviewThreadEvent struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Thread           struct {
+		Comments struct {
+			Nodes []struct {
+				DatabaseID int64 `json:"databaseId"`
+			} `json:"nodes"`
+		} `json:"comments"`
+	} `json:"thread"`
+	PullRequest struct {
+		Number int `json:"number"`
+	} `json:"pull_request"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+func (s *PRService) HandlePullRequestReviewThreadEvent(ctx context.Context, event PullRequestReviewThreadEvent) error {
+	if event.Action != "resolved" || s.feedback == nil || event.OwnerOrgID == nil || len(event.Thread.Comments.Nodes) == 0 {
+		return nil
+	}
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	repo, err := s.repos.GetByOrgAndGitHubIDAnyStatus(ctx, pr.OrgID, event.Repository.ID)
+	if err != nil {
+		return err
+	}
+	deliveryID := event.FeedbackMetadata.DeliveryID
+	delivery := &models.WebhookDelivery{OrgID: pr.OrgID, IntegrationID: repo.IntegrationID, Provider: "github", DeliveryID: &deliveryID, EventType: event.FeedbackMetadata.EventType, Payload: event.FeedbackMetadata.Payload, Headers: event.FeedbackMetadata.Headers, Status: "processed"}
+	_, err = s.feedback.CancelPendingThreadWithDelivery(ctx, delivery, pr.ID, event.Thread.Comments.Nodes[0].DatabaseID)
+	return err
+}
+
 func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueCommentEvent) error {
+	if (event.Action == "created" || event.Action == "edited" || event.Action == "deleted") && event.Issue.PullRequest != nil {
+		appID, appSlug := feedbackGitHubAppIdentity(event.Comment.PerformedViaGitHubApp)
+		body := event.Comment.Body
+		if event.Action == "deleted" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "created" || event.Issue.PullRequest == nil {
 		return nil
 	}

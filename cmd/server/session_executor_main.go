@@ -447,6 +447,7 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 		SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 		Previews:            db.NewPreviewStore(pool),
 		PullRequests:        deps.PullRequests,
+		PullRequestFeedback: db.NewPullRequestFeedbackStore(pool),
 		SlackInstallations:  db.NewSlackInstallationStore(pool),
 		SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
 		SlackBotSettings:    db.NewSlackBotSettingsStore(pool),

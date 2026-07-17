@@ -315,6 +315,9 @@ export const api = {
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
+    getFeedbackFollowThrough: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through`),
+    updateFeedbackFollowThrough: (id: string, monitoring: import('./types').PRFeedbackMonitoring) => patch<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through`, { monitoring }),
+    retryFeedbackBatch: (id: string, batchId: string) => post<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through/${batchId}/retry`, {}),
     fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
     resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),

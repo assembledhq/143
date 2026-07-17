@@ -138,6 +138,10 @@ func ReviewCommentPrompt() string {
 	return render("review_comment_prompt.template", nil)
 }
 
+func PRFeedbackTriagePrompt() string { return render("pr_feedback_triage.template", nil) }
+
+func PRFeedbackResponsePrompt() string { return render("pr_feedback_response.template", nil) }
+
 // ─── Agent ───────────────────────────────────────────────────────────────────
 
 // CodingTaskPreamble returns the preamble injected into coding agent system prompts

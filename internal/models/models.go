@@ -1088,6 +1088,9 @@ const (
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 	JobTypeRestackChangesets             = "restack_changesets"
 	JobTypePublishChangesetStack         = "publish_changeset_stack"
+	JobTypeCollectPullRequestFeedback    = "collect_pull_request_feedback"
+	JobTypePublishPRFeedbackResponses    = "publish_pull_request_feedback_responses"
+	JobTypeReconcilePullRequestFeedback  = "reconcile_pull_request_feedback"
 )
 
 // Job represents an async work queue item.
