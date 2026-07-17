@@ -127,6 +127,80 @@ describe("useDebouncedTextField", () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
+  it("never commits a rejected value and doesn't advance lastSent", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 30,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    expect(result.current.value).toBe("");
+
+    // The debounce fires but the rejected empty value is never committed and,
+    // critically, lastSent is not poisoned to "".
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("reverts a rejected value to the last committed value on blur", () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 5_000,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    expect(result.current.value).toBe("");
+
+    act(() => {
+      result.current.onBlur();
+    });
+
+    // Blur snaps the required field back to the last saved value instead of
+    // leaving it blank, and never commits the empty value.
+    expect(result.current.value).toBe("Weekly audit");
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("still commits a valid value after a rejected one was reverted", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 30,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    act(() => {
+      result.current.onBlur();
+    });
+    expect(result.current.value).toBe("Weekly audit");
+
+    act(() => {
+      result.current.onChange("Release audit");
+    });
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    expect(onCommit).toHaveBeenCalledWith("Release audit");
+  });
+
   it("uses the latest onCommit closure at fire time", async () => {
     const first: Mock<(value: string) => void> = vi.fn();
     const second: Mock<(value: string) => void> = vi.fn();
