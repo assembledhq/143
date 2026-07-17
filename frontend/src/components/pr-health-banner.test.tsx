@@ -358,9 +358,9 @@ describe("PRHealthBanner", () => {
     const actionGroup = moreActions.closest("[data-slot='button-group']");
     expect(actionGroup).toHaveAttribute("data-size", "xs");
     expect(mergeAction).toHaveAttribute("data-size", "xs");
-    expect(mergeAction).toHaveClass("h-10", "sm:h-6");
+    expect(mergeAction).toHaveClass("h-10", "sm:h-6", "shadow-none");
     expect(moreActions).toHaveAttribute("data-size", "icon-xs");
-    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none");
+    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none", "shadow-none");
     expect(moreActions).not.toHaveClass("h-7", "w-7");
 
     await userEvent.setup().click(moreActions);
