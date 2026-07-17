@@ -1090,6 +1090,7 @@ type ContinueSessionOptions struct {
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
+	PRFeedback           *PRFeedbackContinueOptions
 	HumanInputRequestID  *uuid.UUID
 	QueuedMessageID      *int64
 	ChangesetID          *uuid.UUID
@@ -1119,6 +1120,18 @@ type PRRepairContinueOptions struct {
 	HealthVersion     int64
 	HeadSHA           string
 	WorkspaceMode     models.PullRequestRepairWorkspaceMode
+}
+
+// PRFeedbackContinueOptions identifies an automatic feedback-follow-through
+// turn. It is deliberately distinct from repair commands so feedback jobs
+// cannot accidentally inherit repair command semantics or user-message input.
+type PRFeedbackContinueOptions struct {
+	BatchID           uuid.UUID
+	PullRequestID     uuid.UUID
+	PullRequestNumber int
+	HeadSHA           string
+	WorkspaceMode     models.PRFeedbackWorkspaceMode
+	StructuredPrompt  string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -3684,6 +3697,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	prRepairOpts := (*PRRepairContinueOptions)(nil)
 	if opts != nil && opts.PRRepair != nil {
 		prRepairOpts = opts.PRRepair
+	} else if opts != nil && opts.PRFeedback != nil {
+		// Feedback uses the same verified PR-head checkout primitive as repair,
+		// but keeps its own typed execution identity throughout the worker and
+		// prompt path.
+		prRepairOpts = &PRRepairContinueOptions{
+			PullRequestID:     opts.PRFeedback.PullRequestID,
+			PullRequestNumber: opts.PRFeedback.PullRequestNumber,
+			HeadSHA:           opts.PRFeedback.HeadSHA,
+			WorkspaceMode:     models.PullRequestRepairWorkspaceMode(opts.PRFeedback.WorkspaceMode),
+		}
 	}
 	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
 
@@ -3865,6 +3888,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
 		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+	}
+	if opts != nil && opts.PRFeedback != nil {
+		if strings.TrimSpace(opts.PRFeedback.StructuredPrompt) == "" {
+			o.failRun(ctx, session, "PR feedback continuation prompt is empty")
+			return errors.New("PR feedback continuation prompt is empty")
+		}
+		userMessage = opts.PRFeedback.StructuredPrompt
 	}
 
 	var humanInputAnswer *HumanInputAnswer
@@ -4195,6 +4225,12 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
+	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
+	if restrictedPRFeedback {
+		// The control plane owns pushes, comments, and review-thread mutations.
+		// Do not expose integration tools to the feedback execution sandbox.
+		integrationSkills = ""
+	}
 	var authState *sandboxGitHubAuthState
 	var authErr error
 	// continueTargetBranch is the resolved target branch (repo default,
@@ -4266,7 +4302,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			fallbackToken = token
 		}
 		repoCopy := repo
-		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
+		if !restrictedPRFeedback {
+			authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
+		}
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
 			o.cleanupContinueSessionStartupFailure(

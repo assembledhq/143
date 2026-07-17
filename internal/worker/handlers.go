@@ -434,6 +434,9 @@ type DataRetentionConfig struct {
 // RegisterHandlers registers all job handlers on the worker.
 func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCfg DataRetentionConfig, logger zerolog.Logger) {
 	w.Register("ingest_webhook", newIngestWebhookHandler(stores, logger))
+	if stores != nil && stores.PullRequestFeedback != nil {
+		w.Register(models.JobTypeCollectPullRequestFeedback, newCollectPullRequestFeedbackHandler(stores, services, logger))
+	}
 	w.Register("sync_sentry", newSyncSentryHandler(stores, logger))
 	w.Register("sync_slack", newSyncSlackHandler(stores, services, logger))
 	w.Register("slack_start_or_continue_session", newSlackStartOrContinueSessionHandler(stores, services, logger))
@@ -544,6 +547,48 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 }
 
+type collectPullRequestFeedbackPayload struct {
+	OrgID         uuid.UUID `json:"org_id"`
+	PullRequestID uuid.UUID `json:"pull_request_id"`
+}
+
+// newCollectPullRequestFeedbackHandler is the durable shadow-mode boundary for
+// feedback ingestion. Until policy/triage is wired, it deliberately leaves
+// items pending: claiming them here would strand work in an active batch or
+// bypass the rollout kill switch. Reconciliation and later webhook deliveries
+// can safely enqueue the same stable key again after this job completes.
+func newCollectPullRequestFeedbackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
+	return func(ctx context.Context, _ string, payload json.RawMessage) error {
+		var input collectPullRequestFeedbackPayload
+		if err := json.Unmarshal(payload, &input); err != nil {
+			return fmt.Errorf("unmarshal collect PR feedback payload: %w", err)
+		}
+		if input.OrgID == uuid.Nil || input.PullRequestID == uuid.Nil {
+			return errors.New("collect PR feedback requires org_id and pull_request_id")
+		}
+		if stores == nil || stores.PullRequestFeedback == nil {
+			return errors.New("PR feedback store is unavailable")
+		}
+		if services != nil && services.PR != nil {
+			triager, ok := services.PR.(prFeedbackTriager)
+			if !ok {
+				return errors.New("PR feedback triage service is unavailable")
+			}
+			summary, triageErr := triager.TriagePendingPullRequestFeedback(ctx, input.OrgID, input.PullRequestID)
+			if triageErr != nil {
+				return fmt.Errorf("triage pending PR feedback: %w", triageErr)
+			}
+			logger.Info().Str("org_id", input.OrgID.String()).Str("pull_request_id", input.PullRequestID.String()).Int("eligible_count", summary.Eligible).Int("ignored_count", summary.Ignored).Int("untriaged_count", summary.Pending).Msg("PR feedback shadow triage completed")
+		}
+		pending, needsAttention, err := stores.PullRequestFeedback.CountItemsByState(ctx, input.OrgID, input.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("inspect pending PR feedback: %w", err)
+		}
+		logger.Info().Str("org_id", input.OrgID.String()).Str("pull_request_id", input.PullRequestID.String()).Int("pending_count", pending).Int("needs_attention_count", needsAttention).Msg("PR feedback captured in shadow mode")
+		return nil
+	}
+}
+
 func hasServiceHandlersDependencies(services *Services) bool {
 	if services == nil {
 		return false
@@ -593,6 +638,7 @@ type Stores struct {
 	SessionIssueLinks   *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
 	Previews            *db.PreviewStore
 	PullRequests        *db.PullRequestStore
+	PullRequestFeedback *db.PullRequestFeedbackStore
 	SlackInstallations  *db.SlackInstallationStore
 	SlackOrgSelections  *db.SlackOrgSelectionStore
 	SlackBotSettings    *db.SlackBotSettingsStore
@@ -726,6 +772,10 @@ type prCreator interface {
 	// shutdown path so a worker exit doesn't strand sessions with the
 	// pending key set forever.
 	WaitForPostPRSnapshotUploads()
+}
+
+type prFeedbackTriager interface {
+	TriagePendingPullRequestFeedback(ctx context.Context, orgID, pullRequestID uuid.UUID) (ghservice.PRFeedbackTriageSummary, error)
 }
 
 type codeReviewSubmitter interface {
@@ -9401,6 +9451,8 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			ChangesetID            string `json:"changeset_id"`
 			ChangesetLeaseHolderID string `json:"changeset_lease_holder_id"`
 			PullRequestID          string `json:"pull_request_id"`
+			FeedbackBatchID        string `json:"feedback_batch_id"`
+			StructuredPrompt       string `json:"structured_prompt"`
 			RepairRunID            string `json:"repair_run_id"`
 			CommandType            string `json:"command_type"`
 			HealthVersion          int64  `json:"health_version"`
@@ -9496,6 +9548,9 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 		// short-circuited before completing a turn (cancel, policy stop) so
 		// we fall back to the status-only completion path.
 		var lastTurnResult *agent.AgentResult
+		if input.CommandType != "" && input.FeedbackBatchID != "" {
+			return errors.New("continue_session cannot be both PR repair and PR feedback")
+		}
 		if input.CommandType != "" {
 			prID, parseErr := uuid.Parse(input.PullRequestID)
 			if parseErr != nil {
@@ -9528,6 +9583,38 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					HealthVersion:     input.HealthVersion,
 					HeadSHA:           input.HeadSHA,
 					WorkspaceMode:     mode,
+				},
+			}
+		} else if input.FeedbackBatchID != "" {
+			batchID, parseErr := uuid.Parse(input.FeedbackBatchID)
+			if parseErr != nil {
+				return fmt.Errorf("parse feedback batch ID: %w", parseErr)
+			}
+			prID, parseErr := uuid.Parse(input.PullRequestID)
+			if parseErr != nil {
+				return fmt.Errorf("parse pull request ID: %w", parseErr)
+			}
+			mode := models.PRFeedbackWorkspaceMode(input.WorkspaceMode)
+			if mode == "" {
+				mode = models.PRFeedbackWorkspaceModePRHeadReconstruction
+			}
+			if err := mode.Validate(); err != nil {
+				return err
+			}
+			if strings.TrimSpace(input.HeadSHA) == "" {
+				return errors.New("PR feedback continuation requires head_sha")
+			}
+			if strings.TrimSpace(input.StructuredPrompt) == "" {
+				return errors.New("PR feedback continuation requires structured_prompt")
+			}
+			continueOpts = &agent.ContinueSessionOptions{
+				PRFeedback: &agent.PRFeedbackContinueOptions{
+					BatchID:           batchID,
+					PullRequestID:     prID,
+					PullRequestNumber: input.PullRequestNumber,
+					HeadSHA:           input.HeadSHA,
+					WorkspaceMode:     mode,
+					StructuredPrompt:  input.StructuredPrompt,
 				},
 			}
 		}
@@ -9580,12 +9667,13 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 				}
 				if continueOpts != nil {
 					threadOpts.PRRepair = continueOpts.PRRepair
+					threadOpts.PRFeedback = continueOpts.PRFeedback
 				}
 				continueOpts = threadOpts
 			}
 		}
-		isPRRepairContinuation := continueOpts != nil && continueOpts.PRRepair != nil
-		if humanInputRequestID == nil && queuedMessageID != nil && !isPRRepairContinuation {
+		isSystemContinuation := continueOpts != nil && (continueOpts.PRRepair != nil || continueOpts.PRFeedback != nil)
+		if humanInputRequestID == nil && queuedMessageID != nil && !isSystemContinuation {
 			answeredID, answerErr := answerQueuedHumanInputForContinue(ctx, stores, orgID, sessionID, threadID, hasThread, *queuedMessageID, logger)
 			if answerErr != nil {
 				return answerErr
@@ -9846,6 +9934,25 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 			}
 			if recordErr := stores.SessionChangesets.RecordLocalHead(ctx, orgID, sessionID, targetChangeset.ID, captured.HeadSHA, captured.Diff); recordErr != nil {
 				return fmt.Errorf("record targeted changeset turn: %w", recordErr)
+			}
+		}
+		if continueOpts != nil && continueOpts.PRFeedback != nil {
+			if stores.PullRequestFeedback == nil {
+				return errors.New("PR feedback store unavailable after continuation")
+			}
+			if lastTurnResult == nil {
+				return errors.New("PR feedback continuation completed without an agent result")
+			}
+			next := models.PRFeedbackBatchStatusResponding
+			if strings.TrimSpace(lastTurnResult.Diff) != "" {
+				next = models.PRFeedbackBatchStatusPushing
+			}
+			updated, completionErr := stores.PullRequestFeedback.CompleteAgent(ctx, orgID, continueOpts.PRFeedback.BatchID, lastTurnResult.Summary, nil, next)
+			if completionErr != nil {
+				return completionErr
+			}
+			if !updated {
+				return fmt.Errorf("PR feedback batch %s is no longer running", continueOpts.PRFeedback.BatchID)
 			}
 		}
 
