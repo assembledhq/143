@@ -127,8 +127,92 @@ func TestPRServiceReconcileSessionPublicationDefersCompletionWhenLocalCheckpoint
 	}
 
 	err = service.reconcileSessionPublication(context.Background(), publication)
-	require.ErrorContains(t, err, "update already-recorded publication session status", "reconciliation should remain retryable when a required local checkpoint fails")
+	require.ErrorContains(t, err, "update reconciled publication session status", "reconciliation should remain retryable when a required local checkpoint fails")
 	require.NoError(t, mock.ExpectationsWereMet(), "failed local convergence must not write the terminal publication checkpoint")
+}
+
+func TestPRServiceReconcileSessionPublicationRequiresRecoveredHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	prRow := newPRTestRow(uuid.New(), &sessionID, orgID, "assembledhq/143", now, nil)
+	mock.ExpectQuery("SELECT .+FROM pull_requests.+changeset_id = @changeset_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		State: models.SessionPublicationStateRequested, GitHubPRNumber: ptrInt(42),
+	}
+
+	err = service.reconcileSessionPublication(context.Background(), publication)
+	require.ErrorContains(t, err, "missing its head SHA", "reconciliation should remain retryable until the required head checkpoint can be recovered")
+	require.NoError(t, mock.ExpectationsWereMet(), "missing head state must not write any terminal publication checkpoints")
+}
+
+func TestPRServiceReconcileSessionPublicationAppliesClosedLifecycle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	prRow := newPRTestRow(prID, &sessionID, orgID, "assembledhq/143", now, nil)
+	prRow[8] = models.PullRequestStatusClosed
+	prRow[12] = &headSHA
+	mock.ExpectQuery("SELECT .+FROM pull_requests.+changeset_id = @changeset_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}).
+		WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.SessionPublicationStateRecorded, "error_code": (*string)(nil), "error_message": (*string)(nil), "completed": false,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"head_sha": headSHA, "status": models.ChangesetStatusPROpen,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE sessions SET status").
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID, "status": string(models.SessionStatusPRCreated)}).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)...))
+	mock.ExpectExec("UPDATE pull_requests SET status").WithArgs(pgx.NamedArgs{
+		"id": prID, "org_id": orgID, "status": models.PullRequestStatusClosed,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.SessionPublicationStateCompleted, "error_code": (*string)(nil), "error_message": (*string)(nil), "completed": true,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	service := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		logger:       zerolog.New(io.Discard),
+	}
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		State: models.SessionPublicationStateRecorded, GitHubPRNumber: ptrInt(42),
+	}
+
+	err = service.reconcileSessionPublication(context.Background(), publication)
+	require.NoError(t, err, "reconciliation should apply the closed PR lifecycle before completing the publication")
+	require.NoError(t, mock.ExpectationsWereMet(), "closed PR recovery should checkpoint local state, apply the terminal transition, and then complete")
 }
 
 func TestPRServiceReconcileSessionPublicationsRotatesErroredCandidate(t *testing.T) {

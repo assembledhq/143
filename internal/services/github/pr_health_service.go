@@ -686,28 +686,7 @@ func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid
 
 func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
 	if existing, err := s.pullRequests.GetByChangesetID(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err == nil {
-		if existing.HeadSHA != nil && strings.TrimSpace(*existing.HeadSHA) != "" {
-			if err := s.publications.RecordBranchPublished(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, *existing.HeadSHA); err != nil {
-				return err
-			}
-		}
-		if publication.GitHubPRNumber == nil || *publication.GitHubPRNumber != existing.GitHubPRNumber {
-			if err := s.publications.RecordPRResolved(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, existing.GitHubPRNumber, existing.GitHubPRURL); err != nil {
-				return err
-			}
-		}
-		if err := s.publications.MarkRecorded(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
-			return err
-		}
-		if existing.HeadSHA != nil && strings.TrimSpace(*existing.HeadSHA) != "" {
-			if err := s.changesets.RecordPublishedHead(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, *existing.HeadSHA, true); err != nil {
-				return fmt.Errorf("update reconciled publication changeset: %w", err)
-			}
-		}
-		if err := s.sessions.UpdateStatus(ctx, publication.OrgID, publication.SessionID, models.SessionStatusPRCreated); err != nil {
-			return fmt.Errorf("update already-recorded publication session status: %w", err)
-		}
-		if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		if err := s.completeReconciledSessionPublication(ctx, publication, existing, ""); err != nil {
 			return err
 		}
 		metrics.RecordSessionPublicationReconciliation(ctx, "already_recorded")
@@ -789,22 +768,7 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 	if err := s.pullRequests.AssociateGitHubPullRequest(ctx, publication.OrgID, &pr); err != nil {
 		return err
 	}
-	if err := s.publications.RecordBranchPublished(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA); err != nil {
-		return err
-	}
-	if err := s.publications.RecordPRResolved(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, details.Number, details.HTMLURL); err != nil {
-		return err
-	}
-	if err := s.publications.MarkRecorded(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
-		return err
-	}
-	if err := s.changesets.RecordPublishedHead(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA, true); err != nil {
-		return fmt.Errorf("update adopted publication changeset: %w", err)
-	}
-	if err := s.sessions.UpdateStatus(ctx, publication.OrgID, publication.SessionID, models.SessionStatusPRCreated); err != nil {
-		return fmt.Errorf("update reconciled publication session status: %w", err)
-	}
-	if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+	if err := s.completeReconciledSessionPublication(ctx, publication, pr, details.MergeCommitSHA); err != nil {
 		return err
 	}
 	s.logger.Info().
@@ -813,6 +777,60 @@ func (s *PRService) reconcileSessionPublication(ctx context.Context, publication
 		Int("pr_number", details.Number).
 		Msg("reconciled durable session publication")
 	metrics.RecordSessionPublicationReconciliation(ctx, "adopted")
+	return nil
+}
+
+// completeReconciledSessionPublication applies every required local
+// checkpoint before making a durable publication terminal. Terminal GitHub
+// states must flow through the same lifecycle transition as webhooks and
+// health syncs so merged stacks, deploys, previews, and external issue state
+// converge even when the original webhook was missed.
+func (s *PRService) completeReconciledSessionPublication(
+	ctx context.Context,
+	publication models.SessionPublication,
+	pr models.PullRequest,
+	mergeCommitSHA string,
+) error {
+	headSHA := strings.TrimSpace(stringValue(pr.HeadSHA))
+	if headSHA == "" {
+		return errors.New("reconciled pull request is missing its head SHA")
+	}
+	if err := s.publications.RecordBranchPublished(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA); err != nil {
+		return err
+	}
+	if publication.GitHubPRNumber == nil || *publication.GitHubPRNumber != pr.GitHubPRNumber {
+		if err := s.publications.RecordPRResolved(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, pr.GitHubPRNumber, pr.GitHubPRURL); err != nil {
+			return err
+		}
+	}
+	if err := s.publications.MarkRecorded(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		return err
+	}
+	if err := s.changesets.RecordPublishedHead(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA, true); err != nil {
+		return fmt.Errorf("update reconciled publication changeset: %w", err)
+	}
+	if err := s.sessions.UpdateStatus(ctx, publication.OrgID, publication.SessionID, models.SessionStatusPRCreated); err != nil {
+		return fmt.Errorf("update reconciled publication session status: %w", err)
+	}
+
+	switch pr.Status {
+	case models.PullRequestStatusOpen:
+		// The ordinary open-PR checkpoints above are the complete lifecycle.
+	case models.PullRequestStatusMerged:
+		if err := s.applyClosedPRTransition(ctx, pr, true, mergeCommitSHA, headSHA); err != nil {
+			return fmt.Errorf("apply reconciled merged pull request transition: %w", err)
+		}
+	case models.PullRequestStatusClosed:
+		if err := s.applyClosedPRTransition(ctx, pr, false, "", headSHA); err != nil {
+			return fmt.Errorf("apply reconciled closed pull request transition: %w", err)
+		}
+	default:
+		return fmt.Errorf("reconciled pull request has unsupported status %q", pr.Status)
+	}
+
+	if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		return err
+	}
 	return nil
 }
 
