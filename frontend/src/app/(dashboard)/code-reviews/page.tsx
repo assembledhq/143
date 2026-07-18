@@ -29,25 +29,10 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -85,6 +70,7 @@ import type {
   CodeReviewSessionStatus,
   ListResponse,
   OrgSettings,
+  Repository,
   SingleResponse,
 } from "@/lib/types";
 
@@ -94,14 +80,7 @@ const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
 const AUTOMATICALLY_APPROVED = "automatically_approved" satisfies CodeReviewListOutcome;
 const COMPLETED_NOT_APPROVED = "completed_not_approved" satisfies CodeReviewListOutcome;
-const OUTCOME_FILTER_VALUES = [
-  ALL_OUTCOMES,
-  AUTOMATICALLY_APPROVED,
-  COMPLETED_NOT_APPROVED,
-  "needs_human_review",
-  "comment_only",
-  "blocked",
-] as const;
+const OUTCOME_FILTER_VALUES = [ALL_OUTCOMES, AUTOMATICALLY_APPROVED, COMPLETED_NOT_APPROVED, "needs_human_review", "comment_only", "blocked"] as const;
 type OutcomeFilter = (typeof OUTCOME_FILTER_VALUES)[number];
 const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
@@ -121,18 +100,27 @@ type DescriptionRequirement = CodeReviewPolicyConfig["description_policy"]["requ
 type DescriptionApplicability = NonNullable<DescriptionRequirement["applies_when"]>;
 const QUALITY_GATE_DESCRIPTIONS = {
   requirePassingChecks:
-    "Blocks approval until the PR's required GitHub checks are passing. The reviewer can still leave comments, but it will not approve failing or pending builds.",
+    "Blocks approval until the PR's required GitHub checks are passing. When off, checks do not independently block approval; reviews can still leave comments either way.",
   excludeSensitivePaths:
-    "Treats changes matching sensitive paths as blocking approval. Use this for migrations, auth, billing, and other areas that need a human review.",
+    "Treats changes matching sensitive paths as blocking approval. When off, sensitive-path matches do not independently require human review.",
   requireUpToDate:
-    "Requires the PR branch to be current with its base branch before approval. This prevents approving a stale diff when newer base changes may affect the result.",
+    "Requires the PR branch to be current with its base branch before approval. When off, branch freshness does not independently block approval.",
   allowPolicyChanges:
-    "Allows the bot to approve PRs that modify review policy or automation configuration. Leave this off when those changes should always require a human reviewer.",
+    "Allows approval of PRs that modify review policy or automation configuration. The safer default is off, which always requires a human for those changes.",
   disagreementBlocks:
-    "Blocks approval when reviewer agents disagree on whether the PR is acceptable. This makes uncertain reviews resolve to a human decision instead of an approval.",
-  allowForks:
-    "Allows approval decisions for PRs opened from forks. Turn this off when forked PRs should be comment-only because they run with less trusted context.",
+    "Blocks approval when reviewer agents disagree. When off, disagreement is still visible but does not independently veto approval unless another safeguard does.",
+  allowForks: "Allows approval decisions for PRs opened from forks. The safer default is off, which keeps forked PRs comment-only.",
 } as const;
+const NUMBER_POLICY_DESCRIPTIONS: Record<string, string> = {
+  "Files changed": "Maximum number of changed files eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
+  "Lines changed": "Maximum total changed lines eligible for automatic approval. Reviews still leave comments above this deterministic limit.",
+  "Inline comments":
+    "Maximum inline findings posted to GitHub. Extra findings remain in review evidence; this limit does not make a pull request eligible for approval.",
+  "Reviewer quorum":
+    "Minimum configured reviewer agents that must return usable results before automatic approval is eligible. It cannot exceed the reviewer count.",
+  "Files changed at least": "Minimum changed-file count that makes this structured PR-description check apply. The default remains in effect until changed.",
+  "Lines changed at least": "Minimum changed-line count that makes this structured PR-description check apply. The default remains in effect until changed.",
+};
 
 function formatDate(value?: string): string {
   if (!value) return "-";
@@ -341,15 +329,10 @@ export default function CodeReviewsPage() {
     () => ({
       repository_id: repositoryId,
       decision:
-        outcomeFilter !== ALL_OUTCOMES &&
-        outcomeFilter !== AUTOMATICALLY_APPROVED &&
-        outcomeFilter !== COMPLETED_NOT_APPROVED
+        outcomeFilter !== ALL_OUTCOMES && outcomeFilter !== AUTOMATICALLY_APPROVED && outcomeFilter !== COMPLETED_NOT_APPROVED
           ? (outcomeFilter as CodeReviewDecision)
           : undefined,
-      outcome:
-        outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED
-          ? (outcomeFilter as CodeReviewListOutcome)
-          : undefined,
+      outcome: outcomeFilter === AUTOMATICALLY_APPROVED || outcomeFilter === COMPLETED_NOT_APPROVED ? (outcomeFilter as CodeReviewListOutcome) : undefined,
       risk: riskFilter === ALL_RISKS ? undefined : (riskFilter as "acceptable" | "needs_review"),
       status: statusFilter === ALL_STATUSES ? undefined : (statusFilter as CodeReviewSessionStatus),
       search: search.trim() || undefined,
@@ -383,7 +366,9 @@ export default function CodeReviewsPage() {
     if (invalidateTimerRef.current) return;
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.lists() });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.codeReviews.lists(),
+      });
     }, pollMs(CODE_REVIEW_INVALIDATE_COALESCE_MS));
   }, [queryClient]);
   useEffect(
@@ -446,12 +431,17 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     mutationFn: async (next: CodeReviewPolicyConfig) => {
       try {
-        return await api.codeReviews.updatePolicy({ repository_id: repositoryId ?? null, config: next });
+        return await api.codeReviews.updatePolicy({
+          repository_id: repositoryId ?? null,
+          config: next,
+        });
       } finally {
         // Editing the org default cascades into repo-scoped resolved policies
         // cached under other keys, so invalidate the whole code-reviews
         // namespace (matches the prior manual save).
-        void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
+        void queryClient.invalidateQueries({
+          queryKey: queryKeys.codeReviews.all,
+        });
       }
     },
     applyOptimistic: applyCodeReviewPolicyOptimistic,
@@ -459,19 +449,21 @@ export default function CodeReviewsPage() {
     debounceMs: 0,
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
-    queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(
-      queryKeys.codeReviews.policy(repositoryId ?? null),
-    )?.data?.config ?? config;
+    queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy(repositoryId ?? null))?.data?.config ?? config;
   const setupGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.setupGitHubTrigger(targetRepositoryId),
     onSuccess: (_data, targetRepositoryId) => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
+      });
     },
   });
   const deleteGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.deleteGitHubTrigger(targetRepositoryId),
     onSuccess: (_data, targetRepositoryId) => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId) });
+      void queryClient.invalidateQueries({
+        queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
+      });
     },
   });
 
@@ -485,44 +477,24 @@ export default function CodeReviewsPage() {
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
-  const orgCodingCredentials = useMemo(
-    () => orgCodingCredentialsQuery.data?.data ?? [],
-    [orgCodingCredentialsQuery.data?.data],
-  );
+  const orgCodingCredentials = useMemo(() => orgCodingCredentialsQuery.data?.data ?? [], [orgCodingCredentialsQuery.data?.data]);
   const codeReviewResolvedCredentials = useMemo(
     () => pmUsableResolvedCredentials(resolvedCredentialsQuery.data?.data ?? []),
     [resolvedCredentialsQuery.data?.data],
   );
   const codeReviewModelGroups = useMemo(
     () =>
-      availableAgentModelGroups(
-        codeReviewResolvedCredentials,
-        codexAuthQuery.data?.data,
-        orgCodingCredentials,
-        orgSettings.default_agent_type || "codex",
-        { orgAgentConfig: orgSettings.agent_config },
-      ),
-    [
-      codeReviewResolvedCredentials,
-      codexAuthQuery.data?.data,
-      orgCodingCredentials,
-      orgSettings.default_agent_type,
-      orgSettings.agent_config,
-    ],
+      availableAgentModelGroups(codeReviewResolvedCredentials, codexAuthQuery.data?.data, orgCodingCredentials, orgSettings.default_agent_type || "codex", {
+        orgAgentConfig: orgSettings.agent_config,
+      }),
+    [codeReviewResolvedCredentials, codexAuthQuery.data?.data, orgCodingCredentials, orgSettings.default_agent_type, orgSettings.agent_config],
   );
-  const codeReviewOpenCodeAvailability = useOpenCodeAvailability(
-    orgCodingCredentials,
-    orgSettings.opencode_routing?.require_openrouter ?? false,
-  );
+  const codeReviewOpenCodeAvailability = useOpenCodeAvailability(orgCodingCredentials, orgSettings.opencode_routing?.require_openrouter ?? false);
   const editingRequirementIndex = useMemo(
-    () =>
-      editingRequirementKey && config
-        ? config.description_policy.requirements.findIndex((requirement) => requirement.key === editingRequirementKey)
-        : -1,
+    () => (editingRequirementKey && config ? config.description_policy.requirements.findIndex((requirement) => requirement.key === editingRequirementKey) : -1),
     [config, editingRequirementKey],
   );
-  const editingRequirement =
-    editingRequirementIndex >= 0 && config ? config.description_policy.requirements[editingRequirementIndex] : null;
+  const editingRequirement = editingRequirementIndex >= 0 && config ? config.description_policy.requirements[editingRequirementIndex] : null;
   const selectedTemplateAlreadyApplied = useMemo(() => {
     if (!selectedTemplate || !config) return false;
     return JSON.stringify(config) === JSON.stringify(selectedTemplate.config);
@@ -562,8 +534,9 @@ export default function CodeReviewsPage() {
   };
   const commitRequirementByKey = (
     key: string,
-    updater: (requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number]) =>
-      CodeReviewPolicyConfig["description_policy"]["requirements"][number],
+    updater: (
+      requirement: CodeReviewPolicyConfig["description_policy"]["requirements"][number],
+    ) => CodeReviewPolicyConfig["description_policy"]["requirements"][number],
   ) => {
     commitPolicy((next) => {
       const index = next.description_policy.requirements.findIndex((requirement) => requirement.key === key);
@@ -575,10 +548,7 @@ export default function CodeReviewsPage() {
   return (
     <main className="min-h-full bg-background">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8">
-        <PageHeader
-          title="Code reviews"
-          description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes."
-        />
+        <PageHeader title="Code reviews" description="Bot-requested PR reviews, acceptable-risk policy, and review outcomes." />
 
         <Tabs defaultValue="reviews" className="space-y-4">
           <TabsList>
@@ -644,18 +614,10 @@ export default function CodeReviewsPage() {
               </FilterSelect>
               <div className="flex flex-col gap-2">
                 <Label className="text-xs text-muted-foreground">Search</Label>
-                <Input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="PR, repo, or title"
-                  aria-label="Search code reviews"
-                />
+                <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="PR, repo, or title" aria-label="Search code reviews" />
               </div>
             </div>
-            <SectionGroup
-              title="Review activity"
-              description="Pull requests reviewed by the team policy and their current outcome."
-            >
+            <SectionGroup title="Review activity" description="Pull requests reviewed by the team policy and their current outcome.">
             {reviews.length === 0 ? (
               <EmptyState
                 icon={ClipboardCheck}
@@ -701,11 +663,7 @@ export default function CodeReviewsPage() {
                             <ReviewOutcome
                               review={review}
                               selected={selectedEvidenceSessionId === review.session_id}
-                              onToggleEvidence={() =>
-                                setSelectedEvidenceSessionId((current) =>
-                                  current === review.session_id ? null : review.session_id,
-                                )
-                              }
+                                  onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
                             />
                           </TableCell>
                           <TableCell>
@@ -729,24 +687,24 @@ export default function CodeReviewsPage() {
                 {reviews.map((review) => (
                   <ResourceRow
                     key={review.id}
-                    title={(
+                        title={
                       <span className="break-words text-sm">
                         <ReviewTitle review={review} />
                       </span>
-                    )}
-                    metadata={(
+                        }
+                        metadata={
                       <span>
                         {review.repository_name || review.github_repo} · {review.pull_request_author || "Unknown author"} · {review.head_sha.slice(0, 7)}
                       </span>
-                    )}
-                    status={(
-                      <StatusLabel
-                        label={reviewStatusLabel(review)}
-                        tone={reviewStatusTone(review.stale ? "stale" : review.status)}
-                        indicator={false}
-                      />
-                    )}
-                    detail={(
+                        }
+                        status={
+                          <StatusLabel
+                            label={reviewStatusLabel(review)}
+                            tone={reviewStatusTone(review.stale ? "stale" : review.status)}
+                            indicator={false}
+                          />
+                        }
+                        detail={
                       <div className="space-y-2">
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-foreground">
                           <StatusLabel
@@ -754,71 +712,65 @@ export default function CodeReviewsPage() {
                             tone={reviewRiskTone(review)}
                             indicator={false}
                           />
-                          <span>Completed {formatDate(review.completed_at)}</span>
-                        </div>
-                        <ReviewOutcome
-                          review={review}
-                          selected={selectedEvidenceSessionId === review.session_id}
-                          onToggleEvidence={() =>
-                            setSelectedEvidenceSessionId((current) =>
-                              current === review.session_id ? null : review.session_id,
-                            )
-                          }
-                        />
-                      </div>
-                    )}
-                    actions={(
-                      <ReviewActions review={review} />
-                    )}
-                    className="[&_[data-slot=resource-row-actions]]:ml-0"
+                              <span>Completed {formatDate(review.completed_at)}</span>
+                            </div>
+                            <ReviewOutcome
+                              review={review}
+                              selected={selectedEvidenceSessionId === review.session_id}
+                              onToggleEvidence={() => setSelectedEvidenceSessionId((current) => (current === review.session_id ? null : review.session_id))}
+                      />
+                    </div>
+                        }
+                        actions={<ReviewActions review={review} />}
+                        className="[&_[data-slot=resource-row-actions]]:ml-0"
+                      />
+                    ))}
+                  </Card>
+                  <CodeReviewEvidenceSheet
+                    review={selectedEvidenceReview}
+                    evidence={evidenceQuery.data?.data}
+                    isLoading={evidenceQuery.isLoading}
+                    error={evidenceQuery.error}
+                    onRetry={() => void evidenceQuery.refetch()}
+                    open={Boolean(selectedEvidenceReview)}
+                    onOpenChange={(open) => {
+                      if (!open) setSelectedEvidenceSessionId(null);
+                    }}
                   />
-                ))}
-              </Card>
-              <CodeReviewEvidenceSheet
-                review={selectedEvidenceReview}
-                evidence={evidenceQuery.data?.data}
-                isLoading={evidenceQuery.isLoading}
-                error={evidenceQuery.error}
-                onRetry={() => void evidenceQuery.refetch()}
-                open={Boolean(selectedEvidenceReview)}
-                onOpenChange={(open) => {
-                  if (!open) setSelectedEvidenceSessionId(null);
-                }}
-              />
-              </>
-            )}
+                </>
+              )}
             </SectionGroup>
           </TabsContent>
 
           <TabsContent value="config" className="space-y-4">
-            <div className="max-w-sm">
-              <FilterSelect label="Policy repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
-                <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
-                {repositories.map((repo) => (
-                  <SelectItem key={repo.id} value={repo.id}>
-                    {repo.full_name}
-                  </SelectItem>
-                ))}
-              </FilterSelect>
-            </div>
             <Card>
               <CardHeader className="space-y-1">
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>Review policy</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
-                <PolicyScopeHeader
+                <PolicyScopeBar
+                  value={repositoryFilter}
+                  onValueChange={setRepositoryFilter}
+                  repositories={repositories}
                   repositoryName={selectedRepository?.full_name}
                   repositorySelected={Boolean(repositoryId)}
                   source={policyQuery.data?.data.source}
                 />
               </CardHeader>
               <CardContent className="space-y-5">
-                <PolicySummary
-                  config={config}
-                  repositorySelected={Boolean(repositoryId)}
-                  githubTriggerStatus={githubTriggerQuery.data?.data?.status}
-                />
+                <PolicyBehaviorSection
+                      config={config}
+                  onChange={(outcome) =>
+                    commitPolicy((next) => {
+                      if (outcome === "disabled") next.enabled = false;
+                      else {
+                        next.enabled = true;
+                        next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
+                      }
+                    })
+                  }
+                    />
 
                 <GitHubTriggerPanel
                   repositorySelected={Boolean(repositoryId)}
@@ -828,36 +780,175 @@ export default function CodeReviewsPage() {
                   setupErrorMessage={apiErrorMessage(setupGitHubTrigger.error)}
                   setupPending={setupGitHubTrigger.isPending}
                   deletePending={deleteGitHubTrigger.isPending}
-                  onSetup={() => {
-                    if (!repositoryId) return;
-                    setupGitHubTrigger.mutate(repositoryId);
-                  }}
-                  onDelete={() => {
-                    if (!repositoryId) return;
-                    deleteGitHubTrigger.mutate(repositoryId);
-                  }}
+                  onSetup={() => repositoryId && setupGitHubTrigger.mutate(repositoryId)}
+                  onDelete={() => repositoryId && deleteGitHubTrigger.mutate(repositoryId)}
+                    />
+
+                <PolicySummary config={config} repositorySelected={Boolean(repositoryId)} githubTriggerStatus={githubTriggerQuery.data?.data?.status} />
+
+                <AdvancedPolicySettings
+                  selectedTemplateKey={selectedTemplateKey}
+                  setSelectedTemplateKey={setSelectedTemplateKey}
+                  templates={templates}
+                  selectedTemplate={selectedTemplate}
+                  selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
+                  config={config}
+                  readLatestConfig={readLatestConfig}
+                  setPendingTemplateApply={setPendingTemplateApply}
+                  autosave={autosave}
+                  buildConfig={buildConfig}
+                  commitPolicy={commitPolicy}
+                  codeReviewModelGroups={codeReviewModelGroups}
+                  codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
+                  setEditingRequirementKey={setEditingRequirementKey}
                 />
+              </CardContent>
+            </Card>
+            <DescriptionRequirementSheet
+              requirement={editingRequirement}
+              canDelete={(config?.description_policy.requirements.length ?? 0) > 1}
+              disabled={!config}
+              autosave={autosave}
+              buildConfig={buildConfig}
+              open={Boolean(editingRequirement)}
+              onOpenChange={(open) => {
+                if (!open) setEditingRequirementKey(null);
+              }}
+              onCommit={(updater) => {
+                if (!editingRequirementKey) return;
+                commitRequirementByKey(editingRequirementKey, updater);
+              }}
+              onDelete={() => {
+                if (!editingRequirementKey) return;
+                const key = editingRequirementKey;
+                commitPolicy((next) => {
+                  if (next.description_policy.requirements.length <= 1) return;
+                  next.description_policy.requirements = next.description_policy.requirements.filter((requirement) => requirement.key !== key);
+                });
+                setEditingRequirementKey(null);
+              }}
+            />
+          </TabsContent>
+        </Tabs>
+      </div>
+    </main>
+  );
+}
 
-                <div className="space-y-3">
-                  <div className="text-sm font-medium text-foreground">Outcome</div>
+function PolicyScopeBar({
+  value,
+  onValueChange,
+  repositories,
+  repositoryName,
+  repositorySelected,
+  source,
+}: {
+  value: string;
+  onValueChange: (value: string) => void;
+  repositories: Repository[];
+  repositoryName?: string;
+  repositorySelected: boolean;
+  source?: CodeReviewResolvedPolicy["source"];
+}) {
+  const scopePicker = (
+    <div className="w-full sm:max-w-sm">
+      <FilterSelect
+        label="Policy scope"
+        value={value}
+        onValueChange={onValueChange}
+        info="Chooses whether you are editing the organization default or one repository's effective policy. Repository policies inherit organization values unless a field is overridden."
+      >
+        <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
+        {repositories.map((repository) => (
+          <SelectItem key={repository.id} value={repository.id}>
+            {repository.full_name}
+          </SelectItem>
+        ))}
+      </FilterSelect>
+    </div>
+  );
 
-                  <OutcomeControl
-                    config={config}
-                    disabled={!config}
-                    onChange={(outcome) =>
-                      commitPolicy((next) => {
-                        if (outcome === "disabled") {
-                          next.enabled = false;
-                          return;
-                        }
-                        next.enabled = true;
-                        next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
-                      })
-                    }
-                  />
+  if (!repositorySelected) {
+    return (
+      <div className="space-y-2">
+        {scopePicker}
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span>Editing organization default. Repositories without an override inherit this policy.</span>
+          <SettingInfoTooltip
+            label="Organization default inheritance"
+            description="This policy supplies defaults to repositories without their own field-level overrides. Changing it can affect every inheriting repository."
+          />
+        </div>
+      </div>
+    );
+  }
 
+  const inherited = source !== "repository";
+  return (
+    <div className="space-y-2">
+      {scopePicker}
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+      <span>
+        Editing {repositoryName ?? "selected repository"} {inherited ? "inherited policy" : "override"}.
+      </span>
+      <Badge variant={inherited ? "outline" : "secondary"}>{inherited ? "Uses organization default" : "Repository override"}</Badge>
+        <SettingInfoTooltip
+          label="Repository policy inheritance"
+          description={
+            inherited
+              ? "This repository currently uses the organization policy without a local override. Editing a setting creates a field-level repository override."
+              : "This repository has local policy overrides. Fields without overrides continue to inherit organization defaults."
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+type CodeReviewPolicyTemplate = Awaited<ReturnType<typeof api.codeReviews.templates>>["data"][number];
+
+type AdvancedPolicySettingsProps = {
+  selectedTemplateKey: string;
+  setSelectedTemplateKey: (value: string) => void;
+  templates: CodeReviewPolicyTemplate[];
+  selectedTemplate?: CodeReviewPolicyTemplate;
+  selectedTemplateAlreadyApplied: boolean;
+  config: CodeReviewPolicyConfig | null;
+  readLatestConfig: () => CodeReviewPolicyConfig | null;
+  setPendingTemplateApply: (value: { key: string; title: string }) => void;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  buildConfig: (mutate: (next: CodeReviewPolicyConfig) => void) => CodeReviewPolicyConfig;
+  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
+  codeReviewModelGroups: AgentModelGroup[];
+  codeReviewOpenCodeAvailability: Map<string, OpenCodeModelAvailability>;
+  setEditingRequirementKey: (value: string) => void;
+};
+
+function AdvancedPolicySettings({
+  selectedTemplateKey,
+  setSelectedTemplateKey,
+  templates,
+  selectedTemplate,
+  selectedTemplateAlreadyApplied,
+  config,
+  readLatestConfig,
+  setPendingTemplateApply,
+  autosave,
+  buildConfig,
+  commitPolicy,
+  codeReviewModelGroups,
+  codeReviewOpenCodeAvailability,
+  setEditingRequirementKey,
+}: AdvancedPolicySettingsProps) {
+  return (
+                <AdvancedPolicyControls>
                   <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
-                    <FilterSelect label="Starter template" value={selectedTemplateKey} onValueChange={setSelectedTemplateKey}>
+                    <FilterSelect
+                      label="Advanced policy preset"
+                      value={selectedTemplateKey}
+                      onValueChange={setSelectedTemplateKey}
+                      info="Selects a whole-policy replacement covering safety controls, thresholds, and agent settings. No selection makes no change; applying a selection autosaves a new policy version."
+                    >
                       <SelectItem value={NO_TEMPLATE}>No template selected</SelectItem>
                       {templates.map((template) => (
                         <SelectItem key={template.key} value={template.key}>
@@ -865,32 +956,40 @@ export default function CodeReviewsPage() {
                         </SelectItem>
                       ))}
                     </FilterSelect>
-                    <Button
-                      variant="outline"
-                      disabled={!selectedTemplate || !config}
-                      onClick={() => {
-                        if (!selectedTemplate) return;
-                        const latestConfig = readLatestConfig();
-                        const alreadyApplied =
-                          selectedTemplateAlreadyApplied ||
-                          (latestConfig
-                            ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
-                            : false);
-                        if (alreadyApplied) {
-                          toast.info(`${selectedTemplate.title} is already applied`);
-                          return;
-                        }
-                        setPendingTemplateApply({
-                          key: selectedTemplate.key,
-                          title: selectedTemplate.title,
-                        });
-                        autosave.save(clonePolicy(selectedTemplate.config));
-                      }}
-                    >
-                      Apply template
-                    </Button>
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        disabled={!selectedTemplate || !config}
+                        onClick={() => {
+                          if (!selectedTemplate) return;
+                          const latestConfig = readLatestConfig();
+                          const alreadyApplied =
+                            selectedTemplateAlreadyApplied ||
+                            (latestConfig
+                              ? JSON.stringify(latestConfig) === JSON.stringify(selectedTemplate.config)
+                              : false);
+                          if (alreadyApplied) {
+                            toast.info(`${selectedTemplate.title} is already applied`);
+                            return;
+                          }
+                          setPendingTemplateApply({
+                            key: selectedTemplate.key,
+                            title: selectedTemplate.title,
+                          });
+                          autosave.save(clonePolicy(selectedTemplate.config));
+                        }}
+                      >
+                        Apply preset
+                      </Button>
+                      <SettingInfoTooltip
+                        label="Apply advanced policy preset"
+                        description="Replaces the complete effective policy with the selected preset and autosaves a new policy version. This changes safety controls, thresholds, and agent settings—not just visible text."
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground md:col-span-2">
+                      Applying a preset replaces safety controls, thresholds, and agent settings across the whole policy.
+                    </p>
                   </div>
-                </div>
 
                 <div className="space-y-3">
                   <div className="text-sm font-medium text-foreground">Fine-tuning</div>
@@ -924,6 +1023,12 @@ export default function CodeReviewsPage() {
                       />
                       <DurationInput
                         label="Timeout"
+                        labelAction={
+                          <SettingInfoTooltip
+                            label="Timeout"
+                            description="Maximum time reviewer agents may run before the review is treated as incomplete. The default remains active until changed, and a timeout prevents automatic approval when quorum cannot be reached."
+                          />
+                        }
                         valueSeconds={config?.agent_roster.timeout_seconds ?? 60}
                         minSeconds={60}
                         disabled={!config}
@@ -1064,7 +1169,7 @@ export default function CodeReviewsPage() {
                     />
                   </FineTuningSection>
 
-                  <FineTuningSection title="Description requirements" summary="PR description rules checked before approval">
+                  <FineTuningSection title="Structured PR-description checks" summary="PR description rules checked before approval">
                     <DescriptionRequirementsList
                       requirements={config?.description_policy.requirements ?? []}
                       disabled={!config}
@@ -1086,67 +1191,31 @@ export default function CodeReviewsPage() {
                   </FineTuningSection>
 
                 </div>
-              </CardContent>
-            </Card>
-            <DescriptionRequirementSheet
-              requirement={editingRequirement}
-              canDelete={(config?.description_policy.requirements.length ?? 0) > 1}
-              disabled={!config}
-              autosave={autosave}
-              buildConfig={buildConfig}
-              open={Boolean(editingRequirement)}
-              onOpenChange={(open) => {
-                if (!open) setEditingRequirementKey(null);
-              }}
-              onCommit={(updater) => {
-                if (!editingRequirementKey) return;
-                commitRequirementByKey(editingRequirementKey, updater);
-              }}
-              onDelete={() => {
-                if (!editingRequirementKey) return;
-                const key = editingRequirementKey;
-                commitPolicy((next) => {
-                  if (next.description_policy.requirements.length <= 1) return;
-                  next.description_policy.requirements = next.description_policy.requirements.filter(
-                    (requirement) => requirement.key !== key,
-                  );
-                });
-                setEditingRequirementKey(null);
-              }}
-            />
-          </TabsContent>
-
-        </Tabs>
-      </div>
-    </main>
+                </AdvancedPolicyControls>
   );
 }
 
-function PolicyScopeHeader({
-  repositoryName,
-  repositorySelected,
-  source,
-}: {
-  repositoryName?: string;
-  repositorySelected: boolean;
-  source?: CodeReviewResolvedPolicy["source"];
-}) {
-  if (!repositorySelected) {
-    return (
-      <p className="text-xs text-muted-foreground">
-        Editing organization default. Repositories without an override inherit this policy.
-      </p>
-    );
-  }
-
-  const inherited = source !== "repository";
+function AdvancedPolicyControls({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-      <span>
-        Editing {repositoryName ?? "selected repository"} {inherited ? "inherited policy" : "override"}.
-      </span>
-      <Badge variant={inherited ? "outline" : "secondary"}>{inherited ? "Uses organization default" : "Repository override"}</Badge>
+    <Collapsible open={open} onOpenChange={setOpen} className="rounded-md border border-border">
+      <div className="flex items-center gap-1 border-border pr-3">
+        <CollapsibleTrigger asChild>
+          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between rounded-md p-4 text-left" aria-label="Advanced controls">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-foreground">Advanced controls</span>
+              <span className="mt-0.5 block text-xs font-normal text-muted-foreground">Safety gates, paths, agents, limits, and structured checks</span>
+            </span>
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+          </Button>
+        </CollapsibleTrigger>
+        <SettingInfoTooltip
+          label="Advanced controls"
+          description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
+        />
     </div>
+      <CollapsibleContent className="space-y-4 border-t border-border p-4">{children}</CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -1165,28 +1234,23 @@ function PolicySummary({
   githubTriggerStatus?: CodeReviewGitHubTriggerResponse["status"];
 }) {
   if (!config) {
-    return (
-      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-        Loading review policy...
-      </div>
-    );
+    return <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">Loading review policy...</div>;
   }
 
   const outcome = policyOutcome(config);
   const reviewers = config.agent_roster.reviewers.length;
   const summaryItems = [
-    outcome === "disabled"
-      ? "Reviewer disabled"
-      : outcome === "approve"
-        ? "Approves acceptable PRs"
-        : "Comment-only reviews",
-    repositorySelected ? `GitHub reviewer ${githubTriggerStatusLabel(githubTriggerStatus ?? "unconfigured").toLowerCase()}` : "Select a repository for GitHub setup",
+    outcome === "disabled" ? "Reviews paused" : outcome === "approve" ? "Comments + eligible approval" : "Comments only",
+    repositorySelected
+      ? `GitHub reviewer ${githubTriggerStatusLabel(githubTriggerStatus ?? "unconfigured").toLowerCase()}`
+      : "Select a repository for GitHub setup",
     `${reviewers} ${reviewers === 1 ? "reviewer" : "reviewers"}`,
     `quorum ${config.agent_roster.require_reviewer_quorum}`,
   ];
 
   if (config.risk_policy.require_passing_checks) summaryItems.push("passing checks required");
   if (config.agent_roster.disagreement_blocks) summaryItems.push("disagreement blocks approval");
+  if (config.risk_policy.exclude_sensitive_paths) summaryItems.push("sensitive paths need human review");
 
   return (
     <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
@@ -1202,6 +1266,23 @@ function PolicySummary({
   );
 }
 
+function PolicyBehaviorSection({
+  config,
+  onChange,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  onChange: (outcome: "disabled" | "comment" | "approve") => void;
+}) {
+  return (
+    <section className="space-y-3" aria-labelledby="review-behavior-heading">
+      <div id="review-behavior-heading" className="text-sm font-medium text-foreground">
+        Review behavior
+      </div>
+      <OutcomeControl config={config} disabled={!config} onChange={onChange} />
+    </section>
+  );
+}
+
 function OutcomeControl({
   config,
   disabled,
@@ -1213,15 +1294,10 @@ function OutcomeControl({
 }) {
   const selected = policyOutcome(config);
   const options: Array<{
-    value: "disabled" | "comment" | "approve";
+    value: "comment" | "approve";
     title: string;
     description: string;
   }> = [
-    {
-      value: "disabled",
-      title: "Disabled",
-      description: "Reviewer requests are acknowledged, but no review session starts.",
-    },
     {
       value: "comment",
       title: "Comment only",
@@ -1235,12 +1311,40 @@ function OutcomeControl({
   ];
 
   return (
-    <RadioGroup
-      value={selected}
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <Label htmlFor="code-reviews-enabled" className="text-sm text-foreground">
+              Code reviews enabled
+            </Label>
+            <SettingInfoTooltip
+              label="Code reviews enabled"
+              description="Controls whether GitHub reviewer requests start review sessions. The built-in default is on. Turning it off pauses new reviews and preserves the selected outcome for re-enablement."
+            />
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">Turn off to pause new review sessions without changing the selected outcome.</p>
+        </div>
+        <Switch
+          id="code-reviews-enabled"
+          checked={selected !== "disabled"}
       disabled={disabled}
-      aria-label="Outcome"
-      className="grid gap-3 md:grid-cols-3"
-      onValueChange={(value) => onChange(value as "disabled" | "comment" | "approve")}
+          onCheckedChange={(checked) => onChange(checked ? (config?.approval_mode === "approve_acceptable" ? "approve" : "comment") : "disabled")}
+        />
+      </div>
+      <div className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+        Review outcome
+        <SettingInfoTooltip
+          label="Review outcome"
+          description="Chooses whether enabled reviews only leave comments or may approve an acceptable pull request. The built-in default is comment-only, and every deterministic safeguard retains veto power."
+        />
+      </div>
+      <RadioGroup
+        value={config?.approval_mode === "approve_acceptable" ? "approve" : "comment"}
+        disabled={disabled || selected === "disabled"}
+        aria-label="Review outcome"
+        className="grid gap-3 md:grid-cols-2"
+        onValueChange={(value) => onChange(value as "comment" | "approve")}
     >
       {options.map((option) => (
         <Label key={option.value} className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3">
@@ -1252,6 +1356,12 @@ function OutcomeControl({
         </Label>
       ))}
     </RadioGroup>
+      {config?.approval_mode === "approve_acceptable" ? (
+        <p className="text-xs text-muted-foreground">
+          Automatic approval is eligible only when all hard safeguards pass; uncertain or blocked changes still require a human.
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -1295,17 +1405,20 @@ function GitHubTriggerPanel({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-sm font-medium text-foreground">GitHub reviewer menu option</div>
-            <Badge variant={githubTriggerStatusVariant(status)}>
-              {isLoading ? "Checking" : githubTriggerStatusLabel(status)}
-            </Badge>
+            <div className="text-sm font-medium text-foreground">GitHub reviewer</div>
+            <SettingInfoTooltip
+              label="GitHub reviewer"
+              description="Adds a repository reviewer in GitHub that starts 143 reviews when requested. When unconfigured, no GitHub reviewer request can start a review; organization policy remains stored but inactive for that repository trigger."
+            />
+            <Badge variant={githubTriggerStatusVariant(status)}>{isLoading ? "Checking" : githubTriggerStatusLabel(status)}</Badge>
+            {ready ? <span className="text-xs font-medium text-foreground">{reviewer}</span> : null}
           </div>
           <div className="mt-1 text-xs text-muted-foreground">
             {repositorySelected
               ? "People select this team from GitHub's Reviewers menu on a PR to start a 143 code review."
               : "Select a repository to set up the reviewer that appears in GitHub's Reviewers menu."}
           </div>
-          {repositorySelected ? (
+          {repositorySelected && !ready ? (
             <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
               <div className="rounded-md bg-muted/40 px-3 py-2">
                 <div className="text-muted-foreground">Menu reviewer</div>
@@ -1317,9 +1430,7 @@ function GitHubTriggerPanel({
               </div>
               <div className="rounded-md bg-muted/40 px-3 py-2">
                 <div className="text-muted-foreground">Team slug</div>
-                <div className="mt-1 truncate font-medium text-foreground">
-                  {trigger?.team_slug ?? "143-code-reviewer"}
-                </div>
+                <div className="mt-1 truncate font-medium text-foreground">{trigger?.team_slug ?? "143-code-reviewer"}</div>
               </div>
             </div>
           ) : null}
@@ -1345,29 +1456,49 @@ function GitHubTriggerPanel({
           ) : null}
           {!ready ? (
             <DisabledTooltip disabled={!!setupDisabledReason} content={setupDisabledReason}>
-              <Button
-                variant="default"
-                size="sm"
-                disabled={!!setupDisabledReason}
-                onClick={onSetup}
-              >
+              <Button variant="default" size="sm" disabled={!!setupDisabledReason} onClick={onSetup}>
                 <Users className="h-4 w-4" />
                 {needsRepair ? "Repair GitHub reviewer" : "Set up GitHub reviewer"}
               </Button>
             </DisabledTooltip>
           ) : null}
           {ready ? (
-            <Button variant="ghost" size="sm" disabled={setupPending || deletePending} onClick={onDelete}>
-              <PowerOff className="h-4 w-4" />
-              Disable
-            </Button>
+            <GitHubReviewerManage reviewer={reviewer} teamSlug={trigger?.team_slug} disabled={setupPending || deletePending} onDelete={onDelete} />
           ) : null}
-          {permissionRequired ? (
-            <Badge variant="destructive">Permission approval needed</Badge>
-          ) : null}
+          {permissionRequired ? <Badge variant="destructive">Permission approval needed</Badge> : null}
+        </div>
         </div>
       </div>
+  );
+}
+
+function GitHubReviewerManage({ reviewer, teamSlug, disabled, onDelete }: { reviewer: string; teamSlug?: string; disabled: boolean; onDelete: () => void }) {
+  return (
+    <Collapsible>
+      <CollapsibleTrigger asChild>
+        <Button variant="outline" size="sm">
+          Manage
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 w-[min(18rem,calc(100vw-2rem))] space-y-3 rounded-md border border-border bg-card p-3 text-xs">
+        <div>
+          <span className="text-muted-foreground">Reviewer</span>
+          <div className="font-medium text-foreground">{reviewer}</div>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Team slug</span>
+          <div className="font-medium text-foreground">{teamSlug ?? "143-code-reviewer"}</div>
+        </div>
+        <div>
+          <span className="text-muted-foreground">Repository access</span>
+          <div className="font-medium text-foreground">Read</div>
     </div>
+        <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={disabled} onClick={onDelete}>
+          <PowerOff className="h-4 w-4" />
+          Disable reviewer
+        </Button>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -1456,10 +1587,7 @@ function formatRequirementApplicability(requirement: DescriptionRequirement): st
   }
 }
 
-function appliesWhenForKind(
-  kind: CodeReviewDescriptionApplicabilityKind,
-  previous?: DescriptionApplicability,
-): DescriptionApplicability {
+function appliesWhenForKind(kind: CodeReviewDescriptionApplicabilityKind, previous?: DescriptionApplicability): DescriptionApplicability {
   switch (kind) {
     case "nontrivial":
       return {
@@ -1504,14 +1632,18 @@ function DescriptionRequirementsList({
       <div className="flex items-center justify-between gap-3">
         <div>
           <div className="text-sm font-medium text-foreground">Requirements</div>
-          <div className="mt-1 text-xs text-muted-foreground">
-            143 checks these items in the pull request description before approving.
-          </div>
+          <div className="mt-1 text-xs text-muted-foreground">143 checks these items in the pull request description before approving.</div>
         </div>
+        <div className="flex items-center gap-1.5">
         <Button variant="outline" size="sm" disabled={disabled} onClick={onAdd}>
           <Plus className="h-4 w-4" />
           Add requirement
         </Button>
+          <SettingInfoTooltip
+            label="Add structured PR-description check"
+            description="Adds another deterministic PR-description check. A required check can block automatic approval when its requested evidence is missing."
+          />
+        </div>
       </div>
       <div className="overflow-x-auto rounded-md border border-border">
         <Table>
@@ -1527,19 +1659,13 @@ function DescriptionRequirementsList({
             {requirements.map((requirement) => (
               <TableRow key={requirement.key}>
                 <TableCell>
-                  <Badge variant={requirement.required ? "success" : "outline"}>
-                    {requirement.required ? "On" : "Off"}
-                  </Badge>
+                  <Badge variant={requirement.required ? "success" : "outline"}>{requirement.required ? "On" : "Off"}</Badge>
                 </TableCell>
                 <TableCell>
                   <div className="font-medium text-foreground">{requirement.title || "Untitled requirement"}</div>
-                  {requirement.prompt ? (
-                    <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{requirement.prompt}</div>
-                  ) : null}
+                  {requirement.prompt ? <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{requirement.prompt}</div> : null}
                 </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  {formatRequirementApplicability(requirement)}
-                </TableCell>
+                <TableCell className="text-sm text-muted-foreground">{formatRequirementApplicability(requirement)}</TableCell>
                 <TableCell>
                   <div className="flex justify-end">
                     <Button
@@ -1589,15 +1715,16 @@ function DescriptionRequirementSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full sm:max-w-xl">
         <SheetHeader>
-          <SheetTitle>Edit description requirement</SheetTitle>
-          <SheetDescription>
-            Configure when this PR description requirement applies and what the reviewer checks.
-          </SheetDescription>
+          <SheetTitle>Edit structured PR-description check</SheetTitle>
+          <SheetDescription>Configure when this PR description requirement applies and what the reviewer checks.</SheetDescription>
         </SheetHeader>
         {requirement ? (
           <div className="mt-6 space-y-6">
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Title</Label>
+              <SettingLabel
+                label="Title"
+                info="Names this structured PR-description check. The title is shown in policy summaries and review evidence; leaving it blank makes the check harder to identify."
+              />
               <PolicyTextInput
                 serverValue={requirement.title}
                 disabled={disabled}
@@ -1608,10 +1735,17 @@ function DescriptionRequirementSheet({
 
             <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
               <div>
+                <div className="flex items-center gap-1.5">
                 <Label className="text-sm text-foreground">Required</Label>
+                  <SettingInfoTooltip
+                    label="Required description check"
+                    description="When on, missing evidence for this check prevents automatic approval. When off, the check remains advisory."
+                  />
+                </div>
                 <div className="mt-1 text-xs text-muted-foreground">Blocks approval when this item is missing.</div>
               </div>
               <Switch
+                aria-label="Required description check"
                 checked={requirement.required}
                 disabled={disabled}
                 onCheckedChange={(checked) => onCommit((current) => ({ ...current, required: checked }))}
@@ -1619,7 +1753,10 @@ function DescriptionRequirementSheet({
             </div>
 
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Applies to</Label>
+              <SettingLabel
+                label="Applies to"
+                info="Controls which pull requests receive this structured description check. The default applies it to every pull request."
+              />
               <Select
                 value={kind}
                 disabled={disabled}
@@ -1627,10 +1764,7 @@ function DescriptionRequirementSheet({
                   onCommit((current) => ({
                     ...current,
                     applicability: value,
-                    applies_when: appliesWhenForKind(
-                      value as CodeReviewDescriptionApplicabilityKind,
-                      current.applies_when,
-                    ),
+                    applies_when: appliesWhenForKind(value as CodeReviewDescriptionApplicabilityKind, current.applies_when),
                   }))
                 }
               >
@@ -1717,18 +1851,26 @@ function DescriptionRequirementSheet({
             {kind === "tests_changed" ? (
               <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2">
                 <div>
+                  <div className="flex items-center gap-1.5">
                   <Label className="text-sm text-foreground">Require changed test files</Label>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    Applies this rule only when the pull request changes test files.
+                    <SettingInfoTooltip
+                      label="Require changed test files"
+                      description="When on, this description check applies only when test files changed. Turning it off uses the broader tests-changed applicability rule."
+                    />
                   </div>
+                  <div className="mt-1 text-xs text-muted-foreground">Applies this rule only when the pull request changes test files.</div>
                 </div>
                 <Switch
+                  aria-label="Require changed test files"
                   checked={requirement.applies_when?.require_test_files_changed ?? true}
                   disabled={disabled}
                   onCheckedChange={(checked) =>
                     onCommit((current) => ({
                       ...current,
-                      applies_when: { kind: "tests_changed", require_test_files_changed: checked },
+                      applies_when: {
+                        kind: "tests_changed",
+                        require_test_files_changed: checked,
+                      },
                     }))
                   }
                 />
@@ -1736,27 +1878,33 @@ function DescriptionRequirementSheet({
             ) : null}
 
             <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">Reviewer instruction</Label>
+              <div className="flex items-center gap-1.5">
+                <Label className="text-xs text-muted-foreground">Description check instruction</Label>
+                <SettingInfoTooltip
+                  label="Description check instruction"
+                  description="Guides only this structured PR-description check. Leave empty to use the check title and applicability without extra instructions; it never changes general reviewer behavior or bypasses safeguards."
+                />
+              </div>
               <PolicyTextarea
                 serverValue={requirement.prompt}
                 disabled={disabled}
                 rows={5}
-                aria-label="Reviewer instruction"
+                aria-label="Description check instruction"
                 onCommit={(value) => onCommit((current) => ({ ...current, prompt: value }))}
               />
             </div>
 
             <div className="border-t border-border pt-4">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="text-destructive hover:text-destructive"
-                disabled={disabled || !canDelete}
-                onClick={onDelete}
-              >
+              <div className="flex items-center gap-1.5">
+                <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={disabled || !canDelete} onClick={onDelete}>
                 <Trash2 className="h-4 w-4" />
                 Delete requirement
               </Button>
+                <SettingInfoTooltip
+                  label="Delete structured PR-description check"
+                  description="Removes this check from the next policy version. Other structured checks and safeguards are unchanged."
+                />
+              </div>
             </div>
           </div>
         ) : null}
@@ -1767,18 +1915,23 @@ function DescriptionRequirementSheet({
 
 function FilterSelect({
   label,
+  info,
   value,
   onValueChange,
   children,
 }: {
   label: string;
+  info?: string;
   value: string;
   onValueChange: (value: string) => void;
   children: ReactNode;
 }) {
   return (
     <div className="flex min-w-0 flex-col gap-2">
+      <div className="flex items-center gap-1.5">
       <Label className="text-xs text-muted-foreground">{label}</Label>
+        {info ? <SettingInfoTooltip label={label} description={info} /> : null}
+      </div>
       <Select value={value} onValueChange={onValueChange}>
         <SelectTrigger aria-label={label}>
           <SelectValue />
@@ -1816,10 +1969,11 @@ function AgentRosterControls({
       <div className="space-y-3">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <Label className="text-xs text-muted-foreground">Reviewer models</Label>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Run one to three independent reviewers. Quorum stays in Approval criteria.
-            </p>
+            <SettingLabel
+              label="Reviewer models"
+              info="Selects one to three agents that independently review each pull request. At least one is required; the built-in roster remains until changed, and removing one may lower the maximum valid quorum."
+            />
+            <p className="mt-1 text-xs text-muted-foreground">Run one to three independent reviewers. Quorum stays in Approval criteria.</p>
           </div>
           <Button
             type="button"
@@ -1838,6 +1992,10 @@ function AgentRosterControls({
             <Plus className="mr-2 h-4 w-4" />
             Add
           </Button>
+          <SettingInfoTooltip
+            label="Add reviewer model"
+            description="Adds another independent reviewer agent, up to three. Automatic approval still requires the configured reviewer quorum."
+          />
         </div>
 
         <div className="space-y-2">
@@ -1845,6 +2003,7 @@ function AgentRosterControls({
             <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_auto]">
               <AgentModelSelect
                 ariaLabel={`Reviewer ${index + 1} model`}
+                infoDescription="Chooses the agent and model for this independent review slot. Each slot must have a selection; the current resolved default remains until changed and contributes to quorum and disagreement handling."
                 value={selectionValue(agent, reviewerModels[index] ?? defaultModelForAgent(agent, modelGroups))}
                 modelGroups={modelGroups}
                 openCodeAvailability={openCodeAvailability}
@@ -1889,12 +2048,11 @@ function AgentRosterControls({
       <div className="space-y-3">
         <div>
           <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Synthesizes reviewer evidence and decides the final review outcome.
-          </p>
+          <p className="mt-1 text-xs text-muted-foreground">Synthesizes reviewer evidence and decides the final review outcome.</p>
         </div>
         <AgentModelSelect
           ariaLabel="Orchestrator model"
+          infoDescription="Chooses the agent and model that combines reviewer evidence. A selection is required; the resolved default remains until changed, and its recommendation remains subject to every deterministic safeguard."
           value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
           modelGroups={modelGroups}
           openCodeAvailability={openCodeAvailability}
@@ -1922,6 +2080,7 @@ function AgentModelSelect({
   currentModel,
   disabled,
   ariaLabel,
+  infoDescription,
   onValueChange,
 }: {
   value: string;
@@ -1931,13 +2090,13 @@ function AgentModelSelect({
   currentModel?: string;
   disabled?: boolean;
   ariaLabel: string;
+  infoDescription: string;
   onValueChange: (value: string) => void;
 }) {
-  const currentValueAvailable = modelGroups.some((group) =>
-    group.models.some((model) => selectionValue(group.key, model) === value),
-  );
+  const currentValueAvailable = modelGroups.some((group) => group.models.some((model) => selectionValue(group.key, model) === value));
 
   return (
+    <div className="flex min-w-0 items-center gap-1.5">
     <Select value={value} onValueChange={onValueChange} disabled={disabled || modelGroups.length === 0}>
       <SelectTrigger aria-label={ariaLabel}>
         <SelectValue placeholder="Select model" />
@@ -1958,6 +2117,8 @@ function AgentModelSelect({
         />
       </SelectContent>
     </Select>
+      <SettingInfoTooltip label={ariaLabel} description={infoDescription} />
+    </div>
   );
 }
 
@@ -1986,7 +2147,13 @@ function NumberPolicyInput({
   });
   return (
     <div className="rounded-md border border-border p-4">
+      <div className="flex items-center gap-1.5">
       <Label className="text-xs text-muted-foreground">{label}</Label>
+        <SettingInfoTooltip
+          label={label}
+          description={NUMBER_POLICY_DESCRIPTIONS[label] ?? `${label} is a deterministic policy control. Its current default remains active until changed.`}
+        />
+      </div>
       <Input
         className="mt-2"
         type="number"
@@ -2019,26 +2186,41 @@ function PolicyToggle({
     <div className="flex min-w-0 items-center justify-between gap-3 py-2">
       <div className="flex min-w-0 items-center gap-1.5">
         <Label className="truncate text-sm text-foreground">{label}</Label>
-        <TooltipProvider delayDuration={150}>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-5 w-5 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
-                aria-label={`About ${label}`}
-              >
-                <CircleHelp className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" sideOffset={6} className="max-w-72 leading-5">
-              {description}
-            </TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <SettingInfoTooltip label={label} description={description} />
       </div>
-      <Switch checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+      <Switch aria-label={label} checked={checked} disabled={disabled} onCheckedChange={onCheckedChange} />
+    </div>
+  );
+}
+
+function SettingInfoTooltip({ label, description }: { label: string; description: string }) {
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-5 w-5 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+            aria-label={`About ${label}`}
+          >
+            <CircleHelp className="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="top" sideOffset={6} className="max-w-72 leading-5">
+          {description}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
+function SettingLabel({ label, info, className = "text-xs text-muted-foreground" }: { label: string; info: string; className?: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label className={className}>{label}</Label>
+      <SettingInfoTooltip label={label} description={info} />
     </div>
   );
 }
@@ -2113,9 +2295,15 @@ function PolicyStringListEditor({
     <section className="rounded-md border border-border bg-background">
       <div className="space-y-1 p-4">
         <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-1.5">
           <Label htmlFor={`${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-input`} className="text-sm font-medium text-foreground">
             {label}
           </Label>
+            <SettingInfoTooltip
+              label={label}
+              description={`${description ?? `Controls the ${label.toLowerCase()} policy list.`} ${emptyText} Matching entries act as deterministic policy controls and do not alter reviewer instructions.`}
+            />
+          </div>
           <Badge variant="outline" className="shrink-0 text-xs">
             {countLabel}
           </Badge>
@@ -2128,17 +2316,8 @@ function PolicyStringListEditor({
         ) : (
           items.map((item) => (
             <div key={item} className="flex min-h-10 items-center gap-3 px-4 py-2">
-              <span className={`min-w-0 flex-1 truncate text-sm text-foreground ${monospace ? "font-mono" : ""}`}>
-                {item}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                disabled={disabled}
-                aria-label={`Remove ${item}`}
-                onClick={() => removeItem(item)}
-              >
+              <span className={`min-w-0 flex-1 truncate text-sm text-foreground ${monospace ? "font-mono" : ""}`}>{item}</span>
+              <Button type="button" variant="ghost" size="icon-sm" disabled={disabled} aria-label={`Remove ${item}`} onClick={() => removeItem(item)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
@@ -2179,18 +2358,20 @@ function ListTextArea({
   const field = useDebouncedTextField({
     serverValue: serverValue.join("\n"),
     onCommit: (text) =>
-      onCommitItems(text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)),
+      onCommitItems(
+        text
+          .split(/\r?\n/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
   });
   return (
     <div className="space-y-2">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      <Textarea
-        value={field.value}
-        disabled={disabled}
-        rows={4}
-        onChange={(event) => field.onChange(event.target.value)}
-        onBlur={field.onBlur}
+      <SettingLabel
+        label={label}
+        info={`Limits this structured PR-description check to the listed ${label.toLowerCase()}. Leave empty to use the applicability rule's default matching behavior.`}
       />
+      <Textarea value={field.value} disabled={disabled} rows={4} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />
     </div>
   );
 }
@@ -2205,15 +2386,7 @@ function PolicyTextInput({
   onCommit: (value: string) => void;
 } & Omit<ComponentProps<typeof Input>, "value" | "onChange" | "onBlur">) {
   const field = useDebouncedTextField({ serverValue, onCommit });
-  return (
-    <Input
-      {...props}
-      value={field.value}
-      disabled={disabled}
-      onChange={(event) => field.onChange(event.target.value)}
-      onBlur={field.onBlur}
-    />
-  );
+  return <Input {...props} value={field.value} disabled={disabled} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />;
 }
 
 function PolicyTextarea({
@@ -2226,28 +2399,10 @@ function PolicyTextarea({
   onCommit: (value: string) => void;
 } & Omit<ComponentProps<typeof Textarea>, "value" | "onChange" | "onBlur">) {
   const field = useDebouncedTextField({ serverValue, onCommit });
-  return (
-    <Textarea
-      {...props}
-      value={field.value}
-      disabled={disabled}
-      onChange={(event) => field.onChange(event.target.value)}
-      onBlur={field.onBlur}
-    />
-  );
+  return <Textarea {...props} value={field.value} disabled={disabled} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />;
 }
 
-function FineTuningSection({
-  title,
-  summary,
-  defaultOpen = false,
-  children,
-}: {
-  title: string;
-  summary?: string;
-  defaultOpen?: boolean;
-  children: ReactNode;
-}) {
+function FineTuningSection({ title, summary, defaultOpen = false, children }: { title: string; summary?: string; defaultOpen?: boolean; children: ReactNode }) {
   return (
     <Collapsible defaultOpen={defaultOpen} className="rounded-md border border-border">
       <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-md p-4 text-left hover:bg-muted/40">
@@ -2257,9 +2412,7 @@ function FineTuningSection({
         </div>
         <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-3 border-t border-border p-4">
-        {children}
-      </CollapsibleContent>
+      <CollapsibleContent className="space-y-3 border-t border-border p-4">{children}</CollapsibleContent>
     </Collapsible>
   );
 }
@@ -2291,9 +2444,7 @@ function CodeReviewEvidenceSheet({
           <div className="flex items-start justify-between gap-4 pr-8">
             <div className="min-w-0 space-y-1">
               <SheetTitle>Evidence for #{review?.github_pr_number}</SheetTitle>
-              <SheetDescription className="line-clamp-2">
-                {review?.pull_request_title ?? "Review evidence"}
-              </SheetDescription>
+              <SheetDescription className="line-clamp-2">{review?.pull_request_title ?? "Review evidence"}</SheetDescription>
             </div>
             {review ? <StatusLabel label={decisionLabel(review)} tone={reviewDecisionTone(review)} /> : null}
           </div>
@@ -2307,9 +2458,7 @@ function CodeReviewEvidenceSheet({
               action={{ label: "Retry", onClick: onRetry }}
             />
           ) : null}
-          {!isLoading && !error && !evidence ? (
-            <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div>
-          ) : null}
+          {!isLoading && !error && !evidence ? <div className="text-sm text-muted-foreground">No evidence recorded for this review.</div> : null}
           {evidence ? (
             <>
               <div className="grid grid-cols-3 gap-3">
@@ -2333,7 +2482,11 @@ function CodeReviewEvidenceSheet({
                             {result.agent_model ? ` · ${result.agent_model}` : ""}
                           </div>
                         </div>
-                        <StatusLabel label={statusLabel(result.status)} tone={reviewStatusTone(result.status)} active={result.status === "running" || result.status === "queued"} />
+                        <StatusLabel
+                          label={statusLabel(result.status)}
+                          tone={reviewStatusTone(result.status)}
+                          active={result.status === "running" || result.status === "queued"}
+                        />
                       </div>
                       {result.raw_output ? (
                         <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
@@ -2382,9 +2535,7 @@ function CodeReviewEvidenceSheet({
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
                           <div className="truncate text-sm font-medium text-foreground">{artifact.artifact_key}</div>
-                          {artifact.agent_provider ? (
-                            <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div>
-                          ) : null}
+                          {artifact.agent_provider ? <div className="text-xs text-muted-foreground">{artifact.agent_provider}</div> : null}
                         </div>
                         <Badge variant="outline">{artifact.role}</Badge>
                       </div>
