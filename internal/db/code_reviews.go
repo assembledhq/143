@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
@@ -67,7 +68,7 @@ func (s *CodeReviewStore) publishUpdated(ctx context.Context, metadata models.Co
 }
 
 const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, enabled, approval_mode,
-		description_policy, risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id, created_at`
+		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
 	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
@@ -328,6 +329,11 @@ func (s *CodeReviewStore) GetPolicyByID(ctx context.Context, orgID, policyID uui
 }
 
 func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+	config.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
+	config.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
+	if err := config.ValidatePromptFields(); err != nil {
+		return models.CodeReviewPolicyRecord{}, err
+	}
 	config = models.ResolveCodeReviewPolicyConfig(&config)
 	if repositoryID != nil {
 		base, err := s.activeOrgPolicyConfig(ctx, orgID)
@@ -382,24 +388,26 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	}
 	rows, err := tx.Query(ctx, `
 			INSERT INTO code_review_policies (
-				org_id, repository_id, active, version, enabled, approval_mode, description_policy,
+				org_id, repository_id, active, version, enabled, approval_mode, review_instructions, automated_approval_policy, description_policy,
 				risk_policy, agent_roster, inline_comment_limit, inheritance, created_by_user_id
 			) VALUES (
-				@org_id, @repository_id, true, @version, @enabled, @approval_mode, @description_policy,
+				@org_id, @repository_id, true, @version, @enabled, @approval_mode, @review_instructions, @automated_approval_policy, @description_policy,
 				@risk_policy, @agent_roster, @inline_comment_limit, @inheritance, @created_by_user_id
 			)
 			RETURNING `+codeReviewPolicyColumns, pgx.NamedArgs{
-		"org_id":               orgID,
-		"repository_id":        repositoryID,
-		"version":              version,
-		"enabled":              config.Enabled,
-		"approval_mode":        config.ApprovalMode,
-		"description_policy":   descriptionPolicy,
-		"risk_policy":          riskPolicy,
-		"agent_roster":         agentRoster,
-		"inline_comment_limit": config.InlineCommentLimit,
-		"inheritance":          inheritance,
-		"created_by_user_id":   createdByUserID,
+		"org_id":                    orgID,
+		"repository_id":             repositoryID,
+		"version":                   version,
+		"enabled":                   config.Enabled,
+		"approval_mode":             config.ApprovalMode,
+		"review_instructions":       config.ReviewInstructions,
+		"automated_approval_policy": config.AutomatedApprovalPolicy,
+		"description_policy":        descriptionPolicy,
+		"risk_policy":               riskPolicy,
+		"agent_roster":              agentRoster,
+		"inline_comment_limit":      config.InlineCommentLimit,
+		"inheritance":               inheritance,
+		"created_by_user_id":        createdByUserID,
 	})
 	if err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("insert code review policy: %w", err)
@@ -411,6 +419,17 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	if err := tx.Commit(ctx); err != nil {
 		return models.CodeReviewPolicyRecord{}, fmt.Errorf("commit code review policy tx: %w", err)
 	}
+	logEvent := s.logger.Info().
+		Str("org_id", orgID.String()).
+		Str("policy_id", record.ID.String()).
+		Int("policy_version", record.Version)
+	if repositoryID != nil {
+		logEvent = logEvent.Str("repository_id", repositoryID.String())
+	}
+	logEvent.
+		Int("review_instructions_runes", utf8.RuneCountInString(record.ReviewInstructions)).
+		Int("automated_approval_policy_runes", utf8.RuneCountInString(record.AutomatedApprovalPolicy)).
+		Msg("saved code review policy version")
 	return record, nil
 }
 
@@ -1170,7 +1189,7 @@ func scanCodeReviewPolicy(rows pgx.Rows) (models.CodeReviewPolicyRecord, error) 
 	var record models.CodeReviewPolicyRecord
 	var descriptionPolicy, riskPolicy, agentRoster, inheritance []byte
 	if err := rows.Scan(&record.ID, &record.OrgID, &record.RepositoryID, &record.Active, &record.Version, &record.Enabled, &record.ApprovalMode,
-		&descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
+		&record.ReviewInstructions, &record.AutomatedApprovalPolicy, &descriptionPolicy, &riskPolicy, &agentRoster, &record.InlineCommentLimit, &inheritance, &record.CreatedByUserID, &record.CreatedAt); err != nil {
 		return models.CodeReviewPolicyRecord{}, err
 	}
 	if err := json.Unmarshal(descriptionPolicy, &record.DescriptionPolicy); err != nil {

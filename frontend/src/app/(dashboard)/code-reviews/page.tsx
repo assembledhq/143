@@ -86,6 +86,18 @@ const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const MAX_REVIEWER_MODELS = 3;
+const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
+const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
+- the intent is clear and the change has a small, understandable scope
+- there are no blocking findings
+- the implementation follows established repository patterns
+- the available testing evidence is appropriate for the change
+
+Require human review when:
+- the change affects authentication, billing, permissions, infrastructure, or production data
+- the change introduces a new architectural pattern or crosses unclear ownership boundaries
+- reviewers disagree or the risk cannot be evaluated confidently
+- the intended behavior cannot be determined from the pull request and repository context`;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
@@ -772,6 +784,14 @@ export default function CodeReviewsPage() {
                   }
                     />
 
+                <PolicyPromptComposers
+                  config={config}
+                  inheritedConfig={policyQuery.data?.data.inherited_policy}
+                  autosave={autosave}
+                  commitPolicy={commitPolicy}
+                  repositorySelected={Boolean(repositoryId)}
+                />
+
                 <GitHubTriggerPanel
                   repositorySelected={Boolean(repositoryId)}
                   trigger={githubTriggerQuery.data?.data}
@@ -832,6 +852,90 @@ export default function CodeReviewsPage() {
         </Tabs>
       </div>
     </main>
+  );
+}
+
+function PolicyPromptComposers({
+  config,
+  inheritedConfig,
+  autosave,
+  commitPolicy,
+  repositorySelected,
+}: {
+  config: CodeReviewPolicyConfig | null;
+  inheritedConfig?: CodeReviewPolicyConfig;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
+  repositorySelected: boolean;
+}) {
+  return (
+    <div className="space-y-4">
+      <CodeReviewAutomatedApprovalPolicyComposer
+        value={config?.automated_approval_policy ?? ""}
+        disabled={!config}
+        hidden={config?.approval_mode !== "approve_acceptable"}
+        autosave={autosave}
+        onCommit={(value) => commitPolicy((next) => { next.automated_approval_policy = value.trim(); })}
+        resetValue={inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY}
+        onReset={() => commitPolicy((next) => { next.automated_approval_policy = inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY; })}
+        resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Reset to default"}
+      />
+      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
+        <div className="font-medium text-foreground">Hard safeguards</div>
+        <p className="mt-1 text-muted-foreground">Passing checks, sensitive paths, size limits, quorum, and disagreement rules remain deterministic and can veto approval.</p>
+      </div>
+      <CodeReviewInstructionsComposer
+        value={config?.review_instructions ?? ""}
+        disabled={!config}
+        autosave={autosave}
+        onCommit={(value) => commitPolicy((next) => { next.review_instructions = value.trim(); })}
+        resetValue={inheritedConfig?.review_instructions ?? ""}
+        onReset={() => commitPolicy((next) => { next.review_instructions = inheritedConfig?.review_instructions ?? ""; })}
+        resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Clear instructions"}
+      />
+    </div>
+  );
+}
+
+type CodeReviewPromptComposerProps = {
+  value: string; disabled: boolean; hidden?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
+  onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string;
+};
+
+function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptComposerProps) {
+  return <CodeReviewPromptComposerBase {...props} title="Automated approval policy" description="Guides the orchestrator's approve-or-escalate recommendation. Deterministic hard safeguards can still block approval." tooltip="Used only by the orchestrator when automatic approval is enabled. It never replaces /review instructions and cannot bypass hard safeguards. A non-empty value is required for automatic approval." required />;
+}
+
+function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
+  return <CodeReviewPromptComposerBase {...props} title="Additional review instructions (optional)" description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance." tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority." secondary />;
+}
+
+function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary }: {
+  title: string; description: string; tooltip: string; value: string; disabled: boolean; hidden?: boolean; required?: boolean;
+  autosave: UseAutosaveResult<CodeReviewPolicyConfig>; onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string; secondary?: boolean;
+}) {
+  // Gate and count on the trimmed value: that is exactly what onCommit persists
+  // (`value.trim()`) and what the backend validates, so basing the length check
+  // on the raw value would reject content that fits the limit once trailing
+  // whitespace (e.g. a pasted trailing newline) is stripped.
+  const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !next.trim());
+  const field = useDebouncedTextField({ serverValue: value, onCommit: (next) => { if (!invalidValue(next)) onCommit(next); }, preserveLocalOnServerChange: autosave.status === "error" });
+  const count = [...field.value.trim()].length;
+  const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !field.value.trim());
+  return (
+    <section className={`${hidden ? "hidden" : ""} space-y-2 rounded-md border border-border p-4 ${secondary ? "bg-muted/10" : "bg-card shadow-sm"}`} aria-label={title}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5"><Label htmlFor={`prompt-${title.replaceAll(" ", "-")}`}>{title}</Label><SettingInfoTooltip label={title} description={tooltip} /></div>
+        <AutosaveIndicator status={autosave.status} />
+      </div>
+      <p className="text-xs text-muted-foreground">{description}</p>
+      <Textarea id={`prompt-${title.replaceAll(" ", "-")}`} value={field.value} disabled={disabled} rows={secondary ? 6 : 10} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} aria-invalid={invalid} aria-describedby={`prompt-count-${title.replaceAll(" ", "-")}`} />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span id={`prompt-count-${title.replaceAll(" ", "-")}`} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>{count} / {CODE_REVIEW_PROMPT_MAX_LENGTH}</span>
+        <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+      </div>
+      {invalid ? <p className="text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
+    </section>
   );
 }
 
@@ -2194,9 +2298,10 @@ function PolicyToggle({
 }
 
 function SettingInfoTooltip({ label, description }: { label: string; description: string }) {
+  const [open, setOpen] = useState(false);
   return (
     <TooltipProvider delayDuration={150}>
-      <Tooltip>
+      <Tooltip open={open} onOpenChange={setOpen}>
         <TooltipTrigger asChild>
           <Button
             type="button"
@@ -2204,6 +2309,8 @@ function SettingInfoTooltip({ label, description }: { label: string; description
             size="icon"
             className="h-5 w-5 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
             aria-label={`About ${label}`}
+            aria-expanded={open}
+            onClick={() => setOpen((current) => !current)}
           >
             <CircleHelp className="h-3.5 w-3.5" />
           </Button>

@@ -1195,7 +1195,8 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 }
 
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
-	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{}))
+	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
+	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{ReviewInstructions: cfg.ReviewInstructions}))
 }
 
 func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
@@ -1204,23 +1205,26 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		reviewContextSummary = fmt.Sprintf("Unresolved human threads: %d; blocking human reviews: %d", reviewContext.UnresolvedHumanThreads, reviewContext.BlockingHumanReviews)
 	}
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
-		Repository:             pr.GitHubRepo,
-		PullNumber:             pr.GitHubPRNumber,
-		PullRequestURL:         pr.GitHubPRURL,
-		Title:                  pr.Title,
-		Author:                 codeReviewAuthor(job, pr),
-		BaseSHA:                firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
-		HeadSHA:                job.HeadSHA,
-		PolicyVersion:          policyVersion,
-		ApprovalMode:           cfg.ApprovalMode,
-		RequiredReviewerQuorum: codeReviewRequiredReviewerQuorum(cfg, agentResults),
-		InlineCommentLimit:     cfg.InlineCommentLimit,
-		DescriptionResults:     append([]string(nil), description.RequirementSummaries...),
-		RiskReasons:            models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings)),
-		ReviewerOutputs:        codeReviewReviewerOutputsForPrompt(agentResults),
-		Findings:               codeReviewFindingsForPrompt(findings),
-		ChangedFiles:           codeReviewChangedPaths(changedFiles),
-		Checklist:              []string{reviewContextSummary},
+		Repository:                 pr.GitHubRepo,
+		PullNumber:                 pr.GitHubPRNumber,
+		PullRequestURL:             pr.GitHubPRURL,
+		Title:                      pr.Title,
+		Author:                     codeReviewAuthor(job, pr),
+		BaseSHA:                    firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
+		HeadSHA:                    job.HeadSHA,
+		PolicyVersion:              policyVersion,
+		ApprovalMode:               cfg.ApprovalMode,
+		RequiredReviewerQuorum:     codeReviewRequiredReviewerQuorum(cfg, agentResults),
+		InlineCommentLimit:         cfg.InlineCommentLimit,
+		DescriptionResults:         append([]string(nil), description.RequirementSummaries...),
+		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings)),
+		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
+		Findings:                   codeReviewFindingsForPrompt(findings),
+		ChangedFiles:               codeReviewChangedPaths(changedFiles),
+		Checklist:                  []string{reviewContextSummary},
+		ReviewInstructions:         cfg.ReviewInstructions,
+		AutomatedApprovalPolicy:    cfg.AutomatedApprovalPolicy,
+		UseAutomatedApprovalPolicy: cfg.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable,
 	})
 }
 

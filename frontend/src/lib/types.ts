@@ -162,6 +162,8 @@ export interface CodeReviewDescriptionRequirement {
 export interface CodeReviewPolicyConfig {
   enabled: boolean;
   approval_mode: CodeReviewApprovalMode;
+  review_instructions: string;
+  automated_approval_policy: string;
   description_policy: {
     requirements: CodeReviewDescriptionRequirement[];
   };

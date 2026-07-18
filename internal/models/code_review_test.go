@@ -1,6 +1,7 @@
 package models
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -51,10 +52,25 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 	}
 }
 
+func TestCodeReviewPolicyPromptValidationIdentifiesField(t *testing.T) {
+	t.Parallel()
+	config := DefaultCodeReviewPolicyConfig()
+	config.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
+	config.AutomatedApprovalPolicy = ""
+
+	err := config.ValidatePromptFields()
+
+	var validationErr *CodeReviewPolicyValidationError
+	require.ErrorAs(t, err, &validationErr, "prompt validation should return a typed field error")
+	require.Equal(t, "automated_approval_policy", validationErr.Field, "prompt validation should identify the failing field")
+}
+
 func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	t.Parallel()
 
 	config := DefaultCodeReviewPolicyConfig()
+	require.Empty(t, config.ReviewInstructions, "default review instructions should preserve native review behavior")
+	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, config.AutomatedApprovalPolicy, "default approval policy should be conservative")
 
 	require.Equal(t, CodeReviewApprovalModeCommentOnly, config.ApprovalMode, "code reviewer should default to comment-only mode")
 	require.True(t, config.Enabled, "code reviewer should default enabled so explicit reviewer requests are honored")
@@ -90,6 +106,22 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		expectErr bool
 	}{
 		{name: "valid default"},
+		{name: "accepts empty review instructions", mutate: func(c *CodeReviewPolicyConfig) { c.ReviewInstructions = "" }},
+		{name: "rejects blank approval policy in approve mode", mutate: func(c *CodeReviewPolicyConfig) {
+			c.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
+			c.AutomatedApprovalPolicy = "  "
+		}, expectErr: true},
+		{name: "rejects oversized review instructions", mutate: func(c *CodeReviewPolicyConfig) {
+			c.ReviewInstructions = strings.Repeat("界", CodeReviewPromptMaxRunes+1)
+		}, expectErr: true},
+		{name: "rejects oversized automated approval policy", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AutomatedApprovalPolicy = strings.Repeat("界", CodeReviewPromptMaxRunes+1)
+		}, expectErr: true},
+		{name: "accepts maximum rune count", mutate: func(c *CodeReviewPolicyConfig) {
+			c.ReviewInstructions = strings.Repeat("界", CodeReviewPromptMaxRunes)
+		}},
+		{name: "rejects invalid UTF-8", mutate: func(c *CodeReviewPolicyConfig) { c.ReviewInstructions = string([]byte{0xff}) }, expectErr: true},
+		{name: "rejects invalid UTF-8 approval policy", mutate: func(c *CodeReviewPolicyConfig) { c.AutomatedApprovalPolicy = string([]byte{0xff}) }, expectErr: true},
 		{name: "rejects zero inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 0 }, expectErr: true},
 		{name: "rejects too many inline comments", mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 11 }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
@@ -129,13 +161,17 @@ func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
 	base.ApprovalMode = CodeReviewApprovalModeCommentOnly
 	base.RiskPolicy.MaxFilesChanged = 9
 	base.InlineCommentLimit = 4
+	base.ReviewInstructions = "organization review guidance"
+	base.AutomatedApprovalPolicy = "organization approval guidance"
 	override := base
 	override.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
 	override.RiskPolicy.MaxFilesChanged = 2
 	override.InlineCommentLimit = 8
+	override.ReviewInstructions = "repository review guidance"
+	override.AutomatedApprovalPolicy = "repository approval guidance"
 	override.Inheritance = CodeReviewPolicyInheritance{
 		InheritOrgDefaults: true,
-		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy},
+		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldReviewInstructions},
 	}
 
 	merged := MergeCodeReviewPolicyConfig(base, override)
@@ -144,8 +180,33 @@ func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
 	require.Equal(t, CodeReviewApprovalModeApproveAcceptable, merged.ApprovalMode, "merged policy should apply explicitly overridden approval mode")
 	require.Equal(t, 2, merged.RiskPolicy.MaxFilesChanged, "merged policy should apply explicitly overridden risk policy")
 	require.Equal(t, 4, merged.InlineCommentLimit, "merged policy should inherit non-overridden inline comment limit")
+	require.Equal(t, override.ReviewInstructions, merged.ReviewInstructions, "repository review instructions should override independently")
+	require.Equal(t, base.AutomatedApprovalPolicy, merged.AutomatedApprovalPolicy, "automated approval policy should inherit independently")
 	require.Equal(t, override.Inheritance, merged.Inheritance, "merged policy should preserve inheritance audit metadata")
-	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report changed policy sections")
+	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldReviewInstructions, CodeReviewPolicyFieldAutomatedApprovalPolicy, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report prompt fields independently")
+}
+
+func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		config           CodeReviewPolicyConfig
+		expectedReview   string
+		expectedApproval string
+	}{
+		{name: "fills omitted approval policy", config: CodeReviewPolicyConfig{}, expectedReview: "", expectedApproval: DefaultCodeReviewAutomatedApprovalPolicy},
+		{name: "trims supplied prompts", config: CodeReviewPolicyConfig{ReviewInstructions: "  review  ", AutomatedApprovalPolicy: "  approve  "}, expectedReview: "review", expectedApproval: "approve"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			resolved := ResolveCodeReviewPolicyConfig(&tt.config)
+			require.Equal(t, tt.expectedReview, resolved.ReviewInstructions, "review instructions should resolve predictably")
+			require.Equal(t, tt.expectedApproval, resolved.AutomatedApprovalPolicy, "approval policy should resolve predictably")
+		})
+	}
 }
 
 func TestCodeReviewPolicyTemplates(t *testing.T) {

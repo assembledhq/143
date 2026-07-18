@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -387,14 +388,41 @@ type CodeReviewAgentRoster struct {
 }
 
 type CodeReviewPolicyConfig struct {
-	Enabled            bool                        `json:"enabled"`
-	ApprovalMode       CodeReviewApprovalMode      `json:"approval_mode"`
-	DescriptionPolicy  CodeReviewDescriptionPolicy `json:"description_policy"`
-	RiskPolicy         CodeReviewRiskPolicy        `json:"risk_policy"`
-	AgentRoster        CodeReviewAgentRoster       `json:"agent_roster"`
-	InlineCommentLimit int                         `json:"inline_comment_limit"`
-	Inheritance        CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
+	Enabled                 bool                        `json:"enabled"`
+	ApprovalMode            CodeReviewApprovalMode      `json:"approval_mode"`
+	ReviewInstructions      string                      `json:"review_instructions"`
+	AutomatedApprovalPolicy string                      `json:"automated_approval_policy"`
+	DescriptionPolicy       CodeReviewDescriptionPolicy `json:"description_policy"`
+	RiskPolicy              CodeReviewRiskPolicy        `json:"risk_policy"`
+	AgentRoster             CodeReviewAgentRoster       `json:"agent_roster"`
+	InlineCommentLimit      int                         `json:"inline_comment_limit"`
+	Inheritance             CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
 }
+
+const CodeReviewPromptMaxRunes = 8000
+
+type CodeReviewPolicyValidationError struct {
+	Field   string
+	Message string
+}
+
+func (e *CodeReviewPolicyValidationError) Error() string { return e.Message }
+
+func codeReviewPolicyFieldError(field, message string) error {
+	return &CodeReviewPolicyValidationError{Field: field, Message: message}
+}
+
+const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine, well-tested changes when:
+- the intent is clear and the change has a small, understandable scope
+- there are no blocking findings
+- the implementation follows established repository patterns
+- the available testing evidence is appropriate for the change
+
+Require human review when:
+- the change affects authentication, billing, permissions, infrastructure, or production data
+- the change introduces a new architectural pattern or crosses unclear ownership boundaries
+- reviewers disagree or the risk cannot be evaluated confidently
+- the intended behavior cannot be determined from the pull request and repository context`
 
 type CodeReviewPolicyInheritance struct {
 	InheritOrgDefaults bool     `json:"inherit_org_defaults"`
@@ -403,8 +431,10 @@ type CodeReviewPolicyInheritance struct {
 
 func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
-		Enabled:      true,
-		ApprovalMode: CodeReviewApprovalModeCommentOnly,
+		Enabled:                 true,
+		ApprovalMode:            CodeReviewApprovalModeCommentOnly,
+		ReviewInstructions:      "",
+		AutomatedApprovalPolicy: DefaultCodeReviewAutomatedApprovalPolicy,
 		DescriptionPolicy: CodeReviewDescriptionPolicy{Requirements: []CodeReviewDescriptionRequirement{
 			{Key: "description", Title: "Understandable description", Required: true, Prompt: "Explain what is changing and why clearly enough for a reviewer to understand the intent."},
 			{
@@ -486,6 +516,10 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 		defaults.ApprovalMode = config.ApprovalMode
 	}
 	defaults.Enabled = config.Enabled
+	defaults.ReviewInstructions = strings.TrimSpace(config.ReviewInstructions)
+	if config.AutomatedApprovalPolicy != "" {
+		defaults.AutomatedApprovalPolicy = strings.TrimSpace(config.AutomatedApprovalPolicy)
+	}
 	if len(config.DescriptionPolicy.Requirements) > 0 {
 		defaults.DescriptionPolicy = config.DescriptionPolicy
 	}
@@ -577,6 +611,9 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if err := c.ApprovalMode.Validate(); err != nil {
 		return err
 	}
+	if err := c.ValidatePromptFields(); err != nil {
+		return err
+	}
 	if c.InlineCommentLimit < 1 || c.InlineCommentLimit > 10 {
 		return fmt.Errorf("inline_comment_limit must be between 1 and 10")
 	}
@@ -634,32 +671,54 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	return nil
 }
 
+func (c CodeReviewPolicyConfig) ValidatePromptFields() error {
+	if err := c.ApprovalMode.Validate(); err != nil {
+		return err
+	}
+	for field, value := range map[string]string{"review_instructions": c.ReviewInstructions, "automated_approval_policy": c.AutomatedApprovalPolicy} {
+		if !utf8.ValidString(value) {
+			return codeReviewPolicyFieldError(field, fmt.Sprintf("%s must be valid UTF-8", field))
+		}
+		if utf8.RuneCountInString(value) > CodeReviewPromptMaxRunes {
+			return codeReviewPolicyFieldError(field, fmt.Sprintf("%s must be at most %d characters", field, CodeReviewPromptMaxRunes))
+		}
+	}
+	if c.ApprovalMode == CodeReviewApprovalModeApproveAcceptable && strings.TrimSpace(c.AutomatedApprovalPolicy) == "" {
+		return codeReviewPolicyFieldError("automated_approval_policy", "automated_approval_policy must be non-empty when automatic approval is enabled")
+	}
+	return nil
+}
+
 type CodeReviewPolicyRecord struct {
-	ID                 uuid.UUID                   `db:"id" json:"id"`
-	OrgID              uuid.UUID                   `db:"org_id" json:"org_id"`
-	RepositoryID       *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
-	Active             bool                        `db:"active" json:"active"`
-	Version            int                         `db:"version" json:"version"`
-	Enabled            bool                        `db:"enabled" json:"enabled"`
-	ApprovalMode       CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
-	DescriptionPolicy  CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
-	RiskPolicy         CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
-	AgentRoster        CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
-	InlineCommentLimit int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	Inheritance        CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
-	CreatedByUserID    *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
-	CreatedAt          time.Time                   `db:"created_at" json:"created_at"`
+	ID                      uuid.UUID                   `db:"id" json:"id"`
+	OrgID                   uuid.UUID                   `db:"org_id" json:"org_id"`
+	RepositoryID            *uuid.UUID                  `db:"repository_id" json:"repository_id,omitempty"`
+	Active                  bool                        `db:"active" json:"active"`
+	Version                 int                         `db:"version" json:"version"`
+	Enabled                 bool                        `db:"enabled" json:"enabled"`
+	ApprovalMode            CodeReviewApprovalMode      `db:"approval_mode" json:"approval_mode"`
+	ReviewInstructions      string                      `db:"review_instructions" json:"review_instructions"`
+	AutomatedApprovalPolicy string                      `db:"automated_approval_policy" json:"automated_approval_policy"`
+	DescriptionPolicy       CodeReviewDescriptionPolicy `db:"-" json:"description_policy"`
+	RiskPolicy              CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
+	AgentRoster             CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
+	InlineCommentLimit      int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
+	Inheritance             CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
+	CreatedByUserID         *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
+	CreatedAt               time.Time                   `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
-		ApprovalMode:       r.ApprovalMode,
-		Enabled:            r.Enabled,
-		DescriptionPolicy:  r.DescriptionPolicy,
-		RiskPolicy:         r.RiskPolicy,
-		AgentRoster:        r.AgentRoster,
-		InlineCommentLimit: r.InlineCommentLimit,
-		Inheritance:        r.Inheritance,
+		ApprovalMode:            r.ApprovalMode,
+		Enabled:                 r.Enabled,
+		ReviewInstructions:      r.ReviewInstructions,
+		AutomatedApprovalPolicy: r.AutomatedApprovalPolicy,
+		DescriptionPolicy:       r.DescriptionPolicy,
+		RiskPolicy:              r.RiskPolicy,
+		AgentRoster:             r.AgentRoster,
+		InlineCommentLimit:      r.InlineCommentLimit,
+		Inheritance:             r.Inheritance,
 	}
 }
 
@@ -671,12 +730,14 @@ type CodeReviewResolvedPolicy struct {
 }
 
 const (
-	CodeReviewPolicyFieldEnabled            = "enabled"
-	CodeReviewPolicyFieldApprovalMode       = "approval_mode"
-	CodeReviewPolicyFieldDescriptionPolicy  = "description_policy"
-	CodeReviewPolicyFieldRiskPolicy         = "risk_policy"
-	CodeReviewPolicyFieldAgentRoster        = "agent_roster"
-	CodeReviewPolicyFieldInlineCommentLimit = "inline_comment_limit"
+	CodeReviewPolicyFieldEnabled                 = "enabled"
+	CodeReviewPolicyFieldApprovalMode            = "approval_mode"
+	CodeReviewPolicyFieldReviewInstructions      = "review_instructions"
+	CodeReviewPolicyFieldAutomatedApprovalPolicy = "automated_approval_policy"
+	CodeReviewPolicyFieldDescriptionPolicy       = "description_policy"
+	CodeReviewPolicyFieldRiskPolicy              = "risk_policy"
+	CodeReviewPolicyFieldAgentRoster             = "agent_roster"
+	CodeReviewPolicyFieldInlineCommentLimit      = "inline_comment_limit"
 )
 
 func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
@@ -696,6 +757,12 @@ func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeRevi
 	}
 	if apply(CodeReviewPolicyFieldApprovalMode) {
 		merged.ApprovalMode = override.ApprovalMode
+	}
+	if apply(CodeReviewPolicyFieldReviewInstructions) {
+		merged.ReviewInstructions = override.ReviewInstructions
+	}
+	if apply(CodeReviewPolicyFieldAutomatedApprovalPolicy) {
+		merged.AutomatedApprovalPolicy = override.AutomatedApprovalPolicy
 	}
 	if apply(CodeReviewPolicyFieldDescriptionPolicy) {
 		merged.DescriptionPolicy = override.DescriptionPolicy
@@ -723,6 +790,12 @@ func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []str
 	if base.ApprovalMode != override.ApprovalMode {
 		fields = append(fields, CodeReviewPolicyFieldApprovalMode)
 	}
+	if base.ReviewInstructions != override.ReviewInstructions {
+		fields = append(fields, CodeReviewPolicyFieldReviewInstructions)
+	}
+	if base.AutomatedApprovalPolicy != override.AutomatedApprovalPolicy {
+		fields = append(fields, CodeReviewPolicyFieldAutomatedApprovalPolicy)
+	}
 	if !codeReviewJSONEqual(base.DescriptionPolicy, override.DescriptionPolicy) {
 		fields = append(fields, CodeReviewPolicyFieldDescriptionPolicy)
 	}
@@ -748,6 +821,8 @@ func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct
 		switch field {
 		case CodeReviewPolicyFieldEnabled,
 			CodeReviewPolicyFieldApprovalMode,
+			CodeReviewPolicyFieldReviewInstructions,
+			CodeReviewPolicyFieldAutomatedApprovalPolicy,
 			CodeReviewPolicyFieldDescriptionPolicy,
 			CodeReviewPolicyFieldRiskPolicy,
 			CodeReviewPolicyFieldAgentRoster,

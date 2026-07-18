@@ -222,4 +222,32 @@ describe("useDebouncedTextField", () => {
     expect(second).toHaveBeenCalledWith("draft");
     expect(first).not.toHaveBeenCalled();
   });
+
+  it("preserves committed local text when a failed save rolls the server value back", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ serverValue, preserve }: { serverValue: string; preserve: boolean }) =>
+        useDebouncedTextField({ serverValue, onCommit, debounceMs: 20, preserveLocalOnServerChange: preserve }),
+      { initialProps: { serverValue: "saved", preserve: false } },
+    );
+    act(() => result.current.onChange("local draft"));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledWith("local draft"));
+
+    rerender({ serverValue: "local draft", preserve: false });
+    rerender({ serverValue: "saved", preserve: true });
+
+    expect(result.current.value).toBe("local draft");
+  });
+
+  it("replaces local text immediately and cancels a pending commit", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() => useDebouncedTextField({ serverValue: "repository", onCommit, debounceMs: 30 }));
+    act(() => result.current.onChange("pending"));
+
+    act(() => result.current.replace("organization"));
+
+    expect(result.current.value).toBe("organization");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCommit).not.toHaveBeenCalled();
+  });
 });

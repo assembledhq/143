@@ -21,12 +21,14 @@ export interface UseDebouncedTextFieldOptions {
    * visible with its own error affordance (e.g. an over-length editor).
    */
   rejectValue?: (value: string) => boolean;
+  preserveLocalOnServerChange?: boolean;
 }
 
 export interface UseDebouncedTextFieldResult {
   value: string;
   onChange: (next: string) => void;
   onBlur: () => void;
+  replace: (next: string) => void;
 }
 
 /**
@@ -54,6 +56,7 @@ export function useDebouncedTextField({
   onCommit,
   debounceMs = 400,
   rejectValue,
+  preserveLocalOnServerChange = false,
 }: UseDebouncedTextFieldOptions): UseDebouncedTextFieldResult {
   const [trackedServer, setTrackedServer] = useState(serverValue);
   const [local, setLocal] = useState(serverValue);
@@ -85,7 +88,7 @@ export function useDebouncedTextField({
   if (serverValue !== trackedServer) {
     setTrackedServer(serverValue);
     const hasPendingEdit = local !== lastSent;
-    if (serverValue !== lastSent && !hasPendingEdit) {
+    if (serverValue !== lastSent && !hasPendingEdit && !preserveLocalOnServerChange) {
       setLocal(serverValue);
       setLastSent(serverValue);
     }
@@ -129,5 +132,14 @@ export function useDebouncedTextField({
     commit(local);
   };
 
-  return { value: local, onChange, onBlur };
+  const replace = (next: string) => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    setLocal(next);
+    setLastSent(next);
+  };
+
+  return { value: local, onChange, onBlur, replace };
 }
