@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -222,6 +223,44 @@ func (v PRFeedbackBotEligibilitySource) Validate() error {
 	return fmt.Errorf("invalid PR feedback bot eligibility source: %q", v)
 }
 
+type PRFeedbackAuthorType string
+
+const (
+	PRFeedbackAuthorTypeUser         PRFeedbackAuthorType = "User"
+	PRFeedbackAuthorTypeBot          PRFeedbackAuthorType = "Bot"
+	PRFeedbackAuthorTypeMannequin    PRFeedbackAuthorType = "Mannequin"
+	PRFeedbackAuthorTypeOrganization PRFeedbackAuthorType = "Organization"
+	PRFeedbackAuthorTypeUnknown      PRFeedbackAuthorType = "Unknown"
+)
+
+func (v PRFeedbackAuthorType) Validate() error {
+	switch v {
+	case PRFeedbackAuthorTypeUser, PRFeedbackAuthorTypeBot, PRFeedbackAuthorTypeMannequin,
+		PRFeedbackAuthorTypeOrganization, PRFeedbackAuthorTypeUnknown:
+		return nil
+	}
+	return fmt.Errorf("invalid PR feedback author type: %q", v)
+}
+
+// PRFeedbackWorkspaceMode records how the canonical PR workspace was prepared
+// for a feedback batch. Its values intentionally match PR repair workspace
+// modes, but the type remains feedback-specific so the two workflows can
+// evolve independently.
+type PRFeedbackWorkspaceMode string
+
+const (
+	PRFeedbackWorkspaceModeSnapshotContinuation PRFeedbackWorkspaceMode = "snapshot_continuation"
+	PRFeedbackWorkspaceModePRHeadReconstruction PRFeedbackWorkspaceMode = "pr_head_reconstruction"
+)
+
+func (v PRFeedbackWorkspaceMode) Validate() error {
+	switch v {
+	case "", PRFeedbackWorkspaceModeSnapshotContinuation, PRFeedbackWorkspaceModePRHeadReconstruction:
+		return nil
+	}
+	return fmt.Errorf("invalid PR feedback workspace mode: %q", v)
+}
+
 type PullRequestFeedbackBatch struct {
 	ID               uuid.UUID                 `db:"id" json:"id"`
 	OrgID            uuid.UUID                 `db:"org_id" json:"org_id"`
@@ -233,6 +272,7 @@ type PullRequestFeedbackBatch struct {
 	BotFeedbackEpoch *int64                    `db:"bot_feedback_epoch" json:"bot_feedback_epoch,omitempty"`
 	ExpectedHeadSHA  string                    `db:"expected_head_sha" json:"expected_head_sha"`
 	ResultHeadSHA    *string                   `db:"result_head_sha" json:"result_head_sha,omitempty"`
+	WorkspaceMode    *PRFeedbackWorkspaceMode  `db:"workspace_mode" json:"workspace_mode,omitempty"`
 	FeedbackSnapshot json.RawMessage           `db:"feedback_snapshot" json:"feedback_snapshot"`
 	DebounceUntil    time.Time                 `db:"debounce_until" json:"debounce_until"`
 	MaxCollectUntil  time.Time                 `db:"max_collect_until" json:"max_collect_until"`
@@ -260,7 +300,7 @@ type PullRequestFeedbackItem struct {
 	GitHubAppID               *int64                         `db:"github_app_id" json:"github_app_id,omitempty"`
 	GitHubAppSlug             *string                        `db:"github_app_slug" json:"github_app_slug,omitempty"`
 	AuthorLogin               string                         `db:"author_login" json:"author_login"`
-	AuthorType                string                         `db:"author_type" json:"author_type"`
+	AuthorType                PRFeedbackAuthorType           `db:"author_type" json:"author_type"`
 	AuthorAssociation         string                         `db:"author_association" json:"author_association"`
 	BotEligibilitySource      PRFeedbackBotEligibilitySource `db:"bot_eligibility_source" json:"bot_eligibility_source"`
 	Body                      string                         `db:"body" json:"body"`
@@ -286,4 +326,65 @@ type PullRequestFeedbackItem struct {
 	ReceivedAt                time.Time                      `db:"received_at" json:"received_at"`
 	ProcessedAt               *time.Time                     `db:"processed_at" json:"processed_at,omitempty"`
 	UpdatedAt                 time.Time                      `db:"updated_at" json:"updated_at"`
+}
+
+type PRFeedbackBotScope string
+
+const (
+	PRFeedbackBotScopeAllPrivate    PRFeedbackBotScope = "all_private_repository_bots"
+	PRFeedbackBotScopeTrustedPublic PRFeedbackBotScope = "installed_or_first_party_public_bots"
+	PRFeedbackBotScopeSelected      PRFeedbackBotScope = "selected_bots"
+	PRFeedbackBotScopeNone          PRFeedbackBotScope = "none"
+)
+
+type PullRequestFeedbackState struct {
+	PullRequestID          uuid.UUID                 `json:"pull_request_id"`
+	EffectiveMode          PRFeedbackHumanMode       `json:"effective_mode"`
+	EffectiveBotMode       PRFeedbackBotMode         `json:"effective_bot_mode"`
+	EffectiveBotCycleLimit *int                      `json:"effective_bot_cycle_limit"`
+	BotScope               PRFeedbackBotScope        `json:"bot_scope"`
+	Monitoring             PRFeedbackMonitoring      `json:"monitoring"`
+	PausedReason           string                    `json:"paused_reason,omitempty"`
+	PendingCount           int                       `json:"pending_count"`
+	NeedsAttentionCount    int                       `json:"needs_attention_count"`
+	ActiveBatch            *PullRequestFeedbackBatch `json:"active_batch,omitempty"`
+	RecentItems            []PullRequestFeedbackItem `json:"recent_items"`
+}
+
+type UpdatePullRequestFeedbackMonitoringRequest struct {
+	Monitoring PRFeedbackMonitoring `json:"monitoring" validate:"required"`
+}
+
+type PRFeedbackTriageResult struct {
+	Intent             PRFeedbackIntent `json:"intent"`
+	RequiresAgent      bool             `json:"requires_agent"`
+	RequiresCodeChange bool             `json:"requires_code_change"`
+	Reason             string           `json:"reason"`
+	FindingFingerprint string           `json:"finding_fingerprint,omitempty"`
+}
+
+func (r PRFeedbackTriageResult) Validate() error {
+	if err := r.Intent.Validate(); err != nil {
+		return err
+	}
+	if r.Intent == PRFeedbackIntentUnknown {
+		return fmt.Errorf("PR feedback triage intent must be resolved")
+	}
+	if strings.TrimSpace(r.Reason) == "" {
+		return fmt.Errorf("PR feedback triage reason is required")
+	}
+	if r.Intent == PRFeedbackIntentAcknowledgement && (r.RequiresAgent || r.RequiresCodeChange) {
+		return fmt.Errorf("acknowledgement feedback cannot require agent work")
+	}
+	if r.RequiresCodeChange && !r.RequiresAgent {
+		return fmt.Errorf("code-changing feedback must require an agent")
+	}
+	return nil
+}
+
+func (r UpdatePullRequestFeedbackMonitoringRequest) Validate() error {
+	if r.Monitoring == "" {
+		return fmt.Errorf("monitoring is required")
+	}
+	return r.Monitoring.Validate()
 }

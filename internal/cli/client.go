@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/version"
 )
 
@@ -25,7 +25,7 @@ type Client struct {
 
 func NewClient(cfg Config) *Client {
 	return &Client{
-		baseURL: strings.TrimRight(cfg.ServerURL, "/"),
+		baseURL: internalapi.NormalizeBaseURL(cfg.ServerURL),
 		token:   cfg.Token,
 		orgID:   cfg.OrgID,
 		http:    &http.Client{Timeout: 60 * time.Second},

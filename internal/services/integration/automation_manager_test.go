@@ -31,7 +31,7 @@ func TestInternalAutomationManager_CreateAutomation(t *testing.T) {
 
 	require.NoError(t, err, "CreateAutomation should not return an error")
 	require.JSONEq(t, `{"data":{"id":"automation-1","name":"Nightly"}}`, string(raw), "CreateAutomation should return the raw API response")
-	require.Equal(t, "/automations", gotPath, "CreateAutomation should call the internal automations endpoint")
+	require.Equal(t, "/api/v1/internal/automations", gotPath, "CreateAutomation should call the internal automations endpoint")
 	require.Equal(t, "Bearer test-token", gotAuth, "CreateAutomation should send bearer auth")
 	require.Equal(t, "Nightly", gotBody["name"], "CreateAutomation should forward the payload")
 }
@@ -53,5 +53,5 @@ func TestInternalAutomationManager_RunAutomation(t *testing.T) {
 
 	require.NoError(t, err, "RunAutomation should not return an error")
 	require.JSONEq(t, `{"data":{"status":"queued"}}`, string(raw), "RunAutomation should return the raw API response")
-	require.Equal(t, "/automations/automation-1/run", gotPath, "RunAutomation should call the run endpoint")
+	require.Equal(t, "/api/v1/internal/automations/automation-1/run", gotPath, "RunAutomation should call the run endpoint")
 }

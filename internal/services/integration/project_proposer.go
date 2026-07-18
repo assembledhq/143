@@ -23,7 +23,7 @@ type InternalProjectProposer struct {
 func NewInternalProjectProposer(token, baseURL string) *InternalProjectProposer {
 	return &InternalProjectProposer{
 		token:   token,
-		baseURL: baseURL,
+		baseURL: internalAPIBaseURL(baseURL),
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},

@@ -29,6 +29,102 @@ type pullRequestHealthService interface {
 	CancelMergeWhenReady(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 }
 
+type pullRequestFeedbackService interface {
+	GetPullRequestFeedbackState(ctx context.Context, orgID, pullRequestID, userID uuid.UUID) (*models.PullRequestFeedbackState, error)
+	UpdatePullRequestFeedbackMonitoring(ctx context.Context, orgID, pullRequestID, userID uuid.UUID, monitoring models.PRFeedbackMonitoring) (*models.PullRequestFeedbackState, error)
+	RetryPullRequestFeedbackBatch(ctx context.Context, orgID, pullRequestID, batchID, userID uuid.UUID) (*models.PullRequestFeedbackState, error)
+}
+
+func (h *PullRequestHandler) GetFeedbackFollowThrough(w http.ResponseWriter, r *http.Request) {
+	if h.feedback == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "pull request feedback is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	pullRequestID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pull request ID")
+		return
+	}
+	state, err := h.feedback.GetPullRequestFeedbackState(r.Context(), orgID, pullRequestID, user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_FEEDBACK_STATE_FAILED", "failed to load pull request feedback state", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestFeedbackState]{Data: *state})
+}
+
+func (h *PullRequestHandler) UpdateFeedbackFollowThrough(w http.ResponseWriter, r *http.Request) {
+	if h.feedback == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "pull request feedback is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	pullRequestID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pull request ID")
+		return
+	}
+	var body models.UpdatePullRequestFeedbackMonitoringRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "invalid request body")
+		return
+	}
+	if err := body.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+	state, err := h.feedback.UpdatePullRequestFeedbackMonitoring(r.Context(), orgID, pullRequestID, user.ID, body.Monitoring)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_FEEDBACK_UPDATE_FAILED", "failed to update pull request feedback monitoring", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestFeedbackState]{Data: *state})
+}
+
+func (h *PullRequestHandler) RetryFeedbackFollowThrough(w http.ResponseWriter, r *http.Request) {
+	if h.feedback == nil {
+		writeError(w, r, http.StatusNotImplemented, "NOT_CONFIGURED", "pull request feedback is not configured")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	pullRequestID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid pull request ID")
+		return
+	}
+	batchID, err := uuid.Parse(chi.URLParam(r, "batch"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid feedback batch ID")
+		return
+	}
+	user := middleware.UserFromContext(r.Context())
+	if user == nil {
+		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	state, err := h.feedback.RetryPullRequestFeedbackBatch(r.Context(), orgID, pullRequestID, batchID, user.ID)
+	if errors.Is(err, ghservice.ErrPRFeedbackNotRetryable) {
+		writeError(w, r, http.StatusConflict, "PR_FEEDBACK_NOT_RETRYABLE", "feedback batch is not retryable")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "PR_FEEDBACK_RETRY_FAILED", "failed to retry feedback batch", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.PullRequestFeedbackState]{Data: *state})
+}
+
 type pullRequestMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
@@ -41,8 +137,13 @@ var (
 
 type PullRequestHandler struct {
 	service     pullRequestHealthService
+	feedback    pullRequestFeedbackService
 	streams     *cache.PullRequestStreams
 	memberships pullRequestMembershipStore
+}
+
+func (h *PullRequestHandler) SetFeedbackService(service pullRequestFeedbackService) {
+	h.feedback = service
 }
 
 func NewPullRequestHandler(service pullRequestHealthService) *PullRequestHandler {

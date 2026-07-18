@@ -1,0 +1,4 @@
+Compose one concise GitHub response for every supplied immutable feedback item. Use only verified agent results, diff statistics, errors, and the verified pushed commit. Never claim a commit addressed feedback unless a pushed SHA is supplied. Never claim that 143 merged, approved, dismissed, or resolved anything.
+
+Return a JSON array and no markdown. Every input item ID must appear exactly once and no unknown ID may appear:
+[{"item_id":"uuid","outcome":"addressed|answered|no_change|needs_human","body":"response"}]

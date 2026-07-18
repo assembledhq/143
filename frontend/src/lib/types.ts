@@ -108,6 +108,7 @@ export interface AutomaticPRFollowThroughUserSettings {
   readiness_after_review_loop?: AutomaticFollowThroughPreference;
   resolve_conflicts_when_idle?: AutomaticFollowThroughPreference;
   fix_tests_when_idle?: AutomaticFollowThroughPreference;
+  respond_to_pr_feedback?: AutomaticFollowThroughPreference;
 }
 
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
@@ -2201,6 +2202,59 @@ export interface AutomaticFollowThroughOrgSettings {
   readiness_after_review_loop_states?: ReviewLoopStatus[];
   resolve_conflicts_when_idle?: boolean;
   fix_tests_when_idle?: boolean;
+  pr_feedback_mode?: "all_trusted_humans" | "mentions" | "off";
+  pr_feedback_bot_mode?: "all" | "allowlist" | "none";
+  pr_feedback_bot_cycle_limit?: number | null;
+  pr_feedback_bot_allowlist?: string[];
+}
+
+export type PRFeedbackMonitoring = "inherit" | "enabled" | "disabled";
+export type PRFeedbackItemStatus = "pending" | "ignored" | "claimed" | "running" | "responded" | "needs_attention" | "cancelled";
+export type PRFeedbackBatchStatus = "collecting" | "queued" | "running" | "pushing" | "responding" | "completed" | "needs_attention" | "cancelled";
+
+export interface PullRequestFeedbackItem {
+  id: string;
+  pull_request_id: string;
+  batch_id?: string;
+  surface: "issue_comment" | "review_body" | "review_comment";
+  author_login: string;
+  author_type: "User" | "Bot" | "Mannequin" | "Organization" | "Unknown";
+  body: string;
+  intent: "unknown" | "change_request" | "question" | "mixed" | "acknowledgement" | "unsafe_or_unsupported";
+  status: PRFeedbackItemStatus;
+  ignore_reason?: string;
+  received_at: string;
+  response_body?: string;
+  response_commit_sha?: string;
+}
+
+export interface PullRequestFeedbackBatch {
+  id: string;
+  pull_request_id: string;
+  session_id: string;
+  thread_id?: string;
+  status: PRFeedbackBatchStatus;
+  source_kind: "human_or_mixed" | "bot_only";
+  expected_head_sha: string;
+  result_head_sha?: string;
+  result_summary?: string;
+  error_code?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PullRequestFeedbackState {
+  pull_request_id: string;
+  effective_mode: "all_trusted_humans" | "mentions" | "off";
+  effective_bot_mode: "all" | "allowlist" | "none";
+  effective_bot_cycle_limit: number | null;
+  bot_scope: "all_private_repository_bots" | "installed_or_first_party_public_bots" | "selected_bots" | "none";
+  monitoring: PRFeedbackMonitoring;
+  paused_reason?: string;
+  pending_count: number;
+  needs_attention_count: number;
+  active_batch?: PullRequestFeedbackBatch;
+  recent_items: PullRequestFeedbackItem[];
 }
 
 export type SandboxResourceTier = "small" | "standard" | "large";
