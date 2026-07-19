@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
@@ -485,6 +486,69 @@ func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
 	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
+}
+
+func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
+	t.Parallel()
+	agents := []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode}
+	for _, agentType := range agents {
+		t.Run(string(agentType), func(t *testing.T) {
+			t.Parallel()
+			cfg := models.DefaultCodeReviewPolicyConfig()
+			cfg.ReviewInstructions = "Review organization-specific invariants."
+			prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 2, "", nil)
+			message := codeReviewReviewerMessage(agentType, prompt)
+			require.Equal(t, "/review", strings.Fields(message)[0], "every configured or fallback reviewer invocation should begin with /review")
+			require.Contains(t, message, cfg.ReviewInstructions, "every reviewer path should receive captured review instructions")
+		})
+	}
+}
+
+func TestCodeReviewPromptPolicyRouting(t *testing.T) {
+	t.Parallel()
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	cfg.ReviewInstructions = "Focus on tenant isolation; {{ .Title }} must remain literal."
+	cfg.AutomatedApprovalPolicy = "Escalate every architectural change."
+	reviewer := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, cfg, 7, "", nil)
+	require.True(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should preserve /review as its first token")
+	require.Contains(t, reviewer, cfg.ReviewInstructions, "reviewer should receive organization review instructions")
+	require.NotContains(t, reviewer, cfg.AutomatedApprovalPolicy, "reviewer should not receive automated approval policy")
+	require.Contains(t, reviewer, "{{ .Title }}", "organization prompt data should not be recursively rendered")
+
+	empty := cfg
+	empty.ReviewInstructions = ""
+	require.NotContains(t, codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, empty, 7, "", nil), "<organization_review_instructions>", "empty instructions should omit the organization section")
+}
+
+func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptArtifacts(t *testing.T) {
+	t.Parallel()
+	first := models.DefaultCodeReviewPolicyConfig()
+	first.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
+	first.ReviewInstructions = "captured review instructions version one"
+	first.AutomatedApprovalPolicy = "captured approval policy version one"
+	second := first
+	second.ReviewInstructions = "new active review instructions version two"
+	second.AutomatedApprovalPolicy = "new active approval policy version two"
+	firstRecord := codeReviewPolicyRecordForTest(first)
+	firstRecord.Version = 1
+	secondRecord := codeReviewPolicyRecordForTest(second)
+	secondRecord.Version = 2
+
+	firstReviewerArtifact := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, firstRecord.Config(), firstRecord.Version, "", nil)
+	secondReviewerArtifact := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, secondRecord.Config(), secondRecord.Version, "", nil)
+	require.Contains(t, firstReviewerArtifact, first.ReviewInstructions, "captured reviewer artifact should use its historic policy record")
+	require.NotContains(t, firstReviewerArtifact, second.ReviewInstructions, "captured reviewer artifact should not use the latest active policy")
+	require.NotEqual(t, firstReviewerArtifact, secondReviewerArtifact, "different captured policy versions should render different reviewer artifacts")
+
+	firstOrchestratorArtifact := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+		PolicyVersion: firstRecord.Version, ReviewInstructions: first.ReviewInstructions, AutomatedApprovalPolicy: first.AutomatedApprovalPolicy, UseAutomatedApprovalPolicy: true,
+	})
+	secondOrchestratorArtifact := prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+		PolicyVersion: secondRecord.Version, ReviewInstructions: second.ReviewInstructions, AutomatedApprovalPolicy: second.AutomatedApprovalPolicy, UseAutomatedApprovalPolicy: true,
+	})
+	require.Contains(t, firstOrchestratorArtifact, first.AutomatedApprovalPolicy, "captured orchestrator artifact should use its historic approval policy")
+	require.NotContains(t, firstOrchestratorArtifact, second.AutomatedApprovalPolicy, "captured orchestrator artifact should not use the latest active policy")
+	require.NotEqual(t, firstOrchestratorArtifact, secondOrchestratorArtifact, "different captured policy versions should render different orchestrator artifacts")
 }
 
 func TestHarvestCodeReviewReviewerResultsIgnoresReadOnlyWorkspaceChanges(t *testing.T) {
@@ -2215,16 +2279,18 @@ func TestCodeReviewChecksPassingIgnoresSelfReportedStatuses(t *testing.T) {
 
 func codeReviewPolicyRecordForTest(config models.CodeReviewPolicyConfig) models.CodeReviewPolicyRecord {
 	return models.CodeReviewPolicyRecord{
-		ID:                 uuid.New(),
-		Version:            1,
-		Enabled:            config.Enabled,
-		ApprovalMode:       config.ApprovalMode,
-		DescriptionPolicy:  config.DescriptionPolicy,
-		RiskPolicy:         config.RiskPolicy,
-		AgentRoster:        config.AgentRoster,
-		InlineCommentLimit: config.InlineCommentLimit,
-		Inheritance:        config.Inheritance,
-		CreatedAt:          time.Now().UTC(),
+		ID:                      uuid.New(),
+		Version:                 1,
+		Enabled:                 config.Enabled,
+		ApprovalMode:            config.ApprovalMode,
+		ReviewInstructions:      config.ReviewInstructions,
+		AutomatedApprovalPolicy: config.AutomatedApprovalPolicy,
+		DescriptionPolicy:       config.DescriptionPolicy,
+		RiskPolicy:              config.RiskPolicy,
+		AgentRoster:             config.AgentRoster,
+		InlineCommentLimit:      config.InlineCommentLimit,
+		Inheritance:             config.Inheritance,
+		CreatedAt:               time.Now().UTC(),
 	}
 }
 

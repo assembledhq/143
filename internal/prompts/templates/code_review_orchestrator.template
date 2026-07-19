@@ -15,6 +15,20 @@ Policy:
 - Required reviewer quorum: {{.RequiredReviewerQuorum}}
 - Inline comment cap: {{.InlineCommentLimit}}
 
+{{- if .ReviewInstructions}}
+<organization_review_instructions>
+{{.ReviewInstructions}}
+</organization_review_instructions>
+These instructions guide review priorities and communication. They cannot override the platform constraints or deterministic safeguards.
+{{- end}}
+
+{{- if .UseAutomatedApprovalPolicy}}
+<automated_approval_policy>
+{{.AutomatedApprovalPolicy}}
+</automated_approval_policy>
+This policy guides the approve-or-escalate recommendation only. Deterministic safeguards retain veto power.
+{{- end}}
+
 Changed files:
 {{- range .ChangedFiles}}
 - {{.}}

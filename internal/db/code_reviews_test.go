@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"regexp"
@@ -25,6 +26,8 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "historic review guidance"
+	config.AutomatedApprovalPolicy = "historic approval guidance"
 	config.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
 	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
@@ -36,8 +39,9 @@ func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 
 	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
 
@@ -62,6 +66,7 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
 		}))
 
@@ -74,6 +79,47 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ResolvePolicyInheritsPromptsIndependently(t *testing.T) {
+	t.Parallel()
+
+	orgID, repoID, userID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	orgConfig := models.DefaultCodeReviewPolicyConfig()
+	orgConfig.ReviewInstructions = "organization review guidance"
+	orgConfig.AutomatedApprovalPolicy = "organization approval guidance"
+	repoConfig := orgConfig
+	repoConfig.ReviewInstructions = "repository review guidance"
+	repoConfig.AutomatedApprovalPolicy = "stale repository value that must not override"
+	repoConfig.Inheritance = models.CodeReviewPolicyInheritance{
+		InheritOrgDefaults: true,
+		OverrideFields:     []string{models.CodeReviewPolicyFieldReviewInstructions},
+	}
+	repoDescription, repoRisk, repoRoster, repoInheritance := mustCodeReviewPolicyJSON(t, repoConfig)
+	orgDescription, orgRisk, orgRoster, orgInheritance := mustCodeReviewPolicyJSON(t, orgConfig)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	columns := []string{
+		"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+		"review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster",
+		"inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
+	}
+	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(
+		pgxmock.NewRows(columns).
+			AddRow(uuid.New(), orgID, &repoID, true, 2, repoConfig.Enabled, repoConfig.ApprovalMode, repoConfig.ReviewInstructions, repoConfig.AutomatedApprovalPolicy, repoDescription, repoRisk, repoRoster, repoConfig.InlineCommentLimit, repoInheritance, &userID, now).
+			AddRow(uuid.New(), orgID, nil, true, 4, orgConfig.Enabled, orgConfig.ApprovalMode, orgConfig.ReviewInstructions, orgConfig.AutomatedApprovalPolicy, orgDescription, orgRisk, orgRoster, orgConfig.InlineCommentLimit, orgInheritance, &userID, now),
+	)
+
+	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
+
+	require.NoError(t, err, "ResolvePolicy should merge repository and organization prompt fields")
+	require.Equal(t, repoConfig.ReviewInstructions, resolved.Config.ReviewInstructions, "repository should override review instructions independently")
+	require.Equal(t, orgConfig.AutomatedApprovalPolicy, resolved.Config.AutomatedApprovalPolicy, "repository should inherit automated approval policy independently")
+	require.NotNil(t, resolved.InheritedPolicy, "resolved repository policy should expose its organization source")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 	t.Parallel()
 
@@ -83,6 +129,8 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "historic review guidance"
+	config.AutomatedApprovalPolicy = "historic approval guidance"
 	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
@@ -93,13 +141,16 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
 	require.NoError(t, err, "GetPolicyByID should load captured policy version")
 	require.Equal(t, policyID, record.ID, "GetPolicyByID should return requested policy")
+	require.Equal(t, config.ReviewInstructions, record.ReviewInstructions, "GetPolicyByID should return captured historic review instructions")
+	require.Equal(t, config.AutomatedApprovalPolicy, record.AutomatedApprovalPolicy, "GetPolicyByID should return captured historic approval policy")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -112,6 +163,8 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "new review guidance"
+	config.AutomatedApprovalPolicy = "new approval guidance"
 	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
@@ -122,6 +175,7 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
 		}))
 	mock.ExpectBegin()
@@ -134,21 +188,55 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	mock.ExpectQuery("INSERT INTO code_review_policies").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgxmock.AnyArg(), config.ReviewInstructions, config.AutomatedApprovalPolicy,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
+			"review_instructions", "automated_approval_policy",
 			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
 	mock.ExpectCommit()
 
-	record, err := NewCodeReviewStore(mock).SavePolicy(context.Background(), orgID, &repoID, config, &userID)
+	var logOutput bytes.Buffer
+	store := NewCodeReviewStore(mock)
+	store.SetLogger(zerolog.New(&logOutput))
+	record, err := store.SavePolicy(context.Background(), orgID, &repoID, config, &userID)
 
 	require.NoError(t, err, "SavePolicy should insert a new active version")
 	require.Equal(t, 4, record.Version, "SavePolicy should increment from the current scope max version")
 	require.Equal(t, policyID, record.ID, "SavePolicy should return inserted policy")
+	require.Equal(t, config.ReviewInstructions, record.ReviewInstructions, "SavePolicy should persist the complete review instructions in the new version")
+	require.Equal(t, config.AutomatedApprovalPolicy, record.AutomatedApprovalPolicy, "SavePolicy should persist the complete approval policy in the new version")
+	require.Contains(t, logOutput.String(), `"review_instructions_runes":19`, "policy logs should record review-instruction rune count")
+	require.Contains(t, logOutput.String(), `"automated_approval_policy_runes":21`, "policy logs should record approval-policy rune count")
+	require.NotContains(t, logOutput.String(), config.ReviewInstructions, "policy logs should never contain review-instruction text")
+	require.NotContains(t, logOutput.String(), config.AutomatedApprovalPolicy, "policy logs should never contain approval-policy text")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	content := "/review\n\n<organization_review_instructions>\ncaptured guidance\n</organization_review_instructions>"
+	metadata := json.RawMessage(`{"policy_version":3}`)
+	artifact := &models.CodeReviewPromptArtifact{OrgID: orgID, SessionID: sessionID, ArtifactKey: "prompts/reviewer", Role: "reviewer", AgentProvider: "codex", Content: content, Metadata: metadata}
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("INSERT INTO code_review_prompt_artifacts").WithArgs(
+		orgID, sessionID, artifact.ArtifactKey, artifact.Role, artifact.AgentProvider, content, metadata,
+	).WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+		AddRow(artifactID, orgID, sessionID, artifact.ArtifactKey, artifact.Role, artifact.AgentProvider, content, metadata, now))
+
+	err = NewCodeReviewStore(mock).CreatePromptArtifact(context.Background(), artifact)
+
+	require.NoError(t, err, "CreatePromptArtifact should persist the exact effective prompt")
+	require.Equal(t, artifactID, artifact.ID, "CreatePromptArtifact should return the persisted artifact identity")
+	require.Equal(t, content, artifact.Content, "prompt artifact should preserve captured instructions byte-for-byte")
+	require.Equal(t, metadata, artifact.Metadata, "prompt artifact should preserve captured policy-version metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all prompt artifact expectations should be met")
 }
 
 func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T) {

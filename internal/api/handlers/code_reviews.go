@@ -269,12 +269,37 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	var req struct {
-		RepositoryID *uuid.UUID                    `json:"repository_id,omitempty"`
-		Config       models.CodeReviewPolicyConfig `json:"config"`
+		RepositoryID *uuid.UUID      `json:"repository_id,omitempty"`
+		Config       json.RawMessage `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
+	}
+	var config models.CodeReviewPolicyConfig
+	if err := json.Unmarshal(req.Config, &config); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
+		return
+	}
+	var supplied map[string]json.RawMessage
+	if err := json.Unmarshal(req.Config, &supplied); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
+		return
+	}
+	_, reviewInstructionsSupplied := supplied["review_instructions"]
+	_, automatedApprovalPolicySupplied := supplied["automated_approval_policy"]
+	if !reviewInstructionsSupplied || !automatedApprovalPolicySupplied {
+		current, err := h.store.ResolvePolicy(r.Context(), orgID, req.RepositoryID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
+			return
+		}
+		if !reviewInstructionsSupplied {
+			config.ReviewInstructions = current.Config.ReviewInstructions
+		}
+		if !automatedApprovalPolicySupplied {
+			config.AutomatedApprovalPolicy = current.Config.AutomatedApprovalPolicy
+		}
 	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
@@ -291,8 +316,13 @@ func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	record, err := h.store.SavePolicy(r.Context(), orgID, req.RepositoryID, req.Config, &user.ID)
+	record, err := h.store.SavePolicy(r.Context(), orgID, req.RepositoryID, config, &user.ID)
 	if err != nil {
+		var validationErr *models.CodeReviewPolicyValidationError
+		if errors.As(err, &validationErr) {
+			writeErrorWithDetails(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", map[string]string{"field": validationErr.Field}, err)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", err)
 		return
 	}

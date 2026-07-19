@@ -1,7 +1,7 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
 import { http, HttpResponse } from "msw";
-import { renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
+import { fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 
 const toast = vi.hoisted(() => ({
@@ -60,6 +60,8 @@ const policy: CodeReviewResolvedPolicy = {
   config: {
     enabled: true,
     approval_mode: "comment_only",
+    review_instructions: "",
+    automated_approval_policy: "Automatically approve routine, well-tested changes when safe.",
     description_policy: {
       requirements: [
         {
@@ -356,6 +358,9 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("2 reviewers")).toBeInTheDocument();
     expect(screen.getByText("quorum 2")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
+    expect(screen.getByRole("region", { name: "Additional review instructions (optional)" })).toBeInTheDocument();
+    expect(screen.getByText(/native \/review behavior without extra guidance/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Automated approval policy" })).toHaveClass("hidden");
     expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
     expect(screen.getByText("Ready")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Repair GitHub reviewer/i })).not.toBeInTheDocument();
@@ -465,6 +470,8 @@ describe("CodeReviewsPage", () => {
       "Organization default inheritance",
       "Code reviews enabled",
       "Review outcome",
+      "Automated approval policy",
+      "Additional review instructions (optional)",
       "GitHub reviewer",
       "Advanced controls",
     ];
@@ -477,12 +484,14 @@ describe("CodeReviewsPage", () => {
       name: "Code reviews enabled",
     });
     const githubHeading = screen.getByText("GitHub reviewer");
+    const instructionsHeading = screen.getByText("Additional review instructions (optional)");
     const summaryHeading = screen.getByText("Current behavior");
     const advancedTrigger = screen.getByRole("button", {
       name: "Advanced controls",
     });
     expect(scope.compareDocumentPosition(enablement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(enablement.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(enablement.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(githubHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(summaryHeading.compareDocumentPosition(advancedTrigger) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
@@ -500,6 +509,15 @@ describe("CodeReviewsPage", () => {
     await user.hover(advancedInfo);
     expect(await screen.findByRole("tooltip")).toHaveTextContent(/deterministic approval safeguards/i);
     await user.unhover(advancedInfo);
+    const instructionsInfo = screen.getByRole("button", { name: "About Additional review instructions (optional)" });
+    await user.click(instructionsInfo);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/native \/review command/i);
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+    const approvalInfo = screen.getByRole("button", { name: "About Automated approval policy" });
+    act(() => approvalInfo.focus());
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(/cannot bypass hard safeguards/i);
+    act(() => approvalInfo.blur());
 
     await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
@@ -699,6 +717,141 @@ describe("CodeReviewsPage", () => {
     });
     expect(state.getCurrentConfig().approval_mode).toBe("approve_acceptable");
     expect(screen.getByRole("radio", { name: /^Approve acceptable PRs/i })).toBeChecked();
+  });
+
+  it("debounces both prompt composers and autosaves the latest full config without clobbering", async () => {
+    const user = userEvent.setup();
+    const updates: CodeReviewPolicyConfig[] = [];
+    mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+    await waitFor(() => expect(updates.at(-1)?.approval_mode).toBe("approve_acceptable"));
+
+    const reviewInstructions = within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("textbox");
+    const approvalPolicy = within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox");
+    await user.clear(reviewInstructions);
+    await user.type(reviewInstructions, "Review tenant boundaries and authorization.");
+    await user.clear(approvalPolicy);
+    await user.type(approvalPolicy, "Approve only routine changes with proportionate tests.");
+
+    await waitFor(() => {
+      const latest = updates.at(-1);
+      expect(latest?.review_instructions).toBe("Review tenant boundaries and authorization.");
+      expect(latest?.automated_approval_policy).toBe("Approve only routine changes with proportionate tests.");
+      expect(latest?.risk_policy).toEqual(policy.config.risk_policy);
+      expect(latest?.agent_roster).toEqual(policy.config.agent_roster);
+    });
+    await user.click(screen.getByRole("radio", { name: /Comment only/i }));
+    expect(screen.getByRole("region", { name: "Automated approval policy" })).toHaveClass("hidden");
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+    expect(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox")).toHaveValue("Approve only routine changes with proportionate tests.");
+  });
+
+  it("keeps invalid rune-count text visible without sending it", async () => {
+    const user = userEvent.setup();
+    const updates: CodeReviewPolicyConfig[] = [];
+    mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    const input = within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("textbox");
+    const overLimit = "界".repeat(8001);
+    fireEvent.change(input, { target: { value: overLimit } });
+    fireEvent.blur(input);
+
+    expect(input).toHaveValue(overLimit);
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText("8001 / 8000")).toBeInTheDocument();
+    expect(screen.getByText("Prompt is too long.")).toBeInTheDocument();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+    expect(updates).toHaveLength(0);
+  });
+
+  it("saves at-limit text padded with trailing whitespace by trimming before the length check", async () => {
+    const user = userEvent.setup();
+    const updates: CodeReviewPolicyConfig[] = [];
+    mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    const input = within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("textbox");
+    const atLimit = "界".repeat(8000);
+    // Raw length 8002 > 8000, but trimmed length is exactly 8000 — the gate must
+    // measure the trimmed value that actually gets persisted.
+    fireEvent.change(input, { target: { value: `${atLimit}\n\n` } });
+    fireEvent.blur(input);
+
+    expect(input).toHaveAttribute("aria-invalid", "false");
+    expect(screen.getByText("8000 / 8000")).toBeInTheDocument();
+    expect(screen.queryByText("Prompt is too long.")).not.toBeInTheDocument();
+    await waitFor(() => expect(updates.at(-1)?.review_instructions).toBe(atLimit));
+  });
+
+  it("retains local prompt text after a failed save", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    server.use(http.put("/api/v1/code-review-policies", () => HttpResponse.json({ error: { code: "SAVE_FAILED", message: "failed" } }, { status: 500 })));
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    const input = within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("textbox");
+    await user.type(input, "Keep this unsaved local guidance");
+
+    expect(await screen.findAllByText("Couldn't save")).not.toHaveLength(0);
+    expect(input).toHaveValue("Keep this unsaved local guidance");
+  });
+
+  it("resets each repository prompt independently to its organization value", async () => {
+    const user = userEvent.setup();
+    const updates: CodeReviewPolicyConfig[] = [];
+    mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
+    const repositoryConfig = { ...policy.config, review_instructions: "repository review", automated_approval_policy: "repository approval" };
+    const organizationConfig = { ...policy.config, review_instructions: "organization review", automated_approval_policy: "organization approval" };
+    let currentConfig = repositoryConfig;
+    server.use(
+      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: {
+      ...policy, source: "repository", config: currentConfig,
+      inherited_policy: { ...organizationConfig, id: "org-policy", org_id: "org-1", active: true, version: 3, created_at: "2026-06-26T12:00:00Z" },
+      } } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
+      http.put("/api/v1/code-review-policies", async ({ request }) => {
+        const body = (await request.json()) as { config: CodeReviewPolicyConfig };
+        currentConfig = body.config;
+        updates.push(body.config);
+        return HttpResponse.json({ data: { ...body.config, id: "repo-policy", org_id: "org-1", repository_id: repo.id, active: true, version: 4, created_at: "2026-06-26T12:00:00Z" } } satisfies SingleResponse<CodeReviewPolicyRecord>);
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Use organization value" })).toHaveLength(2));
+
+    await user.click(within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("button", { name: "Use organization value" }));
+    await waitFor(() => {
+      expect(updates.at(-1)?.review_instructions).toBe("organization review");
+      expect(updates.at(-1)?.automated_approval_policy).toBe("repository approval");
+    });
+    await user.click(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("button", { name: "Use organization value" }));
+    await waitFor(() => {
+      expect(updates.at(-1)?.review_instructions).toBe("organization review");
+      expect(updates.at(-1)?.automated_approval_policy).toBe("organization approval");
+    });
+  });
+
+  it("preserves prompt composer order at a mobile viewport", async () => {
+    const user = userEvent.setup();
+    const originalWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 375 });
+    mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+
+    const approval = screen.getByRole("region", { name: "Automated approval policy" });
+    const safeguards = screen.getByText("Hard safeguards").parentElement;
+    const instructions = screen.getByRole("region", { name: "Additional review instructions (optional)" });
+    expect(approval.compareDocumentPosition(safeguards as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect((safeguards as Node).compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
   });
 
   it("edits paths, authors, and checks as compact autosaved lists", async () => {

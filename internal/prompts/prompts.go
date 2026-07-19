@@ -296,6 +296,7 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 // ─── Code Reviews ───────────────────────────────────────────────────────────
 
 type CodeReviewReviewerPromptData struct {
+	ReviewInstructions      string
 	Repository              string
 	PullNumber              int
 	PullRequestURL          string
@@ -349,23 +350,26 @@ func CodeReviewDescriptionCheckUserPrompt(data CodeReviewDescriptionCheckUserPro
 }
 
 type CodeReviewOrchestratorPromptData struct {
-	Repository             string
-	PullNumber             int
-	PullRequestURL         string
-	Title                  string
-	Author                 string
-	BaseSHA                string
-	HeadSHA                string
-	PolicyVersion          int
-	ApprovalMode           any
-	RequiredReviewerQuorum int
-	InlineCommentLimit     int
-	RiskReasons            []string
-	DescriptionResults     []string
-	ReviewerOutputs        []string
-	Findings               []string
-	ChangedFiles           []string
-	Checklist              []string
+	Repository                 string
+	PullNumber                 int
+	PullRequestURL             string
+	Title                      string
+	Author                     string
+	BaseSHA                    string
+	HeadSHA                    string
+	PolicyVersion              int
+	ApprovalMode               any
+	RequiredReviewerQuorum     int
+	InlineCommentLimit         int
+	RiskReasons                []string
+	DescriptionResults         []string
+	ReviewerOutputs            []string
+	Findings                   []string
+	ChangedFiles               []string
+	Checklist                  []string
+	ReviewInstructions         string
+	AutomatedApprovalPolicy    string
+	UseAutomatedApprovalPolicy bool
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {
