@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -46,6 +48,117 @@ func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
 	require.Equal(t, config.AutomatedApprovalPolicy, response.Data.Config.AutomatedApprovalPolicy, "policy GET should return automated approval policy")
 }
 
+func TestCodeReviewHandler_PromptExamplesReturnsSeparateCollections(t *testing.T) {
+	t.Parallel()
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/prompt-examples", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.PromptExamples(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "prompt examples should be readable by authenticated policy viewers")
+	var response models.SingleResponse[models.CodeReviewPromptExamplesResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "prompt example response should be valid JSON")
+	require.Equal(t, models.CodeReviewPromptExamples(), response.Data.ReviewInstructions, "response should keep review-instruction examples in their own collection")
+	require.Equal(t, models.CodeReviewAutomatedApprovalExamples(), response.Data.AutomatedApprovalPolicies, "response should keep approval examples in their own collection")
+}
+
+func TestCodeReviewHandler_PolicyEventValidatesEventName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body string
+		expected   int
+	}{
+		{name: "accepts privacy safe event", body: `{"event":"code_review_policy_viewed","scope":"organization","configured":true}`, expected: http.StatusNoContent},
+		{name: "rejects unknown event", body: `{"event":"prompt_contents_here"}`, expected: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			handler := NewCodeReviewHandler(nil, nil)
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/code-reviews/policy-events", strings.NewReader(tt.body))
+			handler.PolicyEvent(rr, req)
+			require.Equal(t, tt.expected, rr.Code, "policy event endpoint should accept only bounded event names")
+		})
+	}
+}
+
+func TestCodeReviewHandler_ResetPolicyRejectsInvalidRepositoryID(t *testing.T) {
+	t.Parallel()
+	handler := NewCodeReviewHandler(nil, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/code-review-policies/repositories/not-a-uuid", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", "not-a-uuid")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	handler.ResetPolicy(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "repository reset should reject malformed repository IDs before touching storage")
+}
+
+func TestCodeReviewHandler_ResetPolicyDeactivatesRepositoryOverride(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+	orgID, repositoryID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/code-review-policies/repositories/"+repositoryID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repositoryID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	handler.ResetPolicy(rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code, "repository reset should return no content after deactivation")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository reset should remain transactionally tenant scoped")
+}
+
+func TestCodeReviewHandler_ResetPolicyReportsAlreadyInherited(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+	orgID, repositoryID := uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectCommit()
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/code-review-policies/repositories/"+repositoryID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repositoryID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	handler.ResetPolicy(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, "stale reset should distinguish an already inherited repository policy")
+	require.Contains(t, rr.Body.String(), "CODE_REVIEW_POLICY_OVERRIDE_NOT_FOUND", "stale reset should return an actionable error code")
+}
+
+func TestCodeReviewHandler_ResetPolicyRejectsCrossOrganizationRepository(t *testing.T) {
+	t.Parallel()
+	orgID, repositoryID := uuid.New(), uuid.New()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+	mock.ExpectQuery("FROM repositories").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), db.NewRepositoryStore(mock))
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/code-review-policies/repositories/"+repositoryID.String(), nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("repository_id", repositoryID.String())
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	handler.ResetPolicy(rr, req)
+	require.Equal(t, http.StatusNotFound, rr.Code, "cross-organization repository reset should be indistinguishable from a missing repository")
+	require.NoError(t, mock.ExpectationsWereMet(), "repository reset ownership check should remain organization scoped")
+}
+
 func TestCodeReviewHandler_PutPolicyRejectsEmptyApprovalPolicyWithFieldDetails(t *testing.T) {
 	t.Parallel()
 	orgID, userID := uuid.New(), uuid.New()
@@ -72,6 +185,18 @@ func TestCodeReviewHandler_PutPolicyRejectsEmptyApprovalPolicyWithFieldDetails(t
 	require.Equal(t, "CODE_REVIEW_POLICY_INVALID", response.Error.Code, "invalid prompt should use policy validation code")
 	require.Equal(t, map[string]any{"field": "automated_approval_policy"}, response.Error.Details, "invalid prompt should identify its field")
 	require.NoError(t, mock.ExpectationsWereMet(), "invalid prompt should fail before database mutation")
+}
+
+func TestCodeReviewHandler_PutPolicyRejectsUnknownEditSource(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(map[string]any{"config": models.DefaultCodeReviewPolicyConfig(), "source": "contains prompt text"})
+	require.NoError(t, err, "policy request should marshal")
+	handler := NewCodeReviewHandler(nil, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
+	handler.PutPolicy(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "policy writes should accept only bounded privacy-safe edit sources")
+	require.Contains(t, rr.Body.String(), "INVALID_SOURCE", "unknown edit source should use the structured source error")
 }
 
 func TestCodeReviewHandler_PutPolicyRetainsEachOmittedPromptIndependently(t *testing.T) {

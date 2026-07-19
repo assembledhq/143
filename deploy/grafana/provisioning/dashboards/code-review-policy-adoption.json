@@ -1,0 +1,20 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {"type":"timeseries","title":"Policy setup events","id":1,"gridPos":{"h":9,"w":12,"x":0,"y":0},"targets":[{"expr":"sum by (event) (rate(code_review_policy_events_total[1h]))","legendFormat":"{{event}}","refId":"A"}]},
+    {"type":"timeseries","title":"Prompt example adoption","id":2,"gridPos":{"h":9,"w":12,"x":12,"y":0},"targets":[{"expr":"sum by (example_key, event) (rate(code_review_policy_events_total{event=~\"code_review_prompt_example_(previewed|applied)\"}[1h]))","legendFormat":"{{example_key}} {{event}}","refId":"A"}]},
+    {"type":"timeseries","title":"Prompt edits by source","id":3,"gridPos":{"h":9,"w":12,"x":0,"y":9},"targets":[{"expr":"sum by (source, character_bucket) (rate(code_review_policy_events_total{event=\"code_review_prompt_edited\"}[1h]))","legendFormat":"{{source}} {{character_bucket}}","refId":"A"}]},
+    {"type":"timeseries","title":"GitHub reviewer setup","id":4,"gridPos":{"h":9,"w":12,"x":12,"y":9},"targets":[{"expr":"sum by (event) (rate(code_review_policy_events_total{event=~\"code_review_github_setup_(completed|failed)\"}[1h]))","legendFormat":"{{event}}","refId":"A"}]}
+  ],
+  "refresh":"5m",
+  "schemaVersion":39,
+  "tags":["code-review","adoption"],
+  "templating":{"list":[]},
+  "time":{"from":"now-30d","to":"now"},
+  "timezone":"browser",
+  "title":"Code Review Policy Adoption",
+  "uid":"code-review-policy-adoption",
+  "version":1
+}

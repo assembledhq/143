@@ -29,6 +29,8 @@ export interface UseDebouncedTextFieldResult {
   onChange: (next: string) => void;
   onBlur: () => void;
   replace: (next: string) => void;
+  flush: () => void;
+  dirty: boolean;
 }
 
 /**
@@ -141,5 +143,5 @@ export function useDebouncedTextField({
     setLastSent(next);
   };
 
-  return { value: local, onChange, onBlur, replace };
+  return { value: local, onChange, onBlur, replace, flush: onBlur, dirty: local !== lastSent };
 }

@@ -21,7 +21,7 @@ The public homepage positions 143 as shared coding-agent infrastructure for engi
 - **Project** is the higher-level planning surface for PM-proposed or human-authored multi-step work. Projects group related tasks and can feed sessions over time.
 - **Preview** is a temporary isolated web runtime for a session or branch. It is addressed by a preview origin, controlled by backend state, and backed by a worker-owned sandbox/runtime.
 - **Branch or PR** is the publish artifact. 143 creates branches and PRs through GitHub while preserving repository templates, keeping PR descriptions concise and problem-first, running policy-driven pre-PR readiness checks with reviewer-facing evidence when configured, and leaving repository-native CI/CD as the validation source of truth.
-- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. It stores policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, and GitHub review output on top of normal sessions so approval decisions remain auditable.
+- **Code review** is a post-PR review session started by explicit reviewer-bot request or future policy triggers. Versioned policy separates optional reviewer instructions, automated-approval guidance, and deterministic safeguards; repository scopes inherit organization fields independently. Reviews store policy version, PR/head SHA metadata, reviewer-agent evidence, findings, risk decision, rendered prompt artifacts, and GitHub review output so decisions remain auditable.
 
 ## Core Flow
 
