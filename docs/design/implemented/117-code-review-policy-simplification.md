@@ -2,7 +2,7 @@
 
 > **Status:** Implemented | **Last reviewed:** 2026-07-19
 >
-> **Depends on:** [../overall.md](../overall.md), [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
+> **Depends on:** [../overall.md](../overall.md), [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
 
 ## Product Specification
 
