@@ -611,3 +611,63 @@ func TestEvaluateCodeReviewDecision(t *testing.T) {
 		})
 	}
 }
+
+func TestCodeReviewPromptExamples(t *testing.T) {
+	t.Parallel()
+
+	review := CodeReviewPromptExamples()
+	approval := CodeReviewAutomatedApprovalExamples()
+
+	require.Equal(t, []CodeReviewPromptExample{CodeReviewPromptExampleBalanced, CodeReviewPromptExampleSecurityFocused, CodeReviewPromptExampleMinimal}, []CodeReviewPromptExample{review[0].Key, review[1].Key, review[2].Key}, "review examples should expose the stable ordered keys")
+	require.Equal(t, []CodeReviewAutomatedApprovalExample{CodeReviewAutomatedApprovalExampleConservative, CodeReviewAutomatedApprovalExampleDocumentation, CodeReviewAutomatedApprovalExampleSmallRoutine}, []CodeReviewAutomatedApprovalExample{approval[0].Key, approval[1].Key, approval[2].Key}, "approval examples should expose the stable ordered keys")
+	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, approval[0].Policy, "the conservative example should match the built-in approval policy")
+	for _, example := range append([]CodeReviewPromptExampleOption(nil), review...) {
+		require.NotEmpty(t, example.Instructions, "every review example should contain usable instructions")
+	}
+}
+
+func TestCodeReviewPolicyConfig_ValidateReturnsStructuredAdvancedFields(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, field string
+		mutate      func(*CodeReviewPolicyConfig)
+	}{
+		{name: "inline comment limit", field: CodeReviewPolicyFieldInlineCommentLimit, mutate: func(c *CodeReviewPolicyConfig) { c.InlineCommentLimit = 0 }},
+		{name: "risk policy", field: CodeReviewPolicyFieldRiskPolicy, mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.MaxFilesChanged = 0 }},
+		{name: "agent roster", field: CodeReviewPolicyFieldAgentRoster, mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }},
+		{name: "description policy", field: CodeReviewPolicyFieldDescriptionPolicy, mutate: func(c *CodeReviewPolicyConfig) { c.DescriptionPolicy.Requirements[0].AppliesWhen.Kind = "invalid" }},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := DefaultCodeReviewPolicyConfig()
+			tt.mutate(&config)
+			err := config.Validate()
+			var validationErr *CodeReviewPolicyValidationError
+			require.ErrorAs(t, err, &validationErr, "advanced validation should return a structured field error")
+			require.Equal(t, tt.field, validationErr.Field, "structured validation should identify the relevant policy subsection")
+		})
+	}
+}
+
+func TestCodeReviewPolicyEditSource_Validate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		value   CodeReviewPolicyEditSource
+		wantErr bool
+	}{{name: "manual", value: CodeReviewPolicyEditSourceManual}, {name: "example", value: CodeReviewPolicyEditSourceExample}, {name: "reset", value: CodeReviewPolicyEditSourceReset}, {name: "invalid", value: "prompt text", wantErr: true}}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.value.Validate()
+			if tt.wantErr {
+				require.Error(t, err, "unknown edit sources should be rejected")
+				return
+			}
+			require.NoError(t, err, "known privacy-safe edit sources should validate")
+		})
+	}
+}

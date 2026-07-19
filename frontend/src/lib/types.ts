@@ -130,6 +130,16 @@ export interface UserSettingsUpdateRequest {
 }
 
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
+export type CodeReviewPolicyEditSource = "manual" | "example" | "reset";
+export interface CodeReviewPolicyAnalyticsEvent {
+  event: "code_review_policy_viewed" | "code_review_prompt_edited" | "code_review_prompt_example_previewed" | "code_review_prompt_example_applied" | "code_review_advanced_opened" | "code_review_policy_enabled" | "code_review_approval_mode_changed" | "code_review_github_setup_completed" | "code_review_github_setup_failed";
+  scope?: "organization" | "repository";
+  source?: CodeReviewPolicyEditSource;
+  example_key?: string;
+  character_bucket?: string;
+  subsection?: string;
+  configured?: boolean;
+}
 export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
 export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
 export type CodeReviewListOutcome = "automatically_approved" | "completed_not_approved";
@@ -261,6 +271,25 @@ export interface CodeReviewTemplateOption {
   title: string;
   description: string;
   config: CodeReviewPolicyConfig;
+}
+
+export interface CodeReviewPromptExampleOption {
+  key: "balanced" | "security_focused" | "minimal";
+  title: string;
+  description: string;
+  instructions: string;
+}
+
+export interface CodeReviewAutomatedApprovalExampleOption {
+  key: "conservative_low_risk" | "documentation_only" | "small_routine_changes";
+  title: string;
+  description: string;
+  policy: string;
+}
+
+export interface CodeReviewPromptExamplesResponse {
+  review_instructions: CodeReviewPromptExampleOption[];
+  automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[];
 }
 
 export interface CodeReviewListItem {
