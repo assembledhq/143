@@ -6538,6 +6538,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                 className="h-6"
                 role="status"
                 aria-live="polite"
+                aria-atomic="true"
                 title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
               >
                 {selectedPublicationPresentation.label}
