@@ -186,6 +186,86 @@ func (s *capturingCodeReviewSubmitter) RemoveRequestedReviewers(_ context.Contex
 	return nil
 }
 
+type stubHeadCodeReviewSubmitter struct {
+	capturingCodeReviewSubmitter
+	head     codereview.PullRequestHead
+	err      error
+	requests []codereview.PullRequestHeadRequest
+}
+
+func (s *stubHeadCodeReviewSubmitter) GetPullRequestHead(_ context.Context, req codereview.PullRequestHeadRequest) (codereview.PullRequestHead, error) {
+	s.requests = append(s.requests, req)
+	return s.head, s.err
+}
+
+func TestCodeReviewLiveHeadChanged(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repositoryID := uuid.New()
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, HeadSHA: "reviewed-head"}
+	pr := models.PullRequest{GitHubRepo: "acme/repo", GitHubPRNumber: 42}
+
+	expectRepositoryLookup := func(t *testing.T, mock pgxmock.PgxPoolIface) {
+		t.Helper()
+		mock.ExpectQuery("(?s)FROM repositories.*WHERE id = @id AND org_id = @org_id").
+			WithArgs(pgx.NamedArgs{"id": repositoryID, "org_id": orgID}).
+			WillReturnRows(workerRepositoryRows(models.Repository{
+				ID: repositoryID, OrgID: orgID, IntegrationID: uuid.New(), GitHubID: 42,
+				FullName: "acme/repo", DefaultBranch: "main", CloneURL: "https://github.com/acme/repo.git",
+				InstallationID: 143, Status: models.RepositoryStatusActive, Settings: json.RawMessage(`{}`),
+				CreatedAt: now, UpdatedAt: now,
+			}))
+	}
+
+	t.Run("service without live head support reports unchecked", func(t *testing.T) {
+		t.Parallel()
+		changed, checked := codeReviewLiveHeadChanged(context.Background(), &Stores{}, &Services{CodeReviews: &capturingCodeReviewSubmitter{}}, zerolog.Nop(), job, pr)
+		require.False(t, checked, "a submitter without head lookups should be reported as unchecked")
+		require.False(t, changed, "an unchecked head should never be reported as changed")
+	})
+
+	t.Run("moved live head reports changed", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "mock pool should be created")
+		defer mock.Close()
+		expectRepositoryLookup(t, mock)
+		submitter := &stubHeadCodeReviewSubmitter{head: codereview.PullRequestHead{HeadSHA: "new-head"}}
+		changed, checked := codeReviewLiveHeadChanged(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, &Services{CodeReviews: submitter}, zerolog.Nop(), job, pr)
+		require.True(t, checked, "a successful live lookup should be reported as checked")
+		require.True(t, changed, "a moved live head should be reported as changed")
+		require.Equal(t, []codereview.PullRequestHeadRequest{{InstallationID: 143, Repository: "acme/repo", PullNumber: 42}}, submitter.requests, "live head lookup should target the PR via the repository installation")
+		require.NoError(t, mock.ExpectationsWereMet(), "repository lookup should be performed")
+	})
+
+	t.Run("matching live head reports unchanged", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "mock pool should be created")
+		defer mock.Close()
+		expectRepositoryLookup(t, mock)
+		submitter := &stubHeadCodeReviewSubmitter{head: codereview.PullRequestHead{HeadSHA: "reviewed-head"}}
+		changed, checked := codeReviewLiveHeadChanged(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, &Services{CodeReviews: submitter}, zerolog.Nop(), job, pr)
+		require.True(t, checked, "a successful live lookup should be reported as checked")
+		require.False(t, changed, "a matching live head should not be reported as changed")
+	})
+
+	t.Run("lookup failure reports unchecked", func(t *testing.T) {
+		t.Parallel()
+		mock, err := pgxmock.NewPool()
+		require.NoError(t, err, "mock pool should be created")
+		defer mock.Close()
+		expectRepositoryLookup(t, mock)
+		submitter := &stubHeadCodeReviewSubmitter{err: errors.New("github unavailable")}
+		changed, checked := codeReviewLiveHeadChanged(context.Background(), &Stores{Repositories: db.NewRepositoryStore(mock)}, &Services{CodeReviews: submitter}, zerolog.Nop(), job, pr)
+		require.False(t, checked, "a failed live lookup should be reported as unchecked so it cannot wedge the review")
+		require.False(t, changed, "a failed live lookup should never be reported as changed")
+	})
+}
+
 func TestCodeReviewInlineComments(t *testing.T) {
 	t.Parallel()
 

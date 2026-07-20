@@ -263,6 +263,54 @@ func TestGitHubSubmitter_SubmitReviewDoesNotReuseMarkedInlineCommentFromDifferen
 	}, result.Comments, "SubmitReview should return the newly posted comment with the original finding key")
 }
 
+func TestGitHubSubmitter_GetPullRequestHead(t *testing.T) {
+	t.Parallel()
+
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"head":{"sha":"f315eeaf17eaf85e5793dbb738d71201e50f6beb"},"base":{"sha":"572f3a9793ade453d559ec2ae5367297514a9476"}}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	head, err := submitter.GetPullRequestHead(context.Background(), PullRequestHeadRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+
+	require.NoError(t, err, "GetPullRequestHead should load the pull request from GitHub")
+	require.Equal(t, "/repos/acme/repo/pulls/42", gotPath, "GetPullRequestHead should call the GitHub pull request endpoint")
+	require.Equal(t, PullRequestHead{
+		HeadSHA: "f315eeaf17eaf85e5793dbb738d71201e50f6beb",
+		BaseSHA: "572f3a9793ade453d559ec2ae5367297514a9476",
+	}, head, "GetPullRequestHead should decode the head and base SHAs")
+}
+
+func TestGitHubSubmitter_GetPullRequestHeadRejectsMissingHead(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{}`))
+		require.NoError(t, err, "test response should write")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+
+	_, err := submitter.GetPullRequestHead(context.Background(), PullRequestHeadRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+	})
+	require.Error(t, err, "GetPullRequestHead should reject a response without a head SHA")
+}
+
 func TestGitHubSubmitter_ListPullRequestFiles(t *testing.T) {
 	t.Parallel()
 
