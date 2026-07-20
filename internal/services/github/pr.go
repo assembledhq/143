@@ -570,6 +570,17 @@ type CreatePRParams struct {
 	PublicationQueue          models.SessionPublicationJobQueue `json:"-"`
 	PublicationRequestPayload json.RawMessage                   `json:"-"`
 	PublicationGenerationAt   time.Time                         `json:"-"`
+	PublicationHeadBranch     string                            `json:"-"`
+}
+
+// PublicationAttempt is the durable publication request paired with the
+// exact parameters that CreatePR must use. In particular, HeadBranch is
+// resolved once and carried forward so snapshot-backed sessions cannot write
+// a ledger entry for one branch and later push another.
+type PublicationAttempt struct {
+	Params      CreatePRParams
+	Publication models.SessionPublication
+	Started     bool
 }
 
 type CreateBranchResult struct {
@@ -714,6 +725,92 @@ func publicationRequestPayloadForCreate(
 	return encoded, nil
 }
 
+// PreparePublicationAttempt persists publication intent and atomically gates
+// the caller before any sandbox or GitHub side effects. Keeping branch
+// resolution here lets snapshot-backed sessions participate even when their
+// mutable session/changeset branch fields were never persisted.
+func (s *PRService) PreparePublicationAttempt(
+	ctx context.Context,
+	run *models.Session,
+	changeset models.SessionChangeset,
+	params CreatePRParams,
+) (PublicationAttempt, error) {
+	if run == nil {
+		return PublicationAttempt{}, errors.New("session is required to prepare publication")
+	}
+	if s.publications == nil {
+		return PublicationAttempt{}, errors.New("session publication store is unavailable")
+	}
+	if run.RepositoryID == nil {
+		return PublicationAttempt{}, fmt.Errorf("session %s has no repository", run.ID)
+	}
+	if changeset.ID == uuid.Nil || changeset.SessionID != run.ID || changeset.OrgID != run.OrgID {
+		return PublicationAttempt{}, errors.New("publication changeset does not match session scope")
+	}
+
+	params.ChangesetID = &changeset.ID
+	params.PublicationSource = publicationSourceForRun(run, params.PublicationSource)
+	queue, err := publicationJobQueueForCreate(params.PublicationQueue)
+	if err != nil {
+		return PublicationAttempt{}, err
+	}
+	params.PublicationQueue = queue
+	payload, err := publicationRequestPayloadForCreate(run, &changeset, params, params.PublicationSource, queue)
+	if err != nil {
+		return PublicationAttempt{}, err
+	}
+	params.PublicationRequestPayload = payload
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil && s.issues != nil {
+		resolved, issueErr := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if issueErr == nil {
+			issue = &resolved
+		} else {
+			// Branch generation has a deterministic session-only fallback. Do not
+			// let a best-effort title lookup prevent the durable request itself.
+			s.logger.Warn().Err(issueErr).
+				Str("session_id", run.ID.String()).
+				Str("issue_id", run.PrimaryIssueID.String()).
+				Msg("failed to load issue while preparing publication branch")
+		}
+	}
+	headBranch := publicationHeadBranch(run, issue, &changeset, params.PublicationHeadBranch)
+	if headBranch == "" {
+		return PublicationAttempt{}, errors.New("publication head branch is required")
+	}
+	params.PublicationHeadBranch = headBranch
+
+	publication := models.SessionPublication{
+		OrgID:               run.OrgID,
+		SessionID:           run.ID,
+		ChangesetID:         changeset.ID,
+		RepositoryID:        *run.RepositoryID,
+		Source:              params.PublicationSource,
+		ReviewGateState:     publicationReviewGateForCreate(run),
+		JobQueue:            queue,
+		RequestPayload:      append(json.RawMessage(nil), payload...),
+		RequestGenerationAt: params.PublicationGenerationAt,
+		BaseBranch:          changeset.BaseBranch,
+		HeadBranch:          headBranch,
+		DesiredHeadSHA:      changeset.HeadSHA,
+	}
+	if err := s.publications.EnsureRequested(ctx, run.OrgID, &publication); err != nil {
+		return PublicationAttempt{}, fmt.Errorf("ensure session publication: %w", err)
+	}
+	params.PublicationSource = publication.Source
+	params.PublicationQueue = publication.JobQueue
+	params.PublicationRequestPayload = append(json.RawMessage(nil), publication.RequestPayload...)
+	params.PublicationGenerationAt = publication.RequestGenerationAt
+	params.PublicationHeadBranch = publication.HeadBranch
+
+	started, err := s.publications.StartAttempt(ctx, run.OrgID, run.ID, changeset.ID)
+	if err != nil {
+		return PublicationAttempt{}, fmt.Errorf("start session publication attempt: %w", err)
+	}
+	return PublicationAttempt{Params: params, Publication: publication, Started: started}, nil
+}
+
 // completePublicationLocalState applies the required local convergence writes
 // before moving a durable publication to its terminal completed state. Keeping
 // these writes in one place prevents a retry path from accidentally making the
@@ -798,16 +895,23 @@ func (s *PRService) checkpointExistingPullRequestPublication(
 		if err := s.publications.EnsureRequested(ctx, run.OrgID, publication); err != nil {
 			return fmt.Errorf("ensure recovered session publication: %w", err)
 		}
-		if !publication.State.Terminal() {
-			if err := s.publications.RecordBranchPublished(ctx, run.OrgID, run.ID, changeset.ID, headSHA); err != nil {
-				return fmt.Errorf("checkpoint recovered publication branch: %w", err)
-			}
-			if err := s.publications.RecordPRResolved(ctx, run.OrgID, run.ID, changeset.ID, existing.GitHubPRNumber, existing.GitHubPRURL); err != nil {
-				return fmt.Errorf("checkpoint recovered pull request: %w", err)
-			}
-			if err := s.publications.MarkRecorded(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
-				return fmt.Errorf("checkpoint recovered pull request record: %w", err)
-			}
+		if publication.State.Terminal() {
+			return nil
+		}
+		if existing.Status == models.PullRequestStatusMerged || existing.Status == models.PullRequestStatusClosed {
+			return s.completeReconciledSessionPublication(ctx, *publication, *existing, "")
+		}
+		if existing.Status != models.PullRequestStatusOpen {
+			return fmt.Errorf("recovered pull request has unsupported status %q", existing.Status)
+		}
+		if err := s.publications.RecordBranchPublished(ctx, run.OrgID, run.ID, changeset.ID, headSHA); err != nil {
+			return fmt.Errorf("checkpoint recovered publication branch: %w", err)
+		}
+		if err := s.publications.RecordPRResolved(ctx, run.OrgID, run.ID, changeset.ID, existing.GitHubPRNumber, existing.GitHubPRURL); err != nil {
+			return fmt.Errorf("checkpoint recovered pull request: %w", err)
+		}
+		if err := s.publications.MarkRecorded(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
+			return fmt.Errorf("checkpoint recovered pull request record: %w", err)
 		}
 	}
 
@@ -854,6 +958,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		}
 		if !param.PublicationGenerationAt.IsZero() {
 			opts.PublicationGenerationAt = param.PublicationGenerationAt
+		}
+		if strings.TrimSpace(param.PublicationHeadBranch) != "" {
+			opts.PublicationHeadBranch = strings.TrimSpace(param.PublicationHeadBranch)
 		}
 	}
 	var targetChangeset *models.SessionChangeset
@@ -986,12 +1093,9 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	owner, repoName := splitRepo(repo.FullName)
 	defaultBranch := targetBranchForPR(run, &repo)
 
-	branchName := formatBranchName(run, issue)
+	branchName := publicationHeadBranch(run, issue, targetChangeset, opts.PublicationHeadBranch)
 	if targetChangeset != nil {
 		defaultBranch = targetChangeset.BaseBranch
-		if targetChangeset.WorkingBranch != nil && strings.TrimSpace(*targetChangeset.WorkingBranch) != "" {
-			branchName = *targetChangeset.WorkingBranch
-		}
 	}
 	if targetChangeset != nil && s.publications != nil {
 		opts.PublicationSource = publicationSource
@@ -4520,6 +4624,22 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 		}
 	}
 	return fmt.Sprintf("143/%s/%s", short, slug)
+}
+
+// publicationHeadBranch gives a branch already recorded for the publication
+// attempt precedence over mutable session state. Otherwise, a concurrent
+// changeset update could make CreatePR push a different branch from the one
+// stored in session_publications.
+func publicationHeadBranch(session *models.Session, issue *models.Issue, changeset *models.SessionChangeset, prepared string) string {
+	if branchName := strings.TrimSpace(prepared); branchName != "" {
+		return branchName
+	}
+	if changeset != nil && changeset.WorkingBranch != nil {
+		if branchName := strings.TrimSpace(*changeset.WorkingBranch); branchName != "" {
+			return branchName
+		}
+	}
+	return strings.TrimSpace(formatBranchName(session, issue))
 }
 
 func formatPRTitle(session *models.Session, issue *models.Issue) string {

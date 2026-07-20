@@ -168,7 +168,7 @@ Recovery has two independent paths:
   is checkpointed as `retryable_failed`, advancing its `updated_at` so a bounded
   oldest-first batch cannot be monopolized by permanently broken rows.
 
-Migration `000249` seeds `retryable_failed` rows for the historical false
+Migration `000252` seeds `retryable_failed` rows for the historical false
 “No changes” signature: a primary changeset with a persisted diff and working
 branch whose legacy PR action failed with a no-changes message. Reconciliation
 still validates GitHub state before associating anything.

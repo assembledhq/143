@@ -77,29 +77,26 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			ELSE session_publications.state
 		END,
 		repository_id = CASE
-			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
-			 AND NOT (
-				session_publications.state IN ('completed_noop', 'terminal_failed')
-				AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			 )
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
 			THEN session_publications.repository_id
 			ELSE EXCLUDED.repository_id
 		END,
 		base_branch = CASE
-			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
-			 AND NOT (
-				session_publications.state IN ('completed_noop', 'terminal_failed')
-				AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			 )
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
 			THEN session_publications.base_branch
 			ELSE EXCLUDED.base_branch
 		END,
 		head_branch = CASE
-			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
-			 AND NOT (
-				session_publications.state IN ('completed_noop', 'terminal_failed')
-				AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			 )
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
 			THEN session_publications.head_branch
 			ELSE EXCLUDED.head_branch
 		END,
@@ -109,19 +106,22 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			THEN EXCLUDED.desired_head_sha
 			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
 			THEN session_publications.desired_head_sha
+			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.desired_head_sha
 			ELSE COALESCE(EXCLUDED.desired_head_sha, session_publications.desired_head_sha)
 		END,
 		request_generation_at = CASE
-			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
-			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
-			THEN EXCLUDED.request_generation_at
-			ELSE session_publications.request_generation_at
+			WHEN session_publications.state = 'completed'
+			THEN session_publications.request_generation_at
+			ELSE GREATEST(session_publications.request_generation_at, EXCLUDED.request_generation_at)
 		END,
 		source = CASE
 			WHEN session_publications.state IN ('completed_noop', 'terminal_failed')
 			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
 			THEN EXCLUDED.source
 			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			THEN session_publications.source
+			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
 			THEN session_publications.source
 			WHEN session_publications.source IN ('backfill', 'reconciler') THEN EXCLUDED.source
 			ELSE session_publications.source
@@ -132,6 +132,8 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			THEN EXCLUDED.review_gate_state
 			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
 			THEN session_publications.review_gate_state
+			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
+			THEN session_publications.review_gate_state
 			WHEN session_publications.review_gate_state IN ('passed', 'needs_human', 'failed')
 			THEN session_publications.review_gate_state
 			ELSE EXCLUDED.review_gate_state
@@ -141,6 +143,8 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
 			THEN EXCLUDED.job_queue
 			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			THEN session_publications.job_queue
+			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
 			THEN session_publications.job_queue
 			WHEN (session_publications.request_payload = '{}'::jsonb
 			      OR session_publications.source IN ('backfill', 'reconciler'))
@@ -153,6 +157,8 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
 			THEN EXCLUDED.request_payload
 			WHEN session_publications.state IN ('completed', 'completed_noop', 'terminal_failed')
+			THEN session_publications.request_payload
+			WHEN EXCLUDED.request_generation_at < session_publications.request_generation_at
 			THEN session_publications.request_payload
 			WHEN (session_publications.request_payload = '{}'::jsonb
 			      OR session_publications.source IN ('backfill', 'reconciler'))
@@ -215,7 +221,14 @@ func (s *SessionPublicationStore) EnsureRequested(ctx context.Context, orgID uui
 			 AND EXCLUDED.request_generation_at > session_publications.request_generation_at
 			THEN NULL ELSE session_publications.completed_at
 		END,
-		updated_at = now()
+		updated_at = CASE
+			WHEN session_publications.state = 'completed'
+			  OR EXCLUDED.request_generation_at < session_publications.request_generation_at
+			  OR (session_publications.state IN ('completed_noop', 'terminal_failed')
+			      AND EXCLUDED.request_generation_at <= session_publications.request_generation_at)
+			THEN session_publications.updated_at
+			ELSE now()
+		END
 	RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
 		"repository_id": publication.RepositoryID, "source": publication.Source,

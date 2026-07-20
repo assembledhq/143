@@ -755,6 +755,7 @@ type pagerDutyPRWritebacker interface {
 }
 
 type prCreator interface {
+	PreparePublicationAttempt(ctx context.Context, run *models.Session, changeset models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error)
 	CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	CreateBranch(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	PushChangesToPR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
@@ -1171,43 +1172,6 @@ func publishChangesetStackCreatePRParams(input publishChangesetStackJobInput, or
 	}, nil
 }
 
-func ensurePublishChangesetStackPublication(
-	ctx context.Context,
-	store *db.SessionPublicationStore,
-	session models.Session,
-	changeset models.SessionChangeset,
-	params ghservice.CreatePRParams,
-) (models.SessionPublication, error) {
-	if store == nil {
-		return models.SessionPublication{}, errors.New("session publication store is unavailable")
-	}
-	if session.RepositoryID == nil {
-		return models.SessionPublication{}, fmt.Errorf("session %s has no repository", session.ID)
-	}
-	headBranch := strings.TrimSpace(stringValue(changeset.WorkingBranch))
-	if headBranch == "" {
-		return models.SessionPublication{}, fmt.Errorf("changeset %s has no working branch", changeset.ID)
-	}
-	publication := models.SessionPublication{
-		OrgID:               session.OrgID,
-		SessionID:           session.ID,
-		ChangesetID:         changeset.ID,
-		RepositoryID:        *session.RepositoryID,
-		Source:              params.PublicationSource,
-		ReviewGateState:     models.SessionPublicationReviewGateNotRequired,
-		JobQueue:            params.PublicationQueue,
-		RequestPayload:      append(json.RawMessage(nil), params.PublicationRequestPayload...),
-		RequestGenerationAt: params.PublicationGenerationAt,
-		BaseBranch:          changeset.BaseBranch,
-		HeadBranch:          headBranch,
-		DesiredHeadSHA:      changeset.HeadSHA,
-	}
-	if err := store.EnsureRequested(ctx, session.OrgID, &publication); err != nil {
-		return models.SessionPublication{}, fmt.Errorf("ensure stack publication: %w", err)
-	}
-	return publication, nil
-}
-
 func newPublishChangesetStackHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
 	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
 		var input publishChangesetStackJobInput
@@ -1232,6 +1196,7 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 		}
 		published := make(map[uuid.UUID]bool, len(changesets))
 		for _, changeset := range changesets {
+			stopStack := false
 			if changeset.Status == models.ChangesetStatusAbandoned || changeset.Status == models.ChangesetStatusMerged {
 				published[changeset.ID] = true
 				continue
@@ -1261,8 +1226,23 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 					return
 				}
 				if stores.SessionPublications != nil {
-					if _, publicationErr := ensurePublishChangesetStackPublication(ctx, stores.SessionPublications, session, changeset, params); publicationErr != nil {
+					attempt, publicationErr := services.PR.PreparePublicationAttempt(ctx, &session, changeset, params)
+					if publicationErr != nil {
 						err = publicationErr
+						return
+					}
+					params = attempt.Params
+					if !attempt.Started {
+						if attempt.Publication.State == models.SessionPublicationStateCompleted {
+							err = updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateSucceeded, "")
+							return
+						}
+						logger.Info().
+							Str("session_id", sessionID.String()).
+							Str("changeset_id", changeset.ID.String()).
+							Str("publication_state", string(attempt.Publication.State)).
+							Msg("stack publication is already terminal; stopping replayed stack job")
+						stopStack = true
 						return
 					}
 				}
@@ -1271,6 +1251,19 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 				}
 				_, err = services.PR.CreatePR(ctx, &session, params)
 				if err != nil {
+					if stores.SessionPublications != nil {
+						var publicationErr error
+						if errors.Is(err, ghservice.ErrNoChanges) {
+							publicationErr = stores.SessionPublications.MarkCompletedNoop(ctx, orgID, sessionID, changeset.ID)
+						} else {
+							publicationErr = stores.SessionPublications.MarkFailed(
+								ctx, orgID, sessionID, changeset.ID, publicationErrorCode(err), err.Error(), shouldDeadLetterPRError(err),
+							)
+						}
+						if publicationErr != nil && !errors.Is(publicationErr, pgx.ErrNoRows) {
+							logger.Error().Err(publicationErr).Str("changeset_id", changeset.ID.String()).Msg("failed to persist stack publication failure")
+						}
+					}
 					stateErr := updateChangesetPRCreationState(ctx, stores, orgID, sessionID, &changeset.ID, models.PRCreationStateFailed, userFacingPRError(err))
 					if stateErr != nil {
 						logger.Error().Err(stateErr).Str("changeset_id", changeset.ID.String()).Msg("failed to persist stack publish failure")
@@ -1281,6 +1274,9 @@ func newPublishChangesetStackHandler(stores *Stores, services *Services, logger 
 			}()
 			if err != nil {
 				return err
+			}
+			if stopStack {
+				return nil
 			}
 			published[changeset.ID] = true
 		}
@@ -10974,7 +10970,38 @@ func persistedOpenPRJobInput(publication models.SessionPublication) (openPRJobIn
 }
 
 func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, jobType string, payload json.RawMessage) error {
+	return func(ctx context.Context, jobType string, payload json.RawMessage) (handlerErr error) {
+		var activePublication *models.SessionPublication
+		publicationFailureHandled := false
+		defer func() {
+			if handlerErr == nil || activePublication == nil || publicationFailureHandled || stores == nil || stores.SessionPublications == nil {
+				return
+			}
+			terminal := shouldDeadLetterPRError(handlerErr)
+			stateErr := stores.SessionPublications.MarkFailed(
+				ctx,
+				activePublication.OrgID,
+				activePublication.SessionID,
+				activePublication.ChangesetID,
+				publicationErrorCode(handlerErr),
+				handlerErr.Error(),
+				terminal,
+			)
+			if stateErr != nil && !errors.Is(stateErr, pgx.ErrNoRows) {
+				logger.Error().Err(stateErr).
+					Str("session_id", activePublication.SessionID.String()).
+					Str("changeset_id", activePublication.ChangesetID.String()).
+					Msg("failed to persist pre-publication failure state")
+				handlerErr = errors.Join(handlerErr, fmt.Errorf("persist pre-publication failure: %w", stateErr))
+				return
+			}
+			publicationState := models.SessionPublicationStateRetryableFailed
+			if terminal {
+				publicationState = models.SessionPublicationStateTerminalFailed
+			}
+			metrics.RecordSessionPublicationTransition(ctx, string(publicationState), string(activePublication.Source))
+		}()
+
 		var input openPRJobInput
 		if err := json.Unmarshal(payload, &input); err != nil {
 			return fmt.Errorf("unmarshal open_pr payload: %w", err)
@@ -11028,77 +11055,73 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 		if err := publicationQueue.Validate(); err != nil {
 			return fmt.Errorf("validate publication queue: %w", err)
 		}
+		hydratedIssueSnapshotID := input.IssueSnapshotID
+		if err := hydrateOpenPRPrimaryIssue(ctx, stores.IssueSnapshots, orgID, &run, hydratedIssueSnapshotID); err != nil {
+			return err
+		}
 		publicationGenerationAt := publicationRequestGenerationAt(ctx)
-		if changesetID != nil && stores.SessionPublications != nil && run.RepositoryID != nil {
-			headBranch := ""
-			if targetChangeset.WorkingBranch != nil {
-				headBranch = strings.TrimSpace(*targetChangeset.WorkingBranch)
+		var preparedPublicationParams *ghservice.CreatePRParams
+		if changesetID != nil && stores.SessionPublications != nil {
+			attempt, prepareErr := services.PR.PreparePublicationAttempt(ctx, &run, targetChangeset, ghservice.CreatePRParams{
+				ChangesetID:               changesetID,
+				Draft:                     input.Draft,
+				AuthorMode:                input.AuthorMode,
+				PublicationSource:         publicationSource,
+				PublicationQueue:          publicationQueue,
+				PublicationRequestPayload: append(json.RawMessage(nil), payload...),
+				PublicationGenerationAt:   publicationGenerationAt,
+			})
+			if prepareErr != nil {
+				return fmt.Errorf("prepare open_pr publication: %w", prepareErr)
 			}
-			if headBranch == "" && run.WorkingBranch != nil {
-				headBranch = strings.TrimSpace(*run.WorkingBranch)
+			publication := attempt.Publication
+			if attempt.Started {
+				activePublication = &publication
+				registerOpenPRPublicationDeadLetter(ctx, stores, logger, publication)
 			}
-			if headBranch != "" {
-				reviewGate := models.SessionPublicationReviewGateNotRequired
-				if run.AutomationRunID != nil {
-					reviewGate = models.SessionPublicationReviewGatePending
+			publicationGenerationAt = publication.RequestGenerationAt
+			persistedInput, persisted, persistedErr := persistedOpenPRJobInput(publication)
+			if persistedErr != nil {
+				return persistedErr
+			}
+			if persisted {
+				// A review-loop continuation may carry only scope. Restore all
+				// caller choices from the first durable request before running
+				// readiness checks or invoking the PR service.
+				input = persistedInput
+				payload = append(json.RawMessage(nil), publication.RequestPayload...)
+				publicationSource = publication.Source
+				publicationQueue = publication.JobQueue
+			}
+			if input.IssueSnapshotID != hydratedIssueSnapshotID {
+				if err := hydrateOpenPRPrimaryIssue(ctx, stores.IssueSnapshots, orgID, &run, input.IssueSnapshotID); err != nil {
+					return err
 				}
-				publication := &models.SessionPublication{
-					OrgID:               orgID,
-					SessionID:           runID,
-					ChangesetID:         *changesetID,
-					RepositoryID:        *run.RepositoryID,
-					Source:              publicationSource,
-					ReviewGateState:     reviewGate,
-					JobQueue:            publicationQueue,
-					RequestPayload:      append(json.RawMessage(nil), payload...),
-					RequestGenerationAt: publicationGenerationAt,
-					BaseBranch:          targetChangeset.BaseBranch,
-					HeadBranch:          headBranch,
-					DesiredHeadSHA:      targetChangeset.HeadSHA,
-				}
-				if err := stores.SessionPublications.EnsureRequested(ctx, orgID, publication); err != nil {
-					return fmt.Errorf("ensure open_pr publication: %w", err)
-				}
-				publicationGenerationAt = publication.RequestGenerationAt
-				persistedInput, persisted, persistedErr := persistedOpenPRJobInput(*publication)
-				if persistedErr != nil {
-					return persistedErr
-				}
-				if persisted {
-					// A review-loop continuation may carry only scope. Restore all
-					// caller choices from the first durable request before running
-					// readiness checks or invoking the PR service.
-					input = persistedInput
-					payload = append(json.RawMessage(nil), publication.RequestPayload...)
-					publicationSource = publication.Source
-					publicationQueue = publication.JobQueue
-				}
-				started, err := stores.SessionPublications.StartAttempt(ctx, orgID, runID, *changesetID)
-				if err != nil {
-					return fmt.Errorf("start open_pr publication attempt: %w", err)
-				}
-				if !started {
-					if publication.State == models.SessionPublicationStateCompleted {
-						if stores.PullRequests == nil {
-							return errors.New("completed publication pull request store is unavailable")
-						}
-						existing, existingErr := stores.PullRequests.GetByChangesetID(ctx, orgID, runID, *changesetID)
-						if existingErr != nil {
-							return fmt.Errorf("load completed publication pull request: %w", existingErr)
-						}
-						logger.Info().
-							Str("session_id", runID.String()).
-							Str("changeset_id", changesetID.String()).
-							Int("pr_number", existing.GitHubPRNumber).
-							Msg("resuming post-publication work for completed pull request")
-						return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing)
+			}
+			attempt.Params.Draft = input.Draft
+			attempt.Params.AuthorMode = input.AuthorMode
+			preparedPublicationParams = &attempt.Params
+			if !attempt.Started {
+				if publication.State == models.SessionPublicationStateCompleted {
+					if stores.PullRequests == nil {
+						return errors.New("completed publication pull request store is unavailable")
+					}
+					existing, existingErr := stores.PullRequests.GetByChangesetID(ctx, orgID, runID, *changesetID)
+					if existingErr != nil {
+						return fmt.Errorf("load completed publication pull request: %w", existingErr)
 					}
 					logger.Info().
 						Str("session_id", runID.String()).
 						Str("changeset_id", changesetID.String()).
-						Msg("open_pr publication is already terminal; skipping replayed job")
-					return nil
+						Int("pr_number", existing.GitHubPRNumber).
+						Msg("resuming post-publication work for completed pull request")
+					return completeOpenPRJob(ctx, stores, services, logger, run, input, changesetID, &existing)
 				}
+				logger.Info().
+					Str("session_id", runID.String()).
+					Str("changeset_id", changesetID.String()).
+					Msg("open_pr publication is already terminal; skipping replayed job")
+				return nil
 			}
 		}
 		if (changesetID == nil || targetChangeset.WorktreePath == nil) && (run.SnapshotKey == nil || *run.SnapshotKey == "") {
@@ -11108,7 +11131,7 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 					Msg("open_pr waiting for running session snapshot")
 				return &RetryableError{Err: agent.ErrSnapshotPending}
 			}
-			return fmt.Errorf("session %s has no snapshot (status: %s)", runID, run.Status)
+			return &FatalError{Err: fmt.Errorf("session %s has no snapshot (status: %s): %w", runID, run.Status, ghservice.ErrSnapshotNotCaptured)}
 		}
 		if err := ensureSessionSnapshotQuiescent(ctx, stores, run); err != nil {
 			logger.Info().
@@ -11148,47 +11171,30 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 			Str("org_id", orgID.String()).
 			Msg("starting open_pr job")
 
-		if stores.IssueSnapshots != nil {
-			var snapshot *models.SessionTurnIssueSnapshot
-			if input.IssueSnapshotID != "" {
-				snapshotID, err := uuid.Parse(input.IssueSnapshotID)
-				if err != nil {
-					return fmt.Errorf("parse issue snapshot id: %w", err)
-				}
-				resolved, err := stores.IssueSnapshots.GetByID(ctx, orgID, snapshotID)
-				if err != nil {
-					return fmt.Errorf("fetch issue snapshot for open_pr: %w", err)
-				}
-				snapshot = &resolved
-			} else if run.CurrentTurn > 0 {
-				if resolved, err := stores.IssueSnapshots.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn); err == nil {
-					snapshot = &resolved
-				}
-			}
-			if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
-				run.PrimaryIssueID = issueID
-			}
-		}
-
 		if err := updateChangesetPRCreationState(ctx, stores, orgID, runID, changesetID, models.PRCreationStatePushing, ""); err != nil {
 			logger.Error().Err(err).Msg("failed to mark PR creation as pushing")
 		}
 
 		var params []ghservice.CreatePRParams
-		if input.Draft != nil {
-			params = append(params, ghservice.CreatePRParams{Draft: input.Draft})
-		}
-		if input.AuthorMode != "" {
-			params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
-		}
-		if changesetID != nil {
+		if preparedPublicationParams != nil {
+			params = append(params, *preparedPublicationParams)
+		} else if changesetID != nil {
 			params = append(params, ghservice.CreatePRParams{
 				ChangesetID:               changesetID,
+				Draft:                     input.Draft,
+				AuthorMode:                input.AuthorMode,
 				PublicationSource:         publicationSource,
 				PublicationQueue:          publicationQueue,
 				PublicationRequestPayload: payload,
 				PublicationGenerationAt:   publicationGenerationAt,
 			})
+		} else {
+			if input.Draft != nil {
+				params = append(params, ghservice.CreatePRParams{Draft: input.Draft})
+			}
+			if input.AuthorMode != "" {
+				params = append(params, ghservice.CreatePRParams{AuthorMode: input.AuthorMode})
+			}
 		}
 
 		pr, createErr := services.PR.CreatePR(ctx, &run, params...)
@@ -11205,6 +11211,8 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 				}
 				if publicationErr != nil && !errors.Is(publicationErr, pgx.ErrNoRows) {
 					logger.Error().Err(publicationErr).Str("session_id", runID.String()).Msg("failed to persist publication terminal state")
+				} else {
+					publicationFailureHandled = true
 				}
 				publicationState := models.SessionPublicationStateCompletedNoop
 				if !noChanges {
@@ -11267,6 +11275,41 @@ func newOpenPRHandler(stores *Stores, services *Services, logger zerolog.Logger)
 	}
 }
 
+func hydrateOpenPRPrimaryIssue(
+	ctx context.Context,
+	store *db.SessionTurnIssueSnapshotStore,
+	orgID uuid.UUID,
+	run *models.Session,
+	issueSnapshotID string,
+) error {
+	if store == nil || run == nil {
+		return nil
+	}
+	var snapshot *models.SessionTurnIssueSnapshot
+	if issueSnapshotID != "" {
+		snapshotID, err := uuid.Parse(issueSnapshotID)
+		if err != nil {
+			return fmt.Errorf("parse issue snapshot id: %w", err)
+		}
+		resolved, err := store.GetByID(ctx, orgID, snapshotID)
+		if err != nil {
+			return fmt.Errorf("fetch issue snapshot for open_pr: %w", err)
+		}
+		snapshot = &resolved
+	} else if run.CurrentTurn > 0 {
+		resolved, err := store.GetByTurn(ctx, orgID, run.ID, run.CurrentTurn)
+		if err == nil {
+			snapshot = &resolved
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("fetch current-turn issue snapshot for open_pr: %w", err)
+		}
+	}
+	if issueID := primaryIssueIDFromSnapshot(snapshot); issueID != nil {
+		run.PrimaryIssueID = issueID
+	}
+	return nil
+}
+
 func completeOpenPRJob(
 	ctx context.Context,
 	stores *Stores,
@@ -11319,6 +11362,52 @@ func completeOpenPRJob(
 		PullRequestURL: pr.GitHubPRURL,
 	})
 	return nil
+}
+
+// registerOpenPRPublicationDeadLetter closes the durable publication state if
+// any retryable failure after StartAttempt exhausts the worker's retry policy.
+// Without this hook, failures in pre-push guards (for example readiness or the
+// automation review service) can leave a review_pending/requested row excluded
+// from reconciliation forever after its final job attempt.
+func registerOpenPRPublicationDeadLetter(
+	ctx context.Context,
+	stores *Stores,
+	logger zerolog.Logger,
+	publication models.SessionPublication,
+) {
+	if stores == nil || stores.SessionPublications == nil {
+		return
+	}
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		writeCtx, cancel := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+		defer cancel()
+		if deadLetterErr == nil {
+			deadLetterErr = errors.New("publication job exhausted its retry policy")
+		}
+		err := stores.SessionPublications.MarkFailed(
+			writeCtx,
+			publication.OrgID,
+			publication.SessionID,
+			publication.ChangesetID,
+			publicationErrorCode(deadLetterErr),
+			deadLetterErr.Error(),
+			true,
+		)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			logger.Error().Err(err).
+				Str("session_id", publication.SessionID.String()).
+				Str("changeset_id", publication.ChangesetID.String()).
+				Msg("failed to terminalize dead-lettered publication")
+			return
+		}
+		if err == nil {
+			metrics.RecordSessionPublicationTransition(
+				writeCtx,
+				string(models.SessionPublicationStateTerminalFailed),
+				string(publication.Source),
+			)
+		}
+	})
 }
 
 func registerOpenPRDeadLetterMilestone(ctx context.Context, stores *Stores, logger zerolog.Logger, orgID, sessionID uuid.UUID) {
