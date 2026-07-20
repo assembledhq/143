@@ -409,7 +409,7 @@ func (h *CodeReviewHandler) ResetPolicy(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	deactivated, err := h.store.ResetRepositoryPolicy(r.Context(), orgID, repositoryID)
+	policyID, deactivated, err := h.store.ResetRepositoryPolicy(r.Context(), orgID, repositoryID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_RESET_FAILED", "failed to reset code review policy", err)
 		return
@@ -419,7 +419,7 @@ func (h *CodeReviewHandler) ResetPolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"source": models.CodeReviewPolicyEditSourceReset, "repository_id": repositoryID})
-	resourceID := repositoryID.String()
+	resourceID := policyID.String()
 	emitUserAudit(h.audit, r, models.AuditActionCodeReviewPolicyReset, models.AuditResourceCodeReviewPolicy, &resourceID, details)
 	w.WriteHeader(http.StatusNoContent)
 }

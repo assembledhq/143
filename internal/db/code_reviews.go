@@ -435,30 +435,32 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 
 // ResetRepositoryPolicy deactivates the complete active repository override.
 // Historical versions remain available to review sessions that captured them.
-func (s *CodeReviewStore) ResetRepositoryPolicy(ctx context.Context, orgID, repositoryID uuid.UUID) (bool, error) {
+func (s *CodeReviewStore) ResetRepositoryPolicy(ctx context.Context, orgID, repositoryID uuid.UUID) (uuid.UUID, bool, error) {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
-		return false, fmt.Errorf("reset code review policy requires transaction support")
+		return uuid.Nil, false, fmt.Errorf("reset code review policy requires transaction support")
 	}
 	tx, err := txStarter.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin reset code review policy tx: %w", err)
+		return uuid.Nil, false, fmt.Errorf("begin reset code review policy tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := tx.Exec(ctx, `
+	var policyID uuid.UUID
+	err = tx.QueryRow(ctx, `
 		UPDATE code_review_policies
 		SET active = false
 		WHERE org_id = @org_id
 		  AND repository_id = @repository_id
-		  AND active = true`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID})
-	if err != nil {
-		return false, fmt.Errorf("inactivate repository code review policy: %w", err)
+		  AND active = true
+		RETURNING id`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).Scan(&policyID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, fmt.Errorf("inactivate repository code review policy: %w", err)
 	}
-	deactivated := result.RowsAffected() > 0
+	deactivated := err == nil
 	if err := tx.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit reset code review policy tx: %w", err)
+		return uuid.Nil, false, fmt.Errorf("commit reset code review policy tx: %w", err)
 	}
-	return deactivated, nil
+	return policyID, deactivated, nil
 }
 
 func (s *CodeReviewStore) activeOrgPolicyConfig(ctx context.Context, orgID uuid.UUID) (models.CodeReviewPolicyConfig, error) {

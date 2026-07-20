@@ -906,9 +906,35 @@ describe("CodeReviewsPage", () => {
   });
 
   it("keeps repository reset failures visible and retryable", async () => {
-    const user = userEvent.setup(); let resetCalls=0; mockCodeReviewBaseHandlers();
-    server.use(http.get("/api/v1/code-review-policies",()=>HttpResponse.json({data:{...policy,source:"repository",config:policy.config,policy:{...policy.config,id:"repo-policy",org_id:"org-1",repository_id:repo.id,active:true,version:2,created_at:"2026-01-01T00:00:00Z"}}})),http.delete("/api/v1/code-review-policies/repositories/repo-1",()=>{resetCalls+=1;return resetCalls===1?HttpResponse.json({error:{code:"RESET_FAILED",message:"reset unavailable"}},{status:500}):new HttpResponse(null,{status:204})}));
-    renderWithProviders(<CodeReviewsPage/>);await user.click(await screen.findByRole("tab",{name:"Policy"}));await user.click(screen.getByRole("combobox",{name:"Policy scope"}));await user.click(await screen.findByRole("option",{name:"acme/api"}));await user.click(await screen.findByRole("button",{name:"Reset repository policy"}));await user.click(await screen.findByRole("button",{name:"Reset repository policy"}));expect(await screen.findByText("reset unavailable")).toBeInTheDocument();await user.click(screen.getByRole("button",{name:"Reset repository policy"}));await user.click(await screen.findByRole("button",{name:"Reset repository policy"}));await waitFor(()=>expect(resetCalls).toBe(2));
+    const user = userEvent.setup();
+    let resetCalls = 0;
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, source: "repository", config: policy.config, policy: { ...policy.config, id: "repo-policy", org_id: "org-1", repository_id: repo.id, active: true, version: 2, created_at: "2026-01-01T00:00:00Z" } } })),
+      http.delete("/api/v1/code-review-policies/repositories/repo-1", () => {
+        resetCalls += 1;
+        return resetCalls === 1
+          ? HttpResponse.json({ error: { code: "RESET_FAILED", message: "reset unavailable" } }, { status: 500 })
+          : new HttpResponse(null, { status: 204 });
+      }),
+    );
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
+    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
+    expect(await screen.findByText("reset unavailable")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(await screen.findByRole("option", { name: "Organization default" }));
+    expect(screen.queryByText("reset unavailable")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
+    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
+    await waitFor(() => expect(resetCalls).toBe(2));
   });
 
   it("preserves prompt composer order at a mobile viewport", async () => {
