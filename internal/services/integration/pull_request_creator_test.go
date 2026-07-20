@@ -44,7 +44,7 @@ func TestInternalPullRequestCreator_CreatePullRequestUsesTokenScopedSession(t *t
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/session/pr", r.URL.Path, "CreatePullRequest should use the token-scoped endpoint when no session id is supplied")
+		require.Equal(t, "/api/v1/internal/session/pr", r.URL.Path, "CreatePullRequest should use the token-scoped endpoint when no session id is supplied")
 		require.Equal(t, "Bearer test-token", r.Header.Get("Authorization"), "CreatePullRequest should authenticate the token-scoped request")
 		w.WriteHeader(http.StatusAccepted)
 		_, err := w.Write([]byte(`{"status":"queued","session_id":"session-from-token"}`))
