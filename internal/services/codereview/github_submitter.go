@@ -124,6 +124,17 @@ type RequestedReviewersRequest struct {
 	TeamReviewers  []string
 }
 
+type PullRequestHeadRequest struct {
+	InstallationID int64
+	Repository     string
+	PullNumber     int
+}
+
+type PullRequestHead struct {
+	HeadSHA string
+	BaseSHA string
+}
+
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
 	if s == nil || s.tokens == nil {
 		return SubmitReviewResult{}, fmt.Errorf("github submitter is not configured")
@@ -651,6 +662,42 @@ func (s *GitHubSubmitter) ListPullRequestFiles(ctx context.Context, req PullRequ
 		path = nextPath
 	}
 	return files, nil
+}
+
+func (s *GitHubSubmitter) GetPullRequestHead(ctx context.Context, req PullRequestHeadRequest) (PullRequestHead, error) {
+	if s == nil || s.tokens == nil {
+		return PullRequestHead{}, fmt.Errorf("github submitter is not configured")
+	}
+	owner, repo, ok := strings.Cut(req.Repository, "/")
+	if !ok || owner == "" || repo == "" {
+		return PullRequestHead{}, fmt.Errorf("repository must be owner/name")
+	}
+	if req.PullNumber <= 0 {
+		return PullRequestHead{}, fmt.Errorf("pull number is required")
+	}
+	if req.InstallationID <= 0 {
+		return PullRequestHead{}, fmt.Errorf("installation id is required")
+	}
+	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
+	if err != nil {
+		return PullRequestHead{}, fmt.Errorf("get installation token: %w", err)
+	}
+	var payload struct {
+		Head struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			SHA string `json:"sha"`
+		} `json:"base"`
+	}
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
+	if _, err := s.getGitHubJSONPage(ctx, token, path, &payload); err != nil {
+		return PullRequestHead{}, err
+	}
+	if payload.Head.SHA == "" {
+		return PullRequestHead{}, fmt.Errorf("GitHub pull request %s#%d has no head SHA", req.Repository, req.PullNumber)
+	}
+	return PullRequestHead{HeadSHA: payload.Head.SHA, BaseSHA: payload.Base.SHA}, nil
 }
 
 func (s *GitHubSubmitter) ListReviewContext(ctx context.Context, req ReviewContextRequest) (ReviewContext, error) {

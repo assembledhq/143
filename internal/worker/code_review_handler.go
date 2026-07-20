@@ -226,6 +226,21 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
+		// Last line of defense before publishing: the DB head only moves once
+		// the push webhook lands, so ask GitHub directly whether the PR still
+		// points at the head this review actually reviewed.
+		if liveHeadChanged, liveHeadChecked := codeReviewLiveHeadChanged(ctx, stores, services, logger, job, pr); liveHeadChecked && liveHeadChanged {
+			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before the review could be published"); staleErr != nil {
+				return fmt.Errorf("mark code review stale before publish: %w", staleErr)
+			}
+			logger.Info().
+				Str("org_id", job.OrgID.String()).
+				Str("session_id", job.SessionID.String()).
+				Str("reviewed_head", job.HeadSHA).
+				Msg("marked code review stale: live PR head moved before publish")
+			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			return nil
+		}
 		submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
 		if err != nil {
 			return err
@@ -2193,6 +2208,51 @@ type codeReviewFileLister interface {
 
 type codeReviewContextLister interface {
 	ListReviewContext(ctx context.Context, req codereviewsvc.ReviewContextRequest) (codereviewsvc.ReviewContext, error)
+}
+
+type codeReviewHeadFetcher interface {
+	GetPullRequestHead(ctx context.Context, req codereviewsvc.PullRequestHeadRequest) (codereviewsvc.PullRequestHead, error)
+}
+
+// codeReviewLiveHeadChanged asks GitHub for the PR's current head SHA and
+// reports whether it has moved away from the head this review pinned. The DB
+// copy of the head only advances when the corresponding webhook has been
+// processed, so this closes the window where a force-push races the review.
+// Best-effort: checked=false when the service cannot do live lookups or the
+// lookup fails, so a GitHub flake can never wedge an otherwise-ready review.
+func codeReviewLiveHeadChanged(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) (changed bool, checked bool) {
+	if services == nil || services.CodeReviews == nil {
+		return false, false
+	}
+	fetcher, ok := services.CodeReviews.(codeReviewHeadFetcher)
+	if !ok {
+		return false, false
+	}
+	if stores == nil || stores.Repositories == nil || pr.GitHubPRNumber <= 0 || strings.TrimSpace(job.HeadSHA) == "" {
+		return false, false
+	}
+	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("skipping live code review head check: failed to load repository")
+		return false, false
+	}
+	if repo.InstallationID == 0 {
+		return false, false
+	}
+	repository := strings.TrimSpace(pr.GitHubRepo)
+	if repository == "" {
+		repository = strings.TrimSpace(repo.FullName)
+	}
+	head, err := fetcher.GetPullRequestHead(ctx, codereviewsvc.PullRequestHeadRequest{
+		InstallationID: repo.InstallationID,
+		Repository:     repository,
+		PullNumber:     pr.GitHubPRNumber,
+	})
+	if err != nil {
+		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("skipping live code review head check: GitHub lookup failed")
+		return false, false
+	}
+	return head.HeadSHA != strings.TrimSpace(job.HeadSHA), true
 }
 
 func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) {
