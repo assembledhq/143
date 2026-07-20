@@ -23,7 +23,7 @@ type InternalPullRequestCreator struct {
 func NewInternalPullRequestCreator(token, baseURL string) *InternalPullRequestCreator {
 	return &InternalPullRequestCreator{
 		token:   token,
-		baseURL: baseURL,
+		baseURL: internalAPIBaseURL(baseURL),
 		client:  &http.Client{Timeout: 10 * time.Second},
 	}
 }
