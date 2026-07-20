@@ -373,6 +373,41 @@ func TestSessionChangesetStoreAcquireLease(t *testing.T) {
 	}
 }
 
+func TestSessionChangesetStoreRecordPublishedHeadPreservesTerminalStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		hasPR      bool
+		wantStatus models.ChangesetStatus
+	}{
+		{name: "branch publication", hasPR: false, wantStatus: models.ChangesetStatusPublishedBranch},
+		{name: "pull request publication", hasPR: true, wantStatus: models.ChangesetStatusPROpen},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgx mock should initialize")
+			t.Cleanup(mock.Close)
+			orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+			headSHA := "0123456789abcdef0123456789abcdef01234567"
+			mock.ExpectExec(`UPDATE session_changesets SET head_sha[\s\S]+status = CASE WHEN status IN \('merged', 'abandoned'\) THEN status ELSE @status END`).
+				WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+					"head_sha": headSHA, "status": tt.wantStatus,
+				}).
+				WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+			err = NewSessionChangesetStore(mock).RecordPublishedHead(context.Background(), orgID, sessionID, changesetID, headSHA, tt.hasPR)
+			require.NoError(t, err, "published-head checkpoint should succeed")
+			require.NoError(t, mock.ExpectationsWereMet(), "published-head SQL should preserve merged and abandoned lifecycle states")
+		})
+	}
+}
+
 func TestSessionChangesetStoreRecordLocalHeadMarksDescendantsStale(t *testing.T) {
 	t.Parallel()
 

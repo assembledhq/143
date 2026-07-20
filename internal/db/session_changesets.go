@@ -328,7 +328,9 @@ func (s *SessionChangesetStore) RecordPublishedHead(ctx context.Context, orgID, 
 		status = models.ChangesetStatusPROpen
 	}
 	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET head_sha = @head_sha,
-		expected_remote_head_sha = @head_sha, status = @status, updated_at = now()
+		expected_remote_head_sha = @head_sha,
+		status = CASE WHEN status IN ('merged', 'abandoned') THEN status ELSE @status END,
+		updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA, "status": status,
 	})

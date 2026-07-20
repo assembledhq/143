@@ -1,3 +1,4 @@
+-- Migration 000252: durable, replayable publication state per changeset.
 CREATE TABLE session_publications (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     org_id uuid NOT NULL REFERENCES organizations(id),
@@ -106,7 +107,7 @@ SELECT
     s.repository_id,
     'retryable_failed',
     'backfill',
-    CASE WHEN s.automation_run_id IS NULL THEN 'not_required' ELSE 'passed' END,
+    CASE WHEN sal.automation_run_id IS NULL THEN 'not_required' ELSE 'passed' END,
     'default',
     jsonb_build_object(
         'session_id', s.id::text,
@@ -129,6 +130,9 @@ JOIN session_changesets sc
 JOIN session_publish_state sps
   ON sps.org_id = s.org_id
  AND sps.session_id = s.id
+LEFT JOIN session_automation_links sal
+  ON sal.org_id = s.org_id
+ AND sal.session_id = s.id
 WHERE s.repository_id IS NOT NULL
   AND sc.working_branch IS NOT NULL
   AND NULLIF(trim(s.diff), '') IS NOT NULL

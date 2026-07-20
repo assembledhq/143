@@ -5897,6 +5897,129 @@ func TestFindPullRequestByHead_AllIncludesClosed(t *testing.T) {
 	require.Equal(t, "https://github.com/owner/repo/pull/42", prURL, "findPullRequestByHead should return the recovered pull request URL")
 }
 
+func TestPreparePublicationAttemptPersistsExactBranchAndGatesTerminalReplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		state         models.SessionPublicationState
+		workingBranch *string
+		updatedRows   int64
+		wantStarted   bool
+	}{
+		{name: "derives branch for snapshot-backed session", state: models.SessionPublicationStateRequested, updatedRows: 1, wantStarted: true},
+		{name: "uses materialized changeset branch", state: models.SessionPublicationStateRequested, workingBranch: strPtr("143/custom/stack"), updatedRows: 1, wantStarted: true},
+		{name: "blocks terminal replay before side effects", state: models.SessionPublicationStateTerminalFailed, updatedRows: 0, wantStarted: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "test should create the database mock")
+			t.Cleanup(mock.Close)
+
+			orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			now := time.Now().UTC()
+			title := "Snapshot publication"
+			run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repositoryID, Title: &title}
+			changeset := models.SessionChangeset{
+				ID: changesetID, OrgID: orgID, SessionID: sessionID,
+				BaseBranch: "main", WorkingBranch: tt.workingBranch,
+			}
+			headBranch := "143/" + sessionID.String()[:8] + "/snapshot-publication"
+			if tt.workingBranch != nil {
+				headBranch = *tt.workingBranch
+			}
+			payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user","publication_queue":"agent"}`)
+			stored := models.SessionPublication{
+				ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+				State: tt.state, Source: models.SessionPublicationSourceUser,
+				ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+				JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
+				BaseBranch: "main", HeadBranch: headBranch,
+				RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+			}
+			mock.ExpectQuery("INSERT INTO session_publications").WithArgs(pgx.NamedArgs{
+				"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+				"repository_id": repositoryID, "source": models.SessionPublicationSourceUser,
+				"review_gate_state": models.SessionPublicationReviewGateNotRequired,
+				"job_queue":         models.SessionPublicationJobQueueAgent, "request_payload": string(payload),
+				"request_generation_at": now,
+				"base_branch":           "main", "head_branch": headBranch, "desired_head_sha": (*string)(nil),
+			}).WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(stored)...))
+			attemptArgs := pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}
+			mock.ExpectExec("UPDATE session_publications").WithArgs(attemptArgs).
+				WillReturnResult(pgxmock.NewResult("UPDATE", tt.updatedRows))
+			if tt.updatedRows == 0 {
+				mock.ExpectQuery("SELECT .*FROM session_publications").WithArgs(attemptArgs).
+					WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(stored)...))
+			}
+
+			svc := &PRService{publications: db.NewSessionPublicationStore(mock), logger: zerolog.Nop()}
+			attempt, err := svc.PreparePublicationAttempt(context.Background(), run, changeset, CreatePRParams{
+				PublicationSource:         models.SessionPublicationSourceUser,
+				PublicationQueue:          models.SessionPublicationJobQueueAgent,
+				PublicationRequestPayload: payload,
+				PublicationGenerationAt:   now,
+			})
+
+			require.NoError(t, err, "publication preparation should persist and gate the request")
+			require.Equal(t, tt.wantStarted, attempt.Started, "publication preparation should report whether side effects may start")
+			require.Equal(t, stored, attempt.Publication, "publication preparation should return the persisted state")
+			require.Equal(t, headBranch, attempt.Params.PublicationHeadBranch, "CreatePR should receive the exact durably recorded branch")
+			require.Equal(t, changesetID, *attempt.Params.ChangesetID, "prepared parameters should retain the changeset target")
+			require.NoError(t, mock.ExpectationsWereMet(), "publication preparation should perform only the expected tenant-scoped writes")
+		})
+	}
+}
+
+func TestPublicationHeadBranch(t *testing.T) {
+	t.Parallel()
+
+	preparedBranch := "143/prepared/branch"
+	workingBranch := "143/working/branch"
+	sessionBranch := "143/session/branch"
+	run := &models.Session{ID: uuid.New(), WorkingBranch: &sessionBranch}
+
+	tests := []struct {
+		name      string
+		changeset *models.SessionChangeset
+		prepared  string
+		expected  string
+	}{
+		{
+			name: "prepared branch wins over mutable changeset state",
+			changeset: &models.SessionChangeset{
+				WorkingBranch: &workingBranch,
+			},
+			prepared: preparedBranch,
+			expected: preparedBranch,
+		},
+		{
+			name: "changeset branch wins when no attempt has been prepared",
+			changeset: &models.SessionChangeset{
+				WorkingBranch: &workingBranch,
+			},
+			expected: workingBranch,
+		},
+		{
+			name:     "session branch is the final fallback",
+			expected: sessionBranch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual := publicationHeadBranch(run, nil, tt.changeset, tt.prepared)
+			require.Equal(t, tt.expected, actual, "publication branch selection should respect durable attempt precedence")
+		})
+	}
+}
+
 func TestCompletePublicationLocalStateWritesTerminalStateLast(t *testing.T) {
 	t.Parallel()
 
@@ -5984,6 +6107,7 @@ func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *te
 	existing := &models.PullRequest{
 		GitHubPRNumber: 42,
 		GitHubPRURL:    "https://github.com/owner/repo/pull/42",
+		Status:         models.PullRequestStatusOpen,
 		HeadSHA:        &headSHA,
 		HeadRef:        &headBranch,
 	}
@@ -6037,6 +6161,86 @@ func TestCheckpointExistingPullRequestPublicationReplaysDurableCheckpoints(t *te
 	)
 	require.NoError(t, err, "existing pull request recovery should replay all publication checkpoints")
 	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request recovery should complete only after every durable checkpoint")
+}
+
+func TestCheckpointExistingPullRequestPublicationPreservesMergedLifecycle(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+
+	orgID, sessionID, changesetID, repositoryID, pullRequestID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	headSHA := "0123456789abcdef0123456789abcdef01234567"
+	headBranch := "143/session/merged"
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `"}`)
+	run := &models.Session{ID: sessionID, OrgID: orgID, RepositoryID: &repositoryID}
+	changeset := &models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID,
+		BaseBranch: "main", WorkingBranch: &headBranch, HeadSHA: &headSHA,
+	}
+	existing := &models.PullRequest{
+		ID: pullRequestID, OrgID: orgID,
+		GitHubPRNumber: 42, GitHubPRURL: "https://github.com/owner/repo/pull/42",
+		Status: models.PullRequestStatusMerged, HeadSHA: &headSHA, HeadRef: &headBranch,
+	}
+	storedPublication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateRecorded, Source: models.SessionPublicationSourceBackend,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue:        models.SessionPublicationJobQueueDefault, RequestPayload: payload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: headBranch, DesiredHeadSHA: &headSHA,
+		RequestedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+
+	mock.ExpectQuery("INSERT INTO session_publications").WithArgs(githubAnyArgs(12)...).
+		WillReturnRows(pgxmock.NewRows(publicationHealthTestColumns).AddRow(publicationHealthTestRow(storedPublication)...))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*published_head_sha").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*github_pr_number").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"number": 42, "url": existing.GitHubPRURL,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
+		WithArgs(githubAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_changesets SET head_sha").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"head_sha": headSHA, "status": models.ChangesetStatusPROpen,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE sessions SET status").WithArgs(githubAnyArgs(3)...).
+		WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(newPRHealthSessionRow(sessionID, orgID, now, models.SessionStatusPRCreated)...))
+	mock.ExpectExec("UPDATE pull_requests SET status").WithArgs(pgx.NamedArgs{
+		"id": pullRequestID, "org_id": orgID, "status": models.PullRequestStatusMerged,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec("UPDATE session_publications[\\s\\S]*SET state").
+		WithArgs(githubAnyArgs(7)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(mock),
+		changesets:   db.NewSessionChangesetStore(mock),
+		sessions:     db.NewSessionStore(mock),
+		publications: db.NewSessionPublicationStore(mock),
+		logger:       zerolog.Nop(),
+	}
+	err = svc.checkpointExistingPullRequestPublication(
+		context.Background(), run, changeset, existing,
+		models.SessionPublicationSourceBackend, models.SessionPublicationJobQueueDefault, payload, now,
+	)
+
+	require.NoError(t, err, "merged pull request recovery should run terminal lifecycle convergence before publication completion")
+	require.NoError(t, mock.ExpectationsWereMet(), "merged recovery should preserve lifecycle ordering and complete last")
+}
+
+func githubAnyArgs(count int) []any {
+	args := make([]any, count)
+	for i := range args {
+		args[i] = pgxmock.AnyArg()
+	}
+	return args
 }
 
 // TestCollectLinearIdentifiers locks the order contract: primary first then

@@ -112,6 +112,54 @@ func TestSessionPublicationStoreEnsureRequestedReopensRetryableTerminalOutcomeFo
 	require.NoError(t, mock.ExpectationsWereMet(), "publication generation reopening should remain tenant scoped")
 }
 
+func TestSessionPublicationStoreEnsureRequestedGuardsMutableIntentByGeneration(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "test should create the database mock")
+	t.Cleanup(mock.Close)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	olderGeneration := time.Now().UTC().Add(-time.Minute)
+	newerGeneration := olderGeneration.Add(30 * time.Second)
+	oldPayload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"reconciler"}`)
+	newPayload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user"}`)
+	publication := models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		Source: models.SessionPublicationSourceReconciler, ReviewGateState: models.SessionPublicationReviewGatePending,
+		JobQueue: models.SessionPublicationJobQueueDefault, RequestPayload: oldPayload,
+		RequestGenerationAt: olderGeneration,
+		BaseBranch:          "stale-base", HeadBranch: "stale-head",
+	}
+	stored := publication
+	stored.ID = uuid.New()
+	stored.State = models.SessionPublicationStateRequested
+	stored.Source = models.SessionPublicationSourceUser
+	stored.ReviewGateState = models.SessionPublicationReviewGateNotRequired
+	stored.JobQueue = models.SessionPublicationJobQueueAgent
+	stored.RequestPayload = newPayload
+	stored.RequestGenerationAt = newerGeneration
+	stored.BaseBranch = "main"
+	stored.HeadBranch = "current-head"
+	stored.RequestedAt = newerGeneration
+	stored.CreatedAt = olderGeneration
+	stored.UpdatedAt = newerGeneration
+
+	mock.ExpectQuery(`head_branch = CASE[\s\S]+EXCLUDED\.request_generation_at < session_publications\.request_generation_at[\s\S]+request_generation_at = CASE[\s\S]+GREATEST\(session_publications\.request_generation_at, EXCLUDED\.request_generation_at\)[\s\S]+source = CASE[\s\S]+EXCLUDED\.request_generation_at < session_publications\.request_generation_at[\s\S]+request_payload = CASE[\s\S]+EXCLUDED\.request_generation_at < session_publications\.request_generation_at[\s\S]+updated_at = CASE[\s\S]+EXCLUDED\.request_generation_at < session_publications\.request_generation_at`).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"repository_id": repositoryID, "source": models.SessionPublicationSourceReconciler,
+			"review_gate_state": models.SessionPublicationReviewGatePending,
+			"job_queue":         models.SessionPublicationJobQueueDefault, "request_payload": string(oldPayload),
+			"request_generation_at": olderGeneration,
+			"base_branch":           "stale-base", "head_branch": "stale-head", "desired_head_sha": (*string)(nil),
+		}).WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	err = NewSessionPublicationStore(mock).EnsureRequested(context.Background(), orgID, &publication)
+	require.NoError(t, err, "a stale retry should return the authoritative newer publication intent")
+	require.Equal(t, stored, publication, "a stale retry must not replace newer branch, payload, source, queue, or review metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all mutable publication intent should be guarded by request generation")
+}
+
 func TestSessionPublicationStoreStartAttempt(t *testing.T) {
 	t.Parallel()
 
