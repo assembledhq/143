@@ -901,7 +901,9 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(resetButton).toBeEnabled());
     await user.click(resetButton);
     expect(await screen.findByRole("alertdialog", { name: "Reset the complete repository policy?" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Reset repository policy" }));
+    const confirmResetButton = screen.getByRole("button", { name: "Reset repository policy" });
+    expect(confirmResetButton).toHaveAttribute("data-variant", "destructive");
+    await user.click(confirmResetButton);
     await waitFor(() => expect(resetCalls).toBe(1));
   });
 
@@ -1270,6 +1272,7 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     expect(await screen.findByRole("alertdialog", { name: "Discard unsaved prompt text?" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Discard and switch" })).toHaveAttribute("data-variant", "destructive");
     expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("Organization default");
   });
 

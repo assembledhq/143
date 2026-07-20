@@ -969,7 +969,7 @@ export default function CodeReviewsPage() {
               }}
             />
             <AlertDialog open={pendingScope !== null} onOpenChange={(open) => { if (!open) setPendingScope(null); }}>
-              <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle><AlertDialogDescription>This prompt has unsaved, pending, or failed changes. Switching policy scope will discard the local text.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Stay here</AlertDialogCancel><AlertDialogAction onClick={() => { promptDraftsRef.current.review_instructions?.replace(config?.review_instructions ?? ""); promptDraftsRef.current.automated_approval_policy?.replace(config?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY); if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); }}>Discard and switch</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+              <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle><AlertDialogDescription>This prompt has unsaved, pending, or failed changes. Switching policy scope will discard the local text.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Stay here</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { promptDraftsRef.current.review_instructions?.replace(config?.review_instructions ?? ""); promptDraftsRef.current.automated_approval_policy?.replace(config?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY); if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); }}>Discard and switch</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
             </AlertDialog>
             <DescriptionRequirementSheet
               requirement={editingRequirement}
@@ -1202,7 +1202,7 @@ function PolicyScopeBar({
             <AlertDialogTrigger asChild><Button type="button" variant="ghost" size="sm" disabled={resetPending}>Reset repository policy</Button></AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader><AlertDialogTitle>Reset the complete repository policy?</AlertDialogTitle><AlertDialogDescription>This removes every repository override and returns all controls and prompts to the organization policy. Historical review versions remain unchanged.</AlertDialogDescription></AlertDialogHeader>
-              <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={onReset}>Reset repository policy</AlertDialogAction></AlertDialogFooter>
+              <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={onReset}>Reset repository policy</AlertDialogAction></AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
         ) : null}
