@@ -120,6 +120,32 @@ func TestMigrationsDoNotUseConcurrentIndexes(t *testing.T) {
 	}
 }
 
+func TestRenumberedPreviewResourceMigrationIsReplaySafe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		required string
+	}{
+		{name: "peak memory bytes column", required: "ADD COLUMN IF NOT EXISTS peak_memory_bytes"},
+		{name: "peak memory sampled at column", required: "ADD COLUMN IF NOT EXISTS peak_memory_sampled_at"},
+		{name: "peak memory phase column", required: "ADD COLUMN IF NOT EXISTS peak_memory_phase"},
+		{name: "resource samples table", required: "CREATE TABLE IF NOT EXISTS preview_resource_samples"},
+		{name: "preview samples index", required: "CREATE INDEX IF NOT EXISTS idx_preview_resource_samples_preview"},
+		{name: "sampled at index", required: "CREATE INDEX IF NOT EXISTS idx_preview_resource_samples_sampled_at"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000249_preview_resource_samples.up.sql"))
+			require.NoError(t, err, "renumbered preview resource migration should be readable")
+			require.Contains(t, string(body), tt.required, "renumbered preview resource migration should tolerate schema applied under its former version")
+		})
+	}
+}
+
 func TestHotTableFKRemovalDownMigrationIsExplicitNoop(t *testing.T) {
 	t.Parallel()
 
