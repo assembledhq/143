@@ -36,17 +36,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -63,6 +55,7 @@ import { useAutosave, type UseAutosaveResult } from "@/hooks/useAutosave";
 import { useAutosaveNumericField } from "@/hooks/useAutosaveNumericField";
 import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
+import { useAuth } from "@/hooks/use-auth";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
 import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
@@ -76,6 +69,10 @@ import type {
   CodeReviewListItem,
   CodeReviewListOutcome,
   CodeReviewPolicyConfig,
+  CodeReviewPolicyEditSource,
+  CodeReviewPolicyAnalyticsEvent,
+  CodeReviewPromptExampleOption,
+  CodeReviewAutomatedApprovalExampleOption,
   CodeReviewResolvedPolicy,
   CodeReviewSessionStatus,
   ListResponse,
@@ -152,6 +149,19 @@ function formatDate(value?: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function trackCodeReviewPolicyEvent(event: CodeReviewPolicyAnalyticsEvent): void {
+  void api.codeReviews.policyEvent(event).catch((error) => console.error("Failed to record code review policy event", error));
+}
+
+function promptCharacterBucket(value: string): string {
+  const length = [...value].length;
+  if (length === 0) return "0";
+  if (length <= 250) return "1-250";
+  if (length <= 1000) return "251-1000";
+  if (length <= 4000) return "1001-4000";
+  return "4001-8000";
 }
 
 function wasAutomaticallyApproved(review: CodeReviewListItem): boolean {
@@ -327,7 +337,10 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 
 export default function CodeReviewsPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const canManagePolicy = user?.role === "admin";
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
+  const [policyScope, setPolicyScope] = useState(ALL_REPOSITORIES);
   const [outcomeFilter, setOutcomeParam] = useQueryState(
     "outcome",
     parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
@@ -340,46 +353,29 @@ export default function CodeReviewsPage() {
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
-  const [promptDrafts, setPromptDrafts] = useState<Record<string, boolean>>({});
-  const [pendingRepositoryFilter, setPendingRepositoryFilter] = useState<string | null>(null);
+  const [promptExample, setPromptExample] = useState<{ field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null>(null);
+  const [invalidPolicyField, setInvalidPolicyField] = useState<string | null>(null);
+  const [policySaveFailed, setPolicySaveFailed] = useState(false);
+  const [promptDraftDirty, setPromptDraftDirty] = useState({ review_instructions: false, automated_approval_policy: false });
+  const [pendingScope, setPendingScope] = useState<string | null>(null);
+  const promptDraftsRef = useRef<Partial<Record<"review_instructions" | "automated_approval_policy", PromptDraftHandle>>>({});
+  const saveSourceByConfigRef = useRef(new WeakMap<CodeReviewPolicyConfig, CodeReviewPolicyEditSource>());
+  const saveScopeByConfigRef = useRef(new WeakMap<CodeReviewPolicyConfig, string>());
+  const persistedPromptsRef = useRef({ scope: "", review_instructions: "", automated_approval_policy: DEFAULT_AUTOMATED_APPROVAL_POLICY });
   const setOutcomeFilter = useCallback(
     (value: string) => {
       void setOutcomeParam(value as OutcomeFilter);
     },
     [setOutcomeParam],
   );
-  const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
-  const hasUnsavedPromptDraft = Object.values(promptDrafts).some(Boolean);
-  const changeRepositoryFilter = useCallback((value: string) => {
-    setPromptDrafts({});
-    setRepositoryFilter(value);
+  const registerPromptDraft = useCallback((field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => {
+    promptDraftsRef.current[field] = handle;
+    setPromptDraftDirty((current) => current[field] === handle.dirty ? current : { ...current, [field]: handle.dirty });
   }, []);
-  const requestRepositoryFilterChange = useCallback(
-    (value: string) => {
-      if (value === repositoryFilter) return;
-      if (hasUnsavedPromptDraft) {
-        setPendingRepositoryFilter(value);
-        return;
-      }
-      changeRepositoryFilter(value);
-    },
-    [changeRepositoryFilter, hasUnsavedPromptDraft, repositoryFilter],
-  );
-  const handlePromptDraftChange = useCallback((prompt: string, dirty: boolean) => {
-    setPromptDrafts((current) => {
-      if (!dirty) {
-        if (!(prompt in current)) return current;
-        const next = { ...current };
-        delete next[prompt];
-        return next;
-      }
-      if (current[prompt]) return current;
-      return { ...current, [prompt]: true };
-    });
-  }, []);
+  const reviewRepositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
     () => ({
-      repository_id: repositoryId,
+      repository_id: reviewRepositoryId,
       decision:
         outcomeFilter !== ALL_OUTCOMES && outcomeFilter !== AUTOMATICALLY_APPROVED && outcomeFilter !== COMPLETED_NOT_APPROVED
           ? (outcomeFilter as CodeReviewDecision)
@@ -390,8 +386,9 @@ export default function CodeReviewsPage() {
       search: search.trim() || undefined,
       limit: 100,
     }),
-    [outcomeFilter, repositoryId, riskFilter, search, statusFilter],
+    [outcomeFilter, reviewRepositoryId, riskFilter, search, statusFilter],
   );
+  const repositoryId = policyScope === ALL_REPOSITORIES ? undefined : policyScope;
 
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
@@ -468,6 +465,10 @@ export default function CodeReviewsPage() {
     queryKey: queryKeys.codeReviews.templates,
     queryFn: () => api.codeReviews.templates(),
   });
+  const promptExamplesQuery = useQuery({
+    queryKey: queryKeys.codeReviews.promptExamples,
+    queryFn: () => api.codeReviews.promptExamples(),
+  });
   const evidenceQuery = useQuery({
     queryKey: queryKeys.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
     queryFn: () => api.codeReviews.evidence(selectedEvidenceSessionId ?? ""),
@@ -479,6 +480,25 @@ export default function CodeReviewsPage() {
   // config built from the freshest cache value (per settings/AGENTS.md), so
   // back-to-back edits never clobber one another.
   const config = policyQuery.data?.data.config ?? null;
+  const currentScopeKey = repositoryId ?? "organization";
+  if (config && persistedPromptsRef.current.scope !== currentScopeKey) {
+    persistedPromptsRef.current = { scope: currentScopeKey, review_instructions: config.review_instructions, automated_approval_policy: config.automated_approval_policy };
+  }
+  const viewedScopeRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!config) return;
+    const scope = repositoryId ? "repository" : "organization";
+    const scopeKey = repositoryId ?? "organization";
+    if (viewedScopeRef.current === scopeKey) return;
+    viewedScopeRef.current = scopeKey;
+    trackCodeReviewPolicyEvent({ event: "code_review_policy_viewed", scope, configured: policyQuery.data?.data.source !== "default" });
+  }, [config, repositoryId, policyQuery.data?.data.source]);
+  const coalescePolicy = useCallback((queued: CodeReviewPolicyConfig, incoming: CodeReviewPolicyConfig) => {
+    const merged = coalesceCodeReviewPolicy(queued, incoming);
+    saveSourceByConfigRef.current.set(merged, saveSourceByConfigRef.current.get(incoming) ?? "manual");
+    saveScopeByConfigRef.current.set(merged, saveScopeByConfigRef.current.get(incoming) ?? currentScopeKey);
+    return merged;
+  }, [currentScopeKey]);
   const autosave = useAutosave<CodeReviewPolicyConfig>({
     queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
     mutationFn: async (next: CodeReviewPolicyConfig) => {
@@ -486,6 +506,7 @@ export default function CodeReviewsPage() {
         return await api.codeReviews.updatePolicy({
           repository_id: repositoryId ?? null,
           config: next,
+          source: saveSourceByConfigRef.current.get(next) ?? "manual",
         });
       } finally {
         // Editing the org default cascades into repo-scoped resolved policies
@@ -497,8 +518,33 @@ export default function CodeReviewsPage() {
       }
     },
     applyOptimistic: applyCodeReviewPolicyOptimistic,
-    coalesce: coalesceCodeReviewPolicy,
+    coalesce: coalescePolicy,
     debounceMs: 0,
+    onError: (error, saved) => {
+      // Ignore failures that belong to a scope the user has already left (e.g.
+      // the save was in flight when they discarded and switched); otherwise the
+      // error banner and invalid-field focus would misattribute to the new scope.
+      const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey;
+      if (savedScope !== currentScopeKey) return;
+      setPolicySaveFailed(true);
+      if (error instanceof ApiError && error.details && typeof error.details === "object" && "field" in error.details) {
+        setInvalidPolicyField(String((error.details as { field: unknown }).field));
+      }
+    },
+    onSuccess: (saved) => {
+      const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey;
+      if (persistedPromptsRef.current.scope === savedScope) {
+        persistedPromptsRef.current = {
+          scope: savedScope,
+          review_instructions: saved.review_instructions,
+          automated_approval_policy: saved.automated_approval_policy,
+        };
+      }
+      if (savedScope === currentScopeKey) {
+        setPolicySaveFailed(false);
+        setInvalidPolicyField(null);
+      }
+    },
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
     queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy(repositoryId ?? null))?.data?.config ?? config;
@@ -508,7 +554,9 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+      trackCodeReviewPolicyEvent({ event: "code_review_github_setup_completed", scope: "repository", configured: true });
     },
+    onError: () => trackCodeReviewPolicyEvent({ event: "code_review_github_setup_failed", scope: "repository", configured: false }),
   });
   const deleteGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.deleteGitHubTrigger(targetRepositoryId),
@@ -516,6 +564,13 @@ export default function CodeReviewsPage() {
       void queryClient.invalidateQueries({
         queryKey: queryKeys.codeReviews.githubTrigger(targetRepositoryId),
       });
+    },
+  });
+  const resetPolicy = useMutation({
+    mutationFn: (targetRepositoryId: string) => api.codeReviews.resetPolicy(targetRepositoryId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
+      toast.success("Repository policy reset to organization defaults");
     },
   });
 
@@ -573,9 +628,25 @@ export default function CodeReviewsPage() {
     return next;
   };
   // Instant commit for toggles/selects/buttons.
-  const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void) => {
+  const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void, source: CodeReviewPolicyEditSource = "manual") => {
     const next = draftFrom(mutate);
-    if (next) autosave.save(next);
+    if (next) { saveSourceByConfigRef.current.set(next, source); saveScopeByConfigRef.current.set(next, currentScopeKey); setInvalidPolicyField(null); autosave.save(next); }
+  };
+  const hasUnsafePromptDraft = promptDraftDirty.review_instructions || promptDraftDirty.automated_approval_policy || policySaveFailed || autosave.status === "saving";
+  // Switching scope discards any per-scope error state: a save failure or
+  // invalid-field marker belongs to the scope it happened on and must not leak
+  // onto the newly loaded scope (which would spuriously disable reset and
+  // re-trigger the discard dialog on every subsequent switch).
+  const applyScopeChange = (value: string) => {
+    setPolicyScope(value);
+    setInvalidPolicyField(null);
+    setPolicySaveFailed(false);
+    resetPolicy.reset();
+  };
+  const requestScopeChange = (value: string) => {
+    if (value === policyScope) return;
+    if (hasUnsafePromptDraft) { setPendingScope(value); return; }
+    applyScopeChange(value);
   };
   // toPatch builder for numeric fields, which require a non-null payload. Safe
   // because numeric inputs are disabled until the policy has loaded.
@@ -634,7 +705,7 @@ export default function CodeReviewsPage() {
               id="code-review-filters"
               className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
             >
-              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={requestRepositoryFilterChange}>
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
                 {repositories.map((repo) => (
                   <SelectItem key={repo.id} value={repo.id}>
@@ -802,36 +873,49 @@ export default function CodeReviewsPage() {
                   <AutosaveIndicator status={autosave.status} />
                 </div>
                 <PolicyScopeBar
-                  value={repositoryFilter}
-                  onValueChange={requestRepositoryFilterChange}
+                  value={policyScope}
+                  onValueChange={requestScopeChange}
                   repositories={repositories}
                   repositoryName={selectedRepository?.full_name}
                   repositorySelected={Boolean(repositoryId)}
                   source={policyQuery.data?.data.source}
+                  customizedCount={policyQuery.data?.data.policy?.inheritance?.override_fields?.length ?? 0}
+                  onReset={canManagePolicy && repositoryId && policyQuery.data?.data.source === "repository" ? () => resetPolicy.mutate(repositoryId) : undefined}
+                  resetPending={resetPolicy.isPending || autosave.status === "saving" || hasUnsafePromptDraft}
+                  resetError={apiErrorMessage(resetPolicy.error) ?? undefined}
                 />
               </CardHeader>
               <CardContent className="space-y-5">
+                {!canManagePolicy ? <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</div> : null}
+                <fieldset disabled={!canManagePolicy} className="space-y-5">
                 <PolicyBehaviorSection
                       config={config}
-                  onChange={(outcome) =>
+                  onChange={(outcome) => {
+                    const prior = policyOutcome(config);
                     commitPolicy((next) => {
                       if (outcome === "disabled") next.enabled = false;
                       else {
                         next.enabled = true;
                         next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
                       }
-                    })
-                  }
+                    });
+                    if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: repositoryId ? "repository" : "organization", configured: outcome !== "disabled" });
+                    if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: repositoryId ? "repository" : "organization", configured: true });
+                  }}
                     />
 
                 <PolicyPromptComposers
-                  key={repositoryFilter}
                   config={config}
                   inheritedConfig={policyQuery.data?.data.inherited_policy}
                   autosave={autosave}
                   commitPolicy={commitPolicy}
                   repositorySelected={Boolean(repositoryId)}
-                  onDraftStateChange={handlePromptDraftChange}
+                  examples={promptExamplesQuery.data?.data}
+                  examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
+                  onRetryExamples={() => void promptExamplesQuery.refetch()}
+                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: repositoryId ? "repository" : "organization", example_key: example.key, configured: true }); }}
+                  onDraftHandle={registerPromptDraft}
+                  invalidPolicyField={invalidPolicyField}
                 />
 
                 <GitHubTriggerPanel
@@ -863,9 +947,30 @@ export default function CodeReviewsPage() {
                   codeReviewModelGroups={codeReviewModelGroups}
                   codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
                   setEditingRequirementKey={setEditingRequirementKey}
+                  invalidPolicyField={invalidPolicyField}
+                  analyticsScope={repositoryId ? "repository" : "organization"}
                 />
+                </fieldset>
               </CardContent>
             </Card>
+            <CodeReviewPromptExampleDialog
+              selection={promptExample}
+              currentConfig={config}
+              currentDraftValue={promptExample ? promptDraftsRef.current[promptExample.field]?.value : undefined}
+              persistedValue={promptExample ? persistedPromptsRef.current[promptExample.field] : undefined}
+              onOpenChange={(open) => { if (!open) setPromptExample(null); }}
+              onApply={() => {
+                if (!promptExample) return;
+                const value = "instructions" in promptExample.example ? promptExample.example.instructions : promptExample.example.policy;
+                promptDraftsRef.current[promptExample.field]?.replace(value);
+                commitPolicy((next) => { next[promptExample.field] = value; }, "example");
+                trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: repositoryId ? "repository" : "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
+                setPromptExample(null);
+              }}
+            />
+            <AlertDialog open={pendingScope !== null} onOpenChange={(open) => { if (!open) setPendingScope(null); }}>
+              <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle><AlertDialogDescription>This prompt has unsaved, pending, or failed changes. Switching policy scope will discard the local text.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Stay here</AlertDialogCancel><AlertDialogAction onClick={() => { promptDraftsRef.current.review_instructions?.replace(config?.review_instructions ?? ""); promptDraftsRef.current.automated_approval_policy?.replace(config?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY); if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); }}>Discard and switch</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
+            </AlertDialog>
             <DescriptionRequirementSheet
               requirement={editingRequirement}
               canDelete={(config?.description_policy.requirements.length ?? 0) > 1}
@@ -892,38 +997,12 @@ export default function CodeReviewsPage() {
             />
           </TabsContent>
         </Tabs>
-        <AlertDialog
-          open={pendingRepositoryFilter !== null}
-          onOpenChange={(open) => {
-            if (!open) setPendingRepositoryFilter(null);
-          }}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle>
-              <AlertDialogDescription>
-                Changing policy scope will discard prompt text that has not been saved.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Keep editing</AlertDialogCancel>
-              <AlertDialogAction
-                variant="destructive"
-                onClick={() => {
-                  if (pendingRepositoryFilter === null) return;
-                  changeRepositoryFilter(pendingRepositoryFilter);
-                  setPendingRepositoryFilter(null);
-                }}
-              >
-                Discard and change scope
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </div>
     </main>
   );
 }
+
+type PromptDraftHandle = { value: string; dirty: boolean; flush(): void; replace(value: string): void };
 
 function PolicyPromptComposers({
   config,
@@ -931,27 +1010,41 @@ function PolicyPromptComposers({
   autosave,
   commitPolicy,
   repositorySelected,
-  onDraftStateChange,
+  examples,
+  examplesError,
+  onRetryExamples,
+  onChooseExample,
+  onDraftHandle,
+  invalidPolicyField,
 }: {
   config: CodeReviewPolicyConfig | null;
   inheritedConfig?: CodeReviewPolicyConfig;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
-  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
+  commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void, source?: CodeReviewPolicyEditSource) => void;
   repositorySelected: boolean;
-  onDraftStateChange: (prompt: string, dirty: boolean) => void;
+  examples?: { review_instructions: CodeReviewPromptExampleOption[]; automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[] };
+  examplesError?: string;
+  onRetryExamples: () => void;
+  onChooseExample: (field: "review_instructions" | "automated_approval_policy", example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
+  onDraftHandle: (field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => void;
+  invalidPolicyField: string | null;
 }) {
   return (
     <div className="space-y-4">
+      {examplesError ? <ErrorNotice title="Could not load prompt examples" description={examplesError} action={{ label: "Retry", onClick: onRetryExamples }} /> : null}
       <CodeReviewAutomatedApprovalPolicyComposer
         value={config?.automated_approval_policy ?? ""}
         disabled={!config}
         hidden={config?.approval_mode !== "approve_acceptable"}
         autosave={autosave}
-        onCommit={(value) => commitPolicy((next) => { next.automated_approval_policy = value.trim(); })}
+        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
         resetValue={inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY}
-        onReset={() => commitPolicy((next) => { next.automated_approval_policy = inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY; })}
-        resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Reset to default"}
-        onDraftStateChange={onDraftStateChange}
+        onReset={() => { const resetValue = inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+        resetLabel={repositorySelected && inheritedConfig ? "Use organization approval policy" : "Reset to default"}
+        examples={examples?.automated_approval_policies ?? []}
+        onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
+        onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
+        focusOnError={invalidPolicyField === "automated_approval_policy"}
       />
       <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
         <div className="font-medium text-foreground">Hard safeguards</div>
@@ -961,11 +1054,14 @@ function PolicyPromptComposers({
         value={config?.review_instructions ?? ""}
         disabled={!config}
         autosave={autosave}
-        onCommit={(value) => commitPolicy((next) => { next.review_instructions = value.trim(); })}
+        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
         resetValue={inheritedConfig?.review_instructions ?? ""}
-        onReset={() => commitPolicy((next) => { next.review_instructions = inheritedConfig?.review_instructions ?? ""; })}
-        resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Clear instructions"}
-        onDraftStateChange={onDraftStateChange}
+        onReset={() => { const resetValue = inheritedConfig?.review_instructions ?? ""; commitPolicy((next) => { next.review_instructions = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+        resetLabel={repositorySelected && inheritedConfig ? "Use organization instructions" : "Clear instructions"}
+        examples={examples?.review_instructions ?? []}
+        onChooseExample={(example) => onChooseExample("review_instructions", example)}
+        onDraftHandle={(handle) => onDraftHandle("review_instructions", handle)}
+        focusOnError={invalidPolicyField === "review_instructions"}
       />
     </div>
   );
@@ -974,7 +1070,10 @@ function PolicyPromptComposers({
 type CodeReviewPromptComposerProps = {
   value: string; disabled: boolean; hidden?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string;
-  onDraftStateChange: (prompt: string, dirty: boolean) => void;
+  examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>;
+  onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
+  onDraftHandle: (handle: PromptDraftHandle) => void;
+  focusOnError: boolean;
 };
 
 function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptComposerProps) {
@@ -985,10 +1084,12 @@ function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
   return <CodeReviewPromptComposerBase {...props} title="Additional review instructions (optional)" description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance." tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority." secondary />;
 }
 
-function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, onDraftStateChange }: {
+function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, examples, onChooseExample, onDraftHandle, focusOnError }: {
   title: string; description: string; tooltip: string; value: string; disabled: boolean; hidden?: boolean; required?: boolean;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>; onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string; secondary?: boolean;
-  onDraftStateChange: (prompt: string, dirty: boolean) => void;
+  examples: Array<CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption>; onChooseExample: (example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption) => void;
+  onDraftHandle: (handle: PromptDraftHandle) => void;
+  focusOnError: boolean;
 }) {
   // Gate and count on the trimmed value: that is exactly what onCommit persists
   // (`value.trim()`) and what the backend validates, so basing the length check
@@ -996,12 +1097,11 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   // whitespace (e.g. a pasted trailing newline) is stripped.
   const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !next.trim());
   const field = useDebouncedTextField({ serverValue: value, onCommit: (next) => { if (!invalidValue(next)) onCommit(next); }, preserveLocalOnServerChange: autosave.status === "error" });
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { onDraftHandle({ value: field.value, dirty: field.dirty, flush: field.flush, replace: field.replace }); }, [field.value, field.dirty, field.flush, field.replace, onDraftHandle]);
+  useEffect(() => { if (focusOnError) textareaRef.current?.focus(); }, [focusOnError]);
   const count = [...field.value.trim()].length;
   const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !field.value.trim());
-  const dirty = field.value !== value;
-  useEffect(() => {
-    onDraftStateChange(title, dirty);
-  }, [dirty, onDraftStateChange, title]);
   return (
     <section className={`${hidden ? "hidden" : ""} space-y-2 rounded-md border border-border p-4 ${secondary ? "bg-muted/10" : "bg-card shadow-sm"}`} aria-label={title}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1009,10 +1109,14 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
         <AutosaveIndicator status={autosave.status} />
       </div>
       <p className="text-xs text-muted-foreground">{description}</p>
-      <Textarea id={`prompt-${title.replaceAll(" ", "-")}`} value={field.value} disabled={disabled} rows={secondary ? 6 : 10} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} aria-invalid={invalid} aria-describedby={`prompt-count-${title.replaceAll(" ", "-")}`} />
+      <Textarea ref={textareaRef} id={`prompt-${title.replaceAll(" ", "-")}`} value={field.value} disabled={disabled} rows={secondary ? 6 : 10} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} aria-invalid={invalid || focusOnError} aria-describedby={`prompt-count-${title.replaceAll(" ", "-")}`} />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span id={`prompt-count-${title.replaceAll(" ", "-")}`} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>{count} / {CODE_REVIEW_PROMPT_MAX_LENGTH}</span>
-        <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+        <div className="flex flex-wrap gap-1">
+          {examples.length > 0 ? <span className="mr-1 inline-flex items-center gap-1 text-xs text-muted-foreground">Prompt examples <SettingInfoTooltip label={`${title} prompt examples`} description="Previews editable starter text for this prompt only. Applying an example creates a normal policy version and never changes safeguards, agents, enablement, or outcome." /></span> : null}
+          {examples.length > 0 ? <Select value="" disabled={disabled} onValueChange={(key) => { const example = examples.find((candidate) => candidate.key === key); if (example) onChooseExample(example); }}><SelectTrigger className="h-8 w-full sm:w-56" aria-label={`${title} prompt example`}><SelectValue placeholder="Choose example" /></SelectTrigger><SelectContent>{examples.map((example) => <SelectItem key={example.key} value={example.key}>{example.title}</SelectItem>)}</SelectContent></Select> : null}
+          <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+        </div>
       </div>
       {invalid ? <p className="text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
     </section>
@@ -1026,6 +1130,10 @@ function PolicyScopeBar({
   repositoryName,
   repositorySelected,
   source,
+  customizedCount,
+  onReset,
+  resetPending,
+  resetError,
 }: {
   value: string;
   onValueChange: (value: string) => void;
@@ -1033,6 +1141,10 @@ function PolicyScopeBar({
   repositoryName?: string;
   repositorySelected: boolean;
   source?: CodeReviewResolvedPolicy["source"];
+  customizedCount: number;
+  onReset?: () => void;
+  resetPending: boolean;
+  resetError?: string;
 }) {
   const scopePicker = (
     <div className="w-full sm:max-w-sm">
@@ -1076,6 +1188,7 @@ function PolicyScopeBar({
         Editing {repositoryName ?? "selected repository"} {inherited ? "inherited policy" : "override"}.
       </span>
       <Badge variant={inherited ? "outline" : "secondary"}>{inherited ? "Uses organization default" : "Repository override"}</Badge>
+      {!inherited ? <Badge variant="outline">{customizedCount} customized {customizedCount === 1 ? "control" : "controls"}</Badge> : null}
         <SettingInfoTooltip
           label="Repository policy inheritance"
           description={
@@ -1084,9 +1197,39 @@ function PolicyScopeBar({
               : "This repository has local policy overrides. Fields without overrides continue to inherit organization defaults."
           }
         />
+        {onReset ? (
+          <AlertDialog>
+            <AlertDialogTrigger asChild><Button type="button" variant="ghost" size="sm" disabled={resetPending}>Reset repository policy</Button></AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader><AlertDialogTitle>Reset the complete repository policy?</AlertDialogTitle><AlertDialogDescription>This removes every repository override and returns all controls and prompts to the organization policy. Historical review versions remain unchanged.</AlertDialogDescription></AlertDialogHeader>
+              <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={onReset}>Reset repository policy</AlertDialogAction></AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        ) : null}
       </div>
+      {resetError ? <ErrorNotice title="Could not reset repository policy" description={resetError} /> : null}
     </div>
   );
+}
+
+function CodeReviewPromptExampleDialog({ selection, currentConfig, currentDraftValue, persistedValue, onOpenChange, onApply }: {
+  selection: { field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null;
+  currentConfig: CodeReviewPolicyConfig | null;
+  currentDraftValue?: string;
+  persistedValue?: string;
+  onOpenChange: (open: boolean) => void;
+  onApply: () => void;
+}) {
+  if (!selection) return null;
+  const value = "instructions" in selection.example ? selection.example.instructions : selection.example.policy;
+  const dirty = currentDraftValue !== undefined && currentDraftValue !== (persistedValue ?? currentConfig?.[selection.field] ?? "");
+  return <Dialog open onOpenChange={onOpenChange}><DialogContent>
+    <DialogHeader><DialogTitle>{selection.example.title}</DialogTitle><DialogDescription>{selection.example.description} Only {selection.field === "review_instructions" ? "additional review instructions" : "the automated approval policy"} will be replaced.</DialogDescription></DialogHeader>
+    <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm">{value}</div>
+    {selection.field === "automated_approval_policy" && currentConfig?.approval_mode !== "approve_acceptable" ? <p className="text-sm text-muted-foreground">This example does not enable automatic approval. Choose “Leave comments and approve when acceptable” separately.</p> : null}
+    {dirty ? <p className="text-sm text-amber-700 dark:text-amber-300">Your currently saved value differs. Applying this example replaces only this prompt field and creates a new policy version.</p> : null}
+    <DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="button" onClick={onApply}>Use example</Button></DialogFooter>
+  </DialogContent></Dialog>;
 }
 
 type CodeReviewPolicyTemplate = Awaited<ReturnType<typeof api.codeReviews.templates>>["data"][number];
@@ -1106,6 +1249,8 @@ type AdvancedPolicySettingsProps = {
   codeReviewModelGroups: AgentModelGroup[];
   codeReviewOpenCodeAvailability: Map<string, OpenCodeModelAvailability>;
   setEditingRequirementKey: (value: string) => void;
+  invalidPolicyField: string | null;
+  analyticsScope: "organization" | "repository";
 };
 
 function AdvancedPolicySettings({
@@ -1123,9 +1268,12 @@ function AdvancedPolicySettings({
   codeReviewModelGroups,
   codeReviewOpenCodeAvailability,
   setEditingRequirementKey,
+  invalidPolicyField,
+  analyticsScope,
 }: AdvancedPolicySettingsProps) {
   return (
-                <AdvancedPolicyControls>
+                <AdvancedPolicyControls forceOpen={Boolean(invalidPolicyField && ["risk_policy", "inline_comment_limit", "agent_roster", "description_policy"].includes(invalidPolicyField))} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "all", configured: true })}>
+                  {invalidPolicyField ? <ErrorNotice title="Could not save this policy setting" description={`Correct the highlighted ${invalidPolicyField.replaceAll("_", " ")} setting and try again.`} /> : null}
                   <div className="grid gap-3 rounded-md border border-border p-4 md:grid-cols-[1fr_auto] md:items-end">
                     <FilterSelect
                       label="Advanced policy preset"
@@ -1178,7 +1326,7 @@ function AdvancedPolicySettings({
                 <div className="space-y-3">
                   <div className="text-sm font-medium text-foreground">Fine-tuning</div>
 
-                  <FineTuningSection title="Approval criteria" summary="Size thresholds, limits, timeout, and reviewer quorum">
+                  <FineTuningSection title="Approval criteria" summary="Size thresholds, limits, timeout, and reviewer quorum" forceOpen={invalidPolicyField === "risk_policy" || invalidPolicyField === "inline_comment_limit"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "approval_criteria", configured: true })}>
                     <div className="grid gap-3 md:grid-cols-3">
                       <NumberPolicyInput
                         label="Files changed"
@@ -1233,7 +1381,7 @@ function AdvancedPolicySettings({
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Quality gates" summary="Merge and check requirements before approval">
+                  <FineTuningSection title="Quality gates" summary="Merge and check requirements before approval" onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "quality_gates", configured: true })}>
                     <div className="grid gap-x-6 gap-y-2 md:grid-cols-2">
                       <PolicyToggle
                         label="Require passing checks"
@@ -1280,7 +1428,7 @@ function AdvancedPolicySettings({
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks">
+                  <FineTuningSection title="Paths, authors & checks" summary="Path filters, eligible authors, and required checks" onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "paths_authors_checks", configured: true })}>
                     <div className="grid gap-3 lg:grid-cols-2">
                       <PolicyStringListEditor
                         label="Sensitive paths"
@@ -1343,7 +1491,7 @@ function AdvancedPolicySettings({
                     </div>
                   </FineTuningSection>
 
-                  <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent">
+                  <FineTuningSection title="Reviewers & agents" summary="Reviewer agents and the orchestrating agent" forceOpen={invalidPolicyField === "agent_roster"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "reviewers_agents", configured: true })}>
                     <AgentRosterControls
                       config={config}
                       disabled={!config}
@@ -1353,7 +1501,7 @@ function AdvancedPolicySettings({
                     />
                   </FineTuningSection>
 
-                  <FineTuningSection title="Structured PR-description checks" summary="PR description rules checked before approval">
+                  <FineTuningSection title="Structured PR-description checks" summary="PR description rules checked before approval" forceOpen={invalidPolicyField === "description_policy"} onOpened={() => trackCodeReviewPolicyEvent({ event: "code_review_advanced_opened", scope: analyticsScope, subsection: "structured_description_checks", configured: true })}>
                     <DescriptionRequirementsList
                       requirements={config?.description_policy.requirements ?? []}
                       disabled={!config}
@@ -1379,10 +1527,10 @@ function AdvancedPolicySettings({
   );
 }
 
-function AdvancedPolicyControls({ children }: { children: ReactNode }) {
+function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: ReactNode; forceOpen: boolean; onOpened: () => void }) {
   const [open, setOpen] = useState(false);
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="rounded-md border border-border">
+    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }} className="rounded-md border border-border">
       <div className="flex items-center gap-1 border-border pr-3">
         <CollapsibleTrigger asChild>
           <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between rounded-md p-4 text-left" aria-label="Advanced controls">
@@ -2589,10 +2737,13 @@ function PolicyTextarea({
   return <Textarea {...props} value={field.value} disabled={disabled} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />;
 }
 
-function FineTuningSection({ title, summary, defaultOpen = false, children }: { title: string; summary?: string; defaultOpen?: boolean; children: ReactNode }) {
+function FineTuningSection({ title, summary, defaultOpen = false, forceOpen = false, onOpened, children }: { title: string; summary?: string; defaultOpen?: boolean; forceOpen?: boolean; onOpened?: () => void; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (forceOpen) triggerRef.current?.focus(); }, [forceOpen]);
   return (
-    <Collapsible defaultOpen={defaultOpen} className="rounded-md border border-border">
-      <CollapsibleTrigger className="group flex w-full items-center justify-between gap-3 rounded-md p-4 text-left hover:bg-muted/40">
+    <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened?.(); }} className="rounded-md border border-border">
+      <CollapsibleTrigger ref={triggerRef} className="group flex w-full items-center justify-between gap-3 rounded-md p-4 text-left hover:bg-muted/40">
         <div className="min-w-0">
           <div className="text-sm font-medium text-foreground">{title}</div>
           {summary ? <div className="mt-0.5 text-xs text-muted-foreground">{summary}</div> : null}

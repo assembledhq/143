@@ -20,6 +20,8 @@ export interface UseAutosaveOptions<TVars> {
   debounceMs?: number;
   errorMessage?: string;
   invalidateOnSettled?: boolean;
+  onError?: (error: unknown, vars: TVars) => void;
+  onSuccess?: (vars: TVars) => void;
 }
 
 export interface UseAutosaveResult<TVars> {
@@ -60,6 +62,8 @@ interface QueueEntry {
   applyOptimistic?: (previous: unknown, vars: unknown) => unknown;
   errorMessage?: string;
   invalidateOnSettled: boolean;
+  onError?: (error: unknown, vars: unknown) => void;
+  onSuccess?: (vars: unknown) => void;
   listeners: Set<(status: QueueStatus, ownerIds: ReadonlySet<string>) => void>;
 }
 
@@ -162,8 +166,10 @@ async function run(
 
   try {
     await mutationFn(vars);
+    entry.onSuccess?.(vars);
     emit(entry, "saved", ownerIds);
   } catch (err) {
+    entry.onError?.(err, vars);
     captureError(err, { feature: "useAutosave" });
     queryClient.setQueryData(queryKey, previous);
     toast.error(errorMessage);
@@ -248,6 +254,8 @@ export function useAutosave<TVars>({
   debounceMs = 0,
   errorMessage = DEFAULT_ERROR_MESSAGE,
   invalidateOnSettled = true,
+  onError,
+  onSuccess,
 }: UseAutosaveOptions<TVars>): UseAutosaveResult<TVars> {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<AutosaveStatus>("idle");
@@ -269,6 +277,8 @@ export function useAutosave<TVars>({
   const errorMessageRef = useRef(errorMessage);
   const debounceMsRef = useRef(debounceMs);
   const invalidateOnSettledRef = useRef(invalidateOnSettled);
+  const onErrorRef = useRef(onError);
+  const onSuccessRef = useRef(onSuccess);
   // Intentional: NO dependency array. This effect must run after every
   // commit so the refs always mirror the freshest prop/callback values a
   // parent passed in. Adding deps (e.g. `[mutationFn, applyOptimistic, ...]`)
@@ -283,6 +293,8 @@ export function useAutosave<TVars>({
     errorMessageRef.current = errorMessage;
     debounceMsRef.current = debounceMs;
     invalidateOnSettledRef.current = invalidateOnSettled;
+    onErrorRef.current = onError;
+    onSuccessRef.current = onSuccess;
   });
 
   // Debounce state is local to each hook instance — two callers of the same
@@ -374,6 +386,8 @@ export function useAutosave<TVars>({
       entry.applyOptimistic = (prev, v) => applyOptimisticRef.current(prev, v as TVars);
       entry.errorMessage = errorMessageRef.current;
       entry.invalidateOnSettled = invalidateOnSettledRef.current;
+      entry.onError = (error, vars) => onErrorRef.current?.(error, vars as TVars);
+      entry.onSuccess = (vars) => onSuccessRef.current?.(vars as TVars);
 
       if (entry.inFlight) {
         if (entry.hasPending && entry.coalesce) {

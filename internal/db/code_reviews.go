@@ -433,6 +433,36 @@ func (s *CodeReviewStore) SavePolicy(ctx context.Context, orgID uuid.UUID, repos
 	return record, nil
 }
 
+// ResetRepositoryPolicy deactivates the complete active repository override.
+// Historical versions remain available to review sessions that captured them.
+func (s *CodeReviewStore) ResetRepositoryPolicy(ctx context.Context, orgID, repositoryID uuid.UUID) (uuid.UUID, bool, error) {
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return uuid.Nil, false, fmt.Errorf("reset code review policy requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("begin reset code review policy tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var policyID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		UPDATE code_review_policies
+		SET active = false
+		WHERE org_id = @org_id
+		  AND repository_id = @repository_id
+		  AND active = true
+		RETURNING id`, pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).Scan(&policyID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, fmt.Errorf("inactivate repository code review policy: %w", err)
+	}
+	deactivated := err == nil
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, false, fmt.Errorf("commit reset code review policy tx: %w", err)
+	}
+	return policyID, deactivated, nil
+}
+
 func (s *CodeReviewStore) activeOrgPolicyConfig(ctx context.Context, orgID uuid.UUID) (models.CodeReviewPolicyConfig, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewPolicyColumns+`

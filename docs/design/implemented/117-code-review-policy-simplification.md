@@ -1,8 +1,8 @@
 # Design: Prompt-First Code Review Policy
 
-> **Status:** Proposed | **Last reviewed:** 2026-07-17
+> **Status:** Implemented | **Last reviewed:** 2026-07-19
 >
-> **Depends on:** [../overall.md](../overall.md), [../implemented/112-code-reviewer-bot-auto-approval.md](../implemented/112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
+> **Depends on:** [../overall.md](../overall.md), [112-code-reviewer-bot-auto-approval.md](112-code-reviewer-bot-auto-approval.md), [../03-frontend.md](../03-frontend.md)
 
 ## Product Specification
 
@@ -452,6 +452,7 @@ The preferred request remains the current full-config contract:
 ```json
 {
   "repository_id": "optional-uuid",
+  "source": "manual | example | reset",
   "config": {
     "enabled": true,
     "approval_mode": "comment_only",
@@ -465,6 +466,8 @@ The preferred request remains the current full-config contract:
   }
 }
 ```
+
+`source` is optional for compatibility and defaults to `manual`. It is a bounded, privacy-safe audit and analytics attribute; prompt content is never accepted in this field.
 
 During the compatibility window, either omitted prompt field from an older full-config client resolves independently as follows:
 
@@ -865,7 +868,7 @@ Exit criteria:
 1. Should administrators be able to make organization instructions non-overridable for repositories? This is out of scope unless customer need is demonstrated.
 2. Should repository-owned `.143/config.json` provide review instructions? Do not add a second source of truth in these phases; evaluate separately with an explicit precedence design.
 3. Should prompt examples be localized or organization-customizable? Built-in English examples are sufficient initially.
-4. Is full repository-policy reset already available through an internal store/service contract? If not, phase 3 should design the deletion semantics explicitly before adding UI.
+4. **Resolved:** full repository-policy reset transactionally deactivates the active repository override while preserving version history captured by existing review sessions.
 5. Should the orchestrator receive instructions verbatim or a smaller derived subset? Start verbatim for consistency and evaluate prompt-token cost and behavior with artifacts/evals.
 
 ## Documentation impact

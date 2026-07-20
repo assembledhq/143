@@ -17,12 +17,24 @@ import (
 )
 
 type Service struct {
-	appID      int64
-	privateKey *rsa.PrivateKey
-	httpClient *http.Client
-	apiBaseURL string
-	cache      map[int64]*cachedToken
-	mu         sync.RWMutex
+	appID        int64
+	privateKey   *rsa.PrivateKey
+	httpClient   *http.Client
+	apiBaseURL   string
+	cache        map[int64]*cachedToken
+	sandboxCache map[sandboxTokenCacheKey]*cachedToken
+	mu           sync.RWMutex
+}
+
+type sandboxTokenCacheKey struct {
+	InstallationID int64
+	RepositoryID   int64
+	Action         string
+}
+
+type installationTokenRequest struct {
+	RepositoryIDs []int64           `json:"repository_ids"`
+	Permissions   map[string]string `json:"permissions"`
 }
 
 type InstallationPermissions struct {
@@ -60,11 +72,12 @@ func NewService(appID int64, privateKeyPEM string) (*Service, error) {
 		return nil, fmt.Errorf("parse private key: %w", err)
 	}
 	return &Service{
-		appID:      appID,
-		privateKey: key,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		apiBaseURL: "https://api.github.com",
-		cache:      make(map[int64]*cachedToken),
+		appID:        appID,
+		privateKey:   key,
+		httpClient:   &http.Client{Timeout: 10 * time.Second},
+		apiBaseURL:   "https://api.github.com",
+		cache:        make(map[int64]*cachedToken),
+		sandboxCache: make(map[sandboxTokenCacheKey]*cachedToken),
 	}, nil
 }
 
@@ -93,6 +106,63 @@ func (s *Service) GetInstallationToken(ctx context.Context, installationID int64
 	return token, nil
 }
 
+// GetSandboxInstallationToken returns a repository-bound installation token
+// with only the permissions required for the requested sandbox operation.
+// In particular, neither profile grants pull_requests:write, so agents cannot
+// bypass the server-owned publication workflow by opening a PR directly.
+func (s *Service) GetSandboxInstallationToken(ctx context.Context, installationID, repositoryID int64, action string) (string, error) {
+	if installationID <= 0 {
+		return "", errors.New("sandbox installation ID must be positive")
+	}
+	if repositoryID <= 0 {
+		return "", errors.New("sandbox repository ID must be positive")
+	}
+
+	permissions := map[string]string{}
+	switch action {
+	case "push":
+		permissions["contents"] = "write"
+		// GitHub requires this separate permission when a pushed commit adds
+		// or modifies files under .github/workflows. The App already requests
+		// it during installation; include it in the narrowed token without
+		// granting any pull-request write authority.
+		permissions["workflows"] = "write"
+	case "api":
+		permissions["contents"] = "read"
+		permissions["pull_requests"] = "read"
+	default:
+		return "", fmt.Errorf("unsupported sandbox GitHub action %q", action)
+	}
+
+	key := sandboxTokenCacheKey{InstallationID: installationID, RepositoryID: repositoryID, Action: action}
+	s.mu.RLock()
+	cached, ok := s.sandboxCache[key]
+	s.mu.RUnlock()
+	if ok && time.Now().Add(5*time.Minute).Before(cached.ExpiresAt) {
+		return cached.Token, nil
+	}
+
+	jwtToken, err := s.generateJWT()
+	if err != nil {
+		return "", err
+	}
+	token, expiresAt, err := s.exchangeForScopedInstallationToken(ctx, jwtToken, installationID, installationTokenRequest{
+		RepositoryIDs: []int64{repositoryID},
+		Permissions:   permissions,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	s.mu.Lock()
+	if s.sandboxCache == nil {
+		s.sandboxCache = make(map[sandboxTokenCacheKey]*cachedToken)
+	}
+	s.sandboxCache[key] = &cachedToken{Token: token, ExpiresAt: expiresAt}
+	s.mu.Unlock()
+	return token, nil
+}
+
 func (s *Service) generateJWT() (string, error) {
 	now := time.Now()
 	claims := jwt.MapClaims{
@@ -105,14 +175,33 @@ func (s *Service) generateJWT() (string, error) {
 }
 
 func (s *Service) exchangeForInstallationToken(ctx context.Context, jwtToken string, installationID int64) (string, time.Time, error) {
+	return s.exchangeForInstallationTokenRequest(ctx, jwtToken, installationID, nil)
+}
+
+func (s *Service) exchangeForScopedInstallationToken(ctx context.Context, jwtToken string, installationID int64, tokenRequest installationTokenRequest) (string, time.Time, error) {
+	return s.exchangeForInstallationTokenRequest(ctx, jwtToken, installationID, &tokenRequest)
+}
+
+func (s *Service) exchangeForInstallationTokenRequest(ctx context.Context, jwtToken string, installationID int64, tokenRequest *installationTokenRequest) (string, time.Time, error) {
 	path := fmt.Sprintf("/app/installations/%d/access_tokens", installationID)
 	url := s.apiURL(path)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	var body io.Reader
+	if tokenRequest != nil {
+		encoded, err := json.Marshal(tokenRequest)
+		if err != nil {
+			return "", time.Time{}, fmt.Errorf("encode installation token request: %w", err)
+		}
+		body = strings.NewReader(string(encoded))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
 		return "", time.Time{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+jwtToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if tokenRequest != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {

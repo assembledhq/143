@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -213,6 +214,24 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	require.NotContains(t, logOutput.String(), config.ReviewInstructions, "policy logs should never contain review-instruction text")
 	require.NotContains(t, logOutput.String(), config.AutomatedApprovalPolicy, "policy logs should never contain approval-policy text")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_ResetRepositoryPolicyDeactivatesOverrideTransactionally(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "database mock should initialize")
+	t.Cleanup(mock.Close)
+	orgID, repositoryID, policyID := uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectBegin()
+	mock.ExpectQuery("UPDATE code_review_policies").WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(policyID))
+	mock.ExpectCommit()
+
+	resetPolicyID, deactivated, err := NewCodeReviewStore(mock).ResetRepositoryPolicy(context.Background(), orgID, repositoryID)
+
+	require.NoError(t, err, "reset should atomically deactivate the active repository override")
+	require.Equal(t, policyID, resetPolicyID, "reset should return the deactivated policy ID for auditing")
+	require.True(t, deactivated, "reset should report that an active override was removed")
+	require.NoError(t, mock.ExpectationsWereMet(), "reset should remain org and repository scoped")
 }
 
 func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {

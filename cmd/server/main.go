@@ -469,6 +469,7 @@ func main() {
 			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
 			SessionChangesets:   db.NewSessionChangesetStore(pool),
+			SessionPublications: db.NewSessionPublicationStore(pool),
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
 			Memberships:         db.NewOrganizationMembershipStore(pool),
@@ -1440,11 +1441,11 @@ func buildServices(
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 
 	// Identity resolver + per-session credential socket server. Wired
-	// together so an agent's `git push` / `gh pr comment` can reach a fresh
+	// together so an agent's `git push` / read-only `gh pr view` can reach a fresh
 	// GitHub token without the host ever planting a long-lived secret in the
-	// container's env. Both are optional: when SandboxAuthSocketDir is empty
-	// (e.g. local dev that hasn't provisioned the directory) sessions fall
-	// back to the legacy GITHUB_TOKEN env path.
+	// container's env. Local development may omit SandboxAuthSocketDir and use
+	// the legacy fallback; production worker/all configuration validation
+	// requires the socket path and startup preflight below must succeed.
 	userStore := db.NewUserStore(pool)
 	identityResolver := identity.NewResolver(ghSvc, logger)
 	if appUserAuthSvc != nil {
@@ -1567,6 +1568,7 @@ func buildServices(
 	workerFeedbackStore.SetJobStore(jobStore)
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
 	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
+	prService.SetPublicationStore(db.NewSessionPublicationStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,

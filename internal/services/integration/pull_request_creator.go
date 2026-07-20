@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"strings"
 	"time"
 )
 
@@ -31,13 +31,7 @@ func NewInternalPullRequestCreator(token, baseURL string) *InternalPullRequestCr
 func (c *InternalPullRequestCreator) Name() string { return "session" }
 
 func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, params CreatePullRequestParams) (*CreatePullRequestResult, error) {
-	sessionID := params.SessionID
-	if sessionID == "" {
-		sessionID = os.Getenv("143_SESSION_ID")
-	}
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
-	}
+	sessionID := strings.TrimSpace(params.SessionID)
 	params.SessionID = sessionID
 
 	body, err := json.Marshal(params)
@@ -45,7 +39,13 @@ func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, para
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	reqURL := c.baseURL + "/sessions/" + sessionID + "/pr"
+	// The current-session endpoint derives the authoritative session ID from
+	// the bearer token. This keeps PR creation working even when an agent
+	// runtime filters or drops optional environment variables.
+	reqURL := c.baseURL + "/session/pr"
+	if sessionID != "" {
+		reqURL = c.baseURL + "/sessions/" + sessionID + "/pr"
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(body)) // #nosec G107 -- URL from trusted server config
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

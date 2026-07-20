@@ -50,6 +50,7 @@ export const queryKeys = {
     policy: (repositoryId?: string | null) => ["code-reviews", "policy", repositoryId ?? null] as const,
     githubTrigger: (repositoryId?: string | null) => ["code-reviews", "github-trigger", repositoryId ?? null] as const,
     templates: ["code-reviews", "templates"] as const,
+    promptExamples: ["code-reviews", "prompt-examples"] as const,
     evidence: (sessionId: string) => ["code-reviews", "evidence", sessionId] as const,
   },
   sessionComposer: {

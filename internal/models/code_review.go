@@ -29,6 +29,23 @@ func (m CodeReviewApprovalMode) Validate() error {
 	}
 }
 
+type CodeReviewPolicyEditSource string
+
+const (
+	CodeReviewPolicyEditSourceManual  CodeReviewPolicyEditSource = "manual"
+	CodeReviewPolicyEditSourceExample CodeReviewPolicyEditSource = "example"
+	CodeReviewPolicyEditSourceReset   CodeReviewPolicyEditSource = "reset"
+)
+
+func (s CodeReviewPolicyEditSource) Validate() error {
+	switch s {
+	case CodeReviewPolicyEditSourceManual, CodeReviewPolicyEditSourceExample, CodeReviewPolicyEditSourceReset:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewPolicyEditSource: %q", s)
+	}
+}
+
 type CodeReviewSessionStatus string
 
 const (
@@ -609,64 +626,64 @@ func normalizeCodeReviewDescriptionPolicy(policy CodeReviewDescriptionPolicy) Co
 
 func (c CodeReviewPolicyConfig) Validate() error {
 	if err := c.ApprovalMode.Validate(); err != nil {
-		return err
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldApprovalMode, err.Error())
 	}
 	if err := c.ValidatePromptFields(); err != nil {
 		return err
 	}
 	if c.InlineCommentLimit < 1 || c.InlineCommentLimit > 10 {
-		return fmt.Errorf("inline_comment_limit must be between 1 and 10")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldInlineCommentLimit, "inline_comment_limit must be between 1 and 10")
 	}
 	if c.RiskPolicy.MaxFilesChanged < 1 {
-		return fmt.Errorf("max_files_changed must be positive")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_files_changed must be positive")
 	}
 	if c.RiskPolicy.MaxLinesChanged < 1 {
-		return fmt.Errorf("max_lines_changed must be positive")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_lines_changed must be positive")
 	}
 	for _, requirement := range c.DescriptionPolicy.Requirements {
 		if err := requirement.AppliesWhen.Validate(); err != nil {
-			return err
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldDescriptionPolicy, err.Error())
 		}
 	}
 	if len(c.AgentRoster.Reviewers) == 0 {
-		return fmt.Errorf("at least one reviewer agent is required")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "at least one reviewer agent is required")
 	}
 	for _, agentType := range c.AgentRoster.Reviewers {
 		if err := agentType.Validate(); err != nil {
-			return err
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
 		}
 		if !AgentSupportsNativeReview(agentType) {
-			return fmt.Errorf("agent %q does not support native review", agentType)
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("agent %q does not support native review", agentType))
 		}
 	}
 	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
-		return fmt.Errorf("reviewer_models must match reviewer count")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_models must match reviewer count")
 	}
 	for idx, model := range c.AgentRoster.ReviewerModels {
 		model = strings.TrimSpace(model)
 		if model == "" {
-			return fmt.Errorf("reviewer model %d must be non-empty", idx+1)
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reviewer model %d must be non-empty", idx+1))
 		}
 		if err := ValidateModelForAgentType(c.AgentRoster.Reviewers[idx], model); err != nil {
-			return fmt.Errorf("invalid reviewer model %d: %w", idx+1, err)
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid reviewer model %d: %v", idx+1, err))
 		}
 	}
 	if err := c.AgentRoster.Orchestrator.Validate(); err != nil {
-		return err
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
 	}
 	if !AgentSupportsNativeReview(c.AgentRoster.Orchestrator) {
-		return fmt.Errorf("orchestrator %q does not support native review", c.AgentRoster.Orchestrator)
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("orchestrator %q does not support native review", c.AgentRoster.Orchestrator))
 	}
 	if c.AgentRoster.OrchestratorModel != nil && strings.TrimSpace(*c.AgentRoster.OrchestratorModel) != "" {
 		if err := ValidateModelForAgentType(c.AgentRoster.Orchestrator, strings.TrimSpace(*c.AgentRoster.OrchestratorModel)); err != nil {
-			return fmt.Errorf("invalid orchestrator model: %w", err)
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid orchestrator model: %v", err))
 		}
 	}
 	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
-		return fmt.Errorf("require_reviewer_quorum must be between 1 and reviewer count")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "require_reviewer_quorum must be between 1 and reviewer count")
 	}
 	if c.AgentRoster.TimeoutSeconds < 60 {
-		return fmt.Errorf("timeout_seconds must be at least 60")
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "timeout_seconds must be at least 60")
 	}
 	return nil
 }
@@ -943,6 +960,57 @@ type CodeReviewTemplateOption struct {
 	Title       string                 `json:"title"`
 	Description string                 `json:"description"`
 	Config      CodeReviewPolicyConfig `json:"config"`
+}
+
+type CodeReviewPromptExample string
+
+const (
+	CodeReviewPromptExampleBalanced        CodeReviewPromptExample = "balanced"
+	CodeReviewPromptExampleSecurityFocused CodeReviewPromptExample = "security_focused"
+	CodeReviewPromptExampleMinimal         CodeReviewPromptExample = "minimal"
+)
+
+type CodeReviewAutomatedApprovalExample string
+
+const (
+	CodeReviewAutomatedApprovalExampleConservative  CodeReviewAutomatedApprovalExample = "conservative_low_risk"
+	CodeReviewAutomatedApprovalExampleDocumentation CodeReviewAutomatedApprovalExample = "documentation_only"
+	CodeReviewAutomatedApprovalExampleSmallRoutine  CodeReviewAutomatedApprovalExample = "small_routine_changes"
+)
+
+type CodeReviewPromptExampleOption struct {
+	Key          CodeReviewPromptExample `json:"key"`
+	Title        string                  `json:"title"`
+	Description  string                  `json:"description"`
+	Instructions string                  `json:"instructions"`
+}
+
+type CodeReviewAutomatedApprovalExampleOption struct {
+	Key         CodeReviewAutomatedApprovalExample `json:"key"`
+	Title       string                             `json:"title"`
+	Description string                             `json:"description"`
+	Policy      string                             `json:"policy"`
+}
+
+type CodeReviewPromptExamplesResponse struct {
+	ReviewInstructions        []CodeReviewPromptExampleOption            `json:"review_instructions"`
+	AutomatedApprovalPolicies []CodeReviewAutomatedApprovalExampleOption `json:"automated_approval_policies"`
+}
+
+func CodeReviewPromptExamples() []CodeReviewPromptExampleOption {
+	return []CodeReviewPromptExampleOption{
+		{Key: CodeReviewPromptExampleBalanced, Title: "Balanced review", Description: "Correctness, security, tests, and maintainability.", Instructions: "Prioritize correctness, security, appropriate test coverage, and maintainability. Report actionable findings with concise reasoning and avoid low-value style comments."},
+		{Key: CodeReviewPromptExampleSecurityFocused, Title: "Security-focused", Description: "Trust boundaries, authorization, data exposure, secrets, and abuse cases.", Instructions: "Focus on trust boundaries, authentication and authorization, tenant isolation, data exposure, secret handling, input validation, and realistic abuse cases. Explain exploitability and impact for each security finding."},
+		{Key: CodeReviewPromptExampleMinimal, Title: "Minimal", Description: "Concise correctness-only review with low comment noise.", Instructions: "Report only concrete correctness defects that could change behavior or cause failures. Keep comments concise and omit style, naming, and speculative suggestions."},
+	}
+}
+
+func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleOption {
+	return []CodeReviewAutomatedApprovalExampleOption{
+		{Key: CodeReviewAutomatedApprovalExampleConservative, Title: "Conservative low-risk approval", Description: "Approve routine changes and escalate uncertainty.", Policy: DefaultCodeReviewAutomatedApprovalPolicy},
+		{Key: CodeReviewAutomatedApprovalExampleDocumentation, Title: "Documentation-only approval", Description: "Approve clear documentation changes while escalating executable or generated changes.", Policy: "Automatically approve clear, accurate documentation-only changes when they match the implementation and contain no executable, configuration, generated, or security-sensitive changes.\n\nRequire human review whenever the change affects runtime behavior, configuration, generated files, permissions, secrets, or the intended documentation behavior is ambiguous."},
+		{Key: CodeReviewAutomatedApprovalExampleSmallRoutine, Title: "Small routine changes", Description: "Approve narrow changes that follow established patterns with proportionate tests.", Policy: "Automatically approve small, narrowly scoped changes that follow established repository patterns, have no blocking findings, and include test evidence proportionate to their risk.\n\nRequire human review for architectural changes, sensitive areas, unclear intent, reviewer disagreement, weak evidence, or any change whose impact cannot be evaluated confidently."},
+	}
 }
 
 func CodeReviewPolicyTemplates() []CodeReviewTemplateOption {

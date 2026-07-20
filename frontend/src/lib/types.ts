@@ -130,6 +130,16 @@ export interface UserSettingsUpdateRequest {
 }
 
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
+export type CodeReviewPolicyEditSource = "manual" | "example" | "reset";
+export interface CodeReviewPolicyAnalyticsEvent {
+  event: "code_review_policy_viewed" | "code_review_prompt_edited" | "code_review_prompt_example_previewed" | "code_review_prompt_example_applied" | "code_review_advanced_opened" | "code_review_policy_enabled" | "code_review_approval_mode_changed" | "code_review_github_setup_completed" | "code_review_github_setup_failed";
+  scope?: "organization" | "repository";
+  source?: CodeReviewPolicyEditSource;
+  example_key?: string;
+  character_bucket?: string;
+  subsection?: string;
+  configured?: boolean;
+}
 export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
 export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
 export type CodeReviewListOutcome = "automatically_approved" | "completed_not_approved";
@@ -261,6 +271,25 @@ export interface CodeReviewTemplateOption {
   title: string;
   description: string;
   config: CodeReviewPolicyConfig;
+}
+
+export interface CodeReviewPromptExampleOption {
+  key: "balanced" | "security_focused" | "minimal";
+  title: string;
+  description: string;
+  instructions: string;
+}
+
+export interface CodeReviewAutomatedApprovalExampleOption {
+  key: "conservative_low_risk" | "documentation_only" | "small_routine_changes";
+  title: string;
+  description: string;
+  policy: string;
+}
+
+export interface CodeReviewPromptExamplesResponse {
+  review_instructions: CodeReviewPromptExampleOption[];
+  automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[];
 }
 
 export interface CodeReviewListItem {
@@ -1663,7 +1692,52 @@ export interface ForkResult {
 export interface SessionDetail extends Session {
   threads: SessionThread[];
   changesets: ChangesetSummary[];
+  publications?: SessionPublication[];
   changeset_stack_state?: ChangesetStackState;
+}
+
+export type SessionPublicationState =
+  | "requested"
+  | "review_pending"
+  | "ready_to_publish"
+  | "branch_published"
+  | "pr_resolved"
+  | "recorded"
+  | "completed"
+  | "completed_noop"
+  | "retryable_failed"
+  | "terminal_failed";
+
+export type SessionPublicationReviewGateState =
+  | "not_required"
+  | "pending"
+  | "passed"
+  | "needs_human"
+  | "failed";
+
+export interface SessionPublication {
+  id: string;
+  session_id: string;
+  changeset_id: string;
+  repository_id: string;
+  state: SessionPublicationState;
+  source: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
+  review_gate_state: SessionPublicationReviewGateState;
+  base_branch: string;
+  head_branch: string;
+  desired_head_sha?: string;
+  published_head_sha?: string;
+  github_pr_number?: number;
+  github_pr_url?: string;
+  attempt_count: number;
+  last_error_code?: string;
+  last_error_message?: string;
+  requested_at: string;
+  last_attempt_at?: string;
+  branch_published_at?: string;
+  pr_resolved_at?: string;
+  completed_at?: string;
+  updated_at: string;
 }
 
 export type ChangesetStackState = "one-pr" | "draft-stack" | "published" | "coherent" | "needs-restack" | "restacking" | "blocked" | "external-update-detected" | "partially-merged" | "merged";
