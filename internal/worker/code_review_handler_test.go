@@ -509,7 +509,11 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	require.Contains(t, prompt, "Pull request: #53873", "reviewer prompt should identify the PR number")
 	require.Contains(t, prompt, "Base SHA: "+baseSHA, "reviewer prompt should pin the base SHA")
 	require.Contains(t, prompt, "Head SHA: "+job.HeadSHA, "reviewer prompt should pin the head SHA")
-	require.Contains(t, prompt, "git diff "+baseSHA+"..."+job.HeadSHA, "reviewer prompt should spell out the diff range")
+	require.Contains(t, prompt, "git diff $(git merge-base "+baseSHA+" "+job.HeadSHA+") "+job.HeadSHA, "reviewer prompt should spell out the merge-base diff command")
+	require.Contains(t, prompt, "git fetch origin "+job.HeadSHA, "reviewer prompt should tell the reviewer how to fetch a missing head SHA")
+	require.Contains(t, prompt, "git fetch origin pull/53873/head", "reviewer prompt should offer the PR ref as a fetch fallback")
+	require.Contains(t, prompt, "git checkout --detach "+job.HeadSHA, "reviewer prompt should permit a detached checkout of the head SHA")
+	require.Contains(t, prompt, "substitute `origin/HEAD`", "reviewer prompt should offer a fallback when the base SHA is unreachable")
 	require.Contains(t, prompt, "report the mismatch", "reviewer prompt should require reporting a workspace/head mismatch")
 	require.Contains(t, prompt, "- gocode/timeutils/interval.go", "reviewer prompt should list changed files")
 

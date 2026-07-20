@@ -18,7 +18,11 @@ Pull request: #{{.PullNumber}}{{if .PullRequestURL}} ({{.PullRequestURL}}){{end}
 Base SHA: {{.BaseSHA}}
 {{- end}}
 Head SHA: {{.HeadSHA}}
-Review exactly this pull request's changes{{if .BaseSHA}} (`git diff {{.BaseSHA}}...{{.HeadSHA}}`){{end}}, not whatever happens to be checked out. Confirm the workspace HEAD matches the head SHA before reviewing; if it does not, report the mismatch in your output instead of silently reviewing a different commit.
+Review exactly this pull request's changes, not whatever happens to be checked out. Workspace setup — fetching commits and detached checkouts are permitted and do not count as workspace modifications:
+1. Verify both SHAs exist locally (`git cat-file -e <sha>^{commit}`). Fetch any that are missing: `git fetch origin {{.HeadSHA}}`{{if .PullNumber}} (or `git fetch origin pull/{{.PullNumber}}/head`){{end}}{{if .BaseSHA}}; `git fetch origin {{.BaseSHA}}` for the base{{end}}.
+2. If the workspace HEAD does not match the head SHA, run `git checkout --detach {{.HeadSHA}}`. Only if the head SHA cannot be fetched at all, stop and report the mismatch in your output instead of reviewing a different commit.
+3. Diff against the merge base: `git diff $(git merge-base {{if .BaseSHA}}{{.BaseSHA}}{{else}}origin/HEAD{{end}} {{.HeadSHA}}) {{.HeadSHA}}`.{{if .BaseSHA}} If the base SHA is unavailable even after fetching (deleted or force-pushed base branch), substitute `origin/HEAD` for it.{{end}} If `git merge-base` fails, the clone may be shallow — run `git fetch --deepen=200 origin` and retry.
+4. Sanity-check the diff: it should touch the changed files listed below (when provided) and nothing unrelated. An implausibly large diff, or one missing those files, means the base is wrong — recompute the merge base before reviewing.
 {{- if .ChangedFiles}}
 Changed files:
 {{- range .ChangedFiles}}
