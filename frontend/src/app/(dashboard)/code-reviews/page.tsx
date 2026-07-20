@@ -531,7 +531,20 @@ export default function CodeReviewsPage() {
         setInvalidPolicyField(String((error.details as { field: unknown }).field));
       }
     },
-    onSuccess: (saved) => { const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey; if (persistedPromptsRef.current.scope === savedScope) persistedPromptsRef.current = { scope: savedScope, review_instructions: saved.review_instructions, automated_approval_policy: saved.automated_approval_policy }; setPolicySaveFailed(false); setInvalidPolicyField(null); },
+    onSuccess: (saved) => {
+      const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey;
+      if (persistedPromptsRef.current.scope === savedScope) {
+        persistedPromptsRef.current = {
+          scope: savedScope,
+          review_instructions: saved.review_instructions,
+          automated_approval_policy: saved.automated_approval_policy,
+        };
+      }
+      if (savedScope === currentScopeKey) {
+        setPolicySaveFailed(false);
+        setInvalidPolicyField(null);
+      }
+    },
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
     queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy(repositoryId ?? null))?.data?.config ?? config;
@@ -628,6 +641,7 @@ export default function CodeReviewsPage() {
     setPolicyScope(value);
     setInvalidPolicyField(null);
     setPolicySaveFailed(false);
+    resetPolicy.reset();
   };
   const requestScopeChange = (value: string) => {
     if (value === policyScope) return;

@@ -221,14 +221,15 @@ func TestCodeReviewStore_ResetRepositoryPolicyDeactivatesOverrideTransactionally
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "database mock should initialize")
 	t.Cleanup(mock.Close)
-	orgID, repositoryID := uuid.New(), uuid.New()
+	orgID, repositoryID, policyID := uuid.New(), uuid.New(), uuid.New()
 	mock.ExpectBegin()
-	mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery("UPDATE code_review_policies").WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repositoryID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(policyID))
 	mock.ExpectCommit()
 
-	deactivated, err := NewCodeReviewStore(mock).ResetRepositoryPolicy(context.Background(), orgID, repositoryID)
+	resetPolicyID, deactivated, err := NewCodeReviewStore(mock).ResetRepositoryPolicy(context.Background(), orgID, repositoryID)
 
 	require.NoError(t, err, "reset should atomically deactivate the active repository override")
+	require.Equal(t, policyID, resetPolicyID, "reset should return the deactivated policy ID for auditing")
 	require.True(t, deactivated, "reset should report that an active override was removed")
 	require.NoError(t, mock.ExpectationsWereMet(), "reset should remain org and repository scoped")
 }
