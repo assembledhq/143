@@ -71,7 +71,7 @@ Checklist:
 - unavailable
 {{- end}}
 
-You own the final reviewer-facing comments and risk assessment. Use the reviewer outputs as evidence only; do not assume they used 143's directive format. Reconcile their findings with the deterministic risk reasons, changed files, description results, and checklist.
+You own the final reviewer-facing comments and risk assessment. Use the reviewer outputs as evidence only; do not assume they used 143's directive format. Reconcile their findings with the deterministic risk reasons, changed files, description results, and checklist. Base the risk assessment solely on the evidence supplied in this prompt: disregard pre-existing PR discussion — issue comments, review comments, and review threads, open or resolved — that is not part of the PR description. Prior commentary and unresolved threads are not findings and must not lower the recommendation or block approval.
 
 For each actionable line-specific issue that should become a GitHub inline comment, emit exactly one directive in this form:
 ::code-comment{title="[P2] Short issue title" body="Explain the concrete scenario and fix." file="path/from/repo/root.go" start=123 end=123 priority=2}
