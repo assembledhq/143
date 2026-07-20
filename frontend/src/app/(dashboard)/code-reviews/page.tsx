@@ -37,6 +37,16 @@ import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -330,6 +340,8 @@ export default function CodeReviewsPage() {
   const [selectedEvidenceSessionId, setSelectedEvidenceSessionId] = useState<string | null>(null);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
+  const [promptDrafts, setPromptDrafts] = useState<Record<string, boolean>>({});
+  const [pendingRepositoryFilter, setPendingRepositoryFilter] = useState<string | null>(null);
   const setOutcomeFilter = useCallback(
     (value: string) => {
       void setOutcomeParam(value as OutcomeFilter);
@@ -337,6 +349,34 @@ export default function CodeReviewsPage() {
     [setOutcomeParam],
   );
   const repositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
+  const hasUnsavedPromptDraft = Object.values(promptDrafts).some(Boolean);
+  const changeRepositoryFilter = useCallback((value: string) => {
+    setPromptDrafts({});
+    setRepositoryFilter(value);
+  }, []);
+  const requestRepositoryFilterChange = useCallback(
+    (value: string) => {
+      if (value === repositoryFilter) return;
+      if (hasUnsavedPromptDraft) {
+        setPendingRepositoryFilter(value);
+        return;
+      }
+      changeRepositoryFilter(value);
+    },
+    [changeRepositoryFilter, hasUnsavedPromptDraft, repositoryFilter],
+  );
+  const handlePromptDraftChange = useCallback((prompt: string, dirty: boolean) => {
+    setPromptDrafts((current) => {
+      if (!dirty) {
+        if (!(prompt in current)) return current;
+        const next = { ...current };
+        delete next[prompt];
+        return next;
+      }
+      if (current[prompt]) return current;
+      return { ...current, [prompt]: true };
+    });
+  }, []);
   const reviewFilters = useMemo(
     () => ({
       repository_id: repositoryId,
@@ -594,7 +634,7 @@ export default function CodeReviewsPage() {
               id="code-review-filters"
               className={`${mobileFiltersOpen ? "grid" : "hidden"} gap-3 rounded-xl border border-border bg-card p-3 shadow-sm md:grid md:grid-cols-[minmax(12rem,18rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_minmax(10rem,12rem)_1fr] md:rounded-none md:border-0 md:bg-transparent md:p-0 md:shadow-none`}
             >
-              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={setRepositoryFilter}>
+              <FilterSelect label="Repository" value={repositoryFilter} onValueChange={requestRepositoryFilterChange}>
                 <SelectItem value={ALL_REPOSITORIES}>All repositories</SelectItem>
                 {repositories.map((repo) => (
                   <SelectItem key={repo.id} value={repo.id}>
@@ -763,7 +803,7 @@ export default function CodeReviewsPage() {
                 </div>
                 <PolicyScopeBar
                   value={repositoryFilter}
-                  onValueChange={setRepositoryFilter}
+                  onValueChange={requestRepositoryFilterChange}
                   repositories={repositories}
                   repositoryName={selectedRepository?.full_name}
                   repositorySelected={Boolean(repositoryId)}
@@ -785,11 +825,13 @@ export default function CodeReviewsPage() {
                     />
 
                 <PolicyPromptComposers
+                  key={repositoryFilter}
                   config={config}
                   inheritedConfig={policyQuery.data?.data.inherited_policy}
                   autosave={autosave}
                   commitPolicy={commitPolicy}
                   repositorySelected={Boolean(repositoryId)}
+                  onDraftStateChange={handlePromptDraftChange}
                 />
 
                 <GitHubTriggerPanel
@@ -850,6 +892,34 @@ export default function CodeReviewsPage() {
             />
           </TabsContent>
         </Tabs>
+        <AlertDialog
+          open={pendingRepositoryFilter !== null}
+          onOpenChange={(open) => {
+            if (!open) setPendingRepositoryFilter(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle>
+              <AlertDialogDescription>
+                Changing policy scope will discard prompt text that has not been saved.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Keep editing</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => {
+                  if (pendingRepositoryFilter === null) return;
+                  changeRepositoryFilter(pendingRepositoryFilter);
+                  setPendingRepositoryFilter(null);
+                }}
+              >
+                Discard and change scope
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </main>
   );
@@ -861,12 +931,14 @@ function PolicyPromptComposers({
   autosave,
   commitPolicy,
   repositorySelected,
+  onDraftStateChange,
 }: {
   config: CodeReviewPolicyConfig | null;
   inheritedConfig?: CodeReviewPolicyConfig;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void) => void;
   repositorySelected: boolean;
+  onDraftStateChange: (prompt: string, dirty: boolean) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -879,6 +951,7 @@ function PolicyPromptComposers({
         resetValue={inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY}
         onReset={() => commitPolicy((next) => { next.automated_approval_policy = inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY; })}
         resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Reset to default"}
+        onDraftStateChange={onDraftStateChange}
       />
       <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
         <div className="font-medium text-foreground">Hard safeguards</div>
@@ -892,6 +965,7 @@ function PolicyPromptComposers({
         resetValue={inheritedConfig?.review_instructions ?? ""}
         onReset={() => commitPolicy((next) => { next.review_instructions = inheritedConfig?.review_instructions ?? ""; })}
         resetLabel={repositorySelected && inheritedConfig ? "Use organization value" : "Clear instructions"}
+        onDraftStateChange={onDraftStateChange}
       />
     </div>
   );
@@ -900,6 +974,7 @@ function PolicyPromptComposers({
 type CodeReviewPromptComposerProps = {
   value: string; disabled: boolean; hidden?: boolean; autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string;
+  onDraftStateChange: (prompt: string, dirty: boolean) => void;
 };
 
 function CodeReviewAutomatedApprovalPolicyComposer(props: CodeReviewPromptComposerProps) {
@@ -910,9 +985,10 @@ function CodeReviewInstructionsComposer(props: CodeReviewPromptComposerProps) {
   return <CodeReviewPromptComposerBase {...props} title="Additional review instructions (optional)" description="Add team-specific priorities or comment style. Empty means every reviewer uses its native /review behavior without extra guidance." tooltip="Optional guidance appended after each reviewer's native /review command and also supplied to the orchestrator. Leave empty for built-in review behavior; it does not grant approval authority." secondary />;
 }
 
-function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary }: {
+function CodeReviewPromptComposerBase({ title, description, tooltip, value, disabled, hidden, required, autosave, onCommit, onReset, resetValue, resetLabel, secondary, onDraftStateChange }: {
   title: string; description: string; tooltip: string; value: string; disabled: boolean; hidden?: boolean; required?: boolean;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>; onCommit: (value: string) => void; onReset: () => void; resetValue: string; resetLabel: string; secondary?: boolean;
+  onDraftStateChange: (prompt: string, dirty: boolean) => void;
 }) {
   // Gate and count on the trimmed value: that is exactly what onCommit persists
   // (`value.trim()`) and what the backend validates, so basing the length check
@@ -922,6 +998,10 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   const field = useDebouncedTextField({ serverValue: value, onCommit: (next) => { if (!invalidValue(next)) onCommit(next); }, preserveLocalOnServerChange: autosave.status === "error" });
   const count = [...field.value.trim()].length;
   const invalid = count > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !field.value.trim());
+  const dirty = field.value !== value;
+  useEffect(() => {
+    onDraftStateChange(title, dirty);
+  }, [dirty, onDraftStateChange, title]);
   return (
     <section className={`${hidden ? "hidden" : ""} space-y-2 rounded-md border border-border p-4 ${secondary ? "bg-muted/10" : "bg-card shadow-sm"}`} aria-label={title}>
       <div className="flex flex-wrap items-center justify-between gap-2">

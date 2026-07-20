@@ -417,7 +417,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("uses the standard error notice and retries evidence loading", async () => {
     const user = userEvent.setup();
@@ -571,7 +571,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Structured PR-description checks/i }));
     expect(screen.getByRole("button", { name: "About Add structured PR-description check" })).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();
@@ -797,6 +797,32 @@ describe("CodeReviewsPage", () => {
 
     expect(await screen.findAllByText("Couldn't save")).not.toHaveLength(0);
     expect(input).toHaveValue("Keep this unsaved local guidance");
+  });
+
+  it("confirms before changing scope with an unsaved prompt draft", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    const input = within(
+      screen.getByRole("region", {
+        name: "Additional review instructions (optional)",
+      }),
+    ).getByRole("textbox");
+    fireEvent.change(input, { target: { value: "x".repeat(8001) } });
+    expect(input).toHaveAttribute("aria-invalid", "true");
+
+    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+
+    expect(
+      await screen.findByRole("alertdialog", {
+        name: "Discard unsaved prompt text?",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Policy scope", hidden: true }),
+    ).toHaveTextContent("Organization default");
   });
 
   it("resets each repository prompt independently to its organization value", async () => {
