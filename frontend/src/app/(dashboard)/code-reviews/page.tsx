@@ -1227,7 +1227,7 @@ function CodeReviewPromptExampleDialog({ selection, currentConfig, currentDraftV
     <DialogHeader><DialogTitle>{selection.example.title}</DialogTitle><DialogDescription>{selection.example.description} Only {selection.field === "review_instructions" ? "additional review instructions" : "the automated approval policy"} will be replaced.</DialogDescription></DialogHeader>
     <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-3 text-sm">{value}</div>
     {selection.field === "automated_approval_policy" && currentConfig?.approval_mode !== "approve_acceptable" ? <p className="text-sm text-muted-foreground">This example does not enable automatic approval. Choose “Leave comments and approve when acceptable” separately.</p> : null}
-    {dirty ? <p className="text-sm text-warning">Your currently saved value differs. Applying this example replaces only this prompt field and creates a new policy version.</p> : null}
+    {dirty ? <p className="text-sm text-amber-700 dark:text-amber-300">Your currently saved value differs. Applying this example replaces only this prompt field and creates a new policy version.</p> : null}
     <DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="button" onClick={onApply}>Use example</Button></DialogFooter>
   </DialogContent></Dialog>;
 }
