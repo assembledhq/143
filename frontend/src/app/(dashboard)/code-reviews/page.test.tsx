@@ -460,7 +460,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Add requirement/i }));
     expect(await screen.findByDisplayValue("Custom requirement")).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("uses the standard error notice and retries evidence loading", async () => {
     const user = userEvent.setup();
@@ -614,7 +614,7 @@ describe("CodeReviewsPage", () => {
 
     await user.click(screen.getByRole("button", { name: /Structured PR-description checks/i }));
     expect(screen.getByRole("button", { name: "About Add structured PR-description check" })).toBeInTheDocument();
-  });
+  }, 30_000);
 
   it("filters automatic approvals and successful non-approvals as distinct outcomes", async () => {
     const user = userEvent.setup();

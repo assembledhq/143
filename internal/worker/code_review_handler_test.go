@@ -491,6 +491,48 @@ func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
 
+func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
+	t.Parallel()
+
+	baseSHA := "1111111111111111111111111111111111111111"
+	pr := models.PullRequest{
+		GitHubRepo:     "assembledhq/example",
+		GitHubPRNumber: 53873,
+		GitHubPRURL:    "https://github.com/assembledhq/example/pull/53873",
+		BaseSHA:        &baseSHA,
+	}
+	job := runCodeReviewPayload{HeadSHA: "db848bf3c98e34c3c26d842b4e9b2ff1913dc34f"}
+	files := []codereview.PullRequestFile{{Filename: "gocode/timeutils/interval.go"}, {Filename: "gocode/timeutils/interval_test.go"}}
+
+	prompt := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, "", files)
+
+	require.True(t, strings.HasPrefix(prompt, "/review https://github.com/assembledhq/example/pull/53873"), "native /review invocation should carry the PR URL as its argument")
+	require.Contains(t, prompt, "<review_target>", "reviewer prompt should include the review target block")
+	require.Contains(t, prompt, "Repository: assembledhq/example", "reviewer prompt should identify the repository")
+	require.Contains(t, prompt, "Pull request: #53873", "reviewer prompt should identify the PR number")
+	require.Contains(t, prompt, "Base SHA: "+baseSHA, "reviewer prompt should pin the base SHA")
+	require.Contains(t, prompt, "Head SHA: "+job.HeadSHA, "reviewer prompt should pin the head SHA")
+	require.Contains(t, prompt, "git diff $(git merge-base "+baseSHA+" "+job.HeadSHA+") "+job.HeadSHA, "reviewer prompt should spell out the merge-base diff command")
+	require.Contains(t, prompt, "git fetch origin "+job.HeadSHA, "reviewer prompt should tell the reviewer how to fetch a missing head SHA")
+	require.Contains(t, prompt, "git fetch origin pull/53873/head", "reviewer prompt should offer the PR ref as a fetch fallback")
+	require.Contains(t, prompt, "git checkout --detach "+job.HeadSHA, "reviewer prompt should permit a detached checkout of the head SHA")
+	require.Contains(t, prompt, "substitute `origin/HEAD`", "reviewer prompt should offer a fallback when the base SHA is unreachable")
+	require.Contains(t, prompt, "report the mismatch", "reviewer prompt should require reporting a workspace/head mismatch")
+	require.Contains(t, prompt, "- gocode/timeutils/interval.go", "reviewer prompt should list changed files")
+
+	explicitBase := "2222222222222222222222222222222222222222"
+	withExplicitBase := codeReviewReviewerPrompt(job, pr, models.DefaultCodeReviewPolicyConfig(), 3, explicitBase, files)
+	require.Contains(t, withExplicitBase, "Base SHA: "+explicitBase, "captured metadata base SHA should win over the PR record")
+
+	commands := codeReviewNativeReviewCommands(models.AgentTypeClaudeCode, prompt)
+	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
+	require.True(t, strings.HasPrefix(commands[0].Arguments, pr.GitHubPRURL), "native /review arguments should start with the PR URL")
+
+	withoutTarget := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
+	require.NotContains(t, withoutTarget, "<review_target>", "prompt without a head SHA should omit the target block")
+	require.True(t, strings.HasPrefix(withoutTarget, "/review"), "prompt without a target should still begin with /review")
+}
+
 func TestCodeReviewEveryReviewerAgentPreservesNativeReviewPrefix(t *testing.T) {
 	t.Parallel()
 	agents := []models.AgentType{models.AgentTypeCodex, models.AgentTypeClaudeCode, models.AgentTypeAmp, models.AgentTypePi, models.AgentTypeOpenCode}
