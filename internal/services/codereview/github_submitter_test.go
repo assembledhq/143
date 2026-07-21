@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,6 +69,36 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	comments, ok := gotPayload["comments"].([]any)
 	require.True(t, ok, "comments should be an array")
 	require.Len(t, comments, 1, "one inline comment should be submitted")
+}
+
+func TestGitHubSubmitter_SubmitReviewPreservesRateLimitResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "29")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, err := w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+		require.NoError(t, err, "test response should write the rate-limit body")
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	_, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID: 99,
+		Repository:     "acme/repo",
+		PullNumber:     42,
+		HeadSHA:        "abc123",
+		OutputKey:      "review-output",
+		Decision:       SubmitReviewDecisionCommentOnly,
+		Body:           "Review summary",
+	})
+
+	var apiErr *ghservice.GitHubAPIError
+	require.ErrorAs(t, err, &apiErr, "SubmitReview should expose typed GitHub API errors through wrapped context")
+	require.Equal(t, http.StatusTooManyRequests, apiErr.StatusCode, "SubmitReview should preserve GitHub's response status")
+	require.Equal(t, "29", apiErr.Header.Get("Retry-After"), "SubmitReview should preserve GitHub's retry delay")
+	require.Equal(t, "0", apiErr.Header.Get("X-RateLimit-Remaining"), "SubmitReview should preserve GitHub's remaining budget")
 }
 
 func TestGitHubSubmitter_SubmitReviewReturnsExistingMarkedReview(t *testing.T) {

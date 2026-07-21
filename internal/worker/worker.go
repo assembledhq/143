@@ -40,7 +40,11 @@ type RetryableError struct {
 	// successful retry is expected immediately after the current attempt repaired
 	// durable state, not for capacity/backlog gates.
 	BypassMaxRetryDuration bool
-	RetryAfter             *time.Duration
+	// MaxRetryDuration overrides the default retry window for a bounded external
+	// wait. Unlike BypassMaxRetryDuration, the job is still guaranteed to
+	// terminate if the dependency does not recover.
+	MaxRetryDuration *time.Duration
+	RetryAfter       *time.Duration
 	// TargetNodeID updates jobs.target_node_id when requeueing this retry.
 	// Use this when an unpinned attempt discovers the session's live sandbox
 	// already belongs to a specific worker node.
@@ -275,12 +279,12 @@ func (w *Worker) poll(ctx context.Context) {
 			w.runDeadLetterHooks(handlerCtx, err)
 			return
 		}
-		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
+		if timedOut, retryWindow := retryableDurationExceeded(job.CreatedAt, retryable, time.Now()); timedOut {
 			w.logger.Error().Err(err).
 				Str("job_id", job.ID.String()).
 				Dur("age", time.Since(job.CreatedAt)).
 				Msg("retryable job exceeded max duration, dead-lettering")
-			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
+			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
 			w.deadLetterJob(ctx, job.ID, *job.LockToken, timeoutErr.Error())
 			w.runDeadLetterHooks(handlerCtx, timeoutErr)
 			return
@@ -297,6 +301,30 @@ func (w *Worker) poll(ctx context.Context) {
 		return
 	}
 	w.retryJob(ctx, job.ID, *job.LockToken, err.Error(), job.Attempts, false)
+}
+
+func retryableDurationExceeded(createdAt time.Time, retryable *RetryableError, now time.Time) (bool, time.Duration) {
+	retryWindow := maxRetryableDuration
+	if retryable != nil && retryable.MaxRetryDuration != nil {
+		retryWindow = *retryable.MaxRetryDuration
+	}
+	if retryable == nil || retryable.BypassMaxRetryDuration {
+		return false, retryWindow
+	}
+	age := now.Sub(createdAt)
+	if age > retryWindow {
+		return true, retryWindow
+	}
+	if retryable.RetryAfter != nil {
+		delay := *retryable.RetryAfter
+		if delay < 0 {
+			delay = 0
+		}
+		if age+delay > retryWindow {
+			return true, retryWindow
+		}
+	}
+	return false, retryWindow
 }
 
 func (w *Worker) RequestDrain() {

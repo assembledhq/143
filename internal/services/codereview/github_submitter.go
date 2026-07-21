@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
 type InstallationTokenProvider interface {
@@ -240,7 +243,7 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return SubmitReviewResult{}, fmt.Errorf("submit GitHub review: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -361,7 +364,7 @@ func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("submit formal GitHub approval returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return fmt.Errorf("submit formal GitHub approval: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	return nil
 }
@@ -386,7 +389,7 @@ func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var decoded struct {
 		ID      int64  `json:"id"`
@@ -423,7 +426,7 @@ func (s *GitHubSubmitter) createReviewComment(ctx context.Context, token, owner,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var decoded githubReviewCommentItem
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
@@ -473,7 +476,7 @@ func (s *GitHubSubmitter) listReviewComments(ctx context.Context, token, owner, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("list GitHub review comments returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return nil, fmt.Errorf("list GitHub review comments: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var decoded []struct {
 		ID   int64  `json:"id"`
@@ -570,7 +573,7 @@ func (s *GitHubSubmitter) updateReviewComment(ctx context.Context, token, owner,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("update GitHub review comment returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return fmt.Errorf("update GitHub review comment: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	return nil
 }
@@ -589,7 +592,7 @@ func (s *GitHubSubmitter) getGitHubJSONPage(ctx context.Context, token, path str
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("GitHub request returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return "", fmt.Errorf("GitHub request failed: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		return "", fmt.Errorf("decode GitHub response: %w", err)
@@ -619,7 +622,7 @@ func (s *GitHubSubmitter) doGitHubGraphQL(ctx context.Context, token, query stri
 		return nil, fmt.Errorf("read GitHub GraphQL response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("GitHub GraphQL returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("GitHub GraphQL request failed: %w", newGitHubAPIResponseError(httpReq, resp, body))
 	}
 	return body, nil
 }
@@ -795,7 +798,7 @@ func (s *GitHubSubmitter) RemoveRequestedReviewers(ctx context.Context, req Requ
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("remove GitHub requested reviewers returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return fmt.Errorf("remove GitHub requested reviewers: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	return nil
 }
@@ -936,7 +939,7 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("list GitHub pull request files returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+		return nil, "", fmt.Errorf("list GitHub pull request files: %w", readGitHubAPIResponseError(httpReq, resp))
 	}
 	var files []PullRequestFile
 	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
@@ -945,12 +948,31 @@ func (s *GitHubSubmitter) getPullRequestFilesPage(ctx context.Context, token, pa
 	return files, parseNextGitHubPath(resp.Header.Get("Link")), nil
 }
 
-func readGitHubErrorBody(resp *http.Response) string {
-	errorBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return fmt.Sprintf("failed to read error body: %v", err)
+func readGitHubAPIResponseError(req *http.Request, resp *http.Response) error {
+	errorBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	apiErr := newGitHubAPIResponseError(req, resp, errorBody)
+	if readErr != nil {
+		return errors.Join(apiErr, fmt.Errorf("read GitHub error response: %w", readErr))
 	}
-	return strings.TrimSpace(string(errorBody))
+	return apiErr
+}
+
+func newGitHubAPIResponseError(req *http.Request, resp *http.Response, body []byte) *ghservice.GitHubAPIError {
+	method := ""
+	path := ""
+	if req != nil {
+		method = req.Method
+		if req.URL != nil {
+			path = req.URL.RequestURI()
+		}
+	}
+	return &ghservice.GitHubAPIError{
+		Method:     method,
+		Path:       path,
+		StatusCode: resp.StatusCode,
+		Body:       body,
+		Header:     resp.Header.Clone(),
+	}
 }
 
 func withCodeReviewOutputMarker(body, outputKey string) string {

@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"net/http"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -493,76 +491,9 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 			return nil
 		}
 		wrapped := fmt.Errorf("sync code review pull request state: %w", err)
-		if retryable, retryAfter := codeReviewGitHubSyncRetry(err); retryable {
-			return &RetryableError{Err: wrapped, ConsumeAttempt: true, RetryAfter: retryAfter}
-		}
-		var apiErr *ghservice.GitHubAPIError
-		if errors.As(err, &apiErr) {
-			return &FatalError{Err: wrapped}
-		}
-		return wrapped
+		return classifyGitHubJobError(wrapped)
 	}
 	return nil
-}
-
-func codeReviewGitHubSyncRetry(err error) (bool, *time.Duration) {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false, nil
-	}
-	var apiErr *ghservice.GitHubAPIError
-	if errors.As(err, &apiErr) {
-		retryable := apiErr.StatusCode == http.StatusRequestTimeout ||
-			apiErr.StatusCode == http.StatusTooEarly ||
-			apiErr.StatusCode == http.StatusTooManyRequests ||
-			apiErr.StatusCode >= http.StatusInternalServerError ||
-			codeReviewGitHubRateLimited(apiErr)
-		if !retryable {
-			return false, nil
-		}
-		return true, codeReviewGitHubRetryAfter(apiErr)
-	}
-	var networkErr net.Error
-	return errors.As(err, &networkErr), nil
-}
-
-func codeReviewGitHubRateLimited(apiErr *ghservice.GitHubAPIError) bool {
-	if apiErr == nil || apiErr.StatusCode != http.StatusForbidden {
-		return false
-	}
-	if strings.TrimSpace(apiErr.Header.Get("Retry-After")) != "" || strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Remaining")) == "0" {
-		return true
-	}
-	message := strings.ToLower(strings.TrimSpace(apiErr.Message()))
-	return strings.Contains(message, "rate limit") || strings.Contains(message, "abuse detection")
-}
-
-func codeReviewGitHubRetryAfter(apiErr *ghservice.GitHubAPIError) *time.Duration {
-	if apiErr == nil {
-		return nil
-	}
-	if raw := strings.TrimSpace(apiErr.Header.Get("Retry-After")); raw != "" {
-		if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
-			delay := time.Duration(seconds) * time.Second
-			return &delay
-		}
-		if retryAt, err := http.ParseTime(raw); err == nil {
-			return nonNegativeCodeReviewRetryDelay(retryAt)
-		}
-	}
-	if strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Remaining")) == "0" {
-		if resetUnix, err := strconv.ParseInt(strings.TrimSpace(apiErr.Header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
-			return nonNegativeCodeReviewRetryDelay(time.Unix(resetUnix, 0))
-		}
-	}
-	return nil
-}
-
-func nonNegativeCodeReviewRetryDelay(retryAt time.Time) *time.Duration {
-	delay := time.Until(retryAt)
-	if delay < 0 {
-		delay = 0
-	}
-	return &delay
 }
 
 func codeReviewCanRunReviewerThreads(stores *Stores) bool {
@@ -2295,7 +2226,7 @@ func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *S
 		PullNumber:     pr.GitHubPRNumber,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, false, classifyGitHubJobError(fmt.Errorf("list GitHub pull request files: %w", err))
 	}
 	return files, true, nil
 }
@@ -3227,7 +3158,7 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		Comments:          comments,
 	})
 	if err != nil {
-		return codeReviewSubmission{}, false, fmt.Errorf("submit code review to GitHub: %w", err)
+		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err))
 	}
 	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, body); err != nil {
 		return codeReviewSubmission{}, true, fmt.Errorf("record submitted code review: %w", err)

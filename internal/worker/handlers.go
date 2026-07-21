@@ -10816,7 +10816,7 @@ func newSyncPullRequestStateHandler(services *Services, logger zerolog.Logger) J
 				logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("skipping pull request state sync for disconnected repository")
 				return nil
 			}
-			return err
+			return classifyGitHubJobError(fmt.Errorf("sync pull request state: %w", err))
 		}
 		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_health_updated")
 		if autoRepairErr != nil {

@@ -401,8 +401,8 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
 			return nil
 		}
-		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
-			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
+		if timedOut, retryWindow := retryableDurationExceeded(job.CreatedAt, retryable, time.Now()); timedOut {
+			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
 			r.markJobDeadLetter(writeCtx, handlerCtx, executor, job, timeoutErr)
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, timeoutErr.Error())
 			return nil

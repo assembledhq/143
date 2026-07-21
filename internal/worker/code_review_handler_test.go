@@ -89,17 +89,19 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 		body               string
 		header             http.Header
 		retryable          bool
+		rateLimited        bool
 		fatal              bool
 		expectedRetryAfter time.Duration
 	}{
 		{name: "retries service unavailable", status: http.StatusServiceUnavailable, retryable: true},
-		{name: "retries rate limiting", status: http.StatusTooManyRequests, retryable: true},
+		{name: "retries rate limiting with fallback delay", status: http.StatusTooManyRequests, retryable: true, rateLimited: true, expectedRetryAfter: githubRateLimitFallbackRetryAfter},
 		{
 			name:               "retries forbidden secondary rate limit using server delay",
 			status:             http.StatusForbidden,
 			body:               `{"message":"You have exceeded a secondary rate limit"}`,
 			header:             http.Header{"Retry-After": []string{"17"}},
 			retryable:          true,
+			rateLimited:        true,
 			expectedRetryAfter: 17 * time.Second,
 		},
 		{name: "does not retry forbidden permission failure", status: http.StatusForbidden, body: `{"message":"Resource not accessible by integration"}`, fatal: true},
@@ -137,12 +139,18 @@ func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *test
 			var fatalErr *FatalError
 			require.Equal(t, tt.fatal, errors.As(err, &fatalErr), "non-transient GitHub status should receive the expected fatal classification")
 			if tt.retryable {
-				require.True(t, retryErr.ConsumeAttempt, "transient GitHub retries should consume attempts so exponential backoff increases")
+				require.Equal(t, !tt.rateLimited, retryErr.ConsumeAttempt, "only non-rate-limit transient failures should consume attempts")
 				if tt.expectedRetryAfter > 0 {
 					require.NotNil(t, retryErr.RetryAfter, "rate-limited response should preserve the upstream retry delay")
 					require.Equal(t, tt.expectedRetryAfter, *retryErr.RetryAfter, "rate-limited response should use the upstream retry delay")
 				} else {
 					require.Nil(t, retryErr.RetryAfter, "transient GitHub retries without a hint should use exponential backoff")
+				}
+				if tt.rateLimited {
+					require.NotNil(t, retryErr.MaxRetryDuration, "rate limits should use an extended but bounded retry window")
+					require.Equal(t, githubRateLimitMaxRetryDuration, *retryErr.MaxRetryDuration, "rate limits should survive GitHub's normal reset interval")
+				} else {
+					require.Nil(t, retryErr.MaxRetryDuration, "ordinary transient failures should use the standard retry window")
 				}
 			}
 		})

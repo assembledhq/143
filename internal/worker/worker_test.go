@@ -73,6 +73,61 @@ func TestRetryableError(t *testing.T) {
 	require.ErrorIs(t, retryable.Unwrap(), cause, "Unwrap should expose the wrapped error")
 }
 
+func TestRetryableDurationExceeded(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.July, 21, 18, 0, 0, 0, time.UTC)
+	customWindow := 30 * time.Minute
+	fiveMinutes := 5 * time.Minute
+	twentyOneMinutes := 21 * time.Minute
+	tests := []struct {
+		name           string
+		createdAt      time.Time
+		retryable      *RetryableError
+		expected       bool
+		expectedWindow time.Duration
+	}{
+		{
+			name:           "default window rejects an old job",
+			createdAt:      now.Add(-maxRetryableDuration - time.Second),
+			retryable:      &RetryableError{Err: errors.New("dependency unavailable")},
+			expected:       true,
+			expectedWindow: maxRetryableDuration,
+		},
+		{
+			name:           "custom window permits a bounded wait",
+			createdAt:      now.Add(-10 * time.Minute),
+			retryable:      &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow, RetryAfter: &fiveMinutes},
+			expected:       false,
+			expectedWindow: customWindow,
+		},
+		{
+			name:           "custom window rejects a retry scheduled beyond its deadline",
+			createdAt:      now.Add(-10 * time.Minute),
+			retryable:      &RetryableError{Err: errors.New("rate limited"), MaxRetryDuration: &customWindow, RetryAfter: &twentyOneMinutes},
+			expected:       true,
+			expectedWindow: customWindow,
+		},
+		{
+			name:           "explicit bypass remains unbounded",
+			createdAt:      now.Add(-time.Hour),
+			retryable:      &RetryableError{Err: errors.New("durable owner recovery"), BypassMaxRetryDuration: true},
+			expected:       false,
+			expectedWindow: maxRetryableDuration,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			actual, retryWindow := retryableDurationExceeded(tt.createdAt, tt.retryable, now)
+			require.Equal(t, tt.expected, actual, "retry window should make the expected terminal decision")
+			require.Equal(t, tt.expectedWindow, retryWindow, "retry window should report the applied duration")
+		})
+	}
+}
+
 type nilStringPointerArg struct{}
 
 func (nilStringPointerArg) Match(v interface{}) bool {
