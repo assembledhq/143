@@ -1432,6 +1432,10 @@ function policyOutcome(config: CodeReviewPolicyConfig | null): "disabled" | "com
   return config.approval_mode === "approve_acceptable" ? "approve" : "comment";
 }
 
+function capitalizeSummaryItem(item: string): string {
+  return item.charAt(0).toUpperCase() + item.slice(1);
+}
+
 function PolicySummary({
   config,
   repositorySelected,
@@ -1464,11 +1468,14 @@ function PolicySummary({
     <div className="rounded-md border border-border bg-muted/30 px-4 py-3">
       <div className="text-sm font-medium text-foreground">Current behavior</div>
       <div className="mt-2 flex flex-wrap gap-2">
-        {summaryItems.map((item) => (
-          <Badge key={item} variant="outline">
-            {item}
-          </Badge>
-        ))}
+        {summaryItems.map((item) => {
+          const label = capitalizeSummaryItem(item);
+          return (
+            <Badge key={label} variant="outline">
+              {label}
+            </Badge>
+          );
+        })}
       </div>
     </div>
   );
