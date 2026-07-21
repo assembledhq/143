@@ -404,7 +404,17 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByText("Comments only")).toBeInTheDocument();
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
     expect(screen.getByText("2 reviewers")).toBeInTheDocument();
-    expect(screen.getByText("quorum 2")).toBeInTheDocument();
+    expect(screen.getByText("Quorum 2")).toBeInTheDocument();
+    expect(screen.getByText("Passing checks required")).toBeInTheDocument();
+    expect(screen.getByText("Disagreement blocks approval")).toBeInTheDocument();
+    expect(screen.getByText("Sensitive paths need human review")).toBeInTheDocument();
+
+    const currentBehaviorCard = screen.getByText("Current behavior").parentElement;
+    expect(currentBehaviorCard).not.toBeNull();
+    const summaryBadges = currentBehaviorCard?.querySelectorAll('[data-slot="badge"]') ?? [];
+    for (const badge of summaryBadges) {
+      expect(badge.textContent).toMatch(/^[A-Z0-9]/);
+    }
     expect(screen.getByRole("radio", { name: /Comment only/i })).toBeChecked();
     expect(screen.getByRole("region", { name: "Additional review instructions (optional)" })).toBeInTheDocument();
     expect(screen.getByText(/native \/review behavior without extra guidance/i)).toBeInTheDocument();
