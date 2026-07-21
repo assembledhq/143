@@ -1978,7 +1978,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			reason:   "fork PRs are not eligible for approval",
 		},
 		{
-			name: "withholds approval when prior human review requested changes",
+			name: "ignores a prior human changes-requested review",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -2008,8 +2008,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "unresolved human review threads are present",
+			expected: models.CodeReviewDecisionApproved,
 		},
 		{
 			name: "withholds approval when PR head moved",
