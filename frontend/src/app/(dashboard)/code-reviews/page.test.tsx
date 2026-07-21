@@ -1262,15 +1262,39 @@ describe("CodeReviewsPage", () => {
   it("confirms before changing scope with an unsaved prompt draft", async () => {
     const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
+    // Keep autosave in-flight so slow, loaded runners cannot finish the real
+    // 400 ms debounce before the scope interaction and invalidate this setup.
+    let releaseSave = () => {};
+    const pendingSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+    server.use(
+      http.put("/api/v1/code-review-policies", async ({ request }) => {
+        const body = (await request.json()) as { config: CodeReviewPolicyConfig };
+        await pendingSave;
+        return HttpResponse.json({
+          data: {
+            ...body.config,
+            id: "policy-1",
+            org_id: "org-1",
+            active: true,
+            version: 2,
+            created_at: "2026-06-26T12:00:00Z",
+          },
+        } satisfies SingleResponse<CodeReviewPolicyRecord>);
+      }),
+    );
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
     const instructions = screen.getByRole("textbox", { name: "Additional review instructions (optional)" });
-    fireEvent.change(instructions, { target: { value: "local unsaved guidance" } });
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toHaveValue("local unsaved guidance"));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    expect(await screen.findByRole("alertdialog", { name: "Discard unsaved prompt text?" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("Organization default");
+    try {
+      fireEvent.change(instructions, { target: { value: "local unsaved guidance" } });
+      await waitFor(() => expect(instructions).toHaveValue("local unsaved guidance"));
+      await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+      await user.click(await screen.findByRole("option", { name: "acme/api" }));
+      expect(await screen.findByRole("alertdialog", { name: "Discard unsaved prompt text?" })).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("Organization default");
+    } finally {
+      releaseSave();
+    }
   });
 
   it("clears the save-failure guard after discarding to another scope", async () => {
