@@ -926,11 +926,11 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 			expectedStatus:  models.CodeReviewAgentResultStatusFailed,
 		},
 		{
-			name:            "rejects assistant output after bookkeeping failure",
+			name:            "keeps durably completed review after bookkeeping failure",
 			failure:         "update interactive turn result: connection reset",
 			failureCategory: "turn_persistence_failed",
 			assistantOutput: "No actionable issues found.",
-			expectedStatus:  models.CodeReviewAgentResultStatusFailed,
+			expectedStatus:  models.CodeReviewAgentResultStatusCompleted,
 		},
 		{
 			name:            "rejects assistant text from an operational failure",
@@ -997,6 +997,42 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 
 			require.NoError(t, err, "failed reviewer output should be classified without stopping the harvest")
 			require.NoError(t, mock.ExpectationsWereMet(), "failed reviewer output should use valid completed reviews but reject operational error text")
+		})
+	}
+}
+
+func TestCodeReviewFailedThreadOutputUsableRequiresDurableTurn(t *testing.T) {
+	t.Parallel()
+
+	failure := "update interactive turn result: connection reset"
+	category := "turn_persistence_failed"
+	otherCategory := "sandbox_capacity"
+	tests := []struct {
+		name         string
+		currentTurn  int
+		expectedTurn int
+		output       string
+		failure      *string
+		category     *string
+		expected     bool
+	}{
+		{name: "rejects output before durable turn completion", currentTurn: 0, expectedTurn: 1, output: "No findings.", failure: &failure, category: &category},
+		{name: "accepts durable output after bookkeeping failure", currentTurn: 1, expectedTurn: 1, output: "No findings.", failure: &failure, category: &category, expected: true},
+		{name: "rejects operational failure output", currentTurn: 1, expectedTurn: 1, output: "No findings.", failure: &failure, category: &otherCategory},
+		{name: "rejects failure text echoed as output", currentTurn: 1, expectedTurn: 1, output: failure, failure: &failure, category: &category},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			thread := models.SessionThread{
+				CurrentTurn:        tt.currentTurn,
+				FailureExplanation: tt.failure,
+				FailureCategory:    tt.category,
+			}
+			actual := codeReviewFailedThreadOutputUsable(thread, tt.output, true, tt.expectedTurn)
+			require.Equal(t, tt.expected, actual, "failed reviewer output should only be usable after its exact turn durably completes")
 		})
 	}
 }
@@ -1262,6 +1298,53 @@ func TestHarvestCodeReviewOrchestratorResultPersistsFindings(t *testing.T) {
 
 	require.NoError(t, err, "orchestrator harvest should persist directive-backed findings")
 	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should parse findings and mark the result completed")
+}
+
+func TestHarvestCodeReviewOrchestratorResultWaitsForDurableTurn(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	resultID := uuid.New()
+	now := time.Now().UTC()
+	state := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+		ThreadID:         threadID.String(),
+		RequestMessageID: 10,
+		ExpectedTurn:     1,
+	})
+
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(newCodeReviewAgentResultRows().
+			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleOrchestrator, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
+		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
+		WillReturnRows(newSessionThreadRows().
+			AddRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil,
+				"Main", nil, []string{"internal/worker/code_review_handler.go"}, models.ThreadStatusIdle,
+				nil, 0, &now, nil, nil, nil, nil,
+				&now, nil, now, models.ThreadCreatedBySourceSystem, nil, nil,
+				nil, 0.25, 0, nil, "", nil, "", "", json.RawMessage(`[]`),
+				models.ThreadExecutionModeWork, models.ThreadFilesystemModeReadWrite))
+
+	policy := codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig())
+	stores := &Stores{
+		CodeReviews:     db.NewCodeReviewStore(mock),
+		SessionThreads:  db.NewSessionThreadStore(mock),
+		SessionMessages: db.NewSessionMessageStore(mock),
+	}
+	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
+		OrgID:     orgID,
+		SessionID: sessionID,
+	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/worker/code_review_handler.go"}})
+
+	require.NoError(t, err, "orchestrator harvest should wait for the requested turn to durably complete")
+	require.NoError(t, mock.ExpectationsWereMet(), "orchestrator harvest should not read or finalize pre-commit assistant output")
 }
 
 type validatedOrchestratorResultArg struct{}
