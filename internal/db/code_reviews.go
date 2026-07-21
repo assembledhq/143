@@ -480,6 +480,62 @@ func (s *CodeReviewStore) GetBySessionID(ctx context.Context, orgID, sessionID u
 	return collectOneCodeReviewMetadata(rows)
 }
 
+func (s *CodeReviewStore) GetLatestByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest code review by pull request: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) GetLatestSubmittedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT `+codeReviewMetadataColumns+`
+		FROM code_review_session_metadata
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND github_review_id IS NOT NULL
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("query latest submitted code review by pull request: %w", err)
+	}
+	return collectOneCodeReviewMetadata(rows)
+}
+
+func (s *CodeReviewStore) HasApprovedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
+	var approved bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM code_review_session_metadata
+			WHERE org_id = @org_id
+			  AND pull_request_id = @pull_request_id
+			  AND status = 'completed'
+			  AND decision = 'approved'
+			  AND github_review_id IS NOT NULL
+		)`, pgx.NamedArgs{
+		"org_id":          orgID,
+		"pull_request_id": pullRequestID,
+	}).Scan(&approved)
+	if err != nil {
+		return false, fmt.Errorf("query prior code review approval: %w", err)
+	}
+	return approved, nil
+}
+
 func (s *CodeReviewStore) GetRunningByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+codeReviewMetadataColumns+`

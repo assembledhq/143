@@ -11647,6 +11647,102 @@ func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_WrapsUnreadySharedWorkspaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	workerNodeID := "worker-review-owner"
+	containerID := "shared-review-container"
+	row := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				row...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "workspace readiness retry should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "workspace readiness retry should remain scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "workspace readiness retry should preserve the requested thread id")
+			return fmt.Errorf("clone is still initializing: %w", agent.ErrSandboxWorkspaceNotReady)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the unready shared-workspace signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxWorkspaceNotReady must be wrapped as RetryableError so the worker waits for the winning checkout")
+	require.NotNil(t, retryable.RetryAfter, "workspace readiness retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxWorkspaceNotReady, "the wrapped error must preserve the ErrSandboxWorkspaceNotReady sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "workspace readiness retries should remain pinned to the sandbox-owning worker")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "workspace readiness retries should target the recorded sandbox owner")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "workspace-wait cancellation should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "workspace-wait cancellation should remain scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "workspace-wait cancellation should preserve the requested thread id")
+			return fmt.Errorf("cancel timestamp observed: %w", agent.ErrThreadCancelledBeforeWorkspaceReady)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should terminate the cancelled workspace-waiting turn")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "workspace-wait cancellation should dead-letter instead of retrying after readiness")
+	require.ErrorIs(t, fatal.Err, agent.ErrThreadCancelledBeforeWorkspaceReady, "fatal error should preserve the workspace-wait cancellation sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before dead-lettering the cancelled turn")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunPRReadinessHandler_DeadLetterMarksReadinessFailed(t *testing.T) {
 	t.Parallel()
 

@@ -366,7 +366,6 @@ type CodeReviewOrchestratorPromptData struct {
 	ReviewerOutputs            []string
 	Findings                   []string
 	ChangedFiles               []string
-	Checklist                  []string
 	ReviewInstructions         string
 	AutomatedApprovalPolicy    string
 	UseAutomatedApprovalPolicy bool

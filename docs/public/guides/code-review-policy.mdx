@@ -20,11 +20,17 @@ Open **Code reviews** and select **Policy**. The organization has one policy tha
 
 Turning code reviews off pauses new reviewer-triggered runs without forgetting the selected outcome.
 
+After someone requests 143 Code Reviewer once, 143 keeps that recommendation current until it approves the PR. New commits, PR description edits, human review activity, resolved or reopened review threads, and check/status updates durably trigger a new assessment even when an older assessment is still running. The existing GitHub review summary is updated in place with the latest pass or escalation recommendation, while the Code reviews page retains each assessment as audit history.
+
+Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
+
 ## Separate guidance from safeguards
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
 
 **Automated approval policy** guides only the orchestrator's approve-or-escalate recommendation. It cannot override passing checks, path restrictions, size limits, quorum, disagreement handling, fork restrictions, or other deterministic safeguards.
+
+143 evaluates the current pull request independently of existing human review activity. Human comments, review decisions, and open or resolved review threads—including unresolved change requests—do not become findings or block 143's approval. Repository branch protection and merge rules still apply independently on GitHub.
 
 Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates. Advanced policy presets are different: they replace the complete policy, including safeguards and agent settings.
 

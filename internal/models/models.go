@@ -1088,6 +1088,7 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeMaterializeChangeset          = "materialize_changeset"
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 	JobTypeRestackChangesets             = "restack_changesets"
