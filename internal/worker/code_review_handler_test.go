@@ -22,6 +22,64 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStartCodeReviewReassessmentHandlerDefersBehindOlderAssessment(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	repoID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	head := "current-head"
+	base := "current-base"
+	row := workerPullRequestRow(prID, uuid.New(), orgID, "acme/repo", "feature/reassess", now)
+	for index, column := range workerPullRequestColumns {
+		switch column {
+		case "head_sha":
+			row[index] = &head
+		case "base_sha":
+			row[index] = &base
+		}
+	}
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
+		WithArgs(pgx.NamedArgs{"id": prID, "org_id": orgID}).
+		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(row...))
+	lifecycle := &codeReviewLifecycleStub{result: codereview.ReviewRequestedResult{Processed: true, Reused: true, Deferred: true}}
+	payload, err := json.Marshal(codereview.ReviewChangedInput{
+		OrgID: orgID, RepositoryID: repoID, PullRequestID: prID, PriorSessionID: priorSessionID,
+		HeadSHA: "event-head", ChangeKey: "pull_request:delivery-143", ChangeReason: "pull_request.edited",
+	})
+	require.NoError(t, err, "reassessment starter payload should marshal")
+
+	err = newStartCodeReviewReassessmentHandler(
+		&Stores{PullRequests: db.NewPullRequestStore(mock)},
+		&Services{CodeReviewLifecycle: lifecycle},
+		zerolog.Nop(),
+	)(context.Background(), models.JobTypeStartCodeReviewReassessment, payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "active older assessment should keep the starter job pending")
+	require.False(t, retryable.ConsumeAttempt, "waiting for an active review should not consume the job attempt budget")
+	require.True(t, retryable.BypassMaxRetryDuration, "durable follow-up should survive long-running reviewer agents")
+	require.Equal(t, "current-head", lifecycle.input.HeadSHA, "starter should reassess the current mirrored PR head")
+	require.Equal(t, priorSessionID, lifecycle.input.PriorSessionID, "starter should preserve event ordering against the prior assessment")
+	require.NoError(t, mock.ExpectationsWereMet(), "starter should load the current pull request with org isolation")
+}
+
+type codeReviewLifecycleStub struct {
+	input  codereview.ReviewChangedInput
+	result codereview.ReviewRequestedResult
+	err    error
+}
+
+func (s *codeReviewLifecycleStub) HandleReviewChanged(_ context.Context, input codereview.ReviewChangedInput) (codereview.ReviewRequestedResult, error) {
+	s.input = input
+	return s.result, s.err
+}
+
 func TestSyncCodeReviewPullRequestStateClassifiesTransientGitHubFailures(t *testing.T) {
 	t.Parallel()
 
@@ -421,6 +479,43 @@ func TestEvaluateCodeReviewDescriptionPolicyUsesCachedArtifact(t *testing.T) {
 	require.Equal(t, []string{"Custom requirement: failed (cached failure)"}, evaluation.RequirementSummaries, "cached artifact should produce the same summary as a fresh evaluation")
 	require.Equal(t, 0, llm.calls, "cached description artifact should avoid another LLM call")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewDescriptionResultFromArtifactChecksInputHash(t *testing.T) {
+	t.Parallel()
+
+	passed := true
+	tests := []struct {
+		name          string
+		artifactHash  string
+		currentHash   string
+		expectedFound bool
+	}{
+		{name: "reuses matching description", artifactHash: "same", currentHash: "same", expectedFound: true},
+		{name: "rejects edited description", artifactHash: "before", currentHash: "after", expectedFound: false},
+		{name: "accepts legacy artifact without hash", artifactHash: "", currentHash: "current", expectedFound: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			metadata, err := json.Marshal(codeReviewDescriptionArtifactMetadata{
+				Passed: &passed, PolicyVersion: 3, HeadSHA: "head", InputHash: tt.artifactHash,
+			})
+			require.NoError(t, err, "description artifact metadata should marshal")
+			artifact := models.CodeReviewPromptArtifact{Metadata: metadata}
+
+			result, found := codeReviewDescriptionResultFromArtifact(runCodeReviewPayload{
+				PolicyVersion: 3, HeadSHA: "head",
+			}, artifact, tt.currentHash)
+
+			require.Equal(t, tt.expectedFound, found, "description cache should be scoped to the current PR text")
+			if tt.expectedFound {
+				require.Equal(t, codeReviewDescriptionLLMResponse{Passed: true, Reason: "requirement satisfied"}, result, "matching cache should return the exact stored assessment")
+			} else {
+				require.Equal(t, codeReviewDescriptionLLMResponse{}, result, "stale cache should return no assessment")
+			}
+		})
+	}
 }
 
 func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
+	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
@@ -286,6 +287,18 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	if services == nil {
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}
+	services.CodeReviewLifecycle = codereviewsvc.NewService(
+		codeReviewStore,
+		codeReviewStore,
+		sessionStore,
+		jobStore,
+		logger,
+		codereviewsvc.Config{
+			AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
+			AliasLogins:       cfg.CodeReviewAliasLogins,
+			TeamSlugs:         cfg.CodeReviewTeamSlugs,
+		},
+	)
 
 	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{
 		Pool:                pool,

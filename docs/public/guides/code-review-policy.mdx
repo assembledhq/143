@@ -20,6 +20,10 @@ Open **Code reviews**, select **Policy**, and choose the organization default or
 
 Turning code reviews off pauses new reviewer-triggered runs without forgetting the selected outcome.
 
+After someone requests 143 Code Reviewer once, 143 keeps that recommendation current until it approves the PR. New commits, PR description edits, human review activity, resolved or reopened review threads, and check/status updates durably trigger a new assessment even when an older assessment is still running. The existing GitHub review summary is updated in place with the latest pass or escalation recommendation, while the Code reviews page retains each assessment as audit history.
+
+Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
+
 ## Separate guidance from safeguards
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.

@@ -125,6 +125,171 @@ func TestGitHubSubmitter_SubmitReviewReturnsExistingMarkedReview(t *testing.T) {
 	}, result.Comments, "SubmitReview should recover comments attached to the existing review")
 }
 
+func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
+	t.Parallel()
+
+	var (
+		reviewUpdate  map[string]string
+		commentUpdate map[string]string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id": 456, "path": "src/auth/session.go", "line": 42,
+				"body": withCodeReviewFindingMarker("Old finding.", codeReviewFindingMarkerKey("prior-output", "finding-key")),
+			}})
+			require.NoError(t, err, "test response should write prior inline comment")
+		case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/pulls/comments/456":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&commentUpdate), "inline update should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":456}`))
+			require.NoError(t, err, "test response should write inline update")
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/143":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&reviewUpdate), "review update should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+			require.NoError(t, err, "test response should write review update")
+		default:
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		HeadSHA:           "new-head",
+		OutputKey:         "updated-output",
+		PreviousOutputKey: "prior-output",
+		ExistingReviewID:  143,
+		ExistingReviewURL: "https://github.com/acme/repo/pull/42#pullrequestreview-143",
+		Decision:          SubmitReviewDecisionCommentOnly,
+		Body:              "143 Code Reviewer did not approve this PR\n\nWhy: required checks are failing.",
+		Comments: []SubmitReviewComment{{
+			Path: "src/auth/session.go", Line: 42, Body: "Updated finding.", DedupeKey: "finding-key",
+		}},
+	})
+
+	require.NoError(t, err, "SubmitReview should update an existing GitHub assessment")
+	require.Equal(t, int64(143), result.ID, "updated assessment should retain the original review id")
+	require.Equal(t, "https://github.com/acme/repo/pull/42#pullrequestreview-143", result.URL, "updated assessment should retain the original review URL")
+	require.Contains(t, reviewUpdate["body"], "required checks are failing", "review summary should contain the updated pass assessment")
+	require.Contains(t, reviewUpdate["body"], codeReviewOutputMarker("updated-output"), "review summary should carry the new idempotency marker")
+	require.Equal(t, withCodeReviewFindingMarker("Updated finding.", "finding-key"), commentUpdate["body"], "matching prior inline finding should be updated in place with a stable reassessment marker")
+	require.Equal(t, []SubmitReviewPostedComment{{
+		ID: 456, Path: "src/auth/session.go", Line: 42,
+		Body:      withCodeReviewFindingMarker("Updated finding.", "finding-key"),
+		DedupeKey: "finding-key",
+	}}, result.Comments, "updated assessment should return the reused inline comment")
+}
+
+func TestGitHubSubmitter_SubmitReviewPromotesUpdatedAssessmentWithFormalApproval(t *testing.T) {
+	t.Parallel()
+
+	var (
+		reviewUpdate  map[string]string
+		approvalPost  map[string]any
+		approvalPosts int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should write no inline comments")
+		case r.Method == http.MethodPut && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/143":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&reviewUpdate), "sticky review update should decode")
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+			require.NoError(t, err, "test response should write sticky review update")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			w.Header().Set("Content-Type", "application/json")
+			if approvalPosts == 0 {
+				_, err := w.Write([]byte(`[]`))
+				require.NoError(t, err, "test response should report no existing formal approval")
+				break
+			}
+			err := json.NewEncoder(w).Encode([]map[string]any{{
+				"id": 144, "html_url": "https://github.com/acme/repo/pull/42#pullrequestreview-144",
+				"body": codeReviewOutputMarker("approved-output:formal-approval"),
+			}})
+			require.NoError(t, err, "test response should report the existing formal approval")
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/42/reviews/144/comments":
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`[]`))
+			require.NoError(t, err, "test response should report no formal approval comments")
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/42/reviews":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&approvalPost), "formal approval request should decode")
+			approvalPosts++
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"id":144,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-144"}`))
+			require.NoError(t, err, "test response should write formal approval")
+		default:
+			http.Error(w, "unexpected request", http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+	result, err := submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		HeadSHA:           "new-head",
+		OutputKey:         "approved-output",
+		PreviousOutputKey: "prior-output",
+		ExistingReviewID:  143,
+		ExistingReviewURL: "https://github.com/acme/repo/pull/42#pullrequestreview-143",
+		Decision:          SubmitReviewDecisionApproved,
+		Body:              "143 Code Reviewer approved this PR.",
+	})
+
+	require.NoError(t, err, "passing reassessment should update the sticky assessment and submit a formal approval")
+	require.Equal(t, int64(143), result.ID, "sticky assessment should remain the persisted review reference")
+	require.Contains(t, reviewUpdate["body"], "approved this PR", "sticky assessment should show the current passing result")
+	require.Equal(t, "APPROVE", approvalPost["event"], "passing reassessment should create a real GitHub approval")
+	require.Equal(t, "new-head", approvalPost["commit_id"], "formal approval should target the reassessed head")
+	require.Contains(t, approvalPost["body"], "143-code-review-output", "formal approval should carry a loop-suppression marker")
+	_, err = submitter.SubmitReview(context.Background(), SubmitReviewRequest{
+		InstallationID:    99,
+		Repository:        "acme/repo",
+		PullNumber:        42,
+		HeadSHA:           "new-head",
+		OutputKey:         "approved-output",
+		PreviousOutputKey: "prior-output",
+		ExistingReviewID:  143,
+		ExistingReviewURL: "https://github.com/acme/repo/pull/42#pullrequestreview-143",
+		Decision:          SubmitReviewDecisionApproved,
+		Body:              "143 Code Reviewer approved this PR.",
+	})
+	require.NoError(t, err, "retry should reuse the marker-backed formal approval")
+	require.Equal(t, 1, approvalPosts, "retry should not post a duplicate formal approval")
+}
+
+func TestIsCodeReviewAuthoredBody(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		body     string
+		expected bool
+	}{
+		{name: "review summary marker", body: "result\n\n" + codeReviewOutputMarker("output"), expected: true},
+		{name: "inline finding marker", body: withCodeReviewFindingMarker("finding", "key"), expected: true},
+		{name: "human review", body: "Please add a regression test.", expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, IsCodeReviewAuthoredBody(tt.body), "marker detection should classify review authorship")
+		})
+	}
+}
+
 func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testing.T) {
 	t.Parallel()
 
