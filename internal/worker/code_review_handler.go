@@ -1196,7 +1196,10 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
-	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{ReviewInstructions: cfg.ReviewInstructions}))
+	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+		PullRequestURL:     pr.GitHubPRURL,
+		ReviewInstructions: cfg.ReviewInstructions,
+	}))
 }
 
 func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {

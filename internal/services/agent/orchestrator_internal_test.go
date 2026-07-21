@@ -78,6 +78,23 @@ func TestRunAgentRecordsUsageOnlyAfterTurnHoldIsPublished(t *testing.T) {
 	require.Less(t, hold, usage, "RunAgent should record usage only after the DB row owns the container so pre-hold crashes do not create open usage events for unowned containers")
 }
 
+func TestContinueSessionWaitsForReusedCodeReviewWorkspaceBeforeTurnHold(t *testing.T) {
+	t.Parallel()
+
+	src, err := os.ReadFile("orchestrator.go")
+	require.NoError(t, err, "orchestrator.go should be readable for workspace readiness ordering regression test")
+
+	body := string(src)
+	continueStart := strings.Index(body, "func (o *Orchestrator) ContinueSession(")
+	require.NotEqual(t, -1, continueStart, "ContinueSession should exist")
+	continueBody := body[continueStart:]
+	barrier := strings.Index(continueBody, "waitForSandboxWorkspaceReady(")
+	hold := strings.Index(continueBody, "o.sessions.AcquireTurnHold")
+	require.NotEqual(t, -1, barrier, "ContinueSession should wait for the reused code review workspace")
+	require.NotEqual(t, -1, hold, "ContinueSession should acquire the shared sandbox turn hold")
+	require.Less(t, barrier, hold, "workspace readiness must be proven before acquiring the shared turn hold so a waiting sibling cannot release the winner's hold")
+}
+
 func TestThreadRuntimeAlreadyActiveDoesNotFailSessionBeforeRetry(t *testing.T) {
 	t.Parallel()
 
@@ -400,6 +417,40 @@ type testInternalSandboxProvider struct {
 	writes     map[string][]byte
 }
 
+type testInternalSessionThreadStore struct {
+	thread         models.SessionThread
+	updateStatuses []models.ThreadStatus
+}
+
+func (s *testInternalSessionThreadStore) GetByID(_ context.Context, _, threadID uuid.UUID) (models.SessionThread, error) {
+	if s.thread.ID != threadID {
+		return models.SessionThread{}, pgx.ErrNoRows
+	}
+	return s.thread, nil
+}
+
+func (s *testInternalSessionThreadStore) UpdateStatus(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
+	s.updateStatuses = append(s.updateStatuses, status)
+	s.thread.Status = status
+	return nil
+}
+
+func (s *testInternalSessionThreadStore) CompleteTurn(context.Context, uuid.UUID, uuid.UUID, int, string) error {
+	return nil
+}
+
+func (s *testInternalSessionThreadStore) UpdateResult(context.Context, uuid.UUID, uuid.UUID, models.ThreadStatus, *models.SessionResult) error {
+	return nil
+}
+
+func (s *testInternalSessionThreadStore) ClearPendingMessages(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (s *testInternalSessionThreadStore) ClaimNextQueuedForSession(context.Context, uuid.UUID, uuid.UUID, int) (models.SessionThread, error) {
+	return models.SessionThread{}, pgx.ErrNoRows
+}
+
 func (p *testInternalSandboxProvider) Name() string { return "test" }
 
 func (p *testInternalSandboxProvider) Create(context.Context, SandboxConfig) (*Sandbox, error) {
@@ -440,6 +491,198 @@ func (p *testInternalSandboxProvider) WriteFile(_ context.Context, _ *Sandbox, p
 	}
 	p.writes[path] = append([]byte(nil), data...)
 	return nil
+}
+
+func TestWaitForSandboxWorkspaceReady(t *testing.T) {
+	t.Parallel()
+
+	type probeResult struct {
+		exitCode int
+		err      error
+		stdout   string
+		stderr   string
+	}
+	const (
+		expectedBranch = "143/abc12345/code-review"
+		expectedHead   = "8802cf3c2664073d13c7522489d674c64889282a"
+	)
+	tests := []struct {
+		name           string
+		results        []probeResult
+		timeout        time.Duration
+		cancelContext  bool
+		cancelChecks   []error
+		expectedErr    error
+		expectedCalls  int
+		expectedChecks int
+	}{
+		{
+			name: "ready on first probe",
+			results: []probeResult{{
+				exitCode: 0,
+				stdout:   expectedHead + "\n" + expectedBranch + "\n",
+			}},
+			timeout:       100 * time.Millisecond,
+			expectedCalls: 1,
+		},
+		{
+			name: "waits through empty and default branch states",
+			results: []probeResult{
+				{exitCode: 128, stderr: "fatal: current branch master has no commits"},
+				{exitCode: 0, stdout: "1111111111111111111111111111111111111111\nmain\n"},
+				{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n"},
+			},
+			timeout:       100 * time.Millisecond,
+			expectedCalls: 3,
+		},
+		{
+			name: "stops before readiness when durable cancellation is observed",
+			results: []probeResult{{
+				exitCode: 128,
+				stderr:   "fatal: current branch master has no commits",
+			}},
+			timeout:        100 * time.Millisecond,
+			cancelChecks:   []error{nil, ErrThreadCancelledBeforeWorkspaceReady},
+			expectedErr:    ErrThreadCancelledBeforeWorkspaceReady,
+			expectedCalls:  1,
+			expectedChecks: 2,
+		},
+		{
+			name: "times out on a different pull request head",
+			results: []probeResult{{
+				exitCode: 0,
+				stdout:   "2222222222222222222222222222222222222222\n" + expectedBranch + "\n",
+			}},
+			timeout:       5 * time.Millisecond,
+			expectedErr:   ErrSandboxWorkspaceNotReady,
+			expectedCalls: -1,
+		},
+		{
+			name:          "honors cancellation before probing",
+			results:       []probeResult{{exitCode: 0, stdout: expectedHead + "\n" + expectedBranch + "\n"}},
+			timeout:       100 * time.Millisecond,
+			cancelContext: true,
+			expectedErr:   context.Canceled,
+			expectedCalls: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			attempt := 0
+			provider := &testInternalSandboxProvider{execFn: func(_ string, stdout, stderr io.Writer) (int, error) {
+				resultIndex := attempt
+				if resultIndex >= len(tt.results) {
+					resultIndex = len(tt.results) - 1
+				}
+				attempt++
+				result := tt.results[resultIndex]
+				_, _ = io.WriteString(stdout, result.stdout)
+				_, _ = io.WriteString(stderr, result.stderr)
+				return result.exitCode, result.err
+			}}
+			ctx := context.Background()
+			if tt.cancelContext {
+				cancelledCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelledCtx
+			}
+			sandbox := &Sandbox{ID: "shared-review", WorkDir: "/workspace/repo's checkout"}
+			cancelCheckCalls := 0
+			var checkCancellation func(context.Context) error
+			if tt.cancelChecks != nil {
+				checkCancellation = func(context.Context) error {
+					index := cancelCheckCalls
+					if index >= len(tt.cancelChecks) {
+						index = len(tt.cancelChecks) - 1
+					}
+					cancelCheckCalls++
+					return tt.cancelChecks[index]
+				}
+			}
+
+			err := waitForSandboxWorkspaceReady(ctx, provider, sandbox, expectedBranch, expectedHead, tt.timeout, time.Millisecond, 4*time.Millisecond, checkCancellation)
+			if tt.expectedErr != nil {
+				require.ErrorIs(t, err, tt.expectedErr, "workspace readiness should return the expected transient or context error")
+			} else {
+				require.NoError(t, err, "workspace readiness should pass only after the authoritative branch and head are checked out")
+			}
+			if tt.expectedCalls >= 0 {
+				require.Equal(t, tt.expectedCalls, len(provider.execCalls), "workspace readiness should execute the expected number of git probes")
+			} else {
+				require.NotEmpty(t, provider.execCalls, "workspace readiness timeout should perform at least one git probe")
+			}
+			if len(provider.execCalls) > 0 {
+				require.Contains(t, provider.execCalls[0], "'/workspace/repo'\\''s checkout'", "workspace readiness should shell-quote the sandbox workdir")
+			}
+			require.Equal(t, tt.expectedChecks, cancelCheckCalls, "workspace readiness should check durable cancellation at the expected points")
+		})
+	}
+}
+
+func TestNextSandboxWorkspaceReadyBackoff(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		current  time.Duration
+		maximum  time.Duration
+		expected time.Duration
+	}{
+		{name: "doubles the initial delay", current: 100 * time.Millisecond, maximum: 2 * time.Second, expected: 200 * time.Millisecond},
+		{name: "doubles below the cap", current: 400 * time.Millisecond, maximum: 2 * time.Second, expected: 800 * time.Millisecond},
+		{name: "clamps instead of overshooting", current: 800 * time.Millisecond, maximum: time.Second, expected: time.Second},
+		{name: "stays at the cap", current: 2 * time.Second, maximum: 2 * time.Second, expected: 2 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, nextSandboxWorkspaceReadyBackoff(tt.current, tt.maximum), "workspace readiness backoff should double quickly and remain bounded")
+		})
+	}
+}
+
+func TestStopWorkspaceWaitIfThreadCancelled(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		cancelRequested  bool
+		status           models.ThreadStatus
+		expectedErr      error
+		expectedStatuses []models.ThreadStatus
+	}{
+		{name: "active thread continues waiting", status: models.ThreadStatusRunning},
+		{name: "durable cancellation terminalizes thread", cancelRequested: true, status: models.ThreadStatusRunning, expectedErr: ErrThreadCancelledBeforeWorkspaceReady, expectedStatuses: []models.ThreadStatus{models.ThreadStatusCancelled}},
+		{name: "already cancelled thread stops without another write", status: models.ThreadStatusCancelled, expectedErr: ErrThreadCancelledBeforeWorkspaceReady},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			threadID := uuid.New()
+			thread := models.SessionThread{ID: threadID, Status: tt.status}
+			if tt.cancelRequested {
+				requestedAt := time.Now()
+				thread.CancelRequestedAt = &requestedAt
+			}
+			threadStore := &testInternalSessionThreadStore{thread: thread}
+			orchestrator := &Orchestrator{sessionThreads: threadStore}
+
+			err := orchestrator.stopWorkspaceWaitIfThreadCancelled(context.Background(), uuid.New(), threadID)
+			if tt.expectedErr != nil {
+				require.ErrorIs(t, err, tt.expectedErr, "workspace wait should stop when durable thread cancellation is present")
+			} else {
+				require.NoError(t, err, "workspace wait should continue for an active uncancelled thread")
+			}
+			require.Equal(t, tt.expectedStatuses, threadStore.updateStatuses, "workspace wait cancellation should persist the expected terminal status updates")
+		})
+	}
 }
 
 func TestOrchestratorMaterializeChangeset(t *testing.T) {
