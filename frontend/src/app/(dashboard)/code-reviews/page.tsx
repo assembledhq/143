@@ -94,6 +94,10 @@ const NO_TEMPLATE = "none";
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
+// Policy textareas create a new version on every commit. Give authors enough
+// time to pause while composing without turning ordinary typing into a stream
+// of short-lived versions; leaving the field still flushes immediately.
+const CODE_REVIEW_TEXTAREA_DEBOUNCE_MS = 2_000;
 const codeReviewPromptValuesEqual = (left: string, right: string) => left.trim() === right.trim();
 const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
 - the intent is clear and the change has a small, understandable scope
@@ -1031,6 +1035,7 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   const field = useDebouncedTextField({
     serverValue: value,
     onCommit: (next) => { if (!invalidValue(next)) onCommit(next); },
+    debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS,
     preserveLocalOnServerChange: autosave.status === "error",
     valuesEqual: codeReviewPromptValuesEqual,
   });
@@ -2561,6 +2566,7 @@ function ListTextArea({
           .map((item) => item.trim())
           .filter(Boolean),
       ),
+    debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS,
   });
   return (
     <div className="space-y-2">
@@ -2595,7 +2601,7 @@ function PolicyTextarea({
   serverValue: string;
   onCommit: (value: string) => void;
 } & Omit<ComponentProps<typeof Textarea>, "value" | "onChange" | "onBlur">) {
-  const field = useDebouncedTextField({ serverValue, onCommit });
+  const field = useDebouncedTextField({ serverValue, onCommit, debounceMs: CODE_REVIEW_TEXTAREA_DEBOUNCE_MS });
   return <Textarea {...props} value={field.value} disabled={disabled} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} />;
 }
 

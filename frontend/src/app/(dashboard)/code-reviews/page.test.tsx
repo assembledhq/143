@@ -861,6 +861,7 @@ describe("CodeReviewsPage", () => {
     await user.type(reviewInstructions, "Review tenant boundaries and authorization.");
     await user.clear(approvalPolicy);
     await user.type(approvalPolicy, "Approve only routine changes with proportionate tests.");
+    fireEvent.blur(approvalPolicy);
 
     await waitFor(() => {
       const latest = updates.at(-1);
@@ -875,6 +876,25 @@ describe("CodeReviewsPage", () => {
     expect(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox")).toHaveValue("Approve only routine changes with proportionate tests.");
   });
 
+  it("waits through a short typing pause before versioning textarea edits and flushes on blur", async () => {
+    const user = userEvent.setup();
+    const updates: CodeReviewPolicyConfig[] = [];
+    mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+
+    const reviewInstructions = within(
+      screen.getByRole("region", { name: "Additional review instructions (optional)" }),
+    ).getByRole("textbox");
+    fireEvent.change(reviewInstructions, { target: { value: "Review tenant boundaries." } });
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+    expect(updates).toHaveLength(0);
+
+    fireEvent.blur(reviewInstructions);
+    await waitFor(() => expect(updates.at(-1)?.review_instructions).toBe("Review tenant boundaries."));
+  });
+
   it("keeps a word-separating space in the approval policy while an autosave is canonicalized", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
@@ -886,11 +906,13 @@ describe("CodeReviewsPage", () => {
     const approvalPolicy = within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox");
     await user.clear(approvalPolicy);
     await user.type(approvalPolicy, "Approve routine ");
+    fireEvent.blur(approvalPolicy);
     await waitFor(() => expect(state.getCurrentConfig().automated_approval_policy).toBe("Approve routine"));
     expect(approvalPolicy).toHaveValue("Approve routine ");
 
     await user.type(approvalPolicy, "changes");
     expect(approvalPolicy).toHaveValue("Approve routine changes");
+    fireEvent.blur(approvalPolicy);
     await waitFor(() => expect(state.getCurrentConfig().automated_approval_policy).toBe("Approve routine changes"));
   });
 
@@ -940,6 +962,7 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
     const input = within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("textbox");
     await user.type(input, "Keep this unsaved local guidance");
+    fireEvent.blur(input);
 
     expect(await screen.findAllByText("Couldn't save")).not.toHaveLength(0);
     expect(input).toHaveValue("Keep this unsaved local guidance");
