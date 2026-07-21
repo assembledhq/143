@@ -53,6 +53,28 @@ describe('AuditLogEntry', () => {
     );
   });
 
+  it('keeps audit rows auto-sized with vertically aligned content', () => {
+    const { container } = render(
+      <AuditLogEntry
+        entry={makeEntry({ details: { changed: 'value' } })}
+        members={mockMembers}
+      />
+    );
+
+    const row = screen.getByRole('button');
+    expect(row).toHaveClass(
+      'h-auto',
+      'sm:h-auto',
+      'leading-5'
+    );
+    expect(row).not.toHaveClass('sm:h-8');
+    expect(container.querySelector('.lucide-chevron-right')?.parentElement).toHaveClass(
+      'flex',
+      'self-stretch',
+      'items-center'
+    );
+  });
+
   it('labels team role changes without saying member role', () => {
     render(
       <AuditLogEntry

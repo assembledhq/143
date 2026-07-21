@@ -109,10 +109,10 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
             setExpanded(!expanded);
           }
         }}
-        className="flex w-full items-start gap-2 whitespace-normal px-6 py-3.5 text-left text-sm hover:bg-muted/30 transition-all duration-150 h-auto rounded-none"
+        className="flex h-auto w-full items-start gap-2 whitespace-normal rounded-none px-6 py-3.5 text-left text-sm leading-5 transition-all duration-150 hover:bg-muted/30 sm:h-auto"
         disabled={!onSelect && !hasDetails}
       >
-        <span className="shrink-0 w-14 text-xs text-muted-foreground/70 pt-0.5 tabular-nums">
+        <span className="w-14 shrink-0 text-xs leading-5 text-muted-foreground/70 tabular-nums">
           {formatTimeAgo(entry.created_at)}
         </span>
         <span className="flex-1 min-w-0 whitespace-normal break-words">
@@ -121,7 +121,7 @@ export function AuditLogEntry({ entry, members, onSelect }: AuditLogEntryProps) 
           <span className="text-muted-foreground">{actionLabel}</span>
         </span>
         {!onSelect && hasDetails && (
-          <span className="shrink-0 pt-0.5 text-muted-foreground/50">
+          <span className="flex shrink-0 self-stretch items-center text-muted-foreground/50">
             {expanded ? (
               <ChevronDown className="h-3.5 w-3.5" />
             ) : (
