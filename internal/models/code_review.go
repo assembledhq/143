@@ -430,13 +430,13 @@ func codeReviewPolicyFieldError(field, message string) error {
 
 const codeReviewIndependentApprovalPolicy = `
 
-Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`
+Evaluate the pull request independently based on the code itself. Disregard GitHub checks, CI results, build statuses, and other external validation signals, whether passing, failing, or pending; they must not count for or against approval. Also disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`
 
-const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine, well-tested changes when:
+const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine changes when:
 - the intent is clear and the change has a small, understandable scope
 - there are no blocking findings
 - the implementation follows established repository patterns
-- the available testing evidence is appropriate for the change
+- the test coverage visible in the code is appropriate for the change
 
 Require human review when:
 - the change affects authentication, billing, permissions, infrastructure, or production data
@@ -488,7 +488,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		RiskPolicy: CodeReviewRiskPolicy{
 			MaxFilesChanged:       5,
 			MaxLinesChanged:       300,
-			RequirePassingChecks:  true,
+			RequirePassingChecks:  false,
 			ExcludeSensitivePaths: true,
 			SensitivePaths:        defaultPRReadinessSensitivePaths(),
 			ExcludeCategories:     []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},

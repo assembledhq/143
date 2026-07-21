@@ -28,7 +28,7 @@ Once 143 submits an approval, that approval is final for the PR: later changes a
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
 
-**Automated approval policy** guides only the orchestrator's approve-or-escalate recommendation. It cannot override passing checks, path restrictions, size limits, quorum, disagreement handling, fork restrictions, or other deterministic safeguards.
+**Automated approval policy** guides only the orchestrator's approve-or-escalate recommendation. By default, approval evaluates the code without requiring GitHub checks to pass. If you enable a passing-check requirement under advanced controls, the prompt cannot override it; path restrictions, size limits, quorum, disagreement handling, fork restrictions, and other enabled safeguards also remain authoritative.
 
 143 evaluates the current pull request independently of existing human review activity. Human comments, review decisions, and open or resolved review threads—including unresolved change requests—do not become findings or block 143's approval. Repository branch protection and merge rules still apply independently on GitHub.
 

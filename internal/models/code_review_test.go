@@ -71,6 +71,7 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	config := DefaultCodeReviewPolicyConfig()
 	require.Empty(t, config.ReviewInstructions, "default review instructions should preserve native review behavior")
 	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, config.AutomatedApprovalPolicy, "default approval policy should be conservative")
+	require.Contains(t, config.AutomatedApprovalPolicy, "Disregard GitHub checks, CI results, build statuses", "default approval policy should base approval on code rather than external check status")
 	require.Contains(t, config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "default approval policy should require an independent decision")
 
 	require.Equal(t, CodeReviewApprovalModeCommentOnly, config.ApprovalMode, "code reviewer should default to comment-only mode")
@@ -78,6 +79,7 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, 4, config.InlineCommentLimit, "default inline comment limit should match product design")
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
+	require.False(t, config.RiskPolicy.RequirePassingChecks, "default approval policy should evaluate code without requiring GitHub checks")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
 	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
 	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
@@ -218,6 +220,9 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 		},
 		{
 			name: "blocks oversized sensitive fork with agent concerns",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.RequirePassingChecks = true
+			},
 			input: CodeReviewRiskInput{
 				FilesChanged:         6,
 				LinesChanged:         350,
@@ -240,6 +245,17 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"},
 			),
+		},
+		{
+			name: "default ignores failing GitHub checks",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     false,
+				DescriptionPassed: true,
+				Author:            "devin",
+			},
+			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
 			name: "blocks missing required named check and ineligible author",
