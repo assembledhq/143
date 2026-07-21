@@ -578,6 +578,8 @@ type codeReviewReviewerStructuredResult struct {
 	ReviewerKey       string  `json:"reviewer_key"`
 	ReviewerIndex     int     `json:"reviewer_index"`
 	ThreadID          string  `json:"thread_id"`
+	RequestMessageID  int64   `json:"request_message_id,omitempty"`
+	ExpectedTurn      int     `json:"expected_turn,omitempty"`
 	PromptArtifactKey string  `json:"prompt_artifact_key,omitempty"`
 	FindingCount      int     `json:"finding_count,omitempty"`
 	CostCents         float64 `json:"cost_cents,omitempty"`
@@ -704,14 +706,15 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err != nil {
 			return fmt.Errorf("create code review reviewer thread: %w", err)
 		}
-		structured := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+		reviewerState := codeReviewReviewerStructuredResult{
 			ReviewerKey:       key,
 			ReviewerIndex:     idx,
 			ThreadID:          thread.ID.String(),
 			PromptArtifactKey: artifactKey,
 			NativeReview:      codeReviewAgentHasBuiltinReviewCommand(agentType),
 			ReadOnly:          true,
-		})
+		}
+		structured := marshalCodeReviewReviewerStructuredResult(reviewerState)
 		result := &models.CodeReviewAgentResult{
 			OrgID:            job.OrgID,
 			SessionID:        job.SessionID,
@@ -724,14 +727,18 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
 			return fmt.Errorf("create code review reviewer result: %w", err)
 		}
-		if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
+		sendResult, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
 			SessionID:     job.SessionID,
 			OrgID:         job.OrgID,
 			ThreadID:      thread.ID,
 			Message:       codeReviewReviewerMessage(agentType, promptText),
 			Commands:      codeReviewNativeReviewCommands(agentType, promptText),
 			MessageSource: models.SessionMessageSourceAgentTool,
-		}); err != nil {
+		})
+		if err == nil && (sendResult == nil || sendResult.Message == nil) {
+			err = errors.New("code review reviewer message send returned no message")
+		}
+		if err != nil {
 			raw := err.Error()
 			if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
 				ReviewerKey:       key,
@@ -753,6 +760,9 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Msg("failed to start code review reviewer thread")
 			continue
 		}
+		reviewerState.RequestMessageID = sendResult.Message.ID
+		reviewerState.ExpectedTurn = sendResult.Message.TurnNumber
+		structured = marshalCodeReviewReviewerStructuredResult(reviewerState)
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusRunning, nil, structured); err != nil {
 			return fmt.Errorf("mark code review reviewer running: %w", err)
 		}
@@ -898,6 +908,22 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			return fmt.Errorf("load code review reviewer thread: %w", err)
 		}
 		state.CostCents = thread.CostCents
+		expectedTurn := state.ExpectedTurn
+		if expectedTurn <= 0 {
+			// Reviewer threads are created solely for the review request, so
+			// historic in-flight results written before expected_turn was added
+			// always target their first turn.
+			expectedTurn = 1
+		}
+		threadFailed := thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled
+		turnPersistenceFailed := strings.EqualFold(strings.TrimSpace(stringPtrValue(thread.FailureCategory)), "turn_persistence_failed")
+		if thread.CurrentTurn < expectedTurn && (!threadFailed || turnPersistenceFailed) {
+			// Assistant messages are written before the session and thread turn
+			// completion records. An idle thread with an assistant message but an
+			// older current_turn is an incomplete/retrying attempt, not a review
+			// result that can be harvested.
+			continue
+		}
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -911,12 +937,11 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				Str("reviewer", result.AgentProvider).
 				Msg("code review reviewer thread produced workspace changes; continuing")
 		}
-		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
+		raw, ok, err := latestAssistantMessageForThreadTurn(ctx, stores, job.OrgID, threadID, expectedTurn, state.RequestMessageID)
 		if err != nil {
 			return err
 		}
-		threadFailed := thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled
-		if threadFailed && !codeReviewFailedReviewerThreadOutputUsable(thread, raw, ok) {
+		if threadFailed {
 			failure := strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
 			if !ok {
 				raw = failure
@@ -938,13 +963,6 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				return fmt.Errorf("mark reviewer failed: %w", err)
 			}
 			continue
-		}
-		if threadFailed {
-			logger.Warn().
-				Str("session_id", job.SessionID.String()).
-				Str("thread_id", thread.ID.String()).
-				Str("reviewer", result.AgentProvider).
-				Msg("using persisted reviewer output from a subsequently failed thread")
 		}
 		if !ok {
 			if readOnlyViolation {
@@ -986,22 +1004,6 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 		}
 	}
 	return nil
-}
-
-func codeReviewFailedReviewerThreadOutputUsable(thread models.SessionThread, raw string, ok bool) bool {
-	if !ok {
-		return false
-	}
-	output := strings.TrimSpace(raw)
-	if output == "" {
-		return false
-	}
-	failure := strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
-	if failure != "" && strings.EqualFold(output, failure) {
-		return false
-	}
-	category := strings.ToLower(strings.TrimSpace(stringPtrValue(thread.FailureCategory)))
-	return category == "turn_persistence_failed"
 }
 
 func codeReviewReviewerResultsByKey(results []models.CodeReviewAgentResult) map[string]models.CodeReviewAgentResult {
@@ -1732,6 +1734,25 @@ func latestAssistantMessageForThread(ctx context.Context, stores *Stores, orgID,
 			continue
 		}
 		content := strings.TrimSpace(messages[i].Content)
+		if content == "" {
+			continue
+		}
+		return content, true, nil
+	}
+	return "", false, nil
+}
+
+func latestAssistantMessageForThreadTurn(ctx context.Context, stores *Stores, orgID, threadID uuid.UUID, turn int, afterMessageID int64) (string, bool, error) {
+	messages, err := stores.SessionMessages.ListByThread(ctx, orgID, threadID)
+	if err != nil {
+		return "", false, fmt.Errorf("list reviewer thread messages: %w", err)
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if message.Role != models.MessageRoleAssistant || message.TurnNumber != turn || message.ID <= afterMessageID {
+			continue
+		}
+		content := strings.TrimSpace(message.Content)
 		if content == "" {
 			continue
 		}

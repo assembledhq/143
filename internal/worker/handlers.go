@@ -10083,10 +10083,7 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Diff:          diffPtr,
 				}
 				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
-					logger.Warn().Err(err).
-						Str("session_id", sessionID.String()).
-						Str("thread_id", threadID.String()).
-						Msg("failed to persist session thread turn result")
+					return fmt.Errorf("persist session thread turn result: %w", err)
 				}
 				if services.ReviewLoops != nil {
 					if err := services.ReviewLoops.OnThreadTurnComplete(ctx, orgID, threadID, lastTurnResult.Summary); err != nil && !errors.Is(err, reviewloopsvc.ErrNoRunningReviewLoop) {
