@@ -3115,6 +3115,7 @@ export type AuditResourceType =
   | "organization"
   | "preview_secret_bundle"
   | "preview_policy"
+  | "code_review_policy"
   | "pr_readiness_policy"
   | "pr_readiness_custom_check"
   | "pr_readiness_bypass"

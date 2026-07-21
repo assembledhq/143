@@ -56,6 +56,8 @@ const actionLabels: Record<string, string> = {
   "integration.connected": "connected integration",
   "credential.updated": "updated credential",
   "credential.deleted": "deleted credential",
+  "code_review_policy.updated": "updated review policy",
+  "code_review_policy.reset": "reset review policy",
   "auth.login": "logged in",
   "auth.logout": "logged out",
   "auth.register": "registered",
