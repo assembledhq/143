@@ -109,6 +109,7 @@ const policy: CodeReviewResolvedPolicy = {
       orchestrator: "claude_code",
       reviewer_models: ["gpt-5.4", "claude-sonnet-4-6"],
       orchestrator_model: "claude-sonnet-4-6",
+      reasoning_effort: "high",
       disagreement_blocks: true,
       require_reviewer_quorum: 2,
       timeout_seconds: 1800,
@@ -228,11 +229,15 @@ const githubTriggerReady: CodeReviewGitHubTriggerResponse = {
   },
 };
 
-function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady, onPolicyUpdate?: (config: CodeReviewPolicyConfig, source?: string) => void) {
+function mockCodeReviewBaseHandlers(
+  trigger: CodeReviewGitHubTriggerResponse = githubTriggerReady,
+  onPolicyUpdate?: (config: CodeReviewPolicyConfig, source?: string) => void,
+  initialConfig: CodeReviewPolicyConfig = policy.config,
+) {
   // Autosave issues whole-config PUTs and refetches on settle, so the GET must
   // reflect the last saved config for optimistic values to stick across the
   // invalidation round-trip.
-  let currentConfig: CodeReviewPolicyConfig = policy.config;
+  let currentConfig: CodeReviewPolicyConfig = initialConfig;
   server.use(
     http.get("/api/v1/repositories", () =>
       HttpResponse.json({
@@ -460,6 +465,7 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("combobox", { name: "Reviewer 1 model" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Reviewer 2 model" })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Orchestrator model" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Reasoning level" })).toHaveTextContent("High");
 
     // Autosave: applying a template persists without a Save button.
     await user.click(screen.getByRole("combobox", { name: /Advanced policy preset/i }));
@@ -679,6 +685,7 @@ describe("CodeReviewsPage", () => {
       "Add reviewer model",
       "Reviewer 1 model",
       "Reviewer 2 model",
+      "Reasoning level",
       "Orchestrator model",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -844,6 +851,78 @@ describe("CodeReviewsPage", () => {
     });
     expect(state.getCurrentConfig().approval_mode).toBe("approve_acceptable");
     expect(screen.getByRole("radio", { name: /^Approve acceptable PRs/i })).toBeChecked();
+  });
+
+  it("saves the code review reasoning level", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+    await user.click(await screen.findByRole("combobox", { name: "Reasoning level" }));
+    await user.click(await screen.findByRole("option", { name: "Extra high" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("xhigh");
+    });
+  });
+
+  it("supports max reasoning for Claude-only rosters and normalizes it when Codex is selected", async () => {
+    const user = userEvent.setup();
+    const claudeOnlyConfig: CodeReviewPolicyConfig = {
+      ...policy.config,
+      agent_roster: {
+        ...policy.config.agent_roster,
+        reviewers: ["claude_code"],
+        reviewer_models: ["claude-sonnet-4-6"],
+        orchestrator: "claude_code",
+        orchestrator_model: "claude-sonnet-4-6",
+        reasoning_effort: "max",
+        require_reviewer_quorum: 1,
+      },
+    };
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, undefined, claudeOnlyConfig);
+    const codexCredential: CodingCredentialSummary = {
+      id: "cred-codex",
+      org_id: "org-1",
+      scope: "org",
+      priority: 1,
+      agent: "codex",
+      auth_type: "api_key",
+      provider: "openai",
+      label: "OpenAI",
+      status: "healthy",
+      is_default: true,
+      created_at: "2026-06-26T12:00:00Z",
+      updated_at: "2026-06-26T12:00:00Z",
+    };
+    server.use(
+      http.get("/api/v1/coding-credentials", ({ request }) => {
+        const scope = new URL(request.url).searchParams.get("scope");
+        return HttpResponse.json({ data: scope === "personal" ? [] : [codexCredential], meta: { scope } });
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("button", { name: "Advanced controls" }));
+    await user.click(screen.getByRole("button", { name: /Reviewers & agents/i }));
+
+    const reasoningSelect = await screen.findByRole("combobox", { name: "Reasoning level" });
+    expect(reasoningSelect).toHaveTextContent("Max");
+    await user.click(reasoningSelect);
+    expect(await screen.findByRole("option", { name: "Max" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+
+    await user.click(screen.getByRole("combobox", { name: "Reviewer 1 model" }));
+    await user.click(await screen.findByRole("option", { name: "gpt-5.4" }));
+
+    await waitFor(() => {
+      expect(state.getCurrentConfig().agent_roster.reviewers).toEqual(["codex"]);
+      expect(state.getCurrentConfig().agent_roster.reasoning_effort).toBe("high");
+    });
   });
 
   it("debounces both prompt composers and autosaves the latest full config without clobbering", async () => {

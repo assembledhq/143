@@ -203,6 +203,7 @@ export interface CodeReviewPolicyConfig {
     orchestrator: string;
     reviewer_models?: string[];
     orchestrator_model?: string;
+    reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;

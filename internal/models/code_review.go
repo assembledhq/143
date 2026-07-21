@@ -395,13 +395,14 @@ func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []strin
 }
 
 type CodeReviewAgentRoster struct {
-	Reviewers             []AgentType `json:"reviewers"`
-	Orchestrator          AgentType   `json:"orchestrator"`
-	ReviewerModels        []string    `json:"reviewer_models,omitempty"`
-	OrchestratorModel     *string     `json:"orchestrator_model,omitempty"`
-	DisagreementBlocks    bool        `json:"disagreement_blocks"`
-	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
-	TimeoutSeconds        int         `json:"timeout_seconds"`
+	Reviewers             []AgentType     `json:"reviewers"`
+	Orchestrator          AgentType       `json:"orchestrator"`
+	ReviewerModels        []string        `json:"reviewer_models,omitempty"`
+	OrchestratorModel     *string         `json:"orchestrator_model,omitempty"`
+	ReasoningEffort       ReasoningEffort `json:"reasoning_effort,omitempty"`
+	DisagreementBlocks    bool            `json:"disagreement_blocks"`
+	RequireReviewerQuorum int             `json:"require_reviewer_quorum"`
+	TimeoutSeconds        int             `json:"timeout_seconds"`
 }
 
 type CodeReviewPolicyConfig struct {
@@ -507,6 +508,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			Orchestrator:          AgentTypeOpenCode,
 			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
 			OrchestratorModel:     strPtr(OpenCodeModelGPT55),
+			ReasoningEffort:       ReasoningEffortHigh,
 			DisagreementBlocks:    true,
 			RequireReviewerQuorum: 2,
 			TimeoutSeconds:        1800,
@@ -574,6 +576,9 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
+		if defaults.AgentRoster.ReasoningEffort == "" {
+			defaults.AgentRoster.ReasoningEffort = ReasoningEffortHigh
+		}
 	}
 	if config.InlineCommentLimit != 0 {
 		defaults.InlineCommentLimit = config.InlineCommentLimit
@@ -649,6 +654,9 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		if !AgentSupportsNativeReview(agentType) {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("agent %q does not support native review", agentType))
 		}
+		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(c.AgentRoster.ReasoningEffort) {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by reviewer %q", c.AgentRoster.ReasoningEffort, agentType))
+		}
 	}
 	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_models must match reviewer count")
@@ -672,6 +680,12 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		if err := ValidateModelForAgentType(c.AgentRoster.Orchestrator, strings.TrimSpace(*c.AgentRoster.OrchestratorModel)); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid orchestrator model: %v", err))
 		}
+	}
+	if err := c.AgentRoster.ReasoningEffort.Validate(); err != nil {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
+	}
+	if c.AgentRoster.Orchestrator.SupportsReasoningEffort() && !c.AgentRoster.Orchestrator.SupportsReasoningEffortLevel(c.AgentRoster.ReasoningEffort) {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by orchestrator %q", c.AgentRoster.ReasoningEffort, c.AgentRoster.Orchestrator))
 	}
 	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "require_reviewer_quorum must be between 1 and reviewer count")
@@ -719,7 +733,7 @@ type CodeReviewPolicyRecord struct {
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
-	return CodeReviewPolicyConfig{
+	config := CodeReviewPolicyConfig{
 		ApprovalMode:            r.ApprovalMode,
 		Enabled:                 r.Enabled,
 		ReviewInstructions:      r.ReviewInstructions,
@@ -729,6 +743,7 @@ func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 		AgentRoster:             r.AgentRoster,
 		InlineCommentLimit:      r.InlineCommentLimit,
 	}
+	return ResolveCodeReviewPolicyConfig(&config)
 }
 
 type CodeReviewResolvedPolicy struct {
