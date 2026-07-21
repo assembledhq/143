@@ -1068,18 +1068,17 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
     <section className={`${hidden ? "hidden" : ""} space-y-2 rounded-md border border-border p-4 ${secondary ? "bg-muted/10" : "bg-card shadow-sm"}`} aria-label={title}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5"><Label htmlFor={`prompt-${title.replaceAll(" ", "-")}`}>{title}</Label><SettingInfoTooltip label={title} description={tooltip} /></div>
-        <AutosaveIndicator status={autosave.status} />
+        <div className="flex flex-wrap items-center justify-end gap-1" role="group" aria-label={`${title} actions`}>
+          <AutosaveIndicator status={autosave.status} />
+          {examples.length > 0 ? <Select value="" disabled={disabled} onValueChange={(key) => { const example = examples.find((candidate) => candidate.key === key); if (example) onChooseExample(example); }}><SelectTrigger size="sm" className="w-auto min-w-0 border-0 bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-accent-foreground" aria-label={`${title} prompt example`}><SelectValue placeholder="Examples" /></SelectTrigger><SelectContent><SelectGroup><SelectLabel>Prompt examples</SelectLabel>{examples.map((example) => <SelectItem key={example.key} value={example.key}>{example.title}</SelectItem>)}</SelectGroup></SelectContent></Select> : null}
+          <DisabledTooltip disabled={disabled} content="Policy settings are still loading.">
+            <Button type="button" variant="ghost" size="sm" className="sm:h-8" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
+          </DisabledTooltip>
+        </div>
       </div>
       <p className="text-xs text-muted-foreground">{description}</p>
       <Textarea ref={textareaRef} id={`prompt-${title.replaceAll(" ", "-")}`} value={field.value} disabled={disabled} rows={secondary ? 6 : 10} onChange={(event) => field.onChange(event.target.value)} onBlur={field.onBlur} aria-invalid={invalid || focusOnError} aria-describedby={`prompt-count-${title.replaceAll(" ", "-")}`} />
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <span id={`prompt-count-${title.replaceAll(" ", "-")}`} className={`text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>{count} / {CODE_REVIEW_PROMPT_MAX_LENGTH}</span>
-        <div className="flex flex-wrap gap-1">
-          {examples.length > 0 ? <span className="mr-1 inline-flex items-center gap-1 text-xs text-muted-foreground">Prompt examples <SettingInfoTooltip label={`${title} prompt examples`} description="Previews editable starter text for this prompt only. Applying an example creates a normal policy version and never changes safeguards, agents, enablement, or outcome." /></span> : null}
-          {examples.length > 0 ? <Select value="" disabled={disabled} onValueChange={(key) => { const example = examples.find((candidate) => candidate.key === key); if (example) onChooseExample(example); }}><SelectTrigger className="h-8 w-full sm:w-56" aria-label={`${title} prompt example`}><SelectValue placeholder="Choose example" /></SelectTrigger><SelectContent>{examples.map((example) => <SelectItem key={example.key} value={example.key}>{example.title}</SelectItem>)}</SelectContent></Select> : null}
-          <Button type="button" variant="ghost" size="sm" disabled={disabled} onClick={() => { field.replace(resetValue); onReset(); }}>{resetLabel}</Button>
-        </div>
-      </div>
+      <span id={`prompt-count-${title.replaceAll(" ", "-")}`} className={`block text-xs ${invalid ? "text-destructive" : "text-muted-foreground"}`}>{count} / {CODE_REVIEW_PROMPT_MAX_LENGTH}</span>
       {invalid ? <p className="text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
     </section>
   );

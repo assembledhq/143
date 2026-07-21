@@ -946,6 +946,28 @@ describe("CodeReviewsPage", () => {
     await waitFor(() => expect(updates.at(-1)?.automated_approval_policy).toContain("Automatically approve routine, well-tested changes"));
   });
 
+  it("places compact example and reset actions together above each prompt editor", async () => {
+    const user = userEvent.setup();
+    mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+
+    const composers = ["Automated approval policy", "Additional review instructions (optional)"];
+    for (const title of composers) {
+      const composer = screen.getByRole("region", { name: title });
+      const actions = within(composer).getByRole("group", { name: `${title} actions` });
+      const examples = within(actions).getByRole("combobox", { name: `${title} prompt example` });
+      const reset = within(actions).getByRole("button");
+      const editor = within(composer).getByRole("textbox");
+
+      expect(examples).toHaveTextContent("Examples");
+      expect(examples).toHaveClass("border-0", "bg-transparent");
+      expect(reset).toHaveClass("sm:h-8");
+      expect(actions.compareDocumentPosition(editor) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
   it("preserves prompt composer order at a mobile viewport", async () => {
     const user = userEvent.setup();
     const originalWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
