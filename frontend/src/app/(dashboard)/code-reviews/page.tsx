@@ -827,7 +827,6 @@ export default function CodeReviewsPage() {
                   <CardTitle>Review policy</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
-                <OrganizationPolicyNotice />
               </CardHeader>
               <CardContent className="space-y-5">
                 {!canManagePolicy ? <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</div> : null}
@@ -999,10 +998,6 @@ function PolicyPromptComposers({
         onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
         focusOnError={invalidPolicyField === "automated_approval_policy"}
       />
-      <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
-        <div className="font-medium text-foreground">Hard safeguards</div>
-        <p className="mt-1 text-muted-foreground">Passing checks, sensitive paths, size limits, quorum, and disagreement rules remain deterministic and can veto approval.</p>
-      </div>
       <CodeReviewInstructionsComposer
         value={config?.review_instructions ?? ""}
         disabled={!config}
@@ -1073,18 +1068,6 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
       </div>
       {invalid ? <p className="text-xs text-destructive">{count > CODE_REVIEW_PROMPT_MAX_LENGTH ? "Prompt is too long." : "An automated approval policy is required while approval is enabled."}</p> : null}
     </section>
-  );
-}
-
-function OrganizationPolicyNotice() {
-  return (
-    <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
-      <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-      <div>
-        <div className="font-medium text-foreground">One policy for every repository</div>
-        <p className="mt-1 text-xs text-muted-foreground">Changes apply to new code reviews across the organization. Repository-specific overrides are not available.</p>
-      </div>
-    </div>
   );
 }
 
@@ -1409,7 +1392,7 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
     <Collapsible open={open || forceOpen} onOpenChange={(next) => { setOpen(next); if (next) onOpened(); }} className="rounded-md border border-border">
       <div className="flex items-center gap-1 border-border pr-3">
         <CollapsibleTrigger asChild>
-          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between rounded-md p-4 text-left" aria-label="Advanced controls">
+          <Button variant="ghost" className="group h-auto min-w-0 flex-1 justify-between rounded-md p-4 text-left sm:h-auto" aria-label="Advanced controls">
             <span className="min-w-0">
               <span className="block text-sm font-medium text-foreground">Advanced controls</span>
               <span className="mt-0.5 block text-xs font-normal text-muted-foreground">Safety gates, paths, agents, limits, and structured checks</span>
@@ -1421,7 +1404,7 @@ function AdvancedPolicyControls({ children, forceOpen, onOpened }: { children: R
           label="Advanced controls"
           description="Contains deterministic approval safeguards, reviewer configuration, limits, structured PR-description checks, and whole-policy presets. Defaults remain enforced while this section is closed."
         />
-    </div>
+      </div>
       <CollapsibleContent className="space-y-4 border-t border-border p-4">{children}</CollapsibleContent>
     </Collapsible>
   );

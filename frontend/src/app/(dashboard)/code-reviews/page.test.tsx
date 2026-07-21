@@ -389,9 +389,7 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
-    // The organization policy, current behavior, outcome, and selected repository trigger are visible without expanding anything.
-    expect(await screen.findByText("One policy for every repository")).toBeInTheDocument();
-    expect(screen.getByText(/Repository-specific overrides are not available/i)).toBeInTheDocument();
+    // The current behavior, outcome, and selected repository trigger are visible without expanding anything.
     expect(screen.getByText("Current behavior")).toBeInTheDocument();
     expect(screen.getByText("Comments only")).toBeInTheDocument();
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
@@ -518,7 +516,6 @@ describe("CodeReviewsPage", () => {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }
 
-    const policyNotice = screen.getByText("One policy for every repository");
     const enablement = screen.getByRole("switch", {
       name: "Code reviews enabled",
     });
@@ -528,7 +525,7 @@ describe("CodeReviewsPage", () => {
     const advancedTrigger = screen.getByRole("button", {
       name: "Advanced controls",
     });
-    expect(policyNotice.compareDocumentPosition(enablement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(advancedTrigger).toHaveClass("h-auto", "p-4", "sm:h-auto");
     expect(enablement.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(githubHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -861,10 +858,9 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
 
     const approval = screen.getByRole("region", { name: "Automated approval policy" });
-    const safeguards = screen.getByText("Hard safeguards").parentElement;
     const instructions = screen.getByRole("region", { name: "Additional review instructions (optional)" });
-    expect(approval.compareDocumentPosition(safeguards as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect((safeguards as Node).compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText("Hard safeguards")).not.toBeInTheDocument();
+    expect(approval.compareDocumentPosition(instructions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
   });
 
