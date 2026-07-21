@@ -104,7 +104,9 @@ Require human review when:
 - the change affects authentication, billing, permissions, infrastructure, or production data
 - the change introduces a new architectural pattern or crosses unclear ownership boundaries
 - reviewers disagree or the risk cannot be evaluated confidently
-- the intended behavior cannot be determined from the pull request and repository context`;
+- the intended behavior cannot be determined from the pull request and repository context
+
+Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
