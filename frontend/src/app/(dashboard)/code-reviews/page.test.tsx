@@ -273,8 +273,14 @@ function mockCodeReviewBaseHandlers(trigger: CodeReviewGitHubTriggerResponse = g
     ),
     http.put("/api/v1/code-review-policies", async ({ request }) => {
       const body = (await request.json()) as { config: CodeReviewPolicyConfig; source?: string };
-      currentConfig = body.config;
-      onPolicyUpdate?.(body.config, body.source);
+      // Match SavePolicy's canonicalization so invalidation returns the exact
+      // prompt value the production backend persists.
+      currentConfig = {
+        ...body.config,
+        review_instructions: body.config.review_instructions.trim(),
+        automated_approval_policy: body.config.automated_approval_policy.trim(),
+      };
+      onPolicyUpdate?.(currentConfig, body.source);
       return HttpResponse.json({
         data: {
           ...currentConfig,
@@ -789,6 +795,25 @@ describe("CodeReviewsPage", () => {
     expect(screen.getByRole("region", { name: "Automated approval policy" })).toHaveClass("hidden");
     await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
     expect(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox")).toHaveValue("Approve only routine changes with proportionate tests.");
+  });
+
+  it("keeps a word-separating space in the approval policy while an autosave is canonicalized", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: /Policy/i }));
+    await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
+    await waitFor(() => expect(state.getCurrentConfig().approval_mode).toBe("approve_acceptable"));
+
+    const approvalPolicy = within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("textbox");
+    await user.clear(approvalPolicy);
+    await user.type(approvalPolicy, "Approve routine ");
+    await waitFor(() => expect(state.getCurrentConfig().automated_approval_policy).toBe("Approve routine"));
+    expect(approvalPolicy).toHaveValue("Approve routine ");
+
+    await user.type(approvalPolicy, "changes");
+    expect(approvalPolicy).toHaveValue("Approve routine changes");
+    await waitFor(() => expect(state.getCurrentConfig().automated_approval_policy).toBe("Approve routine changes"));
   });
 
   it("keeps invalid rune-count text visible without sending it", async () => {

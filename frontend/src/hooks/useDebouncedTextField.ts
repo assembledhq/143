@@ -22,6 +22,14 @@ export interface UseDebouncedTextFieldOptions {
    */
   rejectValue?: (value: string) => boolean;
   preserveLocalOnServerChange?: boolean;
+  /**
+   * Optional semantic equality check for fields whose server canonicalizes
+   * submitted text. For example, a prompt editor can treat `"policy "` and
+   * `"policy"` as equal when the backend trims surrounding whitespace. This
+   * prevents the canonical response from rewriting the active textarea while
+   * still allowing genuinely different server values to resync it.
+   */
+  valuesEqual?: (left: string, right: string) => boolean;
 }
 
 export interface UseDebouncedTextFieldResult {
@@ -59,6 +67,7 @@ export function useDebouncedTextField({
   debounceMs = 400,
   rejectValue,
   preserveLocalOnServerChange = false,
+  valuesEqual = Object.is,
 }: UseDebouncedTextFieldOptions): UseDebouncedTextFieldResult {
   const [trackedServer, setTrackedServer] = useState(serverValue);
   const [local, setLocal] = useState(serverValue);
@@ -73,9 +82,11 @@ export function useDebouncedTextField({
   // react-hooks/refs.
   const onCommitRef = useRef(onCommit);
   const rejectValueRef = useRef(rejectValue);
+  const valuesEqualRef = useRef(valuesEqual);
   useEffect(() => {
     onCommitRef.current = onCommit;
     rejectValueRef.current = rejectValue;
+    valuesEqualRef.current = valuesEqual;
   });
 
   // Resync when the server value changes for reasons other than our own
@@ -89,8 +100,8 @@ export function useDebouncedTextField({
   //      rather than a ref keeps render-body lint rules happy.
   if (serverValue !== trackedServer) {
     setTrackedServer(serverValue);
-    const hasPendingEdit = local !== lastSent;
-    if (serverValue !== lastSent && !hasPendingEdit && !preserveLocalOnServerChange) {
+    const hasPendingEdit = !valuesEqual(local, lastSent);
+    if (!valuesEqual(serverValue, lastSent) && !hasPendingEdit && !preserveLocalOnServerChange) {
       setLocal(serverValue);
       setLastSent(serverValue);
     }
@@ -103,7 +114,7 @@ export function useDebouncedTextField({
   }, []);
 
   const commit = (value: string) => {
-    if (value === lastSent) return;
+    if (valuesEqualRef.current(value, lastSent)) return;
     // A rejected value is never sent and never recorded as `lastSent`, so it
     // can't poison the resync baseline or be mistaken for a saved value.
     if (rejectValueRef.current?.(value)) return;
@@ -143,5 +154,5 @@ export function useDebouncedTextField({
     setLastSent(next);
   };
 
-  return { value: local, onChange, onBlur, replace, flush: onBlur, dirty: local !== lastSent };
+  return { value: local, onChange, onBlur, replace, flush: onBlur, dirty: !valuesEqual(local, lastSent) };
 }
