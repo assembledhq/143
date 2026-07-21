@@ -93,6 +93,7 @@ const NO_TEMPLATE = "none";
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const MAX_REVIEWER_MODELS = 3;
 const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
+const codeReviewPromptValuesEqual = (left: string, right: string) => left.trim() === right.trim();
 const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
 - the intent is clear and the change has a small, understandable scope
 - there are no blocking findings
@@ -990,7 +991,7 @@ function PolicyPromptComposers({
         disabled={!config}
         hidden={config?.approval_mode !== "approve_acceptable"}
         autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
         resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
         onReset={() => { const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
         resetLabel="Reset to default"
@@ -1007,7 +1008,7 @@ function PolicyPromptComposers({
         value={config?.review_instructions ?? ""}
         disabled={!config}
         autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value; }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
         resetValue=""
         onReset={() => { const resetValue = ""; commitPolicy((next) => { next.review_instructions = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
         resetLabel="Clear instructions"
@@ -1044,12 +1045,17 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   onDraftHandle: (handle: PromptDraftHandle) => void;
   focusOnError: boolean;
 }) {
-  // Gate and count on the trimmed value: that is exactly what onCommit persists
-  // (`value.trim()`) and what the backend validates, so basing the length check
-  // on the raw value would reject content that fits the limit once trailing
-  // whitespace (e.g. a pasted trailing newline) is stripped.
+  // Gate and count on the trimmed value: that is exactly what the backend
+  // persists and validates, so basing the length check on the raw value would
+  // reject content that fits the limit once trailing whitespace (e.g. a pasted
+  // trailing newline) is stripped.
   const invalidValue = (next: string) => [...next.trim()].length > CODE_REVIEW_PROMPT_MAX_LENGTH || Boolean(required && !next.trim());
-  const field = useDebouncedTextField({ serverValue: value, onCommit: (next) => { if (!invalidValue(next)) onCommit(next); }, preserveLocalOnServerChange: autosave.status === "error" });
+  const field = useDebouncedTextField({
+    serverValue: value,
+    onCommit: (next) => { if (!invalidValue(next)) onCommit(next); },
+    preserveLocalOnServerChange: autosave.status === "error",
+    valuesEqual: codeReviewPromptValuesEqual,
+  });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => { onDraftHandle({ value: field.value, dirty: field.dirty, flush: field.flush, replace: field.replace }); }, [field.value, field.dirty, field.flush, field.replace, onDraftHandle]);
   useEffect(() => { if (focusOnError) textareaRef.current?.focus(); }, [focusOnError]);
