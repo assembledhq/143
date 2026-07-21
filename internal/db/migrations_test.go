@@ -819,3 +819,19 @@ func TestAgentCapabilitiesRepairMigrationIsIdempotentAndExpandOnly(t *testing.T)
 	require.NotContains(t, downSQL, "DROP COLUMN",
 		"repair down migration must not drop columns owned by 000199 on databases where 000199 did run")
 }
+
+func TestSingleCodeReviewPolicyMigrationPreservesHistoryAndPreventsActiveOverrides(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile("../../migrations/000253_single_code_review_policy.up.sql")
+	require.NoError(t, err, "test should read the single code review policy migration")
+
+	sql := string(body)
+	deactivateOverrides := strings.Index(sql, "UPDATE code_review_policies")
+	addConstraint := strings.Index(sql, "ADD CONSTRAINT chk_code_review_policies_active_org_scope")
+	require.NotEqual(t, -1, deactivateOverrides, "migration should deactivate existing repository-scoped policies")
+	require.NotEqual(t, -1, addConstraint, "migration should prevent new active repository-scoped policies")
+	require.Less(t, deactivateOverrides, addConstraint, "migration should deactivate overrides before enforcing organization-only scope")
+	require.Contains(t, sql, "active = false OR repository_id IS NULL", "constraint should allow historical repository policy rows while requiring active policies to be organization scoped")
+	require.NotContains(t, strings.ToUpper(sql), "DELETE FROM CODE_REVIEW_POLICIES", "migration should preserve policy versions referenced by historical reviews")
+}

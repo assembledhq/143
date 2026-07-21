@@ -208,10 +208,6 @@ export interface CodeReviewPolicyConfig {
     timeout_seconds: number;
   };
   inline_comment_limit: number;
-  inheritance?: {
-    inherit_org_defaults: boolean;
-    override_fields?: string[];
-  };
 }
 
 export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
@@ -228,7 +224,6 @@ export interface CodeReviewResolvedPolicy {
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
-  inherited_policy?: CodeReviewPolicyRecord;
 }
 
 export type CodeReviewGitHubTriggerStatus =

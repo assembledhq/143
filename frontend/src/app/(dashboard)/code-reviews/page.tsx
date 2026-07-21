@@ -37,7 +37,6 @@ import { Switch } from "@/components/ui/switch";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -77,11 +76,11 @@ import type {
   CodeReviewSessionStatus,
   ListResponse,
   OrgSettings,
-  Repository,
   SingleResponse,
 } from "@/lib/types";
 
 const ALL_REPOSITORIES = "all";
+const NO_REPOSITORY = "none";
 const ALL_OUTCOMES = "all";
 const ALL_RISKS = "all";
 const ALL_STATUSES = "all";
@@ -340,7 +339,7 @@ export default function CodeReviewsPage() {
   const { user } = useAuth();
   const canManagePolicy = user?.role === "admin";
   const [repositoryFilter, setRepositoryFilter] = useState(ALL_REPOSITORIES);
-  const [policyScope, setPolicyScope] = useState(ALL_REPOSITORIES);
+  const [githubRepositoryId, setGitHubRepositoryId] = useState(NO_REPOSITORY);
   const [outcomeFilter, setOutcomeParam] = useQueryState(
     "outcome",
     parseAsStringLiteral(OUTCOME_FILTER_VALUES).withDefault(ALL_OUTCOMES),
@@ -355,12 +354,8 @@ export default function CodeReviewsPage() {
   const [editingRequirementKey, setEditingRequirementKey] = useState<string | null>(null);
   const [promptExample, setPromptExample] = useState<{ field: "review_instructions" | "automated_approval_policy"; example: CodeReviewPromptExampleOption | CodeReviewAutomatedApprovalExampleOption } | null>(null);
   const [invalidPolicyField, setInvalidPolicyField] = useState<string | null>(null);
-  const [policySaveFailed, setPolicySaveFailed] = useState(false);
-  const [promptDraftDirty, setPromptDraftDirty] = useState({ review_instructions: false, automated_approval_policy: false });
-  const [pendingScope, setPendingScope] = useState<string | null>(null);
   const promptDraftsRef = useRef<Partial<Record<"review_instructions" | "automated_approval_policy", PromptDraftHandle>>>({});
   const saveSourceByConfigRef = useRef(new WeakMap<CodeReviewPolicyConfig, CodeReviewPolicyEditSource>());
-  const saveScopeByConfigRef = useRef(new WeakMap<CodeReviewPolicyConfig, string>());
   const persistedPromptsRef = useRef({ scope: "", review_instructions: "", automated_approval_policy: DEFAULT_AUTOMATED_APPROVAL_POLICY });
   const setOutcomeFilter = useCallback(
     (value: string) => {
@@ -370,7 +365,6 @@ export default function CodeReviewsPage() {
   );
   const registerPromptDraft = useCallback((field: "review_instructions" | "automated_approval_policy", handle: PromptDraftHandle) => {
     promptDraftsRef.current[field] = handle;
-    setPromptDraftDirty((current) => current[field] === handle.dirty ? current : { ...current, [field]: handle.dirty });
   }, []);
   const reviewRepositoryId = repositoryFilter === ALL_REPOSITORIES ? undefined : repositoryFilter;
   const reviewFilters = useMemo(
@@ -388,7 +382,7 @@ export default function CodeReviewsPage() {
     }),
     [outcomeFilter, reviewRepositoryId, riskFilter, search, statusFilter],
   );
-  const repositoryId = policyScope === ALL_REPOSITORIES ? undefined : policyScope;
+  const githubRepositorySelected = githubRepositoryId !== NO_REPOSITORY;
 
   const repositoriesQuery = useQuery({
     queryKey: queryKeys.repositories.all,
@@ -437,8 +431,8 @@ export default function CodeReviewsPage() {
     refetchInterval: codeReviewStreamHealthy ? pollMs(30_000) : pollMs(5_000),
   });
   const policyQuery = useQuery({
-    queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
-    queryFn: () => api.codeReviews.getPolicy(repositoryId ?? null),
+    queryKey: queryKeys.codeReviews.policy,
+    queryFn: () => api.codeReviews.getPolicy(),
   });
   const settingsQuery = useQuery({
     queryKey: queryKeys.settings.all,
@@ -457,9 +451,9 @@ export default function CodeReviewsPage() {
     queryFn: () => api.codexAuth.status(),
   });
   const githubTriggerQuery = useQuery({
-    queryKey: queryKeys.codeReviews.githubTrigger(repositoryId ?? null),
-    queryFn: () => api.codeReviews.getGitHubTrigger(repositoryId as string),
-    enabled: Boolean(repositoryId),
+    queryKey: queryKeys.codeReviews.githubTrigger(githubRepositorySelected ? githubRepositoryId : null),
+    queryFn: () => api.codeReviews.getGitHubTrigger(githubRepositoryId),
+    enabled: githubRepositorySelected,
   });
   const templatesQuery = useQuery({
     queryKey: queryKeys.codeReviews.templates,
@@ -480,74 +474,58 @@ export default function CodeReviewsPage() {
   // config built from the freshest cache value (per settings/AGENTS.md), so
   // back-to-back edits never clobber one another.
   const config = policyQuery.data?.data.config ?? null;
-  const currentScopeKey = repositoryId ?? "organization";
-  if (config && persistedPromptsRef.current.scope !== currentScopeKey) {
-    persistedPromptsRef.current = { scope: currentScopeKey, review_instructions: config.review_instructions, automated_approval_policy: config.automated_approval_policy };
+  if (config && persistedPromptsRef.current.scope !== "organization") {
+    persistedPromptsRef.current = { scope: "organization", review_instructions: config.review_instructions, automated_approval_policy: config.automated_approval_policy };
   }
   const viewedScopeRef = useRef<string | null>(null);
   useEffect(() => {
     if (!config) return;
-    const scope = repositoryId ? "repository" : "organization";
-    const scopeKey = repositoryId ?? "organization";
-    if (viewedScopeRef.current === scopeKey) return;
-    viewedScopeRef.current = scopeKey;
-    trackCodeReviewPolicyEvent({ event: "code_review_policy_viewed", scope, configured: policyQuery.data?.data.source !== "default" });
-  }, [config, repositoryId, policyQuery.data?.data.source]);
+    if (viewedScopeRef.current === "organization") return;
+    viewedScopeRef.current = "organization";
+    trackCodeReviewPolicyEvent({ event: "code_review_policy_viewed", scope: "organization", configured: policyQuery.data?.data.source !== "default" });
+  }, [config, policyQuery.data?.data.source]);
   const coalescePolicy = useCallback((queued: CodeReviewPolicyConfig, incoming: CodeReviewPolicyConfig) => {
     const merged = coalesceCodeReviewPolicy(queued, incoming);
     saveSourceByConfigRef.current.set(merged, saveSourceByConfigRef.current.get(incoming) ?? "manual");
-    saveScopeByConfigRef.current.set(merged, saveScopeByConfigRef.current.get(incoming) ?? currentScopeKey);
     return merged;
-  }, [currentScopeKey]);
+  }, []);
   const autosave = useAutosave<CodeReviewPolicyConfig>({
-    queryKey: queryKeys.codeReviews.policy(repositoryId ?? null),
+    queryKey: queryKeys.codeReviews.policy,
     mutationFn: async (next: CodeReviewPolicyConfig) => {
       try {
         return await api.codeReviews.updatePolicy({
-          repository_id: repositoryId ?? null,
           config: next,
           source: saveSourceByConfigRef.current.get(next) ?? "manual",
         });
       } finally {
-        // Editing the org default cascades into repo-scoped resolved policies
-        // cached under other keys, so invalidate the whole code-reviews
-        // namespace (matches the prior manual save).
+        // Refetch the single resolved policy so the optimistic config is
+        // reconciled with the newly persisted version.
         void queryClient.invalidateQueries({
-          queryKey: queryKeys.codeReviews.all,
+          queryKey: queryKeys.codeReviews.policy,
         });
       }
     },
     applyOptimistic: applyCodeReviewPolicyOptimistic,
     coalesce: coalescePolicy,
     debounceMs: 0,
-    onError: (error, saved) => {
-      // Ignore failures that belong to a scope the user has already left (e.g.
-      // the save was in flight when they discarded and switched); otherwise the
-      // error banner and invalid-field focus would misattribute to the new scope.
-      const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey;
-      if (savedScope !== currentScopeKey) return;
-      setPolicySaveFailed(true);
+    onError: (error) => {
       if (error instanceof ApiError && error.details && typeof error.details === "object" && "field" in error.details) {
         setInvalidPolicyField(String((error.details as { field: unknown }).field));
       }
     },
     onSuccess: (saved) => {
-      const savedScope = saveScopeByConfigRef.current.get(saved) ?? currentScopeKey;
-      if (persistedPromptsRef.current.scope === savedScope) {
+      if (persistedPromptsRef.current.scope === "organization") {
         persistedPromptsRef.current = {
-          scope: savedScope,
+          scope: "organization",
           review_instructions: saved.review_instructions,
           automated_approval_policy: saved.automated_approval_policy,
         };
       }
-      if (savedScope === currentScopeKey) {
-        setPolicySaveFailed(false);
-        setInvalidPolicyField(null);
-      }
+      setInvalidPolicyField(null);
     },
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
-    queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy(repositoryId ?? null))?.data?.config ?? config;
+    queryClient.getQueryData<SingleResponse<CodeReviewResolvedPolicy>>(queryKeys.codeReviews.policy)?.data?.config ?? config;
   const setupGitHubTrigger = useMutation({
     mutationFn: (targetRepositoryId: string) => api.codeReviews.setupGitHubTrigger(targetRepositoryId),
     onSuccess: (_data, targetRepositoryId) => {
@@ -566,21 +544,12 @@ export default function CodeReviewsPage() {
       });
     },
   });
-  const resetPolicy = useMutation({
-    mutationFn: (targetRepositoryId: string) => api.codeReviews.resetPolicy(targetRepositoryId),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.codeReviews.all });
-      toast.success("Repository policy reset to organization defaults");
-    },
-  });
-
   const reviews = useMemo(() => reviewsQuery.data?.data ?? [], [reviewsQuery.data?.data]);
   const selectedEvidenceReview = useMemo(
     () => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null,
     [reviews, selectedEvidenceSessionId],
   );
   const repositories = repositoriesQuery.data?.data ?? [];
-  const selectedRepository = repositories.find((repo) => repo.id === repositoryId);
   const templates = templatesQuery.data?.data ?? [];
   const selectedTemplate = templates.find((template) => template.key === selectedTemplateKey);
   const orgSettings = (settingsQuery.data?.data?.settings ?? {}) as OrgSettings;
@@ -608,7 +577,7 @@ export default function CodeReviewsPage() {
   }, [config, selectedTemplate]);
   useEffect(() => {
     setPendingTemplateApply(null);
-  }, [selectedTemplateKey, repositoryId]);
+  }, [selectedTemplateKey]);
   useEffect(() => {
     if (!pendingTemplateApply) return;
     if (autosave.status === "saved") {
@@ -630,23 +599,7 @@ export default function CodeReviewsPage() {
   // Instant commit for toggles/selects/buttons.
   const commitPolicy = (mutate: (next: CodeReviewPolicyConfig) => void, source: CodeReviewPolicyEditSource = "manual") => {
     const next = draftFrom(mutate);
-    if (next) { saveSourceByConfigRef.current.set(next, source); saveScopeByConfigRef.current.set(next, currentScopeKey); setInvalidPolicyField(null); autosave.save(next); }
-  };
-  const hasUnsafePromptDraft = promptDraftDirty.review_instructions || promptDraftDirty.automated_approval_policy || policySaveFailed || autosave.status === "saving";
-  // Switching scope discards any per-scope error state: a save failure or
-  // invalid-field marker belongs to the scope it happened on and must not leak
-  // onto the newly loaded scope (which would spuriously disable reset and
-  // re-trigger the discard dialog on every subsequent switch).
-  const applyScopeChange = (value: string) => {
-    setPolicyScope(value);
-    setInvalidPolicyField(null);
-    setPolicySaveFailed(false);
-    resetPolicy.reset();
-  };
-  const requestScopeChange = (value: string) => {
-    if (value === policyScope) return;
-    if (hasUnsafePromptDraft) { setPendingScope(value); return; }
-    applyScopeChange(value);
+    if (next) { saveSourceByConfigRef.current.set(next, source); setInvalidPolicyField(null); autosave.save(next); }
   };
   // toPatch builder for numeric fields, which require a non-null payload. Safe
   // because numeric inputs are disabled until the policy has loaded.
@@ -872,18 +825,7 @@ export default function CodeReviewsPage() {
                   <CardTitle>Review policy</CardTitle>
                   <AutosaveIndicator status={autosave.status} />
                 </div>
-                <PolicyScopeBar
-                  value={policyScope}
-                  onValueChange={requestScopeChange}
-                  repositories={repositories}
-                  repositoryName={selectedRepository?.full_name}
-                  repositorySelected={Boolean(repositoryId)}
-                  source={policyQuery.data?.data.source}
-                  customizedCount={policyQuery.data?.data.policy?.inheritance?.override_fields?.length ?? 0}
-                  onReset={canManagePolicy && repositoryId && policyQuery.data?.data.source === "repository" ? () => resetPolicy.mutate(repositoryId) : undefined}
-                  resetPending={resetPolicy.isPending || autosave.status === "saving" || hasUnsafePromptDraft}
-                  resetError={apiErrorMessage(resetPolicy.error) ?? undefined}
-                />
+                <OrganizationPolicyNotice />
               </CardHeader>
               <CardContent className="space-y-5">
                 {!canManagePolicy ? <div className="rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">You have view-only access to this policy. An organization administrator can change review behavior and GitHub setup.</div> : null}
@@ -899,57 +841,73 @@ export default function CodeReviewsPage() {
                         next.approval_mode = (outcome === "approve" ? "approve_acceptable" : "comment_only") as CodeReviewApprovalMode;
                       }
                     });
-                    if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: repositoryId ? "repository" : "organization", configured: outcome !== "disabled" });
-                    if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: repositoryId ? "repository" : "organization", configured: true });
+                    if ((prior === "disabled") !== (outcome === "disabled")) trackCodeReviewPolicyEvent({ event: "code_review_policy_enabled", scope: "organization", configured: outcome !== "disabled" });
+                    if (outcome !== "disabled" && outcome !== prior) trackCodeReviewPolicyEvent({ event: "code_review_approval_mode_changed", scope: "organization", configured: true });
                   }}
                     />
 
                 <PolicyPromptComposers
                   config={config}
-                  inheritedConfig={policyQuery.data?.data.inherited_policy}
                   autosave={autosave}
                   commitPolicy={commitPolicy}
-                  repositorySelected={Boolean(repositoryId)}
                   examples={promptExamplesQuery.data?.data}
                   examplesError={apiErrorMessage(promptExamplesQuery.error) ?? undefined}
                   onRetryExamples={() => void promptExamplesQuery.refetch()}
-                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: repositoryId ? "repository" : "organization", example_key: example.key, configured: true }); }}
+                  onChooseExample={(field, example) => { setPromptExample({ field, example }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_previewed", scope: "organization", example_key: example.key, configured: true }); }}
                   onDraftHandle={registerPromptDraft}
                   invalidPolicyField={invalidPolicyField}
                 />
+                </fieldset>
 
-                <GitHubTriggerPanel
-                  repositorySelected={Boolean(repositoryId)}
-                  trigger={githubTriggerQuery.data?.data}
-                  isLoading={githubTriggerQuery.isLoading || githubTriggerQuery.isFetching}
-                  errorMessage={apiErrorMessage(githubTriggerQuery.error)}
-                  setupErrorMessage={apiErrorMessage(setupGitHubTrigger.error)}
-                  setupPending={setupGitHubTrigger.isPending}
-                  deletePending={deleteGitHubTrigger.isPending}
-                  onSetup={() => repositoryId && setupGitHubTrigger.mutate(repositoryId)}
-                  onDelete={() => repositoryId && deleteGitHubTrigger.mutate(repositoryId)}
-                    />
+                <div className="space-y-2">
+                  <div className="w-full sm:max-w-sm">
+                    <FilterSelect
+                      label="GitHub reviewer repository"
+                      value={githubRepositoryId}
+                      onValueChange={setGitHubRepositoryId}
+                      info="Choose a repository to configure its GitHub reviewer entry point. The review policy above remains the same for every repository."
+                    >
+                      <SelectItem value={NO_REPOSITORY}>Select a repository</SelectItem>
+                      {repositories.map((repository) => (
+                        <SelectItem key={repository.id} value={repository.id}>{repository.full_name}</SelectItem>
+                      ))}
+                    </FilterSelect>
+                  </div>
+                  <GitHubTriggerPanel
+                    repositorySelected={githubRepositorySelected}
+                    trigger={githubTriggerQuery.data?.data}
+                    isLoading={githubTriggerQuery.isLoading || githubTriggerQuery.isFetching}
+                    errorMessage={apiErrorMessage(githubTriggerQuery.error)}
+                    setupErrorMessage={apiErrorMessage(setupGitHubTrigger.error)}
+                    setupPending={setupGitHubTrigger.isPending}
+                    deletePending={deleteGitHubTrigger.isPending}
+                    canManage={canManagePolicy}
+                    onSetup={() => githubRepositorySelected && setupGitHubTrigger.mutate(githubRepositoryId)}
+                    onDelete={() => githubRepositorySelected && deleteGitHubTrigger.mutate(githubRepositoryId)}
+                  />
+                </div>
 
-                <PolicySummary config={config} repositorySelected={Boolean(repositoryId)} githubTriggerStatus={githubTriggerQuery.data?.data?.status} />
+                <PolicySummary config={config} repositorySelected={githubRepositorySelected} githubTriggerStatus={githubTriggerQuery.data?.data?.status} />
 
-                <AdvancedPolicySettings
-                  selectedTemplateKey={selectedTemplateKey}
-                  setSelectedTemplateKey={setSelectedTemplateKey}
-                  templates={templates}
-                  selectedTemplate={selectedTemplate}
-                  selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
-                  config={config}
-                  readLatestConfig={readLatestConfig}
-                  setPendingTemplateApply={setPendingTemplateApply}
-                  autosave={autosave}
-                  buildConfig={buildConfig}
-                  commitPolicy={commitPolicy}
-                  codeReviewModelGroups={codeReviewModelGroups}
-                  codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
-                  setEditingRequirementKey={setEditingRequirementKey}
-                  invalidPolicyField={invalidPolicyField}
-                  analyticsScope={repositoryId ? "repository" : "organization"}
-                />
+                <fieldset disabled={!canManagePolicy}>
+                  <AdvancedPolicySettings
+                    selectedTemplateKey={selectedTemplateKey}
+                    setSelectedTemplateKey={setSelectedTemplateKey}
+                    templates={templates}
+                    selectedTemplate={selectedTemplate}
+                    selectedTemplateAlreadyApplied={selectedTemplateAlreadyApplied}
+                    config={config}
+                    readLatestConfig={readLatestConfig}
+                    setPendingTemplateApply={setPendingTemplateApply}
+                    autosave={autosave}
+                    buildConfig={buildConfig}
+                    commitPolicy={commitPolicy}
+                    codeReviewModelGroups={codeReviewModelGroups}
+                    codeReviewOpenCodeAvailability={codeReviewOpenCodeAvailability}
+                    setEditingRequirementKey={setEditingRequirementKey}
+                    invalidPolicyField={invalidPolicyField}
+                    analyticsScope="organization"
+                  />
                 </fieldset>
               </CardContent>
             </Card>
@@ -964,13 +922,10 @@ export default function CodeReviewsPage() {
                 const value = "instructions" in promptExample.example ? promptExample.example.instructions : promptExample.example.policy;
                 promptDraftsRef.current[promptExample.field]?.replace(value);
                 commitPolicy((next) => { next[promptExample.field] = value; }, "example");
-                trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: repositoryId ? "repository" : "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
+                trackCodeReviewPolicyEvent({ event: "code_review_prompt_example_applied", scope: "organization", source: "example", example_key: promptExample.example.key, character_bucket: promptCharacterBucket(value), configured: true });
                 setPromptExample(null);
               }}
             />
-            <AlertDialog open={pendingScope !== null} onOpenChange={(open) => { if (!open) setPendingScope(null); }}>
-              <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Discard unsaved prompt text?</AlertDialogTitle><AlertDialogDescription>This prompt has unsaved, pending, or failed changes. Switching policy scope will discard the local text.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Stay here</AlertDialogCancel><AlertDialogAction onClick={() => { promptDraftsRef.current.review_instructions?.replace(config?.review_instructions ?? ""); promptDraftsRef.current.automated_approval_policy?.replace(config?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY); if (pendingScope) applyScopeChange(pendingScope); setPendingScope(null); }}>Discard and switch</AlertDialogAction></AlertDialogFooter></AlertDialogContent>
-            </AlertDialog>
             <DescriptionRequirementSheet
               requirement={editingRequirement}
               canDelete={(config?.description_policy.requirements.length ?? 0) > 1}
@@ -1006,10 +961,8 @@ type PromptDraftHandle = { value: string; dirty: boolean; flush(): void; replace
 
 function PolicyPromptComposers({
   config,
-  inheritedConfig,
   autosave,
   commitPolicy,
-  repositorySelected,
   examples,
   examplesError,
   onRetryExamples,
@@ -1018,10 +971,8 @@ function PolicyPromptComposers({
   invalidPolicyField,
 }: {
   config: CodeReviewPolicyConfig | null;
-  inheritedConfig?: CodeReviewPolicyConfig;
   autosave: UseAutosaveResult<CodeReviewPolicyConfig>;
   commitPolicy: (mutate: (next: CodeReviewPolicyConfig) => void, source?: CodeReviewPolicyEditSource) => void;
-  repositorySelected: boolean;
   examples?: { review_instructions: CodeReviewPromptExampleOption[]; automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[] };
   examplesError?: string;
   onRetryExamples: () => void;
@@ -1037,10 +988,10 @@ function PolicyPromptComposers({
         disabled={!config}
         hidden={config?.approval_mode !== "approve_acceptable"}
         autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
-        resetValue={inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY}
-        onReset={() => { const resetValue = inheritedConfig?.automated_approval_policy ?? DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
-        resetLabel={repositorySelected && inheritedConfig ? "Use organization approval policy" : "Reset to default"}
+        onCommit={(value) => { commitPolicy((next) => { next.automated_approval_policy = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+        resetValue={DEFAULT_AUTOMATED_APPROVAL_POLICY}
+        onReset={() => { const resetValue = DEFAULT_AUTOMATED_APPROVAL_POLICY; commitPolicy((next) => { next.automated_approval_policy = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+        resetLabel="Reset to default"
         examples={examples?.automated_approval_policies ?? []}
         onChooseExample={(example) => onChooseExample("automated_approval_policy", example)}
         onDraftHandle={(handle) => onDraftHandle("automated_approval_policy", handle)}
@@ -1054,10 +1005,10 @@ function PolicyPromptComposers({
         value={config?.review_instructions ?? ""}
         disabled={!config}
         autosave={autosave}
-        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
-        resetValue={inheritedConfig?.review_instructions ?? ""}
-        onReset={() => { const resetValue = inheritedConfig?.review_instructions ?? ""; commitPolicy((next) => { next.review_instructions = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: repositorySelected ? "repository" : "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
-        resetLabel={repositorySelected && inheritedConfig ? "Use organization instructions" : "Clear instructions"}
+        onCommit={(value) => { commitPolicy((next) => { next.review_instructions = value.trim(); }); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "manual", character_bucket: promptCharacterBucket(value.trim()), configured: true }); }}
+        resetValue=""
+        onReset={() => { const resetValue = ""; commitPolicy((next) => { next.review_instructions = resetValue; }, "reset"); trackCodeReviewPolicyEvent({ event: "code_review_prompt_edited", scope: "organization", source: "reset", character_bucket: promptCharacterBucket(resetValue), configured: true }); }}
+        resetLabel="Clear instructions"
         examples={examples?.review_instructions ?? []}
         onChooseExample={(example) => onChooseExample("review_instructions", example)}
         onDraftHandle={(handle) => onDraftHandle("review_instructions", handle)}
@@ -1123,91 +1074,14 @@ function CodeReviewPromptComposerBase({ title, description, tooltip, value, disa
   );
 }
 
-function PolicyScopeBar({
-  value,
-  onValueChange,
-  repositories,
-  repositoryName,
-  repositorySelected,
-  source,
-  customizedCount,
-  onReset,
-  resetPending,
-  resetError,
-}: {
-  value: string;
-  onValueChange: (value: string) => void;
-  repositories: Repository[];
-  repositoryName?: string;
-  repositorySelected: boolean;
-  source?: CodeReviewResolvedPolicy["source"];
-  customizedCount: number;
-  onReset?: () => void;
-  resetPending: boolean;
-  resetError?: string;
-}) {
-  const scopePicker = (
-    <div className="w-full sm:max-w-sm">
-      <FilterSelect
-        label="Policy scope"
-        value={value}
-        onValueChange={onValueChange}
-        info="Chooses whether you are editing the organization default or one repository's effective policy. Repository policies inherit organization values unless a field is overridden."
-      >
-        <SelectItem value={ALL_REPOSITORIES}>Organization default</SelectItem>
-        {repositories.map((repository) => (
-          <SelectItem key={repository.id} value={repository.id}>
-            {repository.full_name}
-          </SelectItem>
-        ))}
-      </FilterSelect>
-    </div>
-  );
-
-  if (!repositorySelected) {
-    return (
-      <div className="space-y-2">
-        {scopePicker}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <span>Editing organization default. Repositories without an override inherit this policy.</span>
-          <SettingInfoTooltip
-            label="Organization default inheritance"
-            description="This policy supplies defaults to repositories without their own field-level overrides. Changing it can affect every inheriting repository."
-          />
-        </div>
-      </div>
-    );
-  }
-
-  const inherited = source !== "repository";
+function OrganizationPolicyNotice() {
   return (
-    <div className="space-y-2">
-      {scopePicker}
-    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-      <span>
-        Editing {repositoryName ?? "selected repository"} {inherited ? "inherited policy" : "override"}.
-      </span>
-      <Badge variant={inherited ? "outline" : "secondary"}>{inherited ? "Uses organization default" : "Repository override"}</Badge>
-      {!inherited ? <Badge variant="outline">{customizedCount} customized {customizedCount === 1 ? "control" : "controls"}</Badge> : null}
-        <SettingInfoTooltip
-          label="Repository policy inheritance"
-          description={
-            inherited
-              ? "This repository currently uses the organization policy without a local override. Editing a setting creates a field-level repository override."
-              : "This repository has local policy overrides. Fields without overrides continue to inherit organization defaults."
-          }
-        />
-        {onReset ? (
-          <AlertDialog>
-            <AlertDialogTrigger asChild><Button type="button" variant="ghost" size="sm" disabled={resetPending}>Reset repository policy</Button></AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader><AlertDialogTitle>Reset the complete repository policy?</AlertDialogTitle><AlertDialogDescription>This removes every repository override and returns all controls and prompts to the organization policy. Historical review versions remain unchanged.</AlertDialogDescription></AlertDialogHeader>
-              <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={onReset}>Reset repository policy</AlertDialogAction></AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
-        ) : null}
+    <div className="flex items-start gap-2 rounded-md border border-border bg-muted/30 px-4 py-3 text-sm">
+      <Users className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+      <div>
+        <div className="font-medium text-foreground">One policy for every repository</div>
+        <p className="mt-1 text-xs text-muted-foreground">Changes apply to new code reviews across the organization. Repository-specific overrides are not available.</p>
       </div>
-      {resetError ? <ErrorNotice title="Could not reset repository policy" description={resetError} /> : null}
     </div>
   );
 }
@@ -1705,6 +1579,7 @@ function GitHubTriggerPanel({
   setupErrorMessage,
   setupPending,
   deletePending,
+  canManage,
   onSetup,
   onDelete,
 }: {
@@ -1715,6 +1590,7 @@ function GitHubTriggerPanel({
   setupErrorMessage: string | null;
   setupPending: boolean;
   deletePending: boolean;
+  canManage: boolean;
   onSetup: () => void;
   onDelete: () => void;
 }) {
@@ -1725,6 +1601,7 @@ function GitHubTriggerPanel({
   const needsRepair = status === "error" || permissionRequired;
   const reviewer = trigger?.team_reviewer ?? "@org/143-code-reviewer";
   const setupDisabledReason = githubTriggerSetupDisabledReason({
+    canManage,
     repositorySelected,
     authRequired,
     setupPending,
@@ -1781,7 +1658,7 @@ function GitHubTriggerPanel({
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
           {authRequired ? (
-            <Button variant="outline" size="sm" onClick={() => api.githubStatus.connect()}>
+            <Button variant="outline" size="sm" disabled={!canManage} onClick={() => api.githubStatus.connect()}>
               <Users className="h-4 w-4" />
               Connect GitHub
             </Button>
@@ -1795,7 +1672,7 @@ function GitHubTriggerPanel({
             </DisabledTooltip>
           ) : null}
           {ready ? (
-            <GitHubReviewerManage reviewer={reviewer} teamSlug={trigger?.team_slug} disabled={setupPending || deletePending} onDelete={onDelete} />
+            <GitHubReviewerManage reviewer={reviewer} teamSlug={trigger?.team_slug} deleteDisabled={!canManage || setupPending || deletePending} onDelete={onDelete} />
           ) : null}
           {permissionRequired ? <Badge variant="destructive">Permission approval needed</Badge> : null}
         </div>
@@ -1804,7 +1681,7 @@ function GitHubTriggerPanel({
   );
 }
 
-function GitHubReviewerManage({ reviewer, teamSlug, disabled, onDelete }: { reviewer: string; teamSlug?: string; disabled: boolean; onDelete: () => void }) {
+function GitHubReviewerManage({ reviewer, teamSlug, deleteDisabled, onDelete }: { reviewer: string; teamSlug?: string; deleteDisabled: boolean; onDelete: () => void }) {
   return (
     <Collapsible>
       <CollapsibleTrigger asChild>
@@ -1825,7 +1702,7 @@ function GitHubReviewerManage({ reviewer, teamSlug, disabled, onDelete }: { revi
           <span className="text-muted-foreground">Repository access</span>
           <div className="font-medium text-foreground">Read</div>
     </div>
-        <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={disabled} onClick={onDelete}>
+        <Button variant="ghost" size="sm" className="text-destructive hover:text-destructive" disabled={deleteDisabled} onClick={onDelete}>
           <PowerOff className="h-4 w-4" />
           Disable reviewer
         </Button>
@@ -1835,18 +1712,23 @@ function GitHubReviewerManage({ reviewer, teamSlug, disabled, onDelete }: { revi
 }
 
 function githubTriggerSetupDisabledReason({
+  canManage,
   repositorySelected,
   authRequired,
   setupPending,
   deletePending,
   isLoading,
 }: {
+  canManage: boolean;
   repositorySelected: boolean;
   authRequired: boolean;
   setupPending: boolean;
   deletePending: boolean;
   isLoading: boolean;
 }): string | undefined {
+  if (!canManage) {
+    return "Only organization administrators can configure the GitHub reviewer menu option.";
+  }
   if (!repositorySelected) {
     return "Select a repository before setting up the GitHub reviewer menu option.";
   }

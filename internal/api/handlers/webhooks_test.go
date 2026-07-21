@@ -794,7 +794,7 @@ type codeReviewWebhookPolicyStore struct {
 	config   models.CodeReviewPolicyConfig
 }
 
-func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	record := models.CodeReviewPolicyRecord{
 		ID:                 s.policyID,
 		Version:            1,
@@ -805,10 +805,10 @@ func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID,
 		AgentRoster:        s.config.AgentRoster,
 		InlineCommentLimit: s.config.InlineCommentLimit,
 	}
-	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "repository", Policy: &record}, nil
+	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "organization", Policy: &record}, nil
 }
 
-func (s *codeReviewWebhookPolicyStore) SavePolicy(context.Context, uuid.UUID, *uuid.UUID, models.CodeReviewPolicyConfig, *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+func (s *codeReviewWebhookPolicyStore) SavePolicy(context.Context, uuid.UUID, models.CodeReviewPolicyConfig, *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
 	return models.CodeReviewPolicyRecord{}, nil
 }
 

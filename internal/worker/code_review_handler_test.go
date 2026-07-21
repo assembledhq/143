@@ -2331,7 +2331,6 @@ func codeReviewPolicyRecordForTest(config models.CodeReviewPolicyConfig) models.
 		RiskPolicy:              config.RiskPolicy,
 		AgentRoster:             config.AgentRoster,
 		InlineCommentLimit:      config.InlineCommentLimit,
-		Inheritance:             config.Inheritance,
 		CreatedAt:               time.Now().UTC(),
 	}
 }

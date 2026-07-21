@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
@@ -17,8 +16,8 @@ import (
 )
 
 type PolicyStore interface {
-	ResolvePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID) (models.CodeReviewResolvedPolicy, error)
-	SavePolicy(ctx context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error)
+	ResolvePolicy(ctx context.Context, orgID uuid.UUID) (models.CodeReviewResolvedPolicy, error)
+	SavePolicy(ctx context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, createdByUserID *uuid.UUID) (models.CodeReviewPolicyRecord, error)
 }
 
 type MetadataStore interface {
@@ -132,14 +131,13 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		return ReviewRequestedResult{IgnoredReason: "reviewer_not_configured"}, nil
 	}
 
-	repositoryID := input.RepositoryID
-	resolved, err := s.policies.ResolvePolicy(ctx, input.OrgID, &repositoryID)
+	resolved, err := s.policies.ResolvePolicy(ctx, input.OrgID)
 	if err != nil {
 		return ReviewRequestedResult{}, fmt.Errorf("resolve code review policy: %w", err)
 	}
 	policy := resolved.Policy
 	if policy == nil {
-		record, err := s.policies.SavePolicy(ctx, input.OrgID, &repositoryID, resolved.Config, nil)
+		record, err := s.policies.SavePolicy(ctx, input.OrgID, resolved.Config, nil)
 		if err != nil {
 			return ReviewRequestedResult{}, fmt.Errorf("materialize default code review policy: %w", err)
 		}
@@ -147,13 +145,6 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 	}
 	if !resolved.Config.Enabled {
 		return ReviewRequestedResult{IgnoredReason: "policy_disabled", TriggerSource: source}, nil
-	}
-	if policy.RepositoryID != nil && policy.Config().Inheritance.InheritOrgDefaults && !reflect.DeepEqual(policy.Config(), resolved.Config) {
-		record, err := s.policies.SavePolicy(ctx, input.OrgID, &repositoryID, resolved.Config, nil)
-		if err != nil {
-			return ReviewRequestedResult{}, fmt.Errorf("materialize inherited code review policy: %w", err)
-		}
-		policy = &record
 	}
 	outputKey := StableOutputKey(input.PullRequestID, input.HeadSHA, policy.ID, policy.Version)
 	latest, err := s.metadata.GetLatestByPullRequestHead(ctx, input.OrgID, input.PullRequestID, input.HeadSHA, policy.ID)
@@ -240,7 +231,7 @@ func (s *Service) HandleReviewRequested(ctx context.Context, input ReviewRequest
 		Status:           models.SessionStatusIdle,
 		AutonomyLevel:    models.SessionAutonomySupervised,
 		TokenMode:        models.DefaultSessionTokenMode,
-		RepositoryID:     &repositoryID,
+		RepositoryID:     &input.RepositoryID,
 		BaseCommitSHA:    &input.HeadSHA,
 		RevisionContext:  revisionContext,
 		Title:            &title,
