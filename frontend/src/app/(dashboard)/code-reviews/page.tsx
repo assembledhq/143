@@ -97,7 +97,7 @@ const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
 // Policy textareas create a new version on every commit. Give authors enough
 // time to pause while composing without turning ordinary typing into a stream
 // of short-lived versions; leaving the field still flushes immediately.
-const CODE_REVIEW_TEXTAREA_DEBOUNCE_MS = 2_000;
+const CODE_REVIEW_TEXTAREA_DEBOUNCE_MS = 5_000;
 const codeReviewPromptValuesEqual = (left: string, right: string) => left.trim() === right.trim();
 const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
 - the intent is clear and the change has a small, understandable scope
