@@ -589,13 +589,13 @@ func newPolicyStub() *policyStub {
 	return &policyStub{resolved: models.CodeReviewResolvedPolicy{Config: cfg, Source: "default"}}
 }
 
-func (s *policyStub) ResolvePolicy(_ context.Context, _ uuid.UUID, _ *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+func (s *policyStub) ResolvePolicy(_ context.Context, _ uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	return s.resolved, nil
 }
 
-func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.CodeReviewPolicyConfig, _ *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, _ *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
 	s.saveCalls++
-	return models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, RepositoryID: repositoryID, Version: 1, Enabled: config.Enabled, ApprovalMode: config.ApprovalMode}, nil
+	return models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, Version: 1, Enabled: config.Enabled, ApprovalMode: config.ApprovalMode}, nil
 }
 
 type metadataStub struct {

@@ -154,39 +154,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	}
 }
 
-func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
-	t.Parallel()
-
-	base := DefaultCodeReviewPolicyConfig()
-	base.Enabled = true
-	base.ApprovalMode = CodeReviewApprovalModeCommentOnly
-	base.RiskPolicy.MaxFilesChanged = 9
-	base.InlineCommentLimit = 4
-	base.ReviewInstructions = "organization review guidance"
-	base.AutomatedApprovalPolicy = "organization approval guidance"
-	override := base
-	override.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
-	override.RiskPolicy.MaxFilesChanged = 2
-	override.InlineCommentLimit = 8
-	override.ReviewInstructions = "repository review guidance"
-	override.AutomatedApprovalPolicy = "repository approval guidance"
-	override.Inheritance = CodeReviewPolicyInheritance{
-		InheritOrgDefaults: true,
-		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldReviewInstructions},
-	}
-
-	merged := MergeCodeReviewPolicyConfig(base, override)
-
-	require.True(t, merged.Enabled, "merged policy should inherit fields outside the repository override list")
-	require.Equal(t, CodeReviewApprovalModeApproveAcceptable, merged.ApprovalMode, "merged policy should apply explicitly overridden approval mode")
-	require.Equal(t, 2, merged.RiskPolicy.MaxFilesChanged, "merged policy should apply explicitly overridden risk policy")
-	require.Equal(t, 4, merged.InlineCommentLimit, "merged policy should inherit non-overridden inline comment limit")
-	require.Equal(t, override.ReviewInstructions, merged.ReviewInstructions, "repository review instructions should override independently")
-	require.Equal(t, base.AutomatedApprovalPolicy, merged.AutomatedApprovalPolicy, "automated approval policy should inherit independently")
-	require.Equal(t, override.Inheritance, merged.Inheritance, "merged policy should preserve inheritance audit metadata")
-	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldReviewInstructions, CodeReviewPolicyFieldAutomatedApprovalPolicy, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report prompt fields independently")
-}
-
 func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
 	t.Parallel()
 

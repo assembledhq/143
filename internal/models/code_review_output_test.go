@@ -86,7 +86,7 @@ Reviewer evidence: Codex found no blocking issues; Claude Code found no blocking
 			},
 			expected: `143 Code Reviewer completed its review without approving this PR
 
-Why: It met the configured policy: the PR description passed and 1 usable reviewer report met the required quorum of 1. Automated approval is disabled by repository policy.`,
+Why: It met the configured policy: the PR description passed and 1 usable reviewer report met the required quorum of 1. Automated approval is disabled by organization policy.`,
 		},
 		{
 			name: "keeps actionable findings and reviewer recommendation",

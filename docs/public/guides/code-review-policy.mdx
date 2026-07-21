@@ -9,14 +9,14 @@ tags:
   - code review
   - pull requests
   - policy
-llm_summary: Code review policy separates optional reviewer instructions from automated approval policy and deterministic safeguards; comment-only is the safe default.
+llm_summary: One organization-wide code review policy separates optional reviewer instructions from automated approval policy and deterministic safeguards; comment-only is the safe default.
 ---
 
 Start with comment-only reviews and no additional instructions. Each configured reviewer uses its native `/review` behavior, while the platform keeps the review read-only and records the policy version used for the run.
 
 ## Choose review behavior
 
-Open **Code reviews**, select **Policy**, and choose the organization default or a repository. Keep **Leave comments** selected while evaluating review quality. **Leave comments and approve when acceptable** allows the orchestrator to recommend approval only after every hard safeguard passes.
+Open **Code reviews** and select **Policy**. The organization has one policy that applies to every repository. Keep **Leave comments** selected while evaluating review quality. **Leave comments and approve when acceptable** allows the orchestrator to recommend approval only after every hard safeguard passes.
 
 Turning code reviews off pauses new reviewer-triggered runs without forgetting the selected outcome.
 
@@ -34,16 +34,16 @@ Once 143 submits an approval, that approval is final for the PR: later changes a
 
 Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates. Advanced policy presets are different: they replace the complete policy, including safeguards and agent settings.
 
-## Use repository inheritance
+## Apply one policy everywhere
 
-Repository policies inherit the organization policy field by field. The scope bar identifies inherited and overridden policies and counts customized controls.
+Policy changes apply to new reviews in every repository. There are no repository overrides or inheritance rules to reconcile.
 
-- **Use organization instructions** resets only reviewer instructions.
-- **Use organization approval policy** resets only automated approval guidance.
-- **Reset repository policy** removes every repository override and returns the repository to organization inheritance.
+- Configure approval behavior, prompts, safeguards, and reviewer agents once.
+- Review sessions capture the policy version they used, so historical review evidence remains auditable after the policy changes.
+- GitHub reviewer setup is still selected per repository because the reviewer team must be granted access to each repository separately.
 
 Policy history remains insert-only. Reviews already in progress continue using the policy version captured when they started.
 
 ## Recover from validation or save failures
 
-Autosave status appears beside prompt editors. Do not switch policy scope while a save is pending. If a save fails, the local prompt remains visible so you can correct or retry it. Invalid advanced settings open the relevant controls and display the backend field error without including prompt contents in logs or analytics.
+Autosave status appears beside prompt editors. If a save fails, the local prompt remains visible so you can correct or retry it. Invalid advanced settings open the relevant controls and display the backend field error without including prompt contents in logs or analytics.

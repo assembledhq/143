@@ -289,10 +289,7 @@ export const api = {
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
-    getPolicy: (repositoryId?: string | null) => {
-      const qs = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : '';
-      return get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>(`/api/v1/code-review-policies${qs}`);
-    },
+    getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),
     getGitHubTrigger: (repositoryId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,
@@ -304,12 +301,11 @@ export const api = {
       ),
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
-    updatePolicy: (body: { repository_id?: string | null; config: import('./types').CodeReviewPolicyConfig; source?: import('./types').CodeReviewPolicyEditSource }) =>
+    updatePolicy: (body: { config: import('./types').CodeReviewPolicyConfig; source?: import('./types').CodeReviewPolicyEditSource }) =>
       request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', {
         method: 'PUT',
         body: JSON.stringify(body),
       }),
-    resetPolicy: (repositoryId: string) => del<void>(`/api/v1/code-review-policies/repositories/${encodeURIComponent(repositoryId)}`),
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),

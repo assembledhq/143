@@ -1648,7 +1648,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
-				r.Delete("/api/v1/code-review-policies/repositories/{repository_id}", codeReviewHandler.ResetPolicy)
 				r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)

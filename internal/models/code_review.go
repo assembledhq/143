@@ -413,7 +413,6 @@ type CodeReviewPolicyConfig struct {
 	RiskPolicy              CodeReviewRiskPolicy        `json:"risk_policy"`
 	AgentRoster             CodeReviewAgentRoster       `json:"agent_roster"`
 	InlineCommentLimit      int                         `json:"inline_comment_limit"`
-	Inheritance             CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
 }
 
 const CodeReviewPromptMaxRunes = 8000
@@ -444,11 +443,6 @@ Require human review when:
 - the change introduces a new architectural pattern or crosses unclear ownership boundaries
 - reviewers disagree or the risk cannot be evaluated confidently
 - the intended behavior cannot be determined from the pull request and repository context` + codeReviewIndependentApprovalPolicy
-
-type CodeReviewPolicyInheritance struct {
-	InheritOrgDefaults bool     `json:"inherit_org_defaults"`
-	OverrideFields     []string `json:"override_fields,omitempty"`
-}
 
 func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
@@ -518,9 +512,6 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			TimeoutSeconds:        1800,
 		},
 		InlineCommentLimit: 4,
-		Inheritance: CodeReviewPolicyInheritance{
-			InheritOrgDefaults: false,
-		},
 	}
 }
 
@@ -587,7 +578,6 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	if config.InlineCommentLimit != 0 {
 		defaults.InlineCommentLimit = config.InlineCommentLimit
 	}
-	defaults.Inheritance = config.Inheritance
 	defaults.DescriptionPolicy = normalizeCodeReviewDescriptionPolicy(defaults.DescriptionPolicy)
 	return defaults
 }
@@ -724,7 +714,6 @@ type CodeReviewPolicyRecord struct {
 	RiskPolicy              CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
 	AgentRoster             CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
 	InlineCommentLimit      int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	Inheritance             CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
 	CreatedByUserID         *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
 	CreatedAt               time.Time                   `db:"created_at" json:"created_at"`
 }
@@ -739,15 +728,13 @@ func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 		RiskPolicy:              r.RiskPolicy,
 		AgentRoster:             r.AgentRoster,
 		InlineCommentLimit:      r.InlineCommentLimit,
-		Inheritance:             r.Inheritance,
 	}
 }
 
 type CodeReviewResolvedPolicy struct {
-	Config          CodeReviewPolicyConfig  `json:"config"`
-	Source          string                  `json:"source"`
-	Policy          *CodeReviewPolicyRecord `json:"policy,omitempty"`
-	InheritedPolicy *CodeReviewPolicyRecord `json:"inherited_policy,omitempty"`
+	Config CodeReviewPolicyConfig  `json:"config"`
+	Source string                  `json:"source"`
+	Policy *CodeReviewPolicyRecord `json:"policy,omitempty"`
 }
 
 const (
@@ -760,108 +747,6 @@ const (
 	CodeReviewPolicyFieldAgentRoster             = "agent_roster"
 	CodeReviewPolicyFieldInlineCommentLimit      = "inline_comment_limit"
 )
-
-func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
-	base = ResolveCodeReviewPolicyConfig(&base)
-	override = ResolveCodeReviewPolicyConfig(&override)
-	if !override.Inheritance.InheritOrgDefaults {
-		return override
-	}
-	merged := base
-	fields := normalizedCodeReviewPolicyOverrideFields(override.Inheritance.OverrideFields)
-	apply := func(field string) bool {
-		_, ok := fields[field]
-		return ok
-	}
-	if apply(CodeReviewPolicyFieldEnabled) {
-		merged.Enabled = override.Enabled
-	}
-	if apply(CodeReviewPolicyFieldApprovalMode) {
-		merged.ApprovalMode = override.ApprovalMode
-	}
-	if apply(CodeReviewPolicyFieldReviewInstructions) {
-		merged.ReviewInstructions = override.ReviewInstructions
-	}
-	if apply(CodeReviewPolicyFieldAutomatedApprovalPolicy) {
-		merged.AutomatedApprovalPolicy = override.AutomatedApprovalPolicy
-	}
-	if apply(CodeReviewPolicyFieldDescriptionPolicy) {
-		merged.DescriptionPolicy = override.DescriptionPolicy
-	}
-	if apply(CodeReviewPolicyFieldRiskPolicy) {
-		merged.RiskPolicy = override.RiskPolicy
-	}
-	if apply(CodeReviewPolicyFieldAgentRoster) {
-		merged.AgentRoster = override.AgentRoster
-	}
-	if apply(CodeReviewPolicyFieldInlineCommentLimit) {
-		merged.InlineCommentLimit = override.InlineCommentLimit
-	}
-	merged.Inheritance = override.Inheritance
-	return ResolveCodeReviewPolicyConfig(&merged)
-}
-
-func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []string {
-	base = ResolveCodeReviewPolicyConfig(&base)
-	override = ResolveCodeReviewPolicyConfig(&override)
-	fields := make([]string, 0, 6)
-	if base.Enabled != override.Enabled {
-		fields = append(fields, CodeReviewPolicyFieldEnabled)
-	}
-	if base.ApprovalMode != override.ApprovalMode {
-		fields = append(fields, CodeReviewPolicyFieldApprovalMode)
-	}
-	if base.ReviewInstructions != override.ReviewInstructions {
-		fields = append(fields, CodeReviewPolicyFieldReviewInstructions)
-	}
-	if base.AutomatedApprovalPolicy != override.AutomatedApprovalPolicy {
-		fields = append(fields, CodeReviewPolicyFieldAutomatedApprovalPolicy)
-	}
-	if !codeReviewJSONEqual(base.DescriptionPolicy, override.DescriptionPolicy) {
-		fields = append(fields, CodeReviewPolicyFieldDescriptionPolicy)
-	}
-	if !codeReviewJSONEqual(base.RiskPolicy, override.RiskPolicy) {
-		fields = append(fields, CodeReviewPolicyFieldRiskPolicy)
-	}
-	if !codeReviewJSONEqual(base.AgentRoster, override.AgentRoster) {
-		fields = append(fields, CodeReviewPolicyFieldAgentRoster)
-	}
-	if base.InlineCommentLimit != override.InlineCommentLimit {
-		fields = append(fields, CodeReviewPolicyFieldInlineCommentLimit)
-	}
-	return fields
-}
-
-func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(fields))
-	for _, field := range fields {
-		field = strings.ToLower(strings.TrimSpace(field))
-		if field == "" {
-			continue
-		}
-		switch field {
-		case CodeReviewPolicyFieldEnabled,
-			CodeReviewPolicyFieldApprovalMode,
-			CodeReviewPolicyFieldReviewInstructions,
-			CodeReviewPolicyFieldAutomatedApprovalPolicy,
-			CodeReviewPolicyFieldDescriptionPolicy,
-			CodeReviewPolicyFieldRiskPolicy,
-			CodeReviewPolicyFieldAgentRoster,
-			CodeReviewPolicyFieldInlineCommentLimit:
-			out[field] = struct{}{}
-		}
-	}
-	return out
-}
-
-func codeReviewJSONEqual(left, right any) bool {
-	leftJSON, leftErr := json.Marshal(left)
-	rightJSON, rightErr := json.Marshal(right)
-	if leftErr != nil || rightErr != nil {
-		return false
-	}
-	return string(leftJSON) == string(rightJSON)
-}
 
 type CodeReviewSessionMetadata struct {
 	ID                    uuid.UUID               `db:"id" json:"id"`

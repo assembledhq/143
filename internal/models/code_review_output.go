@@ -154,7 +154,7 @@ func codeReviewDecisionExplanation(input CodeReviewFinalReviewInput) string {
 		}
 		result += "."
 		if input.Decision != CodeReviewDecisionApproved {
-			result += " Automated approval is disabled by repository policy."
+			result += " Automated approval is disabled by organization policy."
 		}
 		return result
 	}
@@ -210,7 +210,7 @@ func humanizeCodeReviewRiskReason(reason CodeReviewRiskReason, descriptionIssues
 	case CodeReviewRiskReasonForkIneligible:
 		return "Repository policy does not allow automated approval for fork PRs."
 	case CodeReviewRiskReasonAuthorIneligible:
-		return "The PR author is not eligible for automated approval under repository policy."
+		return "The PR author is not eligible for automated approval under organization policy."
 	case CodeReviewRiskReasonUnresolvedHumanReview:
 		return "Human review threads or change requests are still unresolved."
 	case CodeReviewRiskReasonBlockingFindings:
