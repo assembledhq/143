@@ -955,7 +955,7 @@ describe("CodeReviewsPage", () => {
     await user.click(within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("button", { name: "Clear instructions" }));
     await waitFor(() => expect(updates.at(-1)?.review_instructions).toBe(""));
     await user.click(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("button", { name: "Reset to default" }));
-    await waitFor(() => expect(updates.at(-1)?.automated_approval_policy).toContain("Automatically approve routine, well-tested changes"));
+    await waitFor(() => expect(updates.at(-1)?.automated_approval_policy).toContain("Automatically approve routine changes"));
   });
 
   it("places compact example and reset actions together above each prompt editor", async () => {
