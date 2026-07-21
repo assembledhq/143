@@ -124,6 +124,10 @@ func (h *WebhookHandler) handlePullRequestReviewThread(w http.ResponseWriter, r 
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_THREAD_EVENT_FAILED", "failed to process pull_request_review_thread event", err)
 		return
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review_thread", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
@@ -394,6 +398,10 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -548,6 +556,10 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event", err)
 		return
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -579,6 +591,10 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
+		return
+	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review_comment", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
 		return
 	}
 
@@ -616,6 +632,10 @@ func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusInternalServerError, "CHECK_SUITE_FAILED", "failed to process check_suite event", err)
 		return
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "check_suite", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -643,6 +663,10 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, http.StatusInternalServerError, "CHECK_RUN_FAILED", "failed to process check_run event", err)
 		return
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "check_run", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -668,6 +692,10 @@ func (h *WebhookHandler) handleStatus(w http.ResponseWriter, r *http.Request, bo
 
 	if err := h.prService.HandleStatusEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "STATUS_FAILED", "failed to process status event", err)
+		return
+	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "status", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
 		return
 	}
 

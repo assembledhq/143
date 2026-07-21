@@ -635,6 +635,105 @@ func TestCodeReviewStore_GetLatestByPullRequestHeadFiltersByOrgAndPolicy(t *test
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetLatestByPullRequestFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		query string
+		load  func(context.Context, *CodeReviewStore, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error)
+	}{
+		{
+			name:  "latest assessment",
+			query: "WHERE org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+ORDER BY created_at DESC",
+			load: func(ctx context.Context, store *CodeReviewStore, orgID, prID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+				return store.GetLatestByPullRequest(ctx, orgID, prID)
+			},
+		},
+		{
+			name:  "latest submitted assessment",
+			query: "WHERE org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+github_review_id IS NOT NULL[\\s\\S]+ORDER BY created_at DESC",
+			load: func(ctx context.Context, store *CodeReviewStore, orgID, prID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+				return store.GetLatestSubmittedByPullRequest(ctx, orgID, prID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			repoID := uuid.New()
+			prID := uuid.New()
+			policyID := uuid.New()
+			metadataID := uuid.New()
+			reviewID := int64(143)
+			reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+			now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+			expected := models.CodeReviewSessionMetadata{
+				ID: metadataID, OrgID: orgID, SessionID: sessionID, RepositoryID: repoID,
+				PullRequestID: prID, PolicyID: policyID, BaseSHA: "base", HeadSHA: "head",
+				TriggerSource: models.CodeReviewTriggerSourceTeamReviewer, Status: models.CodeReviewSessionStatusCompleted,
+				ReviewOutputKey: "output", GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL, CreatedAt: now,
+			}
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(tt.query).
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+				}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false,
+					models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, false,
+					nil, "output", nil, &reviewID, &reviewURL, nil, nil, nil, now))
+
+			actual, err := tt.load(context.Background(), NewCodeReviewStore(mock), orgID, prID)
+
+			require.NoError(t, err, "pull request review history lookup should succeed")
+			require.Equal(t, expected, actual, "pull request review history lookup should return exact org-scoped metadata")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCodeReviewStore_HasApprovedByPullRequestFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		exists   bool
+		expected bool
+	}{
+		{name: "has submitted approval", exists: true, expected: true},
+		{name: "has no submitted approval", exists: false, expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			prID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery("SELECT EXISTS[\\s\\S]+org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+decision = 'approved'[\\s\\S]+github_review_id IS NOT NULL").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.exists))
+
+			actual, err := NewCodeReviewStore(mock).HasApprovedByPullRequest(context.Background(), orgID, prID)
+
+			require.NoError(t, err, "approval history lookup should succeed")
+			require.Equal(t, tt.expected, actual, "approval history lookup should return the exact submitted approval state")
+			require.NoError(t, mock.ExpectationsWereMet(), "approval history lookup should remain org scoped")
+		})
+	}
+}
+
 func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	t.Parallel()
 

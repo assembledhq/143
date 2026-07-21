@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,19 +27,22 @@ import (
 )
 
 type runCodeReviewPayload struct {
-	OrgID                  uuid.UUID `json:"org_id"`
-	SessionID              uuid.UUID `json:"session_id"`
-	MetadataID             uuid.UUID `json:"metadata_id"`
-	RepositoryID           uuid.UUID `json:"repository_id"`
-	PullRequestID          uuid.UUID `json:"pull_request_id"`
-	PolicyID               uuid.UUID `json:"policy_id"`
-	PolicyVersion          int       `json:"policy_version"`
-	HeadSHA                string    `json:"head_sha"`
-	FromFork               bool      `json:"from_fork"`
-	PullRequestAuthor      string    `json:"pull_request_author,omitempty"`
-	OutputKey              string    `json:"review_output_key"`
-	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
-	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
+	OrgID                   uuid.UUID `json:"org_id"`
+	SessionID               uuid.UUID `json:"session_id"`
+	MetadataID              uuid.UUID `json:"metadata_id"`
+	RepositoryID            uuid.UUID `json:"repository_id"`
+	PullRequestID           uuid.UUID `json:"pull_request_id"`
+	PolicyID                uuid.UUID `json:"policy_id"`
+	PolicyVersion           int       `json:"policy_version"`
+	HeadSHA                 string    `json:"head_sha"`
+	FromFork                bool      `json:"from_fork"`
+	PullRequestAuthor       string    `json:"pull_request_author,omitempty"`
+	OutputKey               string    `json:"review_output_key"`
+	RequestedReviewerLogin  string    `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug       string    `json:"requested_team_slug,omitempty"`
+	PreviousOutputKey       string    `json:"previous_review_output_key,omitempty"`
+	ExistingGitHubReviewID  *int64    `json:"existing_github_review_id,omitempty"`
+	ExistingGitHubReviewURL *string   `json:"existing_github_review_url,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -128,7 +132,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("list code review findings: %w", err)
 		}
-		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, _, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review changed files: %w", err)
 		}
@@ -198,6 +202,35 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 		}
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
+			return err
+		}
+		// Re-read all mutable PR gates immediately before deciding. A description,
+		// code, or check event can arrive while reviewer agents are still running;
+		// the final recommendation must reflect that newer state.
+		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			return syncErr
+		}
+		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("reload code review pull request before decision: %w", err)
+		}
+		health, err = loadStoredCodeReviewHealth(ctx, stores, job, pr)
+		if err != nil {
+			return fmt.Errorf("reload code review health before decision: %w", err)
+		}
+		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
+			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before final recommendation"); staleErr != nil {
+				return fmt.Errorf("mark code review stale before decision: %w", staleErr)
+			}
+			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			return nil
+		}
+		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		if err != nil {
+			return fmt.Errorf("reload code review changed files before decision: %w", err)
+		}
+		descriptionEvaluation, err = evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
+		if err != nil {
 			return err
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
@@ -1322,6 +1355,7 @@ type codeReviewDescriptionArtifactMetadata struct {
 	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
 	PolicyVersion           int    `json:"policy_version"`
 	HeadSHA                 string `json:"head_sha"`
+	InputHash               string `json:"input_hash"`
 }
 
 func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) (codeReviewDescriptionEvaluation, error) {
@@ -1332,7 +1366,8 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 	}
 	evaluation := codeReviewDescriptionEvaluation{Passed: true}
 	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey)
+	inputHash := codeReviewDescriptionInputHash(pr)
+	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey, inputHash)
 	if err != nil {
 		return codeReviewDescriptionEvaluation{}, err
 	}
@@ -1377,6 +1412,7 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 					"prompt_injection_detected": result.PromptInjectionDetected,
 					"policy_version":            policy.Version,
 					"head_sha":                  job.HeadSHA,
+					"input_hash":                inputHash,
 				}),
 			}); err != nil {
 				return codeReviewDescriptionEvaluation{}, err
@@ -1401,7 +1437,7 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 	return evaluation, nil
 }
 
-func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey string) (map[string]codeReviewDescriptionLLMResponse, error) {
+func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey, inputHash string) (map[string]codeReviewDescriptionLLMResponse, error) {
 	if stores == nil || stores.CodeReviews == nil {
 		return nil, nil
 	}
@@ -1414,7 +1450,7 @@ func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Store
 		if artifact.Role != "description_policy" || !strings.HasPrefix(artifact.ArtifactKey, rootKey+"/description-") {
 			continue
 		}
-		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact)
+		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact, inputHash)
 		if ok {
 			results[artifact.ArtifactKey] = result
 		}
@@ -1422,7 +1458,7 @@ func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Store
 	return results, nil
 }
 
-func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact) (codeReviewDescriptionLLMResponse, bool) {
+func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact, inputHash string) (codeReviewDescriptionLLMResponse, bool) {
 	if len(artifact.Metadata) == 0 {
 		return codeReviewDescriptionLLMResponse{}, false
 	}
@@ -1434,6 +1470,9 @@ func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact 
 		return codeReviewDescriptionLLMResponse{}, false
 	}
 	if metadata.PolicyVersion != 0 && metadata.PolicyVersion != job.PolicyVersion {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	if strings.TrimSpace(metadata.InputHash) != "" && metadata.InputHash != inputHash {
 		return codeReviewDescriptionLLMResponse{}, false
 	}
 	reason := strings.TrimSpace(metadata.Reason)
@@ -1449,6 +1488,15 @@ func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact 
 		Reason:                  reason,
 		PromptInjectionDetected: metadata.PromptInjectionDetected,
 	}, true
+}
+
+func codeReviewDescriptionInputHash(pr models.PullRequest) string {
+	body := ""
+	if pr.Body != nil {
+		body = *pr.Body
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(pr.Title) + "\n" + strings.TrimSpace(body)))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func evaluateCodeReviewDescriptionRequirement(ctx context.Context, services *Services, requirement models.CodeReviewDescriptionRequirement, body, userPrompt string) (codeReviewDescriptionLLMResponse, error) {
@@ -3166,14 +3214,17 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 	}
 	comments := codeReviewInlineComments(findings)
 	result, err := services.CodeReviews.SubmitReview(ctx, codereviewsvc.SubmitReviewRequest{
-		InstallationID: repo.InstallationID,
-		Repository:     repository,
-		PullNumber:     pr.GitHubPRNumber,
-		HeadSHA:        job.HeadSHA,
-		OutputKey:      job.OutputKey,
-		Decision:       codeReviewSubmitDecision(decision),
-		Body:           body,
-		Comments:       comments,
+		InstallationID:    repo.InstallationID,
+		Repository:        repository,
+		PullNumber:        pr.GitHubPRNumber,
+		HeadSHA:           job.HeadSHA,
+		OutputKey:         job.OutputKey,
+		PreviousOutputKey: job.PreviousOutputKey,
+		ExistingReviewID:  int64PtrValue(job.ExistingGitHubReviewID),
+		ExistingReviewURL: stringPtrValue(job.ExistingGitHubReviewURL),
+		Decision:          codeReviewSubmitDecision(decision),
+		Body:              body,
+		Comments:          comments,
 	})
 	if err != nil {
 		return codeReviewSubmission{}, false, fmt.Errorf("submit code review to GitHub: %w", err)
@@ -3186,6 +3237,13 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		GitHubReviewID:  &result.ID,
 		GitHubReviewURL: &result.URL,
 	}, true, nil
+}
+
+func int64PtrValue(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func codeReviewSubmitDecision(decision models.CodeReviewDecision) codereviewsvc.SubmitReviewDecision {
