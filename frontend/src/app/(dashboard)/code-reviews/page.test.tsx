@@ -361,6 +361,8 @@ describe("CodeReviewsPage", () => {
     expect(finalReviewLinks).toHaveLength(2);
     for (const link of finalReviewLinks) {
       expect(link).toHaveAttribute("href", review.github_review_url);
+      expect(link).toHaveAttribute("target", "_blank");
+      expect(link.querySelector('[data-slot="external-link-icon"]')).toBeInTheDocument();
     }
     expect(screen.queryByRole("link", { name: "Open final review" })).not.toBeInTheDocument();
     const filterToggle = screen.getByRole("button", {
@@ -370,7 +372,7 @@ describe("CodeReviewsPage", () => {
     await user.click(filterToggle);
     expect(filterToggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("textbox", { name: "Search code reviews" })).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Open pull request" })).toHaveLength(2);
+    expect(screen.queryByRole("link", { name: "Open pull request" })).not.toBeInTheDocument();
     const reviewTable = screen.getByRole("table");
     const reviewRow = within(reviewTable).getByRole("row", {
       name: /#428 Fix invoice rounding/i,

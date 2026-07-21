@@ -10,7 +10,6 @@ import {
   ChevronDown,
   CircleHelp,
   ClipboardCheck,
-  ExternalLink,
   FileSearch,
   Plus,
   PowerOff,
@@ -25,6 +24,7 @@ import { ResourceRow } from "@/components/resource-row";
 import { SectionGroup } from "@/components/section-group";
 import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
+import { ExternalLink } from "@/components/ui/external-link";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { Badge } from "@/components/ui/badge";
@@ -211,15 +211,12 @@ function ReviewTitle({ review }: { review: CodeReviewListItem }) {
   if (!review.github_review_url) return title;
 
   return (
-    <Link
+    <ExternalLink
       href={review.github_review_url}
-      target="_blank"
-      rel="noreferrer"
       title="Open final review"
-      className="underline-offset-4 hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
       {title}
-    </Link>
+    </ExternalLink>
   );
 }
 
@@ -262,33 +259,11 @@ function ReviewOutcome({
 
 function ReviewActions({ review }: { review: CodeReviewListItem }) {
   return (
-    <TooltipProvider>
-      <div className="grid w-full grid-cols-2 gap-2 md:flex md:w-auto md:flex-wrap md:justify-end">
-        <Button className="min-h-11 justify-center md:min-h-0" variant="ghost" size="sm" asChild>
-          <Link href={`/sessions/${review.session_id}`}>
-            <ExternalLink className="h-4 w-4 md:hidden" />
-            Session
-          </Link>
-        </Button>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              className="min-h-11 justify-center md:size-7 md:min-h-0"
-              variant="ghost"
-              size="sm"
-              asChild
-              aria-label="Open pull request"
-            >
-              <Link href={review.github_pr_url} target="_blank" rel="noreferrer">
-                <ExternalLink className="h-4 w-4" />
-                <span className="md:sr-only">Pull request</span>
-              </Link>
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent className="hidden md:block">Open pull request</TooltipContent>
-        </Tooltip>
-      </div>
-    </TooltipProvider>
+    <div className="flex w-full md:w-auto md:justify-end">
+      <Button className="min-h-11 w-full justify-center md:min-h-0 md:w-auto" variant="ghost" size="sm" asChild>
+        <Link href={`/sessions/${review.session_id}`}>Session</Link>
+      </Button>
+    </div>
   );
 }
 
