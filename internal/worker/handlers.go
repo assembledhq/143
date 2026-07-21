@@ -9942,6 +9942,31 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Msg("continue_session lost sandbox publish race to sibling thread; retrying against the shared sandbox")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
 			}
+			if errors.Is(err, agent.ErrSandboxWorkspaceNotReady) {
+				// The sibling's shared container is alive, but its repository
+				// clone / authoritative PR-head checkout did not finish within
+				// this attempt's barrier. Retry on the owning node instead of
+				// launching an agent in an empty or default-branch workspace.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("shared code review workspace is not ready; retrying on the sandbox owner")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
+			}
+			if errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) {
+				// The durable cancel timestamp was observed before this thread
+				// acquired the shared turn hold. The orchestrator already marked
+				// the thread cancelled; dead-letter this accepted turn without
+				// resetting it to idle or retrying it after the workspace is ready.
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("code review thread was cancelled while waiting for the shared workspace")
+				return &FatalError{Err: err}
+			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate continue_session job lost the AcquireTurnHold
 				// race to the winner. Dead-letter immediately without

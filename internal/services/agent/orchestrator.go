@@ -148,6 +148,19 @@ var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached fi
 // winning container.
 var ErrSandboxSiblingRace = errors.New("sandbox race: sibling thread attached first, retry")
 
+// ErrSandboxWorkspaceNotReady is returned when a thread reuses a sibling's
+// published code-review container before that sibling has finished cloning
+// and checking out the authoritative pull request head. The worker retries
+// the thread against the same node instead of starting an agent in a partial
+// or default-branch workspace.
+var ErrSandboxWorkspaceNotReady = errors.New("sandbox workspace is not ready, retry")
+
+// ErrThreadCancelledBeforeWorkspaceReady is returned when a durable thread
+// cancellation lands while a sibling is waiting for the shared code-review
+// checkout. The worker must stop this job without resetting the already-
+// cancelled thread to idle or retrying it.
+var ErrThreadCancelledBeforeWorkspaceReady = errors.New("thread cancelled before sandbox workspace became ready")
+
 // ErrSandboxOnDifferentNode is returned from ContinueSession's reuse path
 // when the session's recorded worker_node_id points at a different worker
 // than the one running this job. Container ids are local to a docker
@@ -202,6 +215,12 @@ const maxNoCheckpointRecoveryAttempts = 3
 // stall the loser's cleanup, long enough that a healthy IsAlive (typically
 // sub-100ms) succeeds with margin.
 const sandboxRaceProbeTimeout = 3 * time.Second
+
+const (
+	reusedCodeReviewWorkspaceReadyTimeout        = 2 * time.Minute
+	reusedCodeReviewWorkspaceReadyInitialBackoff = 100 * time.Millisecond
+	reusedCodeReviewWorkspaceReadyMaxBackoff     = 2 * time.Second
+)
 
 func logAgentRunFinished(log zerolog.Logger, run *models.Session, outcome string, runStartedAt time.Time, addFields func(*zerolog.Event)) {
 	event := log.Info().
@@ -306,6 +325,159 @@ func (o *Orchestrator) diagnoseAcquireHoldRaceLoss(
 		Str("stale_container_id", actualContainerID).
 		Msg("cleared stale orphan container_id from a crashed prior turn; signaling retry to re-enter against the clean row")
 	return ErrStaleSandboxIDCleared
+}
+
+// waitForSandboxWorkspaceReady blocks a reused code-review thread until the
+// shared checkout has both a valid commit and the exact branch/head prepared
+// by the winning sibling. A live container alone is not sufficient: the
+// winner publishes container_id before CloneRepo and pull/<n>/head checkout
+// finish, so an immediate reuse can otherwise start in an empty repository.
+func waitForSandboxWorkspaceReady(
+	ctx context.Context,
+	provider SandboxProvider,
+	sandbox *Sandbox,
+	expectedBranch, expectedHead string,
+	timeout, initialBackoff, maxBackoff time.Duration,
+	checkCancellation func(context.Context) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if initialBackoff <= 0 {
+		initialBackoff = 100 * time.Millisecond
+	}
+	if maxBackoff < initialBackoff {
+		maxBackoff = initialBackoff
+	}
+
+	quotedWorkDir := "'" + shellEscapeSingleQuote(sandbox.WorkDir) + "'"
+	probeCommand := fmt.Sprintf(
+		"git -C %s rev-parse --verify HEAD && git -C %s branch --show-current",
+		quotedWorkDir,
+		quotedWorkDir,
+	)
+	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+	defer cancelWait()
+
+	lastObserved := "workspace probe has not completed"
+	backoff := initialBackoff
+	for {
+		if err := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); err != nil {
+			return err
+		}
+		if checkCancellation != nil {
+			if err := checkCancellation(waitCtx); err != nil {
+				if errors.Is(err, ErrThreadCancelledBeforeWorkspaceReady) {
+					return err
+				}
+				if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
+					return waitErr
+				}
+				return err
+			}
+		}
+
+		var stdout, stderr bytes.Buffer
+		exitCode, execErr := provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
+		if execErr == nil && exitCode == 0 {
+			fields := strings.Fields(stdout.String())
+			if len(fields) >= 2 {
+				actualHead, actualBranch := fields[0], fields[1]
+				headMatches := expectedHead == "" || strings.EqualFold(actualHead, expectedHead)
+				branchMatches := expectedBranch == "" || actualBranch == expectedBranch
+				if headMatches && branchMatches {
+					// Close the race between the last unsuccessful probe and a
+					// cancellation that arrived while this successful probe ran.
+					if checkCancellation != nil {
+						if err := checkCancellation(waitCtx); err != nil {
+							if errors.Is(err, ErrThreadCancelledBeforeWorkspaceReady) {
+								return err
+							}
+							if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
+								return waitErr
+							}
+							return err
+						}
+					}
+					return nil
+				}
+				lastObserved = fmt.Sprintf("branch=%q head=%q", actualBranch, actualHead)
+			} else {
+				lastObserved = fmt.Sprintf("incomplete git probe output %q", strings.TrimSpace(stdout.String()))
+			}
+		} else {
+			lastObserved = fmt.Sprintf("exit=%d exec_error=%v stderr=%q", exitCode, execErr, strings.TrimSpace(stderr.String()))
+		}
+
+		if err := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); err != nil {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved)
+		case <-timer.C:
+		}
+		backoff = nextSandboxWorkspaceReadyBackoff(backoff, maxBackoff)
+	}
+}
+
+func sandboxWorkspaceWaitContextError(parentCtx, waitCtx context.Context, expectedBranch, expectedHead, lastObserved string) error {
+	if parentErr := parentCtx.Err(); parentErr != nil {
+		return parentErr
+	}
+	if waitCtx.Err() == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: expected branch=%q head=%q; last observed %s",
+		ErrSandboxWorkspaceNotReady,
+		expectedBranch,
+		expectedHead,
+		lastObserved,
+	)
+}
+
+func nextSandboxWorkspaceReadyBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum || current > maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
+func (o *Orchestrator) stopWorkspaceWaitIfThreadCancelled(ctx context.Context, orgID, threadID uuid.UUID) error {
+	if o.sessionThreads == nil {
+		return nil
+	}
+	thread, err := o.sessionThreads.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return fmt.Errorf("check thread cancellation while waiting for workspace: %w", err)
+	}
+	if thread.CancelRequestedAt == nil && thread.Status != models.ThreadStatusCancelled {
+		return nil
+	}
+	if thread.Status != models.ThreadStatusCancelled {
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := o.sessionThreads.UpdateStatus(updateCtx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+			return fmt.Errorf("mark workspace-waiting thread cancelled: %w", err)
+		}
+	}
+	return fmt.Errorf("%w: thread %s", ErrThreadCancelledBeforeWorkspaceReady, threadID)
 }
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
@@ -4239,6 +4411,65 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				return fmt.Errorf("restart environment to apply network setting")
 			}
 		}
+	}
+	// A sibling code-review thread can publish container_id before its fresh
+	// CloneRepo and pull-request checkout finish. Do not acquire the shared
+	// turn hold or start this thread's runtime until the checkout proves it is
+	// on the review session's authoritative branch and head SHA. Keeping this
+	// barrier before AcquireTurnHold also prevents a waiting sibling from
+	// releasing the winner's single shared turn-hold bit on timeout.
+	if reusedExisting && session.Origin == models.SessionOriginCodeReview && resolvedRepoID != nil && opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+		_, expectedHead, _, checkoutErr := codeReviewCheckoutContextFromSession(session)
+		if checkoutErr != nil {
+			return checkoutErr
+		}
+		expectedBranch := sessionWorkingBranch(session, promptIssue)
+		workspaceThreadID := *opts.ThreadID
+		workspaceSandbox := &Sandbox{
+			ID:        *session.ContainerID,
+			Provider:  "docker",
+			WorkDir:   sandboxCfg.WorkDir,
+			HomeDir:   sandboxCfg.HomeDir,
+			SessionID: sandboxCfg.SessionID,
+			OrgID:     sandboxCfg.OrgID,
+			Purpose:   sandboxCfg.Purpose,
+		}
+		log.Info().
+			Str("container_id", workspaceSandbox.ID).
+			Str("expected_branch", expectedBranch).
+			Str("expected_head_sha", expectedHead).
+			Msg("waiting for reused code review workspace to become ready")
+		if readyErr := waitForSandboxWorkspaceReady(
+			ctx,
+			o.provider,
+			workspaceSandbox,
+			expectedBranch,
+			expectedHead,
+			reusedCodeReviewWorkspaceReadyTimeout,
+			reusedCodeReviewWorkspaceReadyInitialBackoff,
+			reusedCodeReviewWorkspaceReadyMaxBackoff,
+			func(checkCtx context.Context) error {
+				return o.stopWorkspaceWaitIfThreadCancelled(checkCtx, session.OrgID, workspaceThreadID)
+			},
+		); readyErr != nil {
+			if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
+				log.Info().
+					Err(readyErr).
+					Str("container_id", workspaceSandbox.ID).
+					Str("thread_id", workspaceThreadID.String()).
+					Msg("stopped waiting for reused code review workspace because the thread was cancelled")
+			} else {
+				log.Warn().
+					Err(readyErr).
+					Str("container_id", workspaceSandbox.ID).
+					Msg("reused code review workspace did not become ready before retry")
+			}
+			return readyErr
+		}
+		log.Info().
+			Str("container_id", workspaceSandbox.ID).
+			Str("head_sha", expectedHead).
+			Msg("reused code review workspace is ready")
 	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
 	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
