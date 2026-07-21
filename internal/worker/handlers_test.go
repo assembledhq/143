@@ -12015,6 +12015,52 @@ func TestContinueSessionHandler_ThreadCompleteTurnUsesThreadTurn(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "thread current_turn must come from the thread's own counter, not the session's")
 }
 
+func TestContinueSessionHandler_ReturnsThreadTurnPersistenceFailure(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	threadModel := models.OpenCodeModelGemini3Flash
+	persistErr := errors.New("database unavailable")
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 5, nil, nil)...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
+		))
+	mock.ExpectExec(`UPDATE session_threads`).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), threadID, orgID).
+		WillReturnError(persistErr)
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(_ context.Context, _ *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "thread continuation should pass execution options")
+			require.NotNil(t, opts.OnTurnComplete, "thread continuation should expose the completed result")
+			opts.OnTurnComplete(&agent.AgentResult{Summary: "review complete"})
+			return nil
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.ErrorIs(t, err, persistErr, "continue_session should retry when the durable thread completion marker cannot be written")
+	require.NoError(t, mock.ExpectationsWereMet(), "thread completion persistence failure should be returned after the agent result is available")
+}
+
 // ---------------------------------------------------------------------------
 // parseOrgID additional tests
 // ---------------------------------------------------------------------------
