@@ -171,6 +171,9 @@ func TestCodeReviewHandler_PutPolicyRetainsEachOmittedPromptIndependently(t *tes
 			expectCodeReviewResolvedPolicy(t, mock, orgID, current)
 			description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, requested)
 			mock.ExpectBegin()
+			mock.ExpectExec("pg_advisory_xact_lock").
+				WithArgs("code_review_policy:" + orgID.String()).
+				WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			mock.ExpectQuery("SELECT COALESCE").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(2))
 			mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			mock.ExpectQuery("INSERT INTO code_review_policies").WithArgs(
