@@ -570,15 +570,18 @@ func TestCodeReviewDescriptionRequirementAppliesTypedRules(t *testing.T) {
 func TestCodeReviewReviewerMessageUsesNativeReviewCommand(t *testing.T) {
 	t.Parallel()
 
-	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
+	prURL := "https://github.com/assembledhq/assembled/pull/53786"
+	prompt := codeReviewReviewerPrompt(runCodeReviewPayload{}, models.PullRequest{GitHubPRURL: prURL}, models.DefaultCodeReviewPolicyConfig(), 0, "", nil)
 
-	require.True(t, strings.HasPrefix(prompt, "/review"), "code review reviewer prompt should invoke the native review command")
+	require.True(t, strings.HasPrefix(prompt, "/review "+prURL), "code review reviewer prompt should pass the authoritative pull request URL directly to the native review command")
+	require.Contains(t, prompt, "do not infer the target from recent pull requests", "reviewer prompt should forbid selecting a different pull request from repository activity")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
 	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeCodex, prompt), "Codex reviewer messages should invoke native /review with the review constraints")
 	commands := codeReviewNativeReviewCommands(models.AgentTypeCodex, prompt)
 	require.Len(t, commands, 1, "native reviewer command metadata should be persisted")
 	require.Equal(t, strings.TrimSpace(strings.TrimPrefix(prompt, "/review")), commands[0].Arguments, "native reviewer command should carry the review constraints as arguments")
+	require.True(t, strings.HasPrefix(commands[0].Arguments, prURL), "native reviewer command arguments should begin with the authoritative pull request URL")
 	require.Equal(t, prompt, codeReviewReviewerMessage(models.AgentTypeOpenCode, prompt), "agents without a native /review command should receive the plain prompt")
 	require.Empty(t, codeReviewNativeReviewCommands(models.AgentTypeOpenCode, prompt), "agents without a native /review command should not persist command metadata")
 }
@@ -2070,7 +2073,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 			reason:   "fork PRs are not eligible for approval",
 		},
 		{
-			name: "withholds approval when prior human review requested changes",
+			name: "ignores a prior human changes-requested review",
 			input: liveCodeReviewOutcomeInput{
 				Policy: policy,
 				Job:    runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, PolicyVersion: 3, HeadSHA: "head"},
@@ -2100,8 +2103,7 @@ func TestEvaluateLiveCodeReviewOutcome(t *testing.T) {
 				},
 				ChangedFilesAvailable: true,
 			},
-			expected: models.CodeReviewDecisionNeedsHumanReview,
-			reason:   "unresolved human review threads are present",
+			expected: models.CodeReviewDecisionApproved,
 		},
 		{
 			name: "withholds approval when PR head moved",

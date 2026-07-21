@@ -30,6 +30,8 @@ Once 143 submits an approval, that approval is final for the PR: later changes a
 
 **Automated approval policy** guides only the orchestrator's approve-or-escalate recommendation. It cannot override passing checks, path restrictions, size limits, quorum, disagreement handling, fork restrictions, or other deterministic safeguards.
 
+143 evaluates the current pull request independently of existing human review activity. Human comments, review decisions, and open or resolved review threads—including unresolved change requests—do not become findings or block 143's approval. Repository branch protection and merge rules still apply independently on GitHub.
+
 Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates. Advanced policy presets are different: they replace the complete policy, including safeguards and agent settings.
 
 ## Use repository inheritance

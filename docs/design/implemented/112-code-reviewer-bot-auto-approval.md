@@ -25,7 +25,7 @@ Implemented:
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
-- evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, unresolved human review threads, and the captured policy before choosing approval vs comment-only
+- evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - LLM-backed PR description requirement evaluation with prompt-injection screening
 - prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
@@ -326,7 +326,8 @@ Configurable deterministic signals:
 - PR description passes required sections
 - branch is mergeable and up to date according to policy
 - author is in an eligible role or team
-- no unresolved human review threads
+
+Existing human comments, review decisions, and open or resolved review threads are deliberately not risk signals. The bot evaluates the current pull request independently.
 
 Configurable synthesized signals:
 
@@ -394,11 +395,12 @@ Approval requires all of these by default:
 
 - PR head SHA still matches the reviewed SHA at submission time.
 - No blocking GitHub checks are failing.
-- No unresolved human blocking review exists.
 - No reviewer-agent blocking finding exists.
 - Orchestrator classifies the PR as acceptable under the active risk policy.
 - Policy allows approval for this repository, author class, and changed paths.
 - The bot has not already approved a stale previous head.
+
+Existing human comments, review decisions, and unresolved review threads are excluded from the bot's approval decision. GitHub branch protection and merge rules remain authoritative independently.
 
 The bot should not approve:
 
