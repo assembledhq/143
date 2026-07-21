@@ -65,6 +65,24 @@ describe('AuditLogEntry', () => {
     expect(screen.queryByText('changed member role')).not.toBeInTheDocument();
   });
 
+  it('labels code review policy changes', () => {
+    render(
+      <>
+        <AuditLogEntry
+          entry={makeEntry({ id: 2, action: 'code_review_policy.updated', resource_type: 'code_review_policy' })}
+          members={mockMembers}
+        />
+        <AuditLogEntry
+          entry={makeEntry({ id: 3, action: 'code_review_policy.reset', resource_type: 'code_review_policy' })}
+          members={mockMembers}
+        />
+      </>
+    );
+
+    expect(screen.getByText('updated review policy')).toBeInTheDocument();
+    expect(screen.getByText('reset review policy')).toBeInTheDocument();
+  });
+
   it('labels auto-join audit actions without assuming a domain source', () => {
     render(
       <>

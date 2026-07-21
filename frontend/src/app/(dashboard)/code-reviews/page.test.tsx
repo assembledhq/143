@@ -34,10 +34,12 @@ import type {
   CodeReviewResolvedPolicy,
   CodeReviewTemplateOption,
   CodeReviewPromptExamplesResponse,
+  AuditLog,
   ListResponse,
   OpenCodeModelInfo,
   Repository,
   SingleResponse,
+  User,
 } from "@/lib/types";
 
 const repo: Repository = {
@@ -496,6 +498,77 @@ describe("CodeReviewsPage", () => {
 
     expect(await within(evidenceSheet).findByText("No blocking issues found.")).toBeInTheDocument();
     expect(evidenceRequests).toBe(2);
+  });
+
+  it("shows who changed the review policy over time", async () => {
+    const user = userEvent.setup();
+    const members: User[] = [
+      {
+        id: "user-1",
+        org_id: "org-1",
+        email: "alice@example.com",
+        name: "Alice Smith",
+        role: "admin",
+        created_at: "2026-01-01T00:00:00Z",
+      },
+      {
+        id: "user-2",
+        org_id: "org-1",
+        email: "bob@example.com",
+        name: "Bob Chen",
+        role: "admin",
+        created_at: "2026-01-02T00:00:00Z",
+      },
+    ];
+    const entries: AuditLog[] = [
+      {
+        id: 2,
+        org_id: "org-1",
+        actor_type: "user",
+        actor_id: "user-1",
+        user_id: "user-1",
+        action: "code_review_policy.updated",
+        resource_type: "code_review_policy",
+        resource_id: "policy-2",
+        details: { source: "manual", version: 2 },
+        created_at: "2026-06-26T12:05:00Z",
+      },
+      {
+        id: 1,
+        org_id: "org-1",
+        actor_type: "user",
+        actor_id: "user-2",
+        user_id: "user-2",
+        action: "code_review_policy.updated",
+        resource_type: "code_review_policy",
+        resource_id: "policy-1",
+        details: { source: "example", version: 1 },
+        created_at: "2026-06-25T09:00:00Z",
+      },
+    ];
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/team/members", () =>
+        HttpResponse.json({ data: members, meta: {} } satisfies ListResponse<User>),
+      ),
+      http.get("/api/v1/audit-logs", ({ request }) => {
+        const url = new URL(request.url);
+        const data = url.searchParams.get("limit") === "1" ? entries.slice(0, 1) : entries;
+        return HttpResponse.json({ data, meta: {} } satisfies ListResponse<AuditLog>);
+      }),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
+
+    const historyTrigger = await screen.findByRole("button", { name: /Last activity:.*Alice Smith/i });
+    expect(historyTrigger).toBeInTheDocument();
+    await user.click(historyTrigger);
+
+    const history = await screen.findByRole("dialog", { name: "Review policy history" });
+    expect(within(history).getByText("Alice Smith")).toBeInTheDocument();
+    expect(within(history).getByText("Bob Chen")).toBeInTheDocument();
+    expect(within(history).getAllByText("updated review policy")).toHaveLength(2);
   });
 
   it("exposes accessible policy guidance and the compact GitHub management disclosure", async () => {

@@ -56,6 +56,7 @@ import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import { useOpenCodeAvailability, type OpenCodeModelAvailability } from "@/hooks/use-opencode-models";
 import { useAuth } from "@/hooks/use-auth";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
+import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
 import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
@@ -524,6 +525,7 @@ export default function CodeReviewsPage() {
         };
       }
       setInvalidPolicyField(null);
+      void queryClient.invalidateQueries({ queryKey: ["audit-logs"] });
     },
   });
   const readLatestConfig = (): CodeReviewPolicyConfig | null =>
@@ -911,6 +913,12 @@ export default function CodeReviewsPage() {
                     analyticsScope="organization"
                   />
                 </fieldset>
+
+                <AuditLogTrigger
+                  filters={{ resource_type: "code_review_policy" }}
+                  title="Review policy history"
+                  variant="footer"
+                />
               </CardContent>
             </Card>
             <CodeReviewPromptExampleDialog
