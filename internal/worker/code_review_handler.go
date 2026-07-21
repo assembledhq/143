@@ -132,7 +132,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("list code review findings: %w", err)
 		}
-		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, _, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review changed files: %w", err)
 		}
@@ -152,7 +152,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
-		reviewContext, reviewContextChecked, reviewContextAvailable, err := loadCodeReviewReviewContext(ctx, stores, services, job, pr)
+		reviewContext, _, reviewContextAvailable, err := loadCodeReviewReviewContext(ctx, stores, services, job, pr)
 		if err != nil {
 			return err
 		}
@@ -229,7 +229,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
 			return nil
 		}
-		changedFiles, changedFilesAvailable, err = loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("reload code review changed files before decision: %w", err)
 		}
@@ -237,7 +237,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
-		reviewContext, reviewContextChecked, reviewContextAvailable, err = loadCodeReviewReviewContext(ctx, stores, services, job, pr)
+		reviewContext, reviewContextChecked, reviewContextAvailable, err := loadCodeReviewReviewContext(ctx, stores, services, job, pr)
 		if err != nil {
 			return err
 		}
