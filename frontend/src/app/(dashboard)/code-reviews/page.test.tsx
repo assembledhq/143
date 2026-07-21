@@ -112,9 +112,6 @@ const policy: CodeReviewResolvedPolicy = {
       timeout_seconds: 1800,
     },
     inline_comment_limit: 4,
-    inheritance: {
-      inherit_org_defaults: false,
-    },
   },
 };
 
@@ -395,12 +392,12 @@ describe("CodeReviewsPage", () => {
     await user.click(within(evidenceSheet).getByRole("button", { name: "Close" }));
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
-    // Policy scope, current behavior, outcome, and the GitHub trigger are visible without expanding anything.
-    expect(await screen.findByText("Editing acme/api inherited policy.")).toBeInTheDocument();
-    expect(screen.getByText("Uses organization default")).toBeInTheDocument();
+    // The organization policy, current behavior, outcome, and selected repository trigger are visible without expanding anything.
+    expect(await screen.findByText("One policy for every repository")).toBeInTheDocument();
+    expect(screen.getByText(/Repository-specific overrides are not available/i)).toBeInTheDocument();
     expect(screen.getByText("Current behavior")).toBeInTheDocument();
     expect(screen.getByText("Comments only")).toBeInTheDocument();
     expect(screen.getByText("GitHub reviewer ready")).toBeInTheDocument();
@@ -515,12 +512,11 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
 
     const topLevelGuidance = [
-      "Policy scope",
-      "Organization default inheritance",
       "Code reviews enabled",
       "Review outcome",
       "Automated approval policy",
       "Additional review instructions (optional)",
+      "GitHub reviewer repository",
       "GitHub reviewer",
       "Advanced controls",
     ];
@@ -528,7 +524,7 @@ describe("CodeReviewsPage", () => {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
     }
 
-    const scope = screen.getByRole("combobox", { name: "Policy scope" });
+    const policyNotice = screen.getByText("One policy for every repository");
     const enablement = screen.getByRole("switch", {
       name: "Code reviews enabled",
     });
@@ -538,7 +534,7 @@ describe("CodeReviewsPage", () => {
     const advancedTrigger = screen.getByRole("button", {
       name: "Advanced controls",
     });
-    expect(scope.compareDocumentPosition(enablement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(policyNotice.compareDocumentPosition(enablement) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(enablement.compareDocumentPosition(instructionsHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(instructionsHeading.compareDocumentPosition(githubHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(githubHeading.compareDocumentPosition(summaryHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -568,7 +564,7 @@ describe("CodeReviewsPage", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent(/cannot bypass hard safeguards/i);
     act(() => approvalInfo.blur());
 
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     const manage = await screen.findByRole("button", { name: "Manage" });
     expect(manage).toHaveAttribute("aria-expanded", "false");
@@ -867,99 +863,17 @@ describe("CodeReviewsPage", () => {
     expect(input).toHaveValue("Keep this unsaved local guidance");
   });
 
-  it("resets each repository prompt independently to its organization value", async () => {
+  it("resets organization prompts to built-in values", async () => {
     const user = userEvent.setup();
     const updates: CodeReviewPolicyConfig[] = [];
     mockCodeReviewBaseHandlers(githubTriggerReady, (config) => updates.push(config));
-    const repositoryConfig = { ...policy.config, review_instructions: "repository review", automated_approval_policy: "repository approval" };
-    const organizationConfig = { ...policy.config, review_instructions: "organization review", automated_approval_policy: "organization approval" };
-    let currentConfig = repositoryConfig;
-    server.use(
-      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: {
-      ...policy, source: "repository", config: currentConfig,
-      inherited_policy: { ...organizationConfig, id: "org-policy", org_id: "org-1", active: true, version: 3, created_at: "2026-06-26T12:00:00Z" },
-      } } satisfies SingleResponse<CodeReviewResolvedPolicy>)),
-      http.put("/api/v1/code-review-policies", async ({ request }) => {
-        const body = (await request.json()) as { config: CodeReviewPolicyConfig };
-        currentConfig = body.config;
-        updates.push(body.config);
-        return HttpResponse.json({ data: { ...body.config, id: "repo-policy", org_id: "org-1", repository_id: repo.id, active: true, version: 4, created_at: "2026-06-26T12:00:00Z" } } satisfies SingleResponse<CodeReviewPolicyRecord>);
-      }),
-    );
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(screen.getByRole("radio", { name: /Approve acceptable PRs/i }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Use organization instructions" })).toBeInTheDocument());
-
-    await user.click(within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("button", { name: "Use organization instructions" }));
-    await waitFor(() => {
-      expect(updates.at(-1)?.review_instructions).toBe("organization review");
-      expect(updates.at(-1)?.automated_approval_policy).toBe("repository approval");
-    });
-    await user.click(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("button", { name: "Use organization approval policy" }));
-    await waitFor(() => {
-      expect(updates.at(-1)?.review_instructions).toBe("organization review");
-      expect(updates.at(-1)?.automated_approval_policy).toBe("organization approval");
-    });
-  });
-
-  it("confirms and resets the complete repository override", async () => {
-    const user = userEvent.setup();
-    let resetCalls = 0;
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, source: "repository", config: { ...policy.config, inheritance: { inherit_org_defaults: true, override_fields: ["review_instructions", "risk_policy"] } }, policy: { ...policy.config, id: "repo-policy", org_id: "org-1", repository_id: repo.id, active: true, version: 2, created_at: "2026-01-01T00:00:00Z", inheritance: { inherit_org_defaults: true, override_fields: ["review_instructions", "risk_policy"] } } } })),
-      http.delete("/api/v1/code-review-policies/repositories/repo-1", () => { resetCalls += 1; return new HttpResponse(null, { status: 204 }); }),
-    );
-    renderWithProviders(<CodeReviewsPage />);
-    await user.click(await screen.findByRole("tab", { name: "Policy" }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    expect(await screen.findByText("2 customized controls")).toBeInTheDocument();
-    const resetButton = screen.getByRole("button", { name: "Reset repository policy" });
-    const instructions = screen.getByRole("textbox", { name: "Additional review instructions (optional)" });
-    fireEvent.change(instructions, { target: { value: "pending reset guard" } });
-    expect(resetButton).toBeDisabled();
-    fireEvent.blur(instructions);
-    await waitFor(() => expect(resetButton).toBeEnabled());
-    await user.click(resetButton);
-    expect(await screen.findByRole("alertdialog", { name: "Reset the complete repository policy?" })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Reset repository policy" }));
-    await waitFor(() => expect(resetCalls).toBe(1));
-  });
-
-  it("keeps repository reset failures visible and retryable", async () => {
-    const user = userEvent.setup();
-    let resetCalls = 0;
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.get("/api/v1/code-review-policies", () => HttpResponse.json({ data: { ...policy, source: "repository", config: policy.config, policy: { ...policy.config, id: "repo-policy", org_id: "org-1", repository_id: repo.id, active: true, version: 2, created_at: "2026-01-01T00:00:00Z" } } })),
-      http.delete("/api/v1/code-review-policies/repositories/repo-1", () => {
-        resetCalls += 1;
-        return resetCalls === 1
-          ? HttpResponse.json({ error: { code: "RESET_FAILED", message: "reset unavailable" } }, { status: 500 })
-          : new HttpResponse(null, { status: 204 });
-      }),
-    );
-    renderWithProviders(<CodeReviewsPage />);
-    await user.click(await screen.findByRole("tab", { name: "Policy" }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
-    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
-    expect(await screen.findByText("reset unavailable")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "Organization default" }));
-    expect(screen.queryByText("reset unavailable")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
-    await user.click(await screen.findByRole("button", { name: "Reset repository policy" }));
-    await waitFor(() => expect(resetCalls).toBe(2));
+    await user.click(within(screen.getByRole("region", { name: "Additional review instructions (optional)" })).getByRole("button", { name: "Clear instructions" }));
+    await waitFor(() => expect(updates.at(-1)?.review_instructions).toBe(""));
+    await user.click(within(screen.getByRole("region", { name: "Automated approval policy" })).getByRole("button", { name: "Reset to default" }));
+    await waitFor(() => expect(updates.at(-1)?.automated_approval_policy).toContain("Automatically approve routine, well-tested changes"));
   });
 
   it("preserves prompt composer order at a mobile viewport", async () => {
@@ -987,8 +901,6 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
     await user.click(await screen.findByRole("button", { name: "Advanced controls" }));
     await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
@@ -1186,7 +1098,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     expect(await screen.findByText("Needs GitHub account")).toBeInTheDocument();
@@ -1210,7 +1122,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
 
     const setupButton = await screen.findByRole("button", {
@@ -1258,7 +1170,7 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
 
     await user.click(await screen.findByRole("tab", { name: /Policy/i }));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
+    await user.click(screen.getByRole("combobox", { name: "GitHub reviewer repository" }));
     await user.click(await screen.findByRole("option", { name: "acme/api" }));
     const setupButton = await screen.findByRole("button", { name: /Set up GitHub reviewer/i });
     await waitFor(() => expect(setupButton).toBeEnabled());
@@ -1271,60 +1183,28 @@ describe("CodeReviewsPage", () => {
   });
 
   it("renders policy controls read-only for viewers", async () => {
+    const user = userEvent.setup();
     mockCodeReviewBaseHandlers();
     server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ data: { id: "viewer-1", org_id: "org-1", email: "viewer@example.com", name: "Viewer", role: "viewer", created_at: "2026-01-01T00:00:00Z" } })));
     renderWithProviders(<CodeReviewsPage />);
-    await userEvent.click(await screen.findByRole("tab", { name: "Policy" }));
+    await user.click(await screen.findByRole("tab", { name: "Policy" }));
     expect(await screen.findByText(/view-only access/i)).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
+
+    const repositorySelect = screen.getByRole("combobox", { name: "GitHub reviewer repository" });
+    expect(repositorySelect).toBeEnabled();
+    await user.click(repositorySelect);
+    await user.click(await screen.findByRole("option", { name: "acme/api" }));
+    expect(await screen.findByText("@acme/143-code-reviewer")).toBeInTheDocument();
+    const manageButton = screen.getByRole("button", { name: "Manage" });
+    expect(manageButton).toBeEnabled();
+    await user.click(manageButton);
+    expect(screen.getByRole("button", { name: "Disable reviewer" })).toBeDisabled();
   });
 
   it("surfaces prompt example loading failures with retry", async () => {
     const user=userEvent.setup();let calls=0;mockCodeReviewBaseHandlers();server.use(http.get("/api/v1/code-reviews/prompt-examples",()=>{calls+=1;return HttpResponse.json({error:{code:"EXAMPLES_FAILED",message:"examples unavailable"}},{status:500})}));renderWithProviders(<CodeReviewsPage/>);await user.click(await screen.findByRole("tab",{name:"Policy"}));expect(await screen.findByText("examples unavailable")).toBeInTheDocument();await user.click(screen.getByRole("button",{name:"Retry"}));await waitFor(()=>expect(calls).toBeGreaterThan(1));
-  });
-
-  it("confirms before changing scope with an unsaved prompt draft", async () => {
-    const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
-    renderWithProviders(<CodeReviewsPage />);
-    await user.click(await screen.findByRole("tab", { name: "Policy" }));
-    const instructions = screen.getByRole("textbox", { name: "Additional review instructions (optional)" });
-    fireEvent.change(instructions, { target: { value: "local unsaved guidance" } });
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toHaveValue("local unsaved guidance"));
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    expect(await screen.findByRole("alertdialog", { name: "Discard unsaved prompt text?" })).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("Organization default");
-  });
-
-  it("clears the save-failure guard after discarding to another scope", async () => {
-    const user = userEvent.setup();
-    mockCodeReviewBaseHandlers();
-    server.use(
-      http.put("/api/v1/code-review-policies", () =>
-        HttpResponse.json({ error: { code: "SAVE_FAILED", message: "Policy could not be saved" } }, { status: 500 }),
-      ),
-    );
-    renderWithProviders(<CodeReviewsPage />);
-    await user.click(await screen.findByRole("tab", { name: "Policy" }));
-
-    // A failed save (not a typed draft) leaves the sticky save-failure guard set.
-    await user.click(screen.getByRole("switch", { name: "Code reviews enabled" }));
-    await waitFor(() => expect(toast.error).toHaveBeenCalled());
-
-    // The guard alone forces the discard dialog when switching scope.
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "acme/api" }));
-    await user.click(await screen.findByRole("button", { name: "Discard and switch" }));
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("acme/api"));
-
-    // Switching scope must clear the guard, so a subsequent switch proceeds
-    // without re-prompting and without leaking the prior scope's failure.
-    await user.click(screen.getByRole("combobox", { name: "Policy scope" }));
-    await user.click(await screen.findByRole("option", { name: "Organization default" }));
-    expect(screen.queryByRole("alertdialog", { name: "Discard unsaved prompt text?" })).not.toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("combobox", { name: "Policy scope", hidden: true })).toHaveTextContent("Organization default"));
   });
 
   it("re-opens the prompt example dialog when the same example is chosen twice", async () => {

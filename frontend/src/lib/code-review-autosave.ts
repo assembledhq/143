@@ -2,7 +2,7 @@ import type { CodeReviewPolicyConfig, CodeReviewResolvedPolicy, SingleResponse }
 
 /**
  * Optimistic-update + coalesce helpers for the code-review policy autosave
- * scope (`queryKeys.codeReviews.policy(repositoryId)`).
+ * organization policy (`queryKeys.codeReviews.policy`).
  *
  * The policy save is a single whole-config `PUT` (no partial patches), so the
  * cache entry's `config` is replaced wholesale and queued saves coalesce by

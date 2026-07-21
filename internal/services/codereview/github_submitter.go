@@ -59,14 +59,17 @@ const (
 )
 
 type SubmitReviewRequest struct {
-	InstallationID int64
-	Repository     string
-	PullNumber     int
-	HeadSHA        string
-	OutputKey      string
-	Decision       SubmitReviewDecision
-	Body           string
-	Comments       []SubmitReviewComment
+	InstallationID    int64
+	Repository        string
+	PullNumber        int
+	HeadSHA           string
+	OutputKey         string
+	PreviousOutputKey string
+	ExistingReviewID  int64
+	ExistingReviewURL string
+	Decision          SubmitReviewDecision
+	Body              string
+	Comments          []SubmitReviewComment
 }
 
 type SubmitReviewComment struct {
@@ -149,6 +152,9 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		return SubmitReviewResult{}, fmt.Errorf("get installation token: %w", err)
 	}
 	reviewBody := withCodeReviewOutputMarker(req.Body, req.OutputKey)
+	if req.ExistingReviewID > 0 {
+		return s.updateExistingReview(ctx, token, owner, repo, req, reviewBody)
+	}
 	if strings.TrimSpace(req.OutputKey) != "" {
 		existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
 		if err != nil {
@@ -254,6 +260,178 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		}
 	}
 	return result, nil
+}
+
+func (s *GitHubSubmitter) updateExistingReview(ctx context.Context, token, owner, repo string, req SubmitReviewRequest, reviewBody string) (SubmitReviewResult, error) {
+	comments, err := s.listPullRequestReviewComments(ctx, token, owner, repo, req.PullNumber)
+	if err != nil {
+		return SubmitReviewResult{}, err
+	}
+	existingByMarker := codeReviewCommentsByMarker(comments)
+	posted := make([]SubmitReviewPostedComment, 0, len(req.Comments))
+	for _, comment := range req.Comments {
+		if strings.TrimSpace(comment.Path) == "" || comment.Line <= 0 || strings.TrimSpace(comment.Body) == "" {
+			continue
+		}
+		// Once a PR has a persistent review summary, inline findings use a
+		// review-independent marker. This lets a later assessment revive and
+		// update the same thread even if an intermediate assessment did not
+		// select that finding.
+		markerKey := codeReviewFindingMarkerKey("", comment.DedupeKey)
+		body := withCodeReviewFindingMarker(comment.Body, markerKey)
+		var existing githubReviewCommentItem
+		found := false
+		for _, outputKey := range []string{req.OutputKey, req.PreviousOutputKey, ""} {
+			candidateKey := codeReviewFindingMarkerKey(outputKey, comment.DedupeKey)
+			if strings.TrimSpace(candidateKey) == "" {
+				continue
+			}
+			candidate, ok := existingByMarker[codeReviewMarkerDigest(candidateKey)]
+			if ok {
+				existing = candidate
+				found = true
+				break
+			}
+		}
+		if found {
+			if strings.TrimSpace(existing.Body) != strings.TrimSpace(body) {
+				if err := s.updateReviewComment(ctx, token, owner, repo, existing.ID, body); err != nil {
+					return SubmitReviewResult{}, err
+				}
+			}
+			posted = append(posted, SubmitReviewPostedComment{
+				ID: existing.ID, Path: existing.Path, Line: existing.Line, Body: body, DedupeKey: comment.DedupeKey,
+			})
+			continue
+		}
+		created, err := s.createReviewComment(ctx, token, owner, repo, req.PullNumber, req.HeadSHA, comment, body)
+		if err != nil {
+			return SubmitReviewResult{}, err
+		}
+		posted = append(posted, created)
+	}
+
+	result, err := s.updateReviewSummary(ctx, token, owner, repo, req.PullNumber, req.ExistingReviewID, reviewBody)
+	if err != nil {
+		return SubmitReviewResult{}, err
+	}
+	if req.Decision == SubmitReviewDecisionApproved {
+		if err := s.ensureFormalApproval(ctx, token, owner, repo, req); err != nil {
+			return SubmitReviewResult{}, err
+		}
+	}
+	if strings.TrimSpace(result.URL) == "" {
+		result.URL = strings.TrimSpace(req.ExistingReviewURL)
+	}
+	result.Comments = posted
+	return result, nil
+}
+
+func (s *GitHubSubmitter) ensureFormalApproval(ctx context.Context, token, owner, repo string, req SubmitReviewRequest) error {
+	approvalOutputKey := strings.TrimSpace(req.OutputKey) + ":formal-approval"
+	if strings.TrimSpace(req.OutputKey) != "" {
+		_, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, approvalOutputKey)
+		if err != nil {
+			return err
+		}
+		if found {
+			return nil
+		}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"commit_id": req.HeadSHA,
+		"body":      withCodeReviewOutputMarker("", approvalOutputKey),
+		"event":     githubReviewEvent(SubmitReviewDecisionApproved),
+	})
+	if err != nil {
+		return fmt.Errorf("marshal formal approval payload: %w", err)
+	}
+	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), req.PullNumber)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, reviewURL, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create formal approval request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("submit formal GitHub approval: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("submit formal GitHub approval returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+	}
+	return nil
+}
+
+func (s *GitHubSubmitter) updateReviewSummary(ctx context.Context, token, owner, repo string, pullNumber int, reviewID int64, body string) (SubmitReviewResult, error) {
+	payload, err := json.Marshal(map[string]string{"body": body})
+	if err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("marshal review summary update: %w", err)
+	}
+	reviewURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber, reviewID)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, reviewURL, bytes.NewReader(payload))
+	if err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("create review summary update request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return SubmitReviewResult{}, fmt.Errorf("update GitHub review summary returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+	}
+	var decoded struct {
+		ID      int64  `json:"id"`
+		HTMLURL string `json:"html_url"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return SubmitReviewResult{}, fmt.Errorf("decode GitHub review summary update: %w", err)
+	}
+	if decoded.ID == 0 {
+		decoded.ID = reviewID
+	}
+	return SubmitReviewResult{ID: decoded.ID, URL: decoded.HTMLURL}, nil
+}
+
+func (s *GitHubSubmitter) createReviewComment(ctx context.Context, token, owner, repo string, pullNumber int, headSHA string, comment SubmitReviewComment, body string) (SubmitReviewPostedComment, error) {
+	payload, err := json.Marshal(map[string]any{
+		"body": body, "commit_id": headSHA, "path": comment.Path, "line": comment.Line, "side": "RIGHT",
+	})
+	if err != nil {
+		return SubmitReviewPostedComment{}, fmt.Errorf("marshal review comment create: %w", err)
+	}
+	commentURL := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/comments", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), pullNumber)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, commentURL, bytes.NewReader(payload))
+	if err != nil {
+		return SubmitReviewPostedComment{}, fmt.Errorf("create review comment request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return SubmitReviewPostedComment{}, fmt.Errorf("create GitHub review comment returned %d: %s", resp.StatusCode, readGitHubErrorBody(resp))
+	}
+	var decoded githubReviewCommentItem
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return SubmitReviewPostedComment{}, fmt.Errorf("decode GitHub review comment response: %w", err)
+	}
+	return SubmitReviewPostedComment{
+		ID: decoded.ID, Path: decoded.Path, Line: decoded.Line, Body: body, DedupeKey: comment.DedupeKey,
+	}, nil
 }
 
 func annotatePostedCommentsWithDedupeKeys(comments []SubmitReviewPostedComment, dedupeKeysByMarker map[string]string) {
@@ -858,6 +1036,14 @@ func extractCodeReviewFindingMarker(body string) string {
 		return ""
 	}
 	return strings.TrimSpace(rest[:end])
+}
+
+// IsCodeReviewAuthoredBody identifies hidden markers written by this
+// submitter. Webhook handlers use it to avoid reassessment loops from 143's own
+// review and inline-comment writes.
+func IsCodeReviewAuthoredBody(body string) bool {
+	return strings.Contains(body, "<!-- 143-code-review-output:") ||
+		strings.Contains(body, "<!-- 143-code-review-finding:")
 }
 
 func githubReviewEvent(decision SubmitReviewDecision) string {

@@ -71,6 +71,7 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	config := DefaultCodeReviewPolicyConfig()
 	require.Empty(t, config.ReviewInstructions, "default review instructions should preserve native review behavior")
 	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, config.AutomatedApprovalPolicy, "default approval policy should be conservative")
+	require.Contains(t, config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "default approval policy should require an independent decision")
 
 	require.Equal(t, CodeReviewApprovalModeCommentOnly, config.ApprovalMode, "code reviewer should default to comment-only mode")
 	require.True(t, config.Enabled, "code reviewer should default enabled so explicit reviewer requests are honored")
@@ -153,39 +154,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 	}
 }
 
-func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
-	t.Parallel()
-
-	base := DefaultCodeReviewPolicyConfig()
-	base.Enabled = true
-	base.ApprovalMode = CodeReviewApprovalModeCommentOnly
-	base.RiskPolicy.MaxFilesChanged = 9
-	base.InlineCommentLimit = 4
-	base.ReviewInstructions = "organization review guidance"
-	base.AutomatedApprovalPolicy = "organization approval guidance"
-	override := base
-	override.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
-	override.RiskPolicy.MaxFilesChanged = 2
-	override.InlineCommentLimit = 8
-	override.ReviewInstructions = "repository review guidance"
-	override.AutomatedApprovalPolicy = "repository approval guidance"
-	override.Inheritance = CodeReviewPolicyInheritance{
-		InheritOrgDefaults: true,
-		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldReviewInstructions},
-	}
-
-	merged := MergeCodeReviewPolicyConfig(base, override)
-
-	require.True(t, merged.Enabled, "merged policy should inherit fields outside the repository override list")
-	require.Equal(t, CodeReviewApprovalModeApproveAcceptable, merged.ApprovalMode, "merged policy should apply explicitly overridden approval mode")
-	require.Equal(t, 2, merged.RiskPolicy.MaxFilesChanged, "merged policy should apply explicitly overridden risk policy")
-	require.Equal(t, 4, merged.InlineCommentLimit, "merged policy should inherit non-overridden inline comment limit")
-	require.Equal(t, override.ReviewInstructions, merged.ReviewInstructions, "repository review instructions should override independently")
-	require.Equal(t, base.AutomatedApprovalPolicy, merged.AutomatedApprovalPolicy, "automated approval policy should inherit independently")
-	require.Equal(t, override.Inheritance, merged.Inheritance, "merged policy should preserve inheritance audit metadata")
-	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldReviewInstructions, CodeReviewPolicyFieldAutomatedApprovalPolicy, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report prompt fields independently")
-}
-
 func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
 	t.Parallel()
 
@@ -221,6 +189,7 @@ func TestCodeReviewPolicyTemplates(t *testing.T) {
 
 			require.NotEmpty(t, template.Title, "template should have a display title")
 			require.Equal(t, CodeReviewApprovalModeApproveAcceptable, template.Config.ApprovalMode, "starter templates should be editable approval policies")
+			require.Contains(t, template.Config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "starter templates should require an independent decision")
 			require.NoError(t, template.Config.Validate(), "template config should be valid")
 		})
 	}
@@ -250,16 +219,15 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 		{
 			name: "blocks oversized sensitive fork with agent concerns",
 			input: CodeReviewRiskInput{
-				FilesChanged:           6,
-				LinesChanged:           350,
-				ChangedPaths:           []string{"internal/auth/session.go"},
-				Categories:             []string{"auth"},
-				ChecksPassing:          false,
-				DescriptionPassed:      false,
-				FromFork:               true,
-				UnresolvedHumanThreads: 1,
-				BlockingFindings:       1,
-				ReviewerDisagreement:   true,
+				FilesChanged:         6,
+				LinesChanged:         350,
+				ChangedPaths:         []string{"internal/auth/session.go"},
+				Categories:           []string{"auth"},
+				ChecksPassing:        false,
+				DescriptionPassed:    false,
+				FromFork:             true,
+				BlockingFindings:     1,
+				ReviewerDisagreement: true,
 			},
 			expected: codeReviewRiskEvaluationForTest(
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
@@ -267,7 +235,6 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible},
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"},
@@ -623,6 +590,9 @@ func TestCodeReviewPromptExamples(t *testing.T) {
 	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, approval[0].Policy, "the conservative example should match the built-in approval policy")
 	for _, example := range append([]CodeReviewPromptExampleOption(nil), review...) {
 		require.NotEmpty(t, example.Instructions, "every review example should contain usable instructions")
+	}
+	for _, example := range append([]CodeReviewAutomatedApprovalExampleOption(nil), approval...) {
+		require.Contains(t, example.Policy, "Unresolved human review threads must not count against approval.", "every approval example should require an independent decision")
 	}
 }
 

@@ -461,6 +461,9 @@ func RegisterHandlers(w *Worker, stores *Stores, services *Services, retentionCf
 	}
 	if stores.CodeReviews != nil {
 		w.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(stores, services, logger))
+		if services != nil && services.CodeReviewLifecycle != nil {
+			w.Register(models.JobTypeStartCodeReviewReassessment, newStartCodeReviewReassessmentHandler(stores, services, logger))
+		}
 	}
 	if services != nil && services.PagerDuty != nil {
 		w.Register(models.JobTypePagerDutyIngestEvent, newPagerDutyIngestEventHandler(services.PagerDuty, logger))
@@ -784,35 +787,40 @@ type codeReviewSubmitter interface {
 	SubmitReview(ctx context.Context, req codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error)
 }
 
+type codeReviewLifecycle interface {
+	HandleReviewChanged(ctx context.Context, input codereviewsvc.ReviewChangedInput) (codereviewsvc.ReviewRequestedResult, error)
+}
+
 type codingAgentAvailability interface {
 	IsAgentAvailable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, agentType models.AgentType, model string) (bool, error)
 }
 
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
-	Orchestrator    orchestratorService
-	PR              prCreator
-	Failure         *agent.FailureService
-	SandboxProvider agent.SandboxProvider
-	ProjectTasks    agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
-	AutomationRuns  agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
-	Prioritization  *prioritization.Service
-	Feedback        *feedback.Service
-	PM              pmService
-	Memory          MemoryReinforcer              // optional — enables memory reinforcement on PR approval
-	SlackSummarizer *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
-	LLM             llmClient                     // nil-safe: needed for eval LLM judge grading
-	GitHub          agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
-	GitHubOrgRoster githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
-	Snapshots       storage.SnapshotStore         // nil-safe: needed for eval code_check grading
-	TitleService    *services.SessionTitleService // nil-safe: session title regeneration
-	Linear          *linear.Service               // nil-safe: Linear session-linking disabled if nil
-	PagerDuty       pagerDutyEventProcessor       // nil-safe: PagerDuty incident ingestion disabled if nil
-	PagerDutySync   pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
-	PagerDutyWrites pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
-	CodeReviews     codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
-	CodingAgents    codingAgentAvailability       // nil-safe: code review falls back to the configured roster when nil
-	SlackbotMetrics *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
+	Orchestrator        orchestratorService
+	PR                  prCreator
+	Failure             *agent.FailureService
+	SandboxProvider     agent.SandboxProvider
+	ProjectTasks        agent.ProjectTaskUpdater   // nil-safe: updates project tasks on terminal session fallback paths
+	AutomationRuns      agent.AutomationRunUpdater // nil-safe: updates automation runs on terminal session fallback paths
+	Prioritization      *prioritization.Service
+	Feedback            *feedback.Service
+	PM                  pmService
+	Memory              MemoryReinforcer              // optional — enables memory reinforcement on PR approval
+	SlackSummarizer     *ingestion.SlackSummarizer    // nil-safe: Slack summarization disabled if nil
+	LLM                 llmClient                     // nil-safe: needed for eval LLM judge grading
+	GitHub              agent.GitHubTokenProvider     // nil-safe: needed for eval repo cloning
+	GitHubOrgRoster     githubOrgRosterService        // nil-safe: needed for GitHub org auto-join roster sync
+	Snapshots           storage.SnapshotStore         // nil-safe: needed for eval code_check grading
+	TitleService        *services.SessionTitleService // nil-safe: session title regeneration
+	Linear              *linear.Service               // nil-safe: Linear session-linking disabled if nil
+	PagerDuty           pagerDutyEventProcessor       // nil-safe: PagerDuty incident ingestion disabled if nil
+	PagerDutySync       pagerDutySyncer               // nil-safe: PagerDuty reconciliation disabled if nil
+	PagerDutyWrites     pagerDutyPRWritebacker        // nil-safe: PagerDuty writeback disabled if nil
+	CodeReviews         codeReviewSubmitter           // nil-safe: GitHub review submission disabled if nil
+	CodeReviewLifecycle codeReviewLifecycle           // nil-safe: starts durable follow-up assessments after webhook changes
+	CodingAgents        codingAgentAvailability       // nil-safe: code review falls back to the configured roster when nil
+	SlackbotMetrics     *metrics.SlackbotMetrics      // nil-safe: Slackbot observability disabled if nil
 	// Redis is optional and used for non-authoritative shared caches such as
 	// Slack user display names. Losing it should only increase provider lookups.
 	Redis       *cache.Client
@@ -9941,6 +9949,31 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Err(err).
 					Msg("continue_session lost sandbox publish race to sibling thread; retrying against the shared sandbox")
 				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
+			}
+			if errors.Is(err, agent.ErrSandboxWorkspaceNotReady) {
+				// The sibling's shared container is alive, but its repository
+				// clone / authoritative PR-head checkout did not finish within
+				// this attempt's barrier. Retry on the owning node instead of
+				// launching an agent in an empty or default-branch workspace.
+				retryAfter := 2 * time.Second
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("shared code review workspace is not ready; retrying on the sandbox owner")
+				return &RetryableError{Err: err, RetryAfter: &retryAfter, TargetNodeID: models.SessionWorkerTarget(&session)}
+			}
+			if errors.Is(err, agent.ErrThreadCancelledBeforeWorkspaceReady) {
+				// The durable cancel timestamp was observed before this thread
+				// acquired the shared turn hold. The orchestrator already marked
+				// the thread cancelled; dead-letter this accepted turn without
+				// resetting it to idle or retrying it after the workspace is ready.
+				logger.Info().
+					Str("session_id", sessionID.String()).
+					Str("thread_id", input.ThreadID).
+					Err(err).
+					Msg("code review thread was cancelled while waiting for the shared workspace")
+				return &FatalError{Err: err}
 			}
 			if errors.Is(err, agent.ErrSandboxRaceLoser) {
 				// A duplicate continue_session job lost the AcquireTurnHold

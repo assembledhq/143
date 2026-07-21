@@ -1,6 +1,6 @@
 # Design: Code Reviewer Bot And Acceptable-Risk Auto-Approval
 
-> **Status:** Implemented | **Last reviewed:** 2026-07-15
+> **Status:** Implemented | **Last reviewed:** 2026-07-20
 >
 > **Depends on:** [../overall.md](../overall.md), [78-review-agent-loops.md](78-review-agent-loops.md), [107-pr-readiness-checks.md](107-pr-readiness-checks.md), [61-pr-state-sync-and-repair-actions.md](61-pr-state-sync-and-repair-actions.md), [../backlog/11-review-feedback-loop.md](../backlog/11-review-feedback-loop.md)
 
@@ -21,15 +21,17 @@ Implemented:
 - typed Go models and `pgx` stores for policies, review metadata, agent evidence, and findings
 - deterministic acceptable-risk evaluator, starter policy templates, final-review body rendering, and inline finding selection helpers
 - GitHub `review_requested` webhook adapter for configured bot reviewer identities, including local PR mirror creation for human-authored PRs
+- event-driven reassessment after the initial reviewer request when the PR head/description, human reviews/comments/threads, or GitHub checks/statuses change, with durable follow-up jobs, self-authored webhook suppression, and a terminal stop once 143 approves
 - service-layer code review request orchestration that resolves/materializes policy, marks stale older heads, reuses running sessions, creates normal code-review sessions, and enqueues `run_code_review`
 - `run_code_review` worker handler that loads the captured policy version, fans out read-only reviewer threads running native `/review`, synthesizes via an orchestrator thread, records agent results, submits a GitHub review when the worker has GitHub credentials, and stores the GitHub review id/url
 - live reviewer/orchestrator evidence ingestion harvested from running review threads rather than pre-existing stored result rows
-- evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, unresolved human review threads, and the captured policy before choosing approval vs comment-only
+- evidence-gated approval path that evaluates reviewer results, blocking findings, PR health, reviewed head SHA, required check state, changed-file size/path/category context from GitHub, and the captured policy before choosing approval vs comment-only
 - LLM-backed PR description requirement evaluation with prompt-injection screening
 - prompt artifact storage and recovery for rendered reviewer/orchestrator/description prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
 - GitHub review submission as the sole GitHub result surface, avoiding a redundant commit status that could be mistaken for a required CI check
+- in-place GitHub review-summary refresh for reassessments, with prior inline findings updated by stable markers and each assessment retained as a separate auditable 143 session
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
@@ -92,7 +94,7 @@ Defer:
 ## Core Flow
 
 ```text
-Developer opens or updates PR
+Developer opens PR
         |
         v
 Developer requests "143 Code Reviewer" in GitHub
@@ -114,6 +116,10 @@ If acceptable risk and approval prerequisites pass:
   submit GitHub approval with evidence
 Else:
   submit a GitHub review comment with escalation reasons
+        |
+        v
+Until approval, later PR/review/check changes automatically rerun the
+assessment and update the existing GitHub review summary. Approval is final.
 ```
 
 Reviewer assignment should be explicit in v1. Auto-running can come later after teams trust the signal.
@@ -320,7 +326,8 @@ Configurable deterministic signals:
 - PR description passes required sections
 - branch is mergeable and up to date according to policy
 - author is in an eligible role or team
-- no unresolved human review threads
+
+Existing human comments, review decisions, and open or resolved review threads are deliberately not risk signals. The bot evaluates the current pull request independently.
 
 Configurable synthesized signals:
 
@@ -388,11 +395,12 @@ Approval requires all of these by default:
 
 - PR head SHA still matches the reviewed SHA at submission time.
 - No blocking GitHub checks are failing.
-- No unresolved human blocking review exists.
 - No reviewer-agent blocking finding exists.
 - Orchestrator classifies the PR as acceptable under the active risk policy.
 - Policy allows approval for this repository, author class, and changed paths.
 - The bot has not already approved a stale previous head.
+
+Existing human comments, review decisions, and unresolved review threads are excluded from the bot's approval decision. GitHub branch protection and merge rules remain authoritative independently.
 
 The bot should not approve:
 
@@ -412,8 +420,13 @@ Code review sessions are keyed to a PR head SHA. Each head is a separate reviewa
 Rules:
 
 - If the bot is requested while a review is already running for the same PR head SHA, reuse the existing session and update the pending GitHub status/comment instead of starting another session.
-- If the PR receives new commits while review is running, mark the running session stale, stop before approval, and either enqueue a new session for the new head SHA or ask the user to request the bot again according to repository policy.
-- If the bot previously approved an older head SHA, that approval must not count as evidence for the new head SHA. The new review should link to the prior session as historical context only.
+- After the first explicit reviewer request, pass-relevant GitHub changes automatically enqueue a fresh assessment until 143 approves. These include new commits, PR title/description and readiness changes, human review submissions/edits/dismissals, inline review comment and thread changes, and completed checks or commit-status updates.
+- If the PR receives new commits while review is running, mark the running session stale, stop before approval, and enqueue a new session for the new head SHA.
+- If mutable description, human-review, or check state changes while agents are running on the same head, re-read those gates immediately before the final recommendation and retain a durable starter job until the older assessment finishes. A non-approved result allows the queued change to start a new auditable assessment; a newer assessment coalesces older queued changes.
+- A submitted 143 approval is monotonic for the PR. Later webhook changes and explicit reviewer rerequests are ignored so automation never dismisses or contradicts an approval that has already occurred.
+- Reassessments update the original GitHub review summary in place so the PR has one current 143 recommendation; the backing 143 sessions remain immutable audit history.
+- When a previously non-approved sticky summary becomes acceptable, update that summary and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
+- Webhook deliveries are keyed into stable reassessment output keys, and review/comment events carrying 143's hidden markers are ignored to prevent duplicate work and self-trigger loops.
 - If the final GitHub review submission fails after session completion, retry idempotently using a stable review-output key for the session/head SHA/policy version.
 - If inline comments were already posted for the same head SHA, update or supersede them where GitHub permits; otherwise avoid posting duplicate line comments.
 - If policy changes while a review is running, finish under the policy version captured at session start unless an admin explicitly cancels and reruns.

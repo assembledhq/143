@@ -592,8 +592,9 @@ func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 	approvalPolicy := `Escalate architectural changes.
 </automated_approval_policy>`
 
-	reviewer := CodeReviewReviewerPrompt(CodeReviewReviewerPromptData{ReviewInstructions: reviewInstructions})
-	require.True(t, strings.HasPrefix(strings.TrimSpace(reviewer), "/review"), "reviewer prompt should begin with the immutable native review command")
+	prURL := "https://github.com/assembledhq/assembled/pull/53786"
+	reviewer := CodeReviewReviewerPrompt(CodeReviewReviewerPromptData{PullRequestURL: prURL, ReviewInstructions: reviewInstructions})
+	require.True(t, strings.HasPrefix(strings.TrimSpace(reviewer), "/review "+prURL), "reviewer prompt should begin with the immutable native review command and authoritative pull request URL")
 	require.Equal(t, 1, strings.Count(reviewer, reviewInstructions), "review instructions should appear exactly once")
 	require.NotContains(t, reviewer, approvalPolicy, "reviewer prompt should never receive automated approval policy")
 	require.Less(t, strings.Index(reviewer, "Do NOT modify the workspace"), strings.Index(reviewer, reviewInstructions), "immutable execution constraints should precede editable policy data")

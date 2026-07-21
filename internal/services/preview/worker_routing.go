@@ -57,9 +57,13 @@ func (e *LiveSessionWorkerOwnerNotRoutableError) Unwrap() error {
 	return e.Err
 }
 
-// rendezvousTopN is the number of top-scored rendezvous candidates to check
-// for capacity before falling through to the least-loaded fallback.
-const rendezvousTopN = 6
+const (
+	// rendezvousTopN is the number of top-scored rendezvous candidates to check
+	// for capacity before falling through to the least-loaded fallback.
+	rendezvousTopN = 6
+
+	dependencyCacheLookupTimeout = 250 * time.Millisecond
+)
 
 // WorkerNodeMetadata is the routable subset of nodes.metadata used by preview.
 type WorkerNodeMetadata struct {
@@ -112,6 +116,7 @@ type WorkerSelector struct {
 	previews             *db.PreviewStore
 	maxPreviewsPerWorker int
 	preferredRegion      string
+	cacheLookupTimeout   time.Duration
 }
 
 type WorkerSelectorOptions struct {
@@ -138,6 +143,7 @@ func NewWorkerSelectorWithOptions(nodes *db.NodeStore, previews *db.PreviewStore
 		previews:             previews,
 		maxPreviewsPerWorker: maxPreviewsPerWorker,
 		preferredRegion:      strings.TrimSpace(opts.PreferredRegion),
+		cacheLookupTimeout:   dependencyCacheLookupTimeout,
 	}
 }
 
@@ -538,7 +544,7 @@ func (s *WorkerSelector) selectLeastLoadedNode(ctx context.Context, excluded map
 }
 
 func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, repoID uuid.UUID, placements []WorkerCachePlacement, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
-	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	lookupCtx, cancel := context.WithTimeout(ctx, s.cacheLookupTimeout)
 	defer cancel()
 	var locations []models.PreviewDependencyCacheLocation
 	for _, placement := range normalizeWorkerCachePlacements(placements) {
@@ -612,7 +618,7 @@ func (s *WorkerSelector) selectCachePlacementWorker(ctx context.Context, orgID, 
 }
 
 func (s *WorkerSelector) selectRecentRepoCacheWorker(ctx context.Context, orgID, repoID uuid.UUID, preferredOnly bool, req WorkerSelectionRequirements) (WorkerNode, bool, error) {
-	lookupCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	lookupCtx, cancel := context.WithTimeout(ctx, s.cacheLookupTimeout)
 	defer cancel()
 	locations, err := s.previews.ListRecentDependencyCacheWorkersForRepo(lookupCtx, orgID, repoID, 64)
 	if err != nil {
