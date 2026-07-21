@@ -107,11 +107,11 @@ const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
 // of short-lived versions; leaving the field still flushes immediately.
 const CODE_REVIEW_TEXTAREA_DEBOUNCE_MS = 5_000;
 const codeReviewPromptValuesEqual = (left: string, right: string) => left.trim() === right.trim();
-const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
+const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine changes when:
 - the intent is clear and the change has a small, understandable scope
 - there are no blocking findings
 - the implementation follows established repository patterns
-- the available testing evidence is appropriate for the change
+- the test coverage visible in the code is appropriate for the change
 
 Require human review when:
 - the change affects authentication, billing, permissions, infrastructure, or production data
@@ -119,7 +119,7 @@ Require human review when:
 - reviewers disagree or the risk cannot be evaluated confidently
 - the intended behavior cannot be determined from the pull request and repository context
 
-Evaluate the pull request independently. Disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`;
+Evaluate the pull request independently based on the code itself. Disregard GitHub checks, CI results, build statuses, and other external validation signals, whether passing, failing, or pending; they must not count for or against approval. Also disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`;
 const APPLICABILITY_KIND_LABELS: Record<CodeReviewDescriptionApplicabilityKind, string> = {
   all: "All PRs",
   nontrivial: "Nontrivial",
