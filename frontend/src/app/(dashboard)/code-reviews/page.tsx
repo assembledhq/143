@@ -58,6 +58,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { AutosaveIndicator } from "@/components/AutosaveIndicator";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy } from "@/lib/code-review-autosave";
+import { getCodingAgentReasoningOptions } from "@/lib/coding-agent-reasoning";
 import { AGENTS_BY_KEY, availableAgentModelGroups, modelOptionLabel, pmUsableResolvedCredentials, type AgentModelGroup } from "@/lib/agents";
 import type {
   CodingCredentialSummary,
@@ -93,6 +94,13 @@ const NO_TEMPLATE = "none";
 // Coalesce a burst of SSE lifecycle events into a single list refetch.
 const CODE_REVIEW_INVALIDATE_COALESCE_MS = 300;
 const MAX_REVIEWER_MODELS = 3;
+const CODE_REVIEW_REASONING_OPTIONS = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max" },
+] as const;
 const CODE_REVIEW_PROMPT_MAX_LENGTH = 8000;
 const codeReviewPromptValuesEqual = (left: string, right: string) => left.trim() === right.trim();
 const DEFAULT_AUTOMATED_APPROVAL_POLICY = `Automatically approve routine, well-tested changes when:
@@ -311,6 +319,25 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
     if (configured && modelBelongsToAgent(agent, configured)) return configured;
     return defaultModelForAgent(agent, modelGroups);
   });
+}
+
+type CodeReviewReasoningEffort = NonNullable<CodeReviewPolicyConfig["agent_roster"]["reasoning_effort"]>;
+
+function reasoningOptionsForRoster(config: CodeReviewPolicyConfig) {
+  const agents = [...config.agent_roster.reviewers, config.agent_roster.orchestrator];
+  return CODE_REVIEW_REASONING_OPTIONS.filter((option) =>
+    agents.every((agent) => {
+      const supported = getCodingAgentReasoningOptions(agent);
+      return supported.length === 0 || supported.some((effort) => effort.value === option.value);
+    }),
+  );
+}
+
+function normalizeReasoningEffortForRoster(config: CodeReviewPolicyConfig): void {
+  const current = config.agent_roster.reasoning_effort ?? "high";
+  if (!reasoningOptionsForRoster(config).some((option) => option.value === current)) {
+    config.agent_roster.reasoning_effort = "high";
+  }
 }
 
 export default function CodeReviewsPage() {
@@ -2153,6 +2180,7 @@ function AgentRosterControls({
   const reviewerModels = config ? ensureReviewerModels(config, modelGroups) : [];
   const canAddReviewer = Boolean(config) && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
   const fallbackGroup = modelGroups[0];
+  const reasoningOptions = config ? reasoningOptionsForRoster(config) : CODE_REVIEW_REASONING_OPTIONS.filter((option) => option.value !== "max");
   const orchestratorModel =
     config?.agent_roster.orchestrator_model && modelBelongsToAgent(config.agent_roster.orchestrator, config.agent_roster.orchestrator_model)
       ? config.agent_roster.orchestrator_model
@@ -2180,6 +2208,7 @@ function AgentRosterControls({
                 const reviewerModels = ensureReviewerModels(next, modelGroups);
                 next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
                 next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
+                normalizeReasoningEffortForRoster(next);
               })
             }
           >
@@ -2211,6 +2240,7 @@ function AgentRosterControls({
                     next.agent_roster.reviewers[index] = selection.agent;
                     reviewerModels[index] = selection.model;
                     next.agent_roster.reviewer_models = reviewerModels;
+                    normalizeReasoningEffortForRoster(next);
                   })
                 }
               />
@@ -2240,6 +2270,32 @@ function AgentRosterControls({
       </div>
 
       <div className="space-y-3">
+        <div className="space-y-2">
+          <SettingLabel
+            label="Reasoning level"
+            info="Controls the reasoning effort used by every reviewer and the orchestrator when the selected agent supports explicit reasoning. High is the default."
+          />
+          <Select
+            value={config?.agent_roster.reasoning_effort ?? "high"}
+            disabled={disabled}
+            onValueChange={(value) =>
+              commitPolicy((next) => {
+                next.agent_roster.reasoning_effort = value as CodeReviewReasoningEffort;
+              })
+            }
+          >
+            <SelectTrigger aria-label="Reasoning level">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {reasoningOptions.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
         <div>
           <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
           <p className="mt-1 text-xs text-muted-foreground">Synthesizes reviewer evidence and decides the final review outcome.</p>
@@ -2258,6 +2314,7 @@ function AgentRosterControls({
               const selection = parseSelectionValue(value);
               next.agent_roster.orchestrator = selection.agent;
               next.agent_roster.orchestrator_model = selection.model;
+              normalizeReasoningEffortForRoster(next);
             })
           }
         />

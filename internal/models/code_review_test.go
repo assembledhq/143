@@ -81,7 +81,40 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
 	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
 	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
+	require.Equal(t, ReasoningEffortHigh, config.AgentRoster.ReasoningEffort, "code review agents should default to high reasoning")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
+}
+
+func TestResolveCodeReviewPolicyConfigDefaultsLegacyRosterReasoning(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.AgentRoster.ReasoningEffort = ""
+
+	resolved := ResolveCodeReviewPolicyConfig(&config)
+
+	require.Equal(t, ReasoningEffortHigh, resolved.AgentRoster.ReasoningEffort, "legacy code review policies should inherit high reasoning")
+}
+
+func TestCodeReviewPolicyRecordConfigDefaultsLegacyRosterReasoning(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.AgentRoster.ReasoningEffort = ""
+	record := CodeReviewPolicyRecord{
+		Enabled:                 config.Enabled,
+		ApprovalMode:            config.ApprovalMode,
+		ReviewInstructions:      config.ReviewInstructions,
+		AutomatedApprovalPolicy: config.AutomatedApprovalPolicy,
+		DescriptionPolicy:       config.DescriptionPolicy,
+		RiskPolicy:              config.RiskPolicy,
+		AgentRoster:             config.AgentRoster,
+		InlineCommentLimit:      config.InlineCommentLimit,
+	}
+
+	resolved := record.Config()
+
+	require.Equal(t, ReasoningEffortHigh, resolved.AgentRoster.ReasoningEffort, "stored legacy code review policies should run with high reasoning")
 }
 
 func TestResolveCodeReviewPolicyConfigDoesNotMutateInput(t *testing.T) {
@@ -132,6 +165,8 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 			c.AgentRoster.ReviewerModels = []string{DefaultCodexModel, DefaultCodexModel}
 		}, expectErr: true},
 		{name: "rejects invalid orchestrator model", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.OrchestratorModel = strPtr(DefaultCodexModel) }, expectErr: true},
+		{name: "rejects invalid reasoning effort", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReasoningEffort = ReasoningEffort("turbo") }, expectErr: true},
+		{name: "rejects reasoning effort unsupported by reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReasoningEffort = ReasoningEffortMax }, expectErr: true},
 		{name: "rejects oversized quorum", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.RequireReviewerQuorum = 3 }, expectErr: true},
 		{name: "rejects too short timeout", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.TimeoutSeconds = 30 }, expectErr: true},
 	}

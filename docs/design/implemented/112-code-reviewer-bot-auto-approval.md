@@ -78,6 +78,7 @@ Recommended v1 scope:
 - Normal 143 code review sessions keyed by org, repository, PR, head SHA, and policy version.
 - Editable PR-description policy and acceptable-risk starter templates.
 - Two reviewer agents plus one orchestrator by default.
+- One policy-versioned reasoning-effort setting applies across reviewer and orchestrator execution; omitted legacy values resolve to `high`.
 - GitHub final review with summary body and a configurable number of inline comments.
 - Approval only for acceptable PRs; otherwise comment with escalation reasons.
 - Idempotent reruns for duplicate requests, stale heads, and GitHub review retries.
