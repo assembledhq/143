@@ -686,7 +686,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger)
+		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)

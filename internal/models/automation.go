@@ -89,6 +89,31 @@ type AutomationRun struct {
 	// don't read the field continue to work, and new consumers can rely on
 	// it to render row detail without an N+1.
 	Session *AutomationRunSession `json:"session,omitempty"`
+	// TriggerTarget and TriggerDetails are compact, typed projections of the
+	// GitHub config snapshot populated by run list endpoints. They keep clients
+	// from parsing config_snapshot (which is intentionally excluded from the
+	// polling payload) and describe the PR being evaluated, not a PR created by
+	// the automation session.
+	TriggerTarget  *AutomationRunTriggerTarget  `json:"trigger_target,omitempty"`
+	TriggerDetails *AutomationRunTriggerDetails `json:"trigger_details,omitempty"`
+}
+
+type AutomationRunTriggerTarget struct {
+	Repository        string  `json:"repository"`
+	PullRequestNumber int     `json:"pull_request_number"`
+	PullRequestURL    string  `json:"pull_request_url"`
+	PullRequestTitle  *string `json:"pull_request_title,omitempty"`
+	HeadSHA           *string `json:"head_sha,omitempty"`
+}
+
+type AutomationRunTriggerDetails struct {
+	Event           AutomationGitHubEvent `json:"event"`
+	ProviderEventID *string               `json:"provider_event_id,omitempty"`
+	EventID         *string               `json:"event_id,omitempty"`
+	DedupeGroupID   *string               `json:"dedupe_group_id,omitempty"`
+	Actor           *string               `json:"actor,omitempty"`
+	ActorType       *string               `json:"actor_type,omitempty"`
+	BotTriggered    bool                  `json:"bot_triggered"`
 }
 
 // AutomationRunSession is the slice of the spawned session that the

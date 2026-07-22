@@ -144,6 +144,7 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -377,6 +378,7 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request event")
 		return
 	}
+	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -540,6 +542,7 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		return
 	}
 	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -573,6 +576,7 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 		return
 	}
 	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -608,6 +612,7 @@ func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_suite event")
 		return
 	}
+	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -635,6 +640,7 @@ func (h *WebhookHandler) handleCheckRun(w http.ResponseWriter, r *http.Request, 
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse check_run event")
 		return
 	}
+	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return

@@ -2334,8 +2334,10 @@ type PullRequestEvent struct {
 	Action     string     `json:"action"`
 	Number     int        `json:"number"`
 	OwnerOrgID *uuid.UUID `json:"-"`
+	DeliveryID string     `json:"-"`
 	Sender     struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"sender"`
 	PR struct {
 		Merged         bool   `json:"merged"`
@@ -2377,8 +2379,12 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 			Repository:        event.Repository.FullName,
 			PullRequestNumber: event.Number,
 			PullRequestURL:    event.PR.HTMLURL,
+			PullRequestTitle:  event.PR.Title,
+			HeadSHA:           event.PR.Head.SHA,
 			Actor:             event.Sender.Login,
+			ActorType:         event.Sender.Type,
 			Body:              githubPullRequestBody(event.PR.Title, event.PR.Body),
+			ProviderEventID:   event.DeliveryID,
 			EventID:           fmt.Sprintf("pull_request:%s:%d", event.Action, event.Number),
 			BaseBranch:        event.PR.Base.Ref,
 		}, event.OwnerOrgID, event.Repository.ID)
@@ -3209,9 +3215,11 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 type PullRequestReviewEvent struct {
 	Action           string                  `json:"action"`
 	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"sender"`
 	Review struct {
 		ID    int64  `json:"id"`
@@ -3225,8 +3233,13 @@ type PullRequestReviewEvent struct {
 		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"review"`
 	PullRequest struct {
-		Number int `json:"number"`
-		Base   struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		Title   string `json:"title"`
+		Head    struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
 	} `json:"pull_request"`
@@ -3255,9 +3268,14 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		Event:             models.AutomationGitHubEventPullRequestReviewSubmitted,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
+		PullRequestURL:    event.PullRequest.HTMLURL,
+		PullRequestTitle:  event.PullRequest.Title,
+		HeadSHA:           event.PullRequest.Head.SHA,
 		BaseBranch:        event.PullRequest.Base.Ref,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Review.User.Login),
+		ActorType:         firstNonEmpty(event.Sender.Type, event.Review.User.Type),
 		Body:              event.Review.Body,
+		ProviderEventID:   event.DeliveryID,
 		EventID:           githubIDEventKey("review", event.Review.ID),
 		DedupeGroupID:     githubIDEventKey("review", event.Review.ID),
 		ReviewState:       event.Review.State,
@@ -3318,9 +3336,11 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 type PullRequestReviewCommentEvent struct {
 	Action           string                  `json:"action"`
 	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"sender"`
 	Comment struct {
 		ID                  int64  `json:"id"`
@@ -3341,8 +3361,13 @@ type PullRequestReviewCommentEvent struct {
 		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	PullRequest struct {
-		Number int `json:"number"`
-		Base   struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+		Title   string `json:"title"`
+		Head    struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
 			Ref string `json:"ref"`
 		} `json:"base"`
 	} `json:"pull_request"`
@@ -3376,9 +3401,14 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		Event:             models.AutomationGitHubEventPullRequestReviewCommentCreated,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
+		PullRequestURL:    event.PullRequest.HTMLURL,
+		PullRequestTitle:  event.PullRequest.Title,
+		HeadSHA:           event.PullRequest.Head.SHA,
 		BaseBranch:        event.PullRequest.Base.Ref,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
+		ActorType:         firstNonEmpty(event.Sender.Type, event.Comment.User.Type),
 		Body:              event.Comment.Body,
+		ProviderEventID:   event.DeliveryID,
 		EventID:           githubIDEventKey("review_comment", event.Comment.ID),
 		DedupeGroupID:     githubReviewCommentDedupeGroup(event.Comment.PullRequestReviewID),
 		Path:              event.Comment.Path,
@@ -3421,9 +3451,11 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 type IssueCommentEvent struct {
 	Action           string                  `json:"action"`
 	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
+		Type  string `json:"type"`
 	} `json:"sender"`
 	Comment struct {
 		ID   int64  `json:"id"`
@@ -3437,6 +3469,8 @@ type IssueCommentEvent struct {
 	} `json:"comment"`
 	Issue struct {
 		Number      int       `json:"number"`
+		HTMLURL     string    `json:"html_url"`
+		Title       string    `json:"title"`
 		PullRequest *struct{} `json:"pull_request"`
 	} `json:"issue"`
 	Repository struct {
@@ -3504,8 +3538,12 @@ func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueComm
 		Event:             models.AutomationGitHubEventIssueCommentCreated,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.Issue.Number,
+		PullRequestURL:    event.Issue.HTMLURL,
+		PullRequestTitle:  event.Issue.Title,
 		Actor:             firstNonEmpty(event.Sender.Login, event.Comment.User.Login),
+		ActorType:         firstNonEmpty(event.Sender.Type, event.Comment.User.Type),
 		Body:              event.Comment.Body,
+		ProviderEventID:   event.DeliveryID,
 		EventID:           githubIDEventKey("issue_comment", event.Comment.ID),
 	}, event.OwnerOrgID, event.Repository.ID)
 	return nil
@@ -3524,8 +3562,41 @@ func (s *PRService) triggerGitHubAutomations(ctx context.Context, req automation
 	}
 	req.OrgID = repo.OrgID
 	req.RepositoryID = repo.ID
+	s.populateGitHubAutomationHead(ctx, &repo, &req)
 	if err := s.automationEventTriggers.TriggerGitHubEvent(ctx, req); err != nil {
 		s.logger.Warn().Err(err).Str("repo", req.Repository).Str("github_event", string(req.Event)).Msg("failed to trigger github event automations")
+	}
+}
+
+// populateGitHubAutomationHead fills revision context for webhook payloads,
+// such as issue_comment, that identify a pull request without embedding its
+// current head SHA. The lookup is best-effort so a temporary GitHub API error
+// does not discard an otherwise valid automation event.
+func (s *PRService) populateGitHubAutomationHead(ctx context.Context, repo *models.Repository, req *automationevents.GitHubEventTriggerRequest) {
+	if req.HeadSHA != "" || req.PullRequestNumber <= 0 || s.tokenProvider == nil {
+		return
+	}
+	owner, repoName, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || repoName == "" {
+		s.logger.Warn().Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("cannot resolve pull request head for malformed repository name")
+		return
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, repo.OrgID, repo)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to get installation token for github automation revision lookup")
+		return
+	}
+	head, err := s.GetPullRequestHead(ctx, token, owner, repoName, req.PullRequestNumber)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("repo", repo.FullName).Int("pr_number", req.PullRequestNumber).Msg("failed to resolve pull request head for github automation trigger")
+		return
+	}
+	req.HeadSHA = head.SHA
+	if req.PullRequestURL == "" {
+		req.PullRequestURL = head.HTMLURL
+	}
+	if req.BaseBranch == "" {
+		req.BaseBranch = head.BaseBranch
 	}
 }
 
@@ -3904,11 +3975,12 @@ func (s *PRService) CommitExists(ctx context.Context, token, owner, repo, sha st
 // PullRequestHead is the small PR shape branch previews need to resolve a
 // durable PR URL into the current head branch and commit.
 type PullRequestHead struct {
-	Number  int
-	HTMLURL string
-	State   string
-	Branch  string
-	SHA     string
+	Number     int
+	HTMLURL    string
+	State      string
+	Branch     string
+	SHA        string
+	BaseBranch string
 }
 
 // GetPullRequestHead returns the current head branch/SHA for a pull request.
@@ -3926,6 +3998,9 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 			Ref string `json:"ref"`
 			SHA string `json:"sha"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	}
 	if err := json.Unmarshal(body, &details); err != nil {
 		return PullRequestHead{}, fmt.Errorf("decode pull request head: %w", err)
@@ -3934,11 +4009,12 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("pull request head missing branch or sha")
 	}
 	return PullRequestHead{
-		Number:  details.Number,
-		HTMLURL: details.HTMLURL,
-		State:   details.State,
-		Branch:  details.Head.Ref,
-		SHA:     details.Head.SHA,
+		Number:     details.Number,
+		HTMLURL:    details.HTMLURL,
+		State:      details.State,
+		Branch:     details.Head.Ref,
+		SHA:        details.Head.SHA,
+		BaseBranch: details.Base.Ref,
 	}, nil
 }
 
@@ -5534,9 +5610,11 @@ func buildLabels(issue *models.Issue) []string {
 type CheckSuiteEvent struct {
 	Action     string     `json:"action"`
 	OwnerOrgID *uuid.UUID `json:"-"`
+	DeliveryID string     `json:"-"`
 	CheckSuite struct {
 		Conclusion   *string `json:"conclusion"`
 		HeadBranch   string  `json:"head_branch"`
+		HeadSHA      string  `json:"head_sha"`
 		PullRequests []struct {
 			Number int `json:"number"`
 			Base   struct {
@@ -5565,9 +5643,12 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 			Event:             models.AutomationGitHubEventCheckSuiteCompleted,
 			Repository:        event.Repository.FullName,
 			PullRequestNumber: prRef.Number,
+			HeadSHA:           event.CheckSuite.HeadSHA,
 			BaseBranch:        prRef.Base.Ref,
 			Actor:             "github",
+			ActorType:         "System",
 			Body:              "Checks completed: " + conclusion,
+			ProviderEventID:   event.DeliveryID,
 		}, event.OwnerOrgID, event.Repository.ID)
 
 		pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, prRef.Number)
@@ -5596,9 +5677,11 @@ func (s *PRService) HandleCheckSuiteEvent(ctx context.Context, event CheckSuiteE
 type CheckRunEvent struct {
 	Action     string     `json:"action"`
 	OwnerOrgID *uuid.UUID `json:"-"`
+	DeliveryID string     `json:"-"`
 	CheckRun   struct {
 		ID           int64   `json:"id"`
 		Conclusion   *string `json:"conclusion"`
+		HeadSHA      string  `json:"head_sha"`
 		PullRequests []struct {
 			Number int `json:"number"`
 			Base   struct {
@@ -5631,9 +5714,12 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			Event:             models.AutomationGitHubEventCheckRunCompleted,
 			Repository:        event.Repository.FullName,
 			PullRequestNumber: prRef.Number,
+			HeadSHA:           event.CheckRun.HeadSHA,
 			BaseBranch:        prRef.Base.Ref,
 			Actor:             "github",
+			ActorType:         "System",
 			Body:              "Check run completed: " + conclusion,
+			ProviderEventID:   event.DeliveryID,
 			EventID:           githubIDEventKey("check_run", event.CheckRun.ID),
 		}, event.OwnerOrgID, event.Repository.ID)
 
