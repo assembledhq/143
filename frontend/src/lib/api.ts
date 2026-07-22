@@ -267,6 +267,7 @@ export const api = {
     list: (params?: {
       repository_id?: string;
       decision?: import('./types').CodeReviewDecision;
+      outcome?: import('./types').CodeReviewListOutcome;
       status?: import('./types').CodeReviewSessionStatus;
       risk?: "acceptable" | "needs_review";
       search?: string;
@@ -275,6 +276,7 @@ export const api = {
       const searchParams = new URLSearchParams();
       if (params?.repository_id) searchParams.set('repository_id', params.repository_id);
       if (params?.decision) searchParams.set('decision', params.decision);
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
       if (params?.status) searchParams.set('status', params.status);
       if (params?.risk) searchParams.set('risk', params.risk);
       if (params?.search) searchParams.set('search', params.search);
@@ -283,12 +285,11 @@ export const api = {
       return get<import('./types').ListResponse<import('./types').CodeReviewListItem>>(`/api/v1/code-reviews${qs ? `?${qs}` : ''}`);
     },
     templates: () => get<import('./types').ListResponse<import('./types').CodeReviewTemplateOption>>('/api/v1/code-reviews/templates'),
+    promptExamples: () => get<import('./types').SingleResponse<import('./types').CodeReviewPromptExamplesResponse>>('/api/v1/code-reviews/prompt-examples'),
+    policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
-    getPolicy: (repositoryId?: string | null) => {
-      const qs = repositoryId ? `?repository_id=${encodeURIComponent(repositoryId)}` : '';
-      return get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>(`/api/v1/code-review-policies${qs}`);
-    },
+    getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),
     getGitHubTrigger: (repositoryId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(
         `/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`,
@@ -300,7 +301,7 @@ export const api = {
       ),
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
-    updatePolicy: (body: { repository_id?: string | null; config: import('./types').CodeReviewPolicyConfig }) =>
+    updatePolicy: (body: { config: import('./types').CodeReviewPolicyConfig; source?: import('./types').CodeReviewPolicyEditSource }) =>
       request<import('./types').SingleResponse<import('./types').CodeReviewPolicyRecord>>('/api/v1/code-review-policies', {
         method: 'PUT',
         body: JSON.stringify(body),
@@ -308,6 +309,9 @@ export const api = {
   },
   pullRequests: {
     getHealth: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestHealthResponse>>(`/api/v1/pull-requests/${id}/health`),
+    getFeedbackFollowThrough: (id: string) => get<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through`),
+    updateFeedbackFollowThrough: (id: string, monitoring: import('./types').PRFeedbackMonitoring) => patch<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through`, { monitoring }),
+    retryFeedbackBatch: (id: string, batchId: string) => post<import('./types').SingleResponse<import('./types').PullRequestFeedbackState>>(`/api/v1/pull-requests/${id}/feedback-follow-through/${batchId}/retry`, {}),
     fixTests: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/fix-tests`, body ?? {}),
     resolveConflicts: (id: string, body?: import('./types').PullRequestRepairRequest) => post<import('./types').SingleResponse<import('./types').PullRequestRepairResponse>>(`/api/v1/pull-requests/${id}/repair/resolve-conflicts`, body ?? {}),
     merge: (id: string) => post<import('./types').SingleResponse<import('./types').PullRequestMergeResponse>>(`/api/v1/pull-requests/${id}/merge`),
@@ -1301,6 +1305,17 @@ export const api = {
       const qs = searchParams.toString();
       return get<import('./types').ListResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs${qs ? `?${qs}` : ''}`);
     },
+    listDecisions: (id: string, params?: { cursor?: string; limit?: number; outcome?: string; pr?: string }) => {
+      const searchParams = new URLSearchParams();
+      if (params?.cursor) searchParams.set('cursor', params.cursor);
+      if (params?.limit) searchParams.set('limit', String(params.limit));
+      if (params?.outcome) searchParams.set('outcome', params.outcome);
+      if (params?.pr) searchParams.set('pr', params.pr);
+      const qs = searchParams.toString();
+      return get<import('./types').ListResponse<import('./types').AutomationDecision>>(`/api/v1/automations/${id}/decisions${qs ? `?${qs}` : ''}`);
+    },
+    decisionStats: (id: string) =>
+      get<import('./types').SingleResponse<import('./types').AutomationDecisionStats>>(`/api/v1/automations/${id}/decision-stats`),
     getRun: (id: string, runId: string) =>
       get<import('./types').SingleResponse<import('./types').AutomationRun>>(`/api/v1/automations/${id}/runs/${runId}`),
     getCapabilities: (id: string) =>

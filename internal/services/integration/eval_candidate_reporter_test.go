@@ -38,6 +38,6 @@ func TestInternalEvalCandidateReporter_AddCandidateUsesBootstrapRoute(t *testing
 	})
 
 	require.NoError(t, err, "AddCandidate should succeed")
-	require.Equal(t, "/evals/bootstrap/boot-1/candidates", gotPath, "reporter should prefer the explicit bootstrap route")
+	require.Equal(t, "/api/v1/internal/evals/bootstrap/boot-1/candidates", gotPath, "reporter should prefer the explicit bootstrap route")
 	require.Equal(t, "cand-1", result.CandidateID, "reporter should decode wrapped API response")
 }

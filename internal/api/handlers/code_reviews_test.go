@@ -3,10 +3,13 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/db"
@@ -15,9 +18,207 @@ import (
 	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCodeReviewHandler_GetPolicyReturnsPromptFields(t *testing.T) {
+	t.Parallel()
+	orgID := uuid.New()
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "team review guidance"
+	config.AutomatedApprovalPolicy = "team approval guidance"
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	expectCodeReviewResolvedPolicy(t, mock, orgID, config)
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-policies", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+	rr := httptest.NewRecorder()
+
+	handler.GetPolicy(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "policy GET should succeed")
+	var response models.SingleResponse[models.CodeReviewResolvedPolicy]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "policy GET response should be valid JSON")
+	require.Equal(t, config.ReviewInstructions, response.Data.Config.ReviewInstructions, "policy GET should return review instructions")
+	require.Equal(t, config.AutomatedApprovalPolicy, response.Data.Config.AutomatedApprovalPolicy, "policy GET should return automated approval policy")
+}
+
+func TestCodeReviewHandler_PromptExamplesReturnsSeparateCollections(t *testing.T) {
+	t.Parallel()
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews/prompt-examples", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.PromptExamples(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "prompt examples should be readable by authenticated policy viewers")
+	var response models.SingleResponse[models.CodeReviewPromptExamplesResponse]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "prompt example response should be valid JSON")
+	require.Equal(t, models.CodeReviewPromptExamples(), response.Data.ReviewInstructions, "response should keep review-instruction examples in their own collection")
+	require.Equal(t, models.CodeReviewAutomatedApprovalExamples(), response.Data.AutomatedApprovalPolicies, "response should keep approval examples in their own collection")
+}
+
+func TestCodeReviewHandler_PolicyEventValidatesEventName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body string
+		expected   int
+	}{
+		{name: "accepts privacy safe event", body: `{"event":"code_review_policy_viewed","scope":"organization","configured":true}`, expected: http.StatusNoContent},
+		{name: "rejects unknown event", body: `{"event":"prompt_contents_here"}`, expected: http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			handler := NewCodeReviewHandler(nil, nil)
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/code-reviews/policy-events", strings.NewReader(tt.body))
+			handler.PolicyEvent(rr, req)
+			require.Equal(t, tt.expected, rr.Code, "policy event endpoint should accept only bounded event names")
+		})
+	}
+}
+
+func TestCodeReviewHandler_PutPolicyRejectsRepositoryScope(t *testing.T) {
+	t.Parallel()
+	repositoryID := uuid.New()
+	body, err := json.Marshal(map[string]any{"repository_id": repositoryID, "config": models.DefaultCodeReviewPolicyConfig()})
+	require.NoError(t, err, "repository-scoped policy request should marshal")
+	handler := NewCodeReviewHandler(nil, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
+	handler.PutPolicy(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "repository-scoped policy writes should be rejected")
+	require.Contains(t, rr.Body.String(), "CODE_REVIEW_POLICY_SCOPE_UNSUPPORTED", "repository-scoped writes should explain the organization-wide policy contract")
+}
+
+func TestCodeReviewHandler_PutPolicyRejectsEmptyApprovalPolicyWithFieldDetails(t *testing.T) {
+	t.Parallel()
+	orgID, userID := uuid.New(), uuid.New()
+	config := models.DefaultCodeReviewPolicyConfig()
+	config.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
+	config.AutomatedApprovalPolicy = ""
+	body, err := json.Marshal(map[string]any{"config": config})
+	require.NoError(t, err, "policy request should marshal")
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
+	ctx := middleware.WithOrgID(req.Context(), orgID)
+	ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+	req = req.WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	handler.PutPolicy(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "empty approval policy should be rejected in approve mode")
+	var response models.ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "invalid policy response should be valid JSON")
+	require.Equal(t, "CODE_REVIEW_POLICY_INVALID", response.Error.Code, "invalid prompt should use policy validation code")
+	require.Equal(t, map[string]any{"field": "automated_approval_policy"}, response.Error.Details, "invalid prompt should identify its field")
+	require.NoError(t, mock.ExpectationsWereMet(), "invalid prompt should fail before database mutation")
+}
+
+func TestCodeReviewHandler_PutPolicyRejectsUnknownEditSource(t *testing.T) {
+	t.Parallel()
+	body, err := json.Marshal(map[string]any{"config": models.DefaultCodeReviewPolicyConfig(), "source": "contains prompt text"})
+	require.NoError(t, err, "policy request should marshal")
+	handler := NewCodeReviewHandler(nil, nil)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
+	handler.PutPolicy(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, "policy writes should accept only bounded privacy-safe edit sources")
+	require.Contains(t, rr.Body.String(), "INVALID_SOURCE", "unknown edit source should use the structured source error")
+}
+
+func TestCodeReviewHandler_PutPolicyRetainsEachOmittedPromptIndependently(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		omittedField string
+	}{
+		{name: "retains omitted review instructions", omittedField: "review_instructions"},
+		{name: "retains omitted automated approval policy", omittedField: "automated_approval_policy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, userID, policyID := uuid.New(), uuid.New(), uuid.New()
+			current := models.DefaultCodeReviewPolicyConfig()
+			current.ReviewInstructions = "persisted review guidance"
+			current.AutomatedApprovalPolicy = "persisted approval guidance"
+			requested := current
+			requested.Enabled = false
+			var configMap map[string]any
+			rawConfig, err := json.Marshal(requested)
+			require.NoError(t, err, "policy config should marshal")
+			require.NoError(t, json.Unmarshal(rawConfig, &configMap), "policy config should decode to map")
+			delete(configMap, tt.omittedField)
+			body, err := json.Marshal(map[string]any{"config": configMap})
+			require.NoError(t, err, "compatibility request should marshal")
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			expectCodeReviewResolvedPolicy(t, mock, orgID, current)
+			description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, requested)
+			mock.ExpectBegin()
+			mock.ExpectExec("pg_advisory_xact_lock").
+				WithArgs("code_review_policy:" + orgID.String()).
+				WillReturnResult(pgxmock.NewResult("SELECT", 1))
+			mock.ExpectQuery("SELECT COALESCE").WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(2))
+			mock.ExpectExec("UPDATE code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			mock.ExpectQuery("INSERT INTO code_review_policies").WithArgs(
+				pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+				current.ReviewInstructions, current.AutomatedApprovalPolicy, pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			).WillReturnRows(codeReviewPolicyRowsForHandlerTest().AddRow(policyID, orgID, nil, true, 2, requested.Enabled, requested.ApprovalMode, current.ReviewInstructions, current.AutomatedApprovalPolicy, description, risk, roster, requested.InlineCommentLimit, &userID, time.Now().UTC()))
+			mock.ExpectCommit()
+			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/code-review-policies", bytes.NewReader(body))
+			ctx := middleware.WithOrgID(req.Context(), orgID)
+			ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: orgID, Role: models.RoleAdmin})
+			req = req.WithContext(ctx)
+			rr := httptest.NewRecorder()
+
+			handler.PutPolicy(rr, req)
+
+			require.Equal(t, http.StatusOK, rr.Code, "older client request should remain compatible")
+			require.NoError(t, mock.ExpectationsWereMet(), "compatibility update should preserve both prompt values")
+		})
+	}
+}
+
+func expectCodeReviewResolvedPolicy(t *testing.T, mock pgxmock.PgxPoolIface, orgID uuid.UUID, config models.CodeReviewPolicyConfig) {
+	t.Helper()
+	description, risk, roster := marshalCodeReviewPolicyPartsForHandlerTest(t, config)
+	mock.ExpectQuery("FROM code_review_policies").WithArgs(pgxmock.AnyArg()).WillReturnRows(
+		codeReviewPolicyRowsForHandlerTest().AddRow(uuid.New(), orgID, nil, true, 1, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, description, risk, roster, config.InlineCommentLimit, nil, time.Now().UTC()),
+	)
+}
+
+func codeReviewPolicyRowsForHandlerTest() *pgxmock.Rows {
+	return pgxmock.NewRows([]string{"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode", "review_instructions", "automated_approval_policy", "description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at"})
+}
+
+func marshalCodeReviewPolicyPartsForHandlerTest(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {
+	t.Helper()
+	values := []any{config.DescriptionPolicy, config.RiskPolicy, config.AgentRoster}
+	encoded := make([][]byte, len(values))
+	for idx, value := range values {
+		var err error
+		encoded[idx], err = json.Marshal(value)
+		require.NoError(t, err, "policy JSON section should marshal")
+	}
+	return encoded[0], encoded[1], encoded[2]
+}
 
 func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 	t.Parallel()
@@ -43,6 +244,20 @@ func TestCodeReviewHandler_SetupGitHubTriggerMapsMissingUserAuth(t *testing.T) {
 
 	require.Equal(t, http.StatusConflict, rr.Code, "missing GitHub user authorization should return a conflict")
 	require.Contains(t, rr.Body.String(), "GITHUB_USER_AUTH_REQUIRED", "response should expose the reconnect error code")
+}
+
+func TestCodeReviewHandler_ListRejectsInvalidOutcome(t *testing.T) {
+	t.Parallel()
+
+	handler := NewCodeReviewHandler(nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/code-reviews?outcome=bogus", nil)
+	req = req.WithContext(middleware.WithOrgID(req.Context(), uuid.New()))
+	rr := httptest.NewRecorder()
+
+	handler.List(rr, req)
+
+	require.Equal(t, http.StatusBadRequest, rr.Code, "an invalid outcome filter should return a bad request")
+	require.Contains(t, rr.Body.String(), "INVALID_OUTCOME", "the response should identify the invalid outcome filter")
 }
 
 type codeReviewTriggerHandlerStoreStub struct{}

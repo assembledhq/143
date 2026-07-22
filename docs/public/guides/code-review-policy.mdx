@@ -1,0 +1,51 @@
+---
+title: Configure code review policy
+description: Add optional team review guidance, control automated approval recommendations, and keep deterministic safeguards authoritative.
+section: Guides
+order: 15
+status: stable
+audience: operator
+tags:
+  - code review
+  - pull requests
+  - policy
+llm_summary: One organization-wide code review policy separates optional reviewer instructions from automated approval policy and deterministic safeguards; comment-only is the safe default.
+---
+
+Start with comment-only reviews and no additional instructions. Each configured reviewer uses its native `/review` behavior, while the platform keeps the review read-only and records the policy version used for the run.
+
+## Choose review behavior
+
+Open **Code reviews** and select **Policy**. The organization has one policy that applies to every repository. Keep **Leave comments** selected while evaluating review quality. **Leave comments and approve when acceptable** allows the orchestrator to recommend approval only after every hard safeguard passes.
+
+Turning code reviews off pauses new reviewer-triggered runs without forgetting the selected outcome.
+
+After someone requests 143 Code Reviewer once, new commits pushed to the pull request durably trigger a new assessment until 143 approves the PR. Human review submissions, edits, and dismissals; inline review comment changes; resolved or reopened review threads; PR title or description edits; readiness changes; completed checks; and commit-status updates continue through normal PR synchronization without starting another review session. The existing GitHub review summary is updated in place after a new-commit reassessment, while the Code reviews page retains each assessment as audit history.
+
+Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
+
+## Separate guidance from safeguards
+
+**Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
+
+**Automated approval policy** guides only the orchestrator's approve-or-escalate recommendation. By default, approval evaluates the code without requiring GitHub checks to pass. If you enable a passing-check requirement under advanced controls, the prompt cannot override it; path restrictions, size limits, quorum, disagreement handling, fork restrictions, and other enabled safeguards also remain authoritative.
+
+143 evaluates the current pull request independently of existing human review activity. Human comments, review decisions, and open or resolved review threads—including unresolved change requests—do not become findings or block 143's approval. Repository branch protection and merge rules still apply independently on GitHub.
+
+Use a prompt example when it matches your intent. Previewing and applying an example replaces only its corresponding prompt; it never changes enablement, outcome, reviewers, paths, thresholds, or safety gates. Advanced policy presets are different: they replace the complete policy, including safeguards and agent settings.
+
+Under **Advanced controls → Reviewers & agents**, choose the reasoning level used for the review run. The default is **High**. The setting applies to each reviewer and the orchestrator when its selected agent supports explicit reasoning levels.
+
+## Apply one policy everywhere
+
+Policy changes apply to new reviews in every repository. There are no repository overrides or inheritance rules to reconcile.
+
+- Configure approval behavior, prompts, safeguards, and reviewer agents once.
+- Review sessions capture the policy version they used, so historical review evidence remains auditable after the policy changes.
+- GitHub reviewer setup is still selected per repository because the reviewer team must be granted access to each repository separately.
+
+Policy history remains insert-only. Reviews already in progress continue using the policy version captured when they started.
+
+## Recover from validation or save failures
+
+Autosave status appears beside prompt editors. If a save fails, the local prompt remains visible so you can correct or retry it. Invalid advanced settings open the relevant controls and display the backend field error without including prompt contents in logs or analytics.

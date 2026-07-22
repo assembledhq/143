@@ -62,10 +62,9 @@ const SandboxSocketPath = SandboxSocketDir + "/sock"
 const SocketFileName = "sock"
 
 // Action discriminates what kind of GitHub call the in-sandbox tool is about
-// to make. Today the host-side handler logs it for audit and the resolver
-// is action-agnostic — both push and api get the same token. Kept on the
-// wire so we can later differentiate (e.g. issue scoped tokens for push
-// vs read-only tokens for api) without a protocol break.
+// to make. The host uses it to issue separate least-privilege credentials:
+// push can write repository contents, while api is read-only for contents and
+// pull requests. Neither credential can create a pull request.
 type Action string
 
 const (

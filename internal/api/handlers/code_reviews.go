@@ -8,11 +8,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/assembledhq/143/internal/api/middleware"
 	"github.com/assembledhq/143/internal/api/sse"
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/go-chi/chi/v5"
@@ -36,8 +38,11 @@ type CodeReviewHandler struct {
 	repos        *db.RepositoryStore
 	triggerSetup *codereviewsvc.GitHubTriggerSetupService
 	streams      *cache.CodeReviewStreams
+	audit        *db.AuditEmitter
 	memberships  codeReviewMembershipStore
 }
+
+func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
 
 func NewCodeReviewHandler(store *db.CodeReviewStore, repos *db.RepositoryStore) *CodeReviewHandler {
 	return &CodeReviewHandler{store: store, repos: repos}
@@ -185,6 +190,14 @@ func (h *CodeReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		}
 		filters.Decision = &decision
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("outcome")); raw != "" {
+		outcome := models.CodeReviewListOutcome(raw)
+		if err := outcome.Validate(); err != nil {
+			writeError(w, r, http.StatusBadRequest, "INVALID_OUTCOME", "invalid outcome")
+			return
+		}
+		filters.Outcome = &outcome
+	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("status")); raw != "" {
 		status := models.CodeReviewSessionStatus(raw)
 		if err := status.Validate(); err != nil {
@@ -219,6 +232,53 @@ func (h *CodeReviewHandler) Templates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, models.ListResponse[models.CodeReviewTemplateOption]{Data: models.CodeReviewPolicyTemplates()})
 }
 
+func (h *CodeReviewHandler) PromptExamples(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPromptExamplesResponse]{Data: models.CodeReviewPromptExamplesResponse{
+		ReviewInstructions: models.CodeReviewPromptExamples(), AutomatedApprovalPolicies: models.CodeReviewAutomatedApprovalExamples(),
+	}})
+}
+
+func (h *CodeReviewHandler) PolicyEvent(w http.ResponseWriter, r *http.Request) {
+	_ = middleware.OrgIDFromContext(r.Context())
+	var req struct {
+		Event           string `json:"event"`
+		Scope           string `json:"scope"`
+		Source          string `json:"source"`
+		ExampleKey      string `json:"example_key"`
+		CharacterBucket string `json:"character_bucket"`
+		Subsection      string `json:"subsection"`
+		Configured      bool   `json:"configured"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid event body")
+		return
+	}
+	allowed := map[string]bool{"code_review_policy_viewed": true, "code_review_prompt_edited": true, "code_review_prompt_example_previewed": true, "code_review_prompt_example_applied": true, "code_review_advanced_opened": true, "code_review_policy_enabled": true, "code_review_approval_mode_changed": true, "code_review_github_setup_completed": true, "code_review_github_setup_failed": true}
+	if !allowed[req.Event] {
+		writeError(w, r, http.StatusBadRequest, "INVALID_EVENT", "invalid policy event")
+		return
+	}
+	if !oneOfOrEmpty(req.Scope, "organization", "repository") || !oneOfOrEmpty(req.Source, "manual", "example", "reset") || !oneOfOrEmpty(req.ExampleKey, "balanced", "security_focused", "minimal", "conservative_low_risk", "documentation_only", "small_routine_changes") || !oneOfOrEmpty(req.CharacterBucket, "0", "1-250", "251-1000", "1001-4000", "4001-8000") || !oneOfOrEmpty(req.Subsection, "all", "approval_criteria", "quality_gates", "paths_authors_checks", "reviewers_agents", "structured_description_checks") {
+		writeError(w, r, http.StatusBadRequest, "INVALID_EVENT_ATTRIBUTES", "invalid policy event attributes")
+		return
+	}
+	metrics.RecordCodeReviewPolicyEvent(r.Context(), req.Event, req.Scope, req.Source, req.ExampleKey, req.CharacterBucket, req.Subsection, req.Configured)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func oneOfOrEmpty(value string, allowed ...string) bool {
+	if value == "" {
+		return true
+	}
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -246,11 +306,7 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 
 func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
-	repositoryID, ok := parseOptionalUUIDQuery(w, r, "repository_id")
-	if !ok {
-		return
-	}
-	resolved, err := h.store.ResolvePolicy(r.Context(), orgID, repositoryID)
+	resolved, err := h.store.ResolvePolicy(r.Context(), orgID)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
 		return
@@ -261,34 +317,69 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 func (h *CodeReviewHandler) PutPolicy(w http.ResponseWriter, r *http.Request) {
 	orgID := middleware.OrgIDFromContext(r.Context())
 	var req struct {
-		RepositoryID *uuid.UUID                    `json:"repository_id,omitempty"`
-		Config       models.CodeReviewPolicyConfig `json:"config"`
+		RepositoryID *uuid.UUID                        `json:"repository_id,omitempty"`
+		Config       json.RawMessage                   `json:"config"`
+		Source       models.CodeReviewPolicyEditSource `json:"source,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid request body")
 		return
+	}
+	if req.Source == "" {
+		req.Source = models.CodeReviewPolicyEditSourceManual
+	}
+	if err := req.Source.Validate(); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_SOURCE", "invalid policy edit source", err)
+		return
+	}
+	if req.RepositoryID != nil {
+		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_SCOPE_UNSUPPORTED", "code review policy applies to all repositories")
+		return
+	}
+	var config models.CodeReviewPolicyConfig
+	if err := json.Unmarshal(req.Config, &config); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
+		return
+	}
+	var supplied map[string]json.RawMessage
+	if err := json.Unmarshal(req.Config, &supplied); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "invalid policy config")
+		return
+	}
+	_, reviewInstructionsSupplied := supplied["review_instructions"]
+	_, automatedApprovalPolicySupplied := supplied["automated_approval_policy"]
+	if !reviewInstructionsSupplied || !automatedApprovalPolicySupplied {
+		current, err := h.store.ResolvePolicy(r.Context(), orgID)
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_POLICY_LOAD_FAILED", "failed to load code review policy", err)
+			return
+		}
+		if !reviewInstructionsSupplied {
+			config.ReviewInstructions = current.Config.ReviewInstructions
+		}
+		if !automatedApprovalPolicySupplied {
+			config.AutomatedApprovalPolicy = current.Config.AutomatedApprovalPolicy
+		}
 	}
 	user := middleware.UserFromContext(r.Context())
 	if user == nil {
 		writeError(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "user is required")
 		return
 	}
-	if req.RepositoryID != nil && h.repos != nil {
-		if _, err := h.repos.GetByID(r.Context(), orgID, *req.RepositoryID); err != nil {
-			if err == pgx.ErrNoRows {
-				writeError(w, r, http.StatusNotFound, "REPOSITORY_NOT_FOUND", "repository not found")
-				return
-			}
-			writeError(w, r, http.StatusInternalServerError, "REPOSITORY_LOAD_FAILED", "failed to load repository", err)
+	record, err := h.store.SavePolicy(r.Context(), orgID, config, &user.ID)
+	if err != nil {
+		var validationErr *models.CodeReviewPolicyValidationError
+		if errors.As(err, &validationErr) {
+			writeErrorWithDetails(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", map[string]string{"field": validationErr.Field}, err)
 			return
 		}
-	}
-	record, err := h.store.SavePolicy(r.Context(), orgID, req.RepositoryID, req.Config, &user.ID)
-	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "CODE_REVIEW_POLICY_INVALID", "invalid code review policy", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewPolicyRecord]{Data: record})
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"source": req.Source, "version": record.Version, "review_instructions_runes": utf8.RuneCountInString(record.ReviewInstructions), "automated_approval_policy_runes": utf8.RuneCountInString(record.AutomatedApprovalPolicy)})
+	resourceID := record.ID.String()
+	emitUserAudit(h.audit, r, models.AuditActionCodeReviewPolicyUpdated, models.AuditResourceCodeReviewPolicy, &resourceID, details)
 }
 
 func (h *CodeReviewHandler) GetGitHubTrigger(w http.ResponseWriter, r *http.Request) {

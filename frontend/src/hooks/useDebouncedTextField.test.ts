@@ -127,6 +127,80 @@ describe("useDebouncedTextField", () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
+  it("never commits a rejected value and doesn't advance lastSent", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 30,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    expect(result.current.value).toBe("");
+
+    // The debounce fires but the rejected empty value is never committed and,
+    // critically, lastSent is not poisoned to "".
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("reverts a rejected value to the last committed value on blur", () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 5_000,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    expect(result.current.value).toBe("");
+
+    act(() => {
+      result.current.onBlur();
+    });
+
+    // Blur snaps the required field back to the last saved value instead of
+    // leaving it blank, and never commits the empty value.
+    expect(result.current.value).toBe("Weekly audit");
+    expect(onCommit).not.toHaveBeenCalled();
+  });
+
+  it("still commits a valid value after a rejected one was reverted", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() =>
+      useDebouncedTextField({
+        serverValue: "Weekly audit",
+        onCommit,
+        debounceMs: 30,
+        rejectValue: (value) => value.trim() === "",
+      }),
+    );
+
+    act(() => {
+      result.current.onChange("");
+    });
+    act(() => {
+      result.current.onBlur();
+    });
+    expect(result.current.value).toBe("Weekly audit");
+
+    act(() => {
+      result.current.onChange("Release audit");
+    });
+    await waitFor(() => expect(onCommit).toHaveBeenCalledTimes(1));
+    expect(onCommit).toHaveBeenCalledWith("Release audit");
+  });
+
   it("uses the latest onCommit closure at fire time", async () => {
     const first: Mock<(value: string) => void> = vi.fn();
     const second: Mock<(value: string) => void> = vi.fn();
@@ -147,5 +221,62 @@ describe("useDebouncedTextField", () => {
     await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
     expect(second).toHaveBeenCalledWith("draft");
     expect(first).not.toHaveBeenCalled();
+  });
+
+  it("preserves committed local text when a failed save rolls the server value back", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ serverValue, preserve }: { serverValue: string; preserve: boolean }) =>
+        useDebouncedTextField({ serverValue, onCommit, debounceMs: 20, preserveLocalOnServerChange: preserve }),
+      { initialProps: { serverValue: "saved", preserve: false } },
+    );
+    act(() => result.current.onChange("local draft"));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledWith("local draft"));
+
+    rerender({ serverValue: "local draft", preserve: false });
+    rerender({ serverValue: "saved", preserve: true });
+
+    expect(result.current.value).toBe("local draft");
+  });
+
+  it("does not rewrite local text when the server canonicalizes an equivalent committed value", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ serverValue }: { serverValue: string }) =>
+        useDebouncedTextField({
+          serverValue,
+          onCommit,
+          debounceMs: 20,
+          valuesEqual: (left, right) => left.trim() === right.trim(),
+        }),
+      { initialProps: { serverValue: "Approve" } },
+    );
+
+    act(() => result.current.onChange("Approve routine "));
+    await waitFor(() => expect(onCommit).toHaveBeenCalledWith("Approve routine "));
+
+    rerender({ serverValue: "Approve routine " });
+    rerender({ serverValue: "Approve routine" });
+
+    expect(result.current.value).toBe("Approve routine ");
+    expect(result.current.dirty).toBe(false);
+
+    act(() => result.current.onChange("Approve routine changes"));
+    await waitFor(() => expect(onCommit).toHaveBeenLastCalledWith("Approve routine changes"));
+
+    rerender({ serverValue: "Escalate uncertain changes" });
+    expect(result.current.value).toBe("Escalate uncertain changes");
+  });
+
+  it("replaces local text immediately and cancels a pending commit", async () => {
+    const onCommit: Mock<(value: string) => void> = vi.fn();
+    const { result } = renderHook(() => useDebouncedTextField({ serverValue: "repository", onCommit, debounceMs: 30 }));
+    act(() => result.current.onChange("pending"));
+
+    act(() => result.current.replace("organization"));
+
+    expect(result.current.value).toBe("organization");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(onCommit).not.toHaveBeenCalled();
   });
 });

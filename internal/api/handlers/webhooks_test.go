@@ -754,6 +754,230 @@ func TestWebhook_HandleCodeReviewRequestedRefreshesExistingMirror(t *testing.T) 
 	require.NoError(t, mock.ExpectationsWereMet(), "existing pull request mirror should be refreshed from the webhook payload")
 }
 
+func TestWebhook_ReassessesRequestedCodeReviewAfterNewCommits(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	priorSessionID := uuid.New()
+	priorReviewID := int64(143)
+	priorReviewURL := "https://github.com/assembledhq/143/pull/42#pullrequestreview-143"
+	now := time.Now().UTC()
+	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
+		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
+		HeadSHA: "old-head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
+		GitHubReviewID: &priorReviewID, GitHubReviewURL: &priorReviewURL,
+	}}
+	sessions := &codeReviewWebhookSessionStore{}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}, metadata, sessions, jobs, zerolog.Nop(), codereviewsvc.Config{},
+	)
+	handler := &WebhookHandler{pullRequests: db.NewPullRequestStore(mock), codeReviews: codeReviews}
+
+	oldBody := "Old description"
+	oldHead := "old-head-sha"
+	oldRef := "feature/code-review"
+	oldBase := "base-sha"
+	mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+		WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+			prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+			"Old title", &oldBody, "open", "pending", "user", "", &oldHead, &oldRef, &oldBase,
+			"unknown", false, 0, false, nil, int64(0),
+			models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+			nil, now, now,
+		))
+	mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha").
+		WithArgs(pgx.NamedArgs{
+			"id": prID, "org_id": orgID,
+			"github_pr_url": "https://github.com/assembledhq/143/pull/42",
+			"title":         "Updated title", "body": stringPointerArg{value: "Updated description with test evidence"},
+			"head_sha": stringPointerArg{value: "head-sha"}, "head_ref": stringPointerArg{value: "feature/code-review"},
+			"base_sha": stringPointerArg{value: "base-sha"}, "merge_state": models.PullRequestMergeStateUnknown,
+		}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	body := []byte(`{
+		"action":"synchronize",
+		"number":42,
+		"repository":{"full_name":"assembledhq/143"},
+		"pull_request":{
+			"number":42,"html_url":"https://github.com/assembledhq/143/pull/42",
+			"title":"Updated title","body":"Updated description with test evidence","user":{"login":"anya"},
+			"head":{"sha":"head-sha","ref":"feature/code-review","repo":{"fork":false}},
+			"base":{"sha":"base-sha"}
+		}
+	}`)
+	err = handler.reassessCodeReviewsForGitHubEvent(context.Background(), db.GitHubRepoOwner{
+		OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/143", Status: "active",
+	}, "pull_request", body, "delivery-143")
+
+	require.NoError(t, err, "new commits should trigger code review reassessment")
+	require.Equal(t, prID, jobs.reassessmentPayload.PullRequestID, "reassessment should target the reviewed pull request")
+	require.Equal(t, priorSessionID, jobs.reassessmentPayload.PriorSessionID, "queued reassessment should remain ordered behind the assessment active when the event arrived")
+	require.Equal(t, "head-sha", jobs.reassessmentPayload.HeadSHA, "queued reassessment should capture the current PR head")
+	require.Contains(t, jobs.reassessmentPayload.ChangeKey, "material:", "queued reassessment should use a material-state key")
+	require.NotContains(t, jobs.reassessmentPayload.ChangeKey, "delivery-143", "queued reassessment should not use the webhook delivery id")
+	require.Equal(t, 0, sessions.createCalls, "webhook should defer session creation to the durable starter job")
+	require.NoError(t, mock.ExpectationsWereMet(), "pull request mirror refresh should be org-scoped")
+}
+
+func TestCodeReviewMaterialChangeKey(t *testing.T) {
+	t.Parallel()
+
+	headSHA := "head-sha"
+	newHeadSHA := "new-head-sha"
+	base := models.PullRequest{HeadSHA: &headSHA, CIStatus: models.PullRequestCIStatusSuccess}
+	ciChanged := base
+	ciChanged.CIStatus = models.PullRequestCIStatusFailure
+	headChanged := base
+	headChanged.HeadSHA = &newHeadSHA
+
+	tests := []struct {
+		name       string
+		left       models.PullRequest
+		right      models.PullRequest
+		expectSame bool
+	}{
+		{
+			name:       "same head ignores CI state",
+			left:       base,
+			right:      ciChanged,
+			expectSame: true,
+		},
+		{
+			name:       "new head uses a new key",
+			left:       base,
+			right:      headChanged,
+			expectSame: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			left, err := codeReviewMaterialChangeKey(tt.left)
+			require.NoError(t, err, "left material state should serialize")
+			right, err := codeReviewMaterialChangeKey(tt.right)
+			require.NoError(t, err, "right material state should serialize")
+			if tt.expectSame {
+				require.Equal(t, left, right, "the same code head should share a dedupe key")
+				return
+			}
+			require.NotEqual(t, left, right, "a new code head should use a new dedupe key")
+		})
+	}
+}
+
+func TestWebhook_CodeReviewReassessmentUsesSameKeyForEquivalentDeliveries(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock pool should initialize")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	priorSessionID := uuid.New()
+	now := time.Now().UTC()
+	metadata := &codeReviewWebhookMetadataStore{latest: models.CodeReviewSessionMetadata{
+		ID: uuid.New(), SessionID: priorSessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
+		HeadSHA: "head-sha", TriggerSource: models.CodeReviewTriggerSourceTeamReviewer,
+		Status: models.CodeReviewSessionStatusCompleted, ReviewOutputKey: "prior-output",
+	}}
+	jobs := &codeReviewWebhookJobStore{jobID: uuid.New()}
+	cfg := models.DefaultCodeReviewPolicyConfig()
+	codeReviews := codereviewsvc.NewService(
+		&codeReviewWebhookPolicyStore{policyID: policyID, config: cfg}, metadata,
+		&codeReviewWebhookSessionStore{}, jobs, zerolog.Nop(), codereviewsvc.Config{},
+	)
+	handler := &WebhookHandler{pullRequests: db.NewPullRequestStore(mock), codeReviews: codeReviews}
+	body := "Description with tests"
+	headSHA := "head-sha"
+	headRef := "feature/code-review"
+	baseSHA := "base-sha"
+	expectPullRequest := func() {
+		mock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+			WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "assembledhq/143", "github_pr_number": 42}).
+			WillReturnRows(pgxmock.NewRows(codeReviewWebhookPullRequestColumns()).AddRow(
+				prID, nil, orgID, 42, "https://github.com/assembledhq/143/pull/42", "assembledhq/143",
+				"Improve reviewer reassessment", &body, "open", "pending", "user", "success", &headSHA, &headRef, &baseSHA,
+				"clean", false, 0, false, nil, int64(1),
+				models.PullRequestMergeWhenReadyStateOff, nil, nil, "", nil, "", nil,
+				nil, now, now,
+			))
+		mock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*body = @body[\\s\\S]*head_sha = @head_sha").
+			WithArgs(pgx.NamedArgs{
+				"id": prID, "org_id": orgID,
+				"github_pr_url": "https://github.com/assembledhq/143/pull/42",
+				"title":         "Improve reviewer reassessment", "body": stringPointerArg{value: body},
+				"head_sha": stringPointerArg{value: headSHA}, "head_ref": stringPointerArg{value: headRef},
+				"base_sha": stringPointerArg{value: baseSHA}, "merge_state": models.PullRequestMergeStateUnknown,
+			}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	}
+	eventBody := []byte(`{
+		"action":"synchronize","number":42,"repository":{"full_name":"assembledhq/143"},
+		"pull_request":{"number":42,"html_url":"https://github.com/assembledhq/143/pull/42",
+		"title":"Improve reviewer reassessment","body":"Description with tests","user":{"login":"anya"},
+		"head":{"sha":"head-sha","ref":"feature/code-review","repo":{"fork":false}},"base":{"sha":"base-sha"}}
+	}`)
+	owner := db.GitHubRepoOwner{OrgID: orgID, RepositoryID: repoID, FullName: "assembledhq/143", Status: "active"}
+	for _, deliveryID := range []string{"delivery-one", "delivery-two"} {
+		expectPullRequest()
+		require.NoError(t, handler.reassessCodeReviewsForGitHubEvent(
+			context.Background(), owner, "pull_request", eventBody, deliveryID,
+		), "equivalent delivery should queue without error")
+	}
+
+	require.Len(t, jobs.reassessmentPayloads, 2, "both deliveries should reach the durable queue boundary")
+	require.Equal(t, jobs.reassessmentPayloads[0].ChangeKey, jobs.reassessmentPayloads[1].ChangeKey, "equivalent deliveries should share a semantic dedupe key")
+	require.NotContains(t, jobs.reassessmentPayloads[0].ChangeKey, "delivery-", "semantic dedupe key should not contain delivery identity")
+	require.NoError(t, mock.ExpectationsWereMet(), "equivalent deliveries should use org-scoped pull request lookups")
+}
+
+func TestCodeReviewEventChangesAssessment(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		eventType string
+		action    string
+		expected  bool
+	}{
+		{name: "new commits", eventType: "pull_request", action: "synchronize", expected: true},
+		{name: "description edit", eventType: "pull_request", action: "edited", expected: false},
+		{name: "pull request reopened", eventType: "pull_request", action: "reopened", expected: false},
+		{name: "human review", eventType: "pull_request_review", action: "submitted", expected: false},
+		{name: "review dismissal", eventType: "pull_request_review", action: "dismissed", expected: false},
+		{name: "inline review creation", eventType: "pull_request_review_comment", action: "created", expected: false},
+		{name: "inline review edit", eventType: "pull_request_review_comment", action: "edited", expected: false},
+		{name: "inline review deletion", eventType: "pull_request_review_comment", action: "deleted", expected: false},
+		{name: "thread resolution", eventType: "pull_request_review_thread", action: "resolved", expected: false},
+		{name: "thread reopening", eventType: "pull_request_review_thread", action: "unresolved", expected: false},
+		{name: "check suite complete", eventType: "check_suite", action: "completed", expected: false},
+		{name: "check run complete", eventType: "check_run", action: "completed", expected: false},
+		{name: "commit status changed", eventType: "status", action: "", expected: false},
+		{name: "unrelated label", eventType: "pull_request", action: "labeled", expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			event := codeReviewReassessmentWebhook{Action: tt.action}
+			require.Equal(t, tt.expected, codeReviewEventChangesAssessment(tt.eventType, event), "event classifier should trigger only pass-relevant changes")
+		})
+	}
+}
+
 func TestWebhook_HandleIssueComment_InvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -817,7 +1041,7 @@ type codeReviewWebhookPolicyStore struct {
 	config   models.CodeReviewPolicyConfig
 }
 
-func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID, *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	record := models.CodeReviewPolicyRecord{
 		ID:                 s.policyID,
 		Version:            1,
@@ -828,17 +1052,22 @@ func (s *codeReviewWebhookPolicyStore) ResolvePolicy(context.Context, uuid.UUID,
 		AgentRoster:        s.config.AgentRoster,
 		InlineCommentLimit: s.config.InlineCommentLimit,
 	}
-	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "repository", Policy: &record}, nil
+	return models.CodeReviewResolvedPolicy{Config: s.config, Source: "organization", Policy: &record}, nil
 }
 
-func (s *codeReviewWebhookPolicyStore) SavePolicy(context.Context, uuid.UUID, *uuid.UUID, models.CodeReviewPolicyConfig, *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+func (s *codeReviewWebhookPolicyStore) SavePolicy(context.Context, uuid.UUID, models.CodeReviewPolicyConfig, *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
 	return models.CodeReviewPolicyRecord{}, nil
 }
 
-type codeReviewWebhookMetadataStore struct{}
+type codeReviewWebhookMetadataStore struct {
+	latest    models.CodeReviewSessionMetadata
+	created   models.CodeReviewSessionMetadata
+	submitted models.CodeReviewSessionMetadata
+}
 
 func (s *codeReviewWebhookMetadataStore) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	metadata.ID = uuid.New()
+	s.created = *metadata
 	return nil
 }
 
@@ -846,30 +1075,82 @@ func (s *codeReviewWebhookMetadataStore) GetByOutputKey(context.Context, uuid.UU
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
-func (s *codeReviewWebhookMetadataStore) GetRunningByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+func (s *codeReviewWebhookMetadataStore) GetLatestByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewWebhookMetadataStore) GetLatestByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latest.ID != uuid.Nil {
+		return s.latest, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewWebhookMetadataStore) GetLatestSubmittedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.submitted.ID != uuid.Nil {
+		return s.submitted, nil
+	}
+	if s.latest.GitHubReviewID != nil {
+		return s.latest, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *codeReviewWebhookMetadataStore) HasApprovedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return false, nil
+}
+
+func (s *codeReviewWebhookMetadataStore) FailReview(context.Context, uuid.UUID, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, nil
 }
 
 func (s *codeReviewWebhookMetadataStore) MarkStaleForPullRequestExceptHead(context.Context, uuid.UUID, uuid.UUID, string, *uuid.UUID) (int64, error) {
 	return 0, nil
 }
 
-type codeReviewWebhookSessionStore struct{}
+type codeReviewWebhookSessionStore struct {
+	getResult   models.Session
+	createCalls int
+}
 
 func (s *codeReviewWebhookSessionStore) Create(_ context.Context, session *models.Session) error {
+	s.createCalls++
 	session.ID = uuid.New()
 	return nil
 }
 
-type codeReviewWebhookJobStore struct {
-	jobID   uuid.UUID
-	payload codereviewsvc.RunCodeReviewJobPayload
+func (s *codeReviewWebhookSessionStore) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
+	return s.getResult, nil
 }
 
-func (s *codeReviewWebhookJobStore) Enqueue(_ context.Context, _ uuid.UUID, _, _ string, payload any, _ int, _ *string) (uuid.UUID, error) {
-	typed, ok := payload.(codereviewsvc.RunCodeReviewJobPayload)
+func (s *codeReviewWebhookSessionStore) UpdateStatus(context.Context, uuid.UUID, uuid.UUID, models.SessionStatus) error {
+	return nil
+}
+
+func (s *codeReviewWebhookSessionStore) UpdateFailure(context.Context, uuid.UUID, uuid.UUID, string, string, []string, bool) error {
+	return nil
+}
+
+type codeReviewWebhookJobStore struct {
+	jobID                uuid.UUID
+	payload              codereviewsvc.RunCodeReviewJobPayload
+	reassessmentPayload  codereviewsvc.ReviewChangedInput
+	reassessmentPayloads []codereviewsvc.ReviewChangedInput
+}
+
+func (s *codeReviewWebhookJobStore) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+	typed, ok := opts.Payload.(codereviewsvc.RunCodeReviewJobPayload)
 	if ok {
 		s.payload = typed
 	}
+	changed, ok := opts.Payload.(codereviewsvc.ReviewChangedInput)
+	if ok {
+		s.reassessmentPayload = changed
+		s.reassessmentPayloads = append(s.reassessmentPayloads, changed)
+	}
 	return s.jobID, nil
+}
+
+func (s *codeReviewWebhookJobStore) HasActiveByDedupeKey(context.Context, uuid.UUID, string, string) (bool, error) {
+	return true, nil
 }

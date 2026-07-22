@@ -53,6 +53,28 @@ describe('AuditLogEntry', () => {
     );
   });
 
+  it('keeps audit rows auto-sized with vertically aligned content', () => {
+    const { container } = render(
+      <AuditLogEntry
+        entry={makeEntry({ details: { changed: 'value' } })}
+        members={mockMembers}
+      />
+    );
+
+    const row = screen.getByRole('button');
+    expect(row).toHaveClass(
+      'h-auto',
+      'sm:h-auto',
+      'leading-5'
+    );
+    expect(row).not.toHaveClass('sm:h-8');
+    expect(container.querySelector('.lucide-chevron-right')?.parentElement).toHaveClass(
+      'flex',
+      'self-stretch',
+      'items-center'
+    );
+  });
+
   it('labels team role changes without saying member role', () => {
     render(
       <AuditLogEntry
@@ -63,6 +85,24 @@ describe('AuditLogEntry', () => {
 
     expect(screen.getByText('changed user role')).toBeInTheDocument();
     expect(screen.queryByText('changed member role')).not.toBeInTheDocument();
+  });
+
+  it('labels code review policy changes', () => {
+    render(
+      <>
+        <AuditLogEntry
+          entry={makeEntry({ id: 2, action: 'code_review_policy.updated', resource_type: 'code_review_policy' })}
+          members={mockMembers}
+        />
+        <AuditLogEntry
+          entry={makeEntry({ id: 3, action: 'code_review_policy.reset', resource_type: 'code_review_policy' })}
+          members={mockMembers}
+        />
+      </>
+    );
+
+    expect(screen.getByText('updated review policy')).toBeInTheDocument();
+    expect(screen.getByText('reset review policy')).toBeInTheDocument();
   });
 
   it('labels auto-join audit actions without assuming a domain source', () => {

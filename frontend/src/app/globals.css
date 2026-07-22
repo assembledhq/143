@@ -297,6 +297,13 @@
     font-family: var(--font-display);
     @apply tracking-[-0.025em];
   }
+  /* Fieldsets default to min-inline-size: min-content, so any child that
+     cannot wrap (e.g. a whitespace-nowrap button label) widens the fieldset
+     past its container and pushes content off-screen on narrow viewports.
+     Let fieldsets shrink like ordinary block containers. */
+  fieldset {
+    min-inline-size: 0;
+  }
   /* Prevent iOS Safari from auto-zooming when focusing form fields. Triggered
      when computed font-size is <16px. Scoped to mobile widths so desktop
      typography is unchanged. */

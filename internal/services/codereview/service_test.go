@@ -3,8 +3,8 @@ package codereview
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -18,10 +18,11 @@ func TestService_HandleReviewRequested(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		input    ReviewRequestedInput
-		setup    func(*policyStub, *metadataStub, *triggerStub)
-		expected func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub)
+		name      string
+		input     ReviewRequestedInput
+		activeJob *bool
+		setup     func(*policyStub, *metadataStub, *triggerStub)
+		expected  func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub)
 	}{
 		{
 			name: "ignores unrelated reviewer",
@@ -32,6 +33,19 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.False(t, result.Processed, "unrelated reviewer request should not be processed")
 				require.Equal(t, "reviewer_not_configured", result.IgnoredReason, "ignored result should explain reviewer mismatch")
 				require.Equal(t, 0, sessions.createCalls, "unrelated reviewer request should not create a session")
+			},
+		},
+		{
+			name:  "does not rereview after approval",
+			input: newReviewRequestedInput(nil),
+			setup: func(_ *policyStub, metadata *metadataStub, _ *triggerStub) {
+				metadata.approved = true
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *policyStub, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "approved pull request should not be reviewed again")
+				require.Equal(t, "already_approved", result.IgnoredReason, "rerequest should preserve the existing approval")
+				require.Equal(t, 0, sessions.createCalls, "approved rerequest should not create a new session")
+				require.Equal(t, 0, jobs.enqueueCalls, "approved rerequest should not enqueue new review work")
 			},
 		},
 		{
@@ -48,10 +62,13 @@ func TestService_HandleReviewRequested(t *testing.T) {
 				require.Equal(t, models.SessionOriginCodeReview, sessions.created.Origin, "session should use code_review origin")
 				require.Equal(t, models.SessionInteractionModeSingleRun, sessions.created.InteractionMode, "review sessions should be single-run")
 				require.Equal(t, models.SessionStatusIdle, sessions.created.Status, "review sessions should start idle so reviewer tabs can claim the first turn")
+				require.NotNil(t, sessions.created.ReasoningEffort, "review sessions should carry the policy reasoning level")
+				require.Equal(t, models.ReasoningEffortHigh, *sessions.created.ReasoningEffort, "review sessions should default to high reasoning")
 				require.Equal(t, 1, metadata.createCalls, "service should create code review metadata")
 				require.True(t, metadata.created.FromFork, "service should persist fork source evidence on review metadata")
 				require.Equal(t, 1, jobs.enqueueCalls, "service should enqueue the code review worker job")
 				require.Equal(t, models.JobTypeRunCodeReview, jobs.jobType, "service should use the code review job type")
+				require.Equal(t, codeReviewJobMaxAttempts, jobs.opts.MaxAttempts, "code review jobs should get the extended retry budget")
 				require.NotEmpty(t, jobs.dedupeKey, "service should dedupe by stable output key")
 				require.True(t, jobs.payload.FromFork, "service should carry fork source evidence into worker payload")
 				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "service should carry GitHub author login into worker payload")
@@ -105,12 +122,17 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			name:  "reuses running review for same head and policy",
 			input: newReviewRequestedInput(nil),
 			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
-				m.running = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New()}
+				m.latest = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					Status:          models.CodeReviewSessionStatusRunning,
+					ReviewOutputKey: "running-output-key",
+				}
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
 				require.True(t, result.Processed, "matching duplicate request should be processed")
 				require.True(t, result.Reused, "duplicate request for same head should reuse running review")
-				require.Equal(t, metadata.running.SessionID, result.SessionID, "result should point to running session")
+				require.Equal(t, metadata.latest.SessionID, result.SessionID, "result should point to running session")
 				require.Equal(t, 0, sessions.createCalls, "duplicate request should not create another session")
 				require.Equal(t, 0, jobs.enqueueCalls, "duplicate request should not enqueue another job")
 			},
@@ -119,15 +141,108 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			name:  "reuses terminal review for same output key",
 			input: newReviewRequestedInput(nil),
 			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
-				m.byOutputKey = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
+				m.latest = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted}
 			},
 			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
 				require.True(t, result.Processed, "matching duplicate terminal request should be processed")
 				require.True(t, result.Reused, "duplicate terminal request should reuse the existing review")
-				require.Equal(t, metadata.byOutputKey.SessionID, result.SessionID, "result should point to existing terminal session")
+				require.Equal(t, metadata.latest.SessionID, result.SessionID, "result should point to existing terminal session")
 				require.Equal(t, 0, sessions.createCalls, "duplicate terminal request should not create a detached session")
 				require.Equal(t, 0, metadata.createCalls, "duplicate terminal request should not create duplicate metadata")
 				require.Equal(t, 0, jobs.enqueueCalls, "duplicate terminal request should not enqueue a broken job")
+			},
+		},
+		{
+			name:      "replaces running review whose job is no longer active",
+			input:     newReviewRequestedInput(nil),
+			activeJob: boolPtr(false),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				m.latest = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					Status:          models.CodeReviewSessionStatusRunning,
+					ReviewOutputKey: "stranded-output-key",
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "rerequest should be processed")
+				require.False(t, result.Reused, "stranded review should not be silently reused")
+				require.Equal(t, 1, metadata.failCalls, "stranded review should be marked failed before replacement")
+				require.Equal(t, 1, sessions.updateStatusCalls, "stranded parent session should be terminalized")
+				require.Equal(t, models.SessionStatusFailed, sessions.updatedStatus, "stranded parent session should be marked failed")
+				require.Equal(t, 1, sessions.updateFailureCalls, "stranded parent session should record an actionable failure")
+				require.Equal(t, 1, sessions.createCalls, "rerequest should create a fresh session")
+				require.Equal(t, 1, jobs.enqueueCalls, "rerequest should enqueue a fresh review job")
+				require.Contains(t, metadata.created.ReviewOutputKey, metadata.latest.ID.String(), "replacement output key should identify the prior failed attempt")
+			},
+		},
+		{
+			name:      "reuses newly queued review while its job enqueue is in flight",
+			input:     newReviewRequestedInput(nil),
+			activeJob: boolPtr(false),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				m.latest = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					Status:          models.CodeReviewSessionStatusQueued,
+					ReviewOutputKey: "new-output-key",
+					CreatedAt:       time.Now(),
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "duplicate request during enqueue should be processed")
+				require.True(t, result.Reused, "new metadata should be reused during the enqueue grace period")
+				require.Equal(t, 0, metadata.failCalls, "enqueue grace period should not fail new metadata")
+				require.Equal(t, 0, sessions.createCalls, "enqueue grace period should not create a duplicate session")
+				require.Equal(t, 0, jobs.enqueueCalls, "the original request should remain responsible for enqueueing")
+			},
+		},
+		{
+			name:      "reuses concurrent replacement after losing stranded takeover",
+			input:     newReviewRequestedInput(nil),
+			activeJob: boolPtr(false),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				m.latest = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					Status:          models.CodeReviewSessionStatusRunning,
+					ReviewOutputKey: "stranded-output-key",
+				}
+				m.failErr = pgx.ErrNoRows
+				m.latestAfterFail = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					Status:          models.CodeReviewSessionStatusQueued,
+					ReviewOutputKey: "replacement-output-key",
+					CreatedAt:       time.Now(),
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "concurrent replacement should satisfy the rerequest")
+				require.True(t, result.Reused, "losing takeover should reuse the winning replacement")
+				require.Equal(t, metadata.latestAfterFail.SessionID, result.SessionID, "result should point to the winning replacement session")
+				require.Equal(t, 1, metadata.failCalls, "service should attempt to claim the stranded record once")
+				require.Equal(t, 0, sessions.updateStatusCalls, "losing takeover must not fail the winning replacement session")
+				require.Equal(t, 0, sessions.createCalls, "losing takeover must not create another replacement")
+				require.Equal(t, 0, jobs.enqueueCalls, "the winning request remains responsible for enqueueing")
+			},
+		},
+		{
+			name:  "creates fresh review after failed attempt",
+			input: newReviewRequestedInput(nil),
+			setup: func(_ *policyStub, m *metadataStub, _ *triggerStub) {
+				m.latest = models.CodeReviewSessionMetadata{
+					ID:        uuid.New(),
+					SessionID: uuid.New(),
+					Status:    models.CodeReviewSessionStatusFailed,
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, policies *policyStub, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "failed review rerequest should be processed")
+				require.False(t, result.Reused, "failed review should get a fresh attempt")
+				require.Equal(t, 1, sessions.createCalls, "failed review rerequest should create a fresh session")
+				require.Equal(t, 1, jobs.enqueueCalls, "failed review rerequest should enqueue a fresh job")
+				require.Contains(t, metadata.created.ReviewOutputKey, metadata.latest.ID.String(), "retry output key should advance from the failed attempt")
 			},
 		},
 		{
@@ -167,13 +282,16 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			t.Parallel()
 
 			policies := newPolicyStub()
-			metadata := &metadataStub{runningErr: pgx.ErrNoRows}
+			metadata := &metadataStub{}
 			triggers := &triggerStub{orgID: tt.input.OrgID, repositoryID: tt.input.RepositoryID, err: pgx.ErrNoRows}
 			if tt.setup != nil {
 				tt.setup(policies, metadata, triggers)
 			}
 			sessions := &sessionStub{}
-			jobs := &jobStub{jobID: uuid.New()}
+			jobs := &jobStub{jobID: uuid.New(), active: true}
+			if tt.activeJob != nil {
+				jobs.active = *tt.activeJob
+			}
 			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{AppReviewerLogins: []string{"143-code-reviewer"}})
 			svc.SetGitHubTriggerStore(triggers)
 
@@ -182,6 +300,237 @@ func TestService_HandleReviewRequested(t *testing.T) {
 			require.NoError(t, err, "HandleReviewRequested should not error for valid test input")
 			tt.expected(t, result, policies, metadata, sessions, jobs)
 		})
+	}
+}
+
+func TestService_HandleReviewChanged(t *testing.T) {
+	t.Parallel()
+
+	priorReviewID := int64(143)
+	priorReviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+	tests := []struct {
+		name              string
+		usePriorSessionID bool
+		setup             func(*metadataStub, *sessionStub)
+		expected          func(*testing.T, ReviewRequestedResult, *metadataStub, *sessionStub, *jobStub)
+	}{
+		{
+			name: "ignores pull requests without prior 143 review history",
+			expected: func(t *testing.T, result ReviewRequestedResult, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "unreviewed pull request changes should not start always-on review")
+				require.Equal(t, "review_not_previously_requested", result.IgnoredReason, "ignored change should explain missing reviewer request")
+				require.Equal(t, 0, sessions.createCalls, "unreviewed pull request change should not create a session")
+				require.Equal(t, 0, jobs.enqueueCalls, "unreviewed pull request change should not enqueue work")
+			},
+		},
+		{
+			name: "stops reassessing after 143 has approved",
+			setup: func(metadata *metadataStub, _ *sessionStub) {
+				metadata.approved = true
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.False(t, result.Processed, "approved pull request changes should not start another review")
+				require.Equal(t, "already_approved", result.IgnoredReason, "ignored change should preserve the monotonic approval")
+				require.Equal(t, 0, sessions.createCalls, "approved pull request change should not create a session")
+				require.Equal(t, 0, jobs.enqueueCalls, "approved pull request change should not enqueue work")
+			},
+		},
+		{
+			name: "creates a fresh assessment and carries the existing GitHub review",
+			setup: func(metadata *metadataStub, sessions *sessionStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID:              uuid.New(),
+					SessionID:       uuid.New(),
+					PullRequestID:   uuid.New(),
+					PolicyID:        uuid.New(),
+					HeadSHA:         "head",
+					FromFork:        true,
+					TriggerSource:   models.CodeReviewTriggerSourceTeamReviewer,
+					Status:          models.CodeReviewSessionStatusCompleted,
+					ReviewOutputKey: "prior-output-key",
+					GitHubReviewID:  &priorReviewID,
+					GitHubReviewURL: &priorReviewURL,
+				}
+				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, metadata *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "external PR change should start reassessment")
+				require.False(t, result.Reused, "new change delivery should create a new auditable assessment")
+				require.Equal(t, 1, sessions.createCalls, "reassessment should create a code review session")
+				require.Equal(t, 1, jobs.enqueueCalls, "reassessment should enqueue code review work")
+				require.Equal(t, models.CodeReviewTriggerSourceTeamReviewer, metadata.created.TriggerSource, "reassessment should preserve the original trigger source")
+				require.Contains(t, metadata.created.ReviewOutputKey, ":change:", "reassessment output should be keyed by the external change")
+				require.Equal(t, &priorReviewID, jobs.payload.ExistingGitHubReviewID, "worker should update the existing GitHub review")
+				require.Equal(t, &priorReviewURL, jobs.payload.ExistingGitHubReviewURL, "worker should retain the existing review URL")
+				require.Equal(t, "prior-output-key", jobs.payload.PreviousOutputKey, "worker should be able to match prior inline findings")
+				require.Equal(t, "anya", jobs.payload.PullRequestAuthor, "reassessment should retain author eligibility context")
+				require.True(t, jobs.payload.FromFork, "reassessment should retain fork eligibility context")
+			},
+		},
+		{
+			name: "defers behind an active assessment while it refreshes mutable gates",
+			setup: func(metadata *metadataStub, sessions *sessionStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head",
+					TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+					Status:        models.CodeReviewSessionStatusRunning, ReviewOutputKey: "active-output-key",
+				}
+				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Reused, "change during an active review should reuse the running assessment")
+				require.True(t, result.Deferred, "change during an older active review should remain pending for a follow-up")
+				require.Equal(t, 0, sessions.createCalls, "active reassessment should not create concurrent reviewer sessions")
+				require.Equal(t, 0, jobs.enqueueCalls, "active reassessment should not enqueue duplicate work")
+			},
+		},
+		{
+			name:              "coalesces a change already covered by a newer assessment",
+			usePriorSessionID: true,
+			setup: func(metadata *metadataStub, _ *sessionStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head",
+					TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+					Status:        models.CodeReviewSessionStatusRunning, ReviewOutputKey: "newer-output-key",
+				}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Reused, "newer assessment should cover the queued change")
+				require.False(t, result.Deferred, "covered change should not keep retrying")
+				require.Equal(t, "change_already_reassessed", result.IgnoredReason, "coalesced result should explain why no new review started")
+				require.Equal(t, 0, sessions.createCalls, "covered change should not create another session")
+				require.Equal(t, 0, jobs.enqueueCalls, "covered change should not enqueue another review")
+			},
+		},
+		{
+			name:              "retries a change after a newer assessment failed",
+			usePriorSessionID: true,
+			setup: func(metadata *metadataStub, sessions *sessionStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head",
+					TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+					Status:        models.CodeReviewSessionStatusFailed, ReviewOutputKey: "failed-newer-output-key",
+				}
+				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Processed, "failed newer assessment should not consume the queued change")
+				require.False(t, result.Reused, "queued change should receive a fresh attempt after failure")
+				require.Equal(t, 1, sessions.createCalls, "failed coverage should create a replacement assessment")
+				require.Equal(t, 1, jobs.enqueueCalls, "failed coverage should enqueue replacement review work")
+			},
+		},
+		{
+			name: "reuses a completed assessment for a redelivered change",
+			setup: func(metadata *metadataStub, sessions *sessionStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), HeadSHA: "head",
+					TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+					Status:        models.CodeReviewSessionStatusCompleted,
+				}
+				metadata.createResult = models.CodeReviewSessionMetadata{
+					ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusCompleted,
+				}
+				sessions.getResult = models.Session{RevisionContext: json.RawMessage(`{"pull_request_author":"anya"}`)}
+			},
+			expected: func(t *testing.T, result ReviewRequestedResult, _ *metadataStub, sessions *sessionStub, jobs *jobStub) {
+				require.True(t, result.Reused, "redelivered change should reuse its completed assessment")
+				require.Equal(t, 0, sessions.createCalls, "redelivery should not create an orphan session")
+				require.Equal(t, 0, jobs.enqueueCalls, "redelivery should not enqueue duplicate work")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			policies := newPolicyStub()
+			metadata := &metadataStub{}
+			sessions := &sessionStub{}
+			jobs := &jobStub{jobID: uuid.New(), active: true}
+			if tt.setup != nil {
+				tt.setup(metadata, sessions)
+			}
+			svc := NewService(policies, metadata, sessions, jobs, zerolog.Nop(), Config{})
+			input := newReviewChangedInput()
+			if tt.usePriorSessionID {
+				input.PriorSessionID = uuid.New()
+			}
+
+			result, err := svc.HandleReviewChanged(context.Background(), input)
+
+			require.NoError(t, err, "HandleReviewChanged should process valid reassessment input")
+			tt.expected(t, result, metadata, sessions, jobs)
+		})
+	}
+}
+
+func TestService_QueueReviewChanged(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		setup         func(*metadataStub)
+		expectedQueue bool
+		expectedWhy   string
+	}{
+		{
+			name: "queues a durable reassessment behind the current session",
+			setup: func(metadata *metadataStub) {
+				metadata.latest = models.CodeReviewSessionMetadata{ID: uuid.New(), SessionID: uuid.New(), Status: models.CodeReviewSessionStatusRunning}
+			},
+			expectedQueue: true,
+		},
+		{
+			name:        "ignores pull requests without review history",
+			expectedWhy: "review_not_previously_requested",
+		},
+		{
+			name: "does not queue after approval",
+			setup: func(metadata *metadataStub) {
+				metadata.approved = true
+			},
+			expectedWhy: "already_approved",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			metadata := &metadataStub{}
+			if tt.setup != nil {
+				tt.setup(metadata)
+			}
+			jobs := &jobStub{jobID: uuid.New()}
+			svc := NewService(newPolicyStub(), metadata, &sessionStub{}, jobs, zerolog.Nop(), Config{})
+			input := newReviewChangedInput()
+
+			result, err := svc.QueueReviewChanged(context.Background(), input)
+
+			require.NoError(t, err, "QueueReviewChanged should handle valid event input")
+			if !tt.expectedQueue {
+				require.False(t, result.Processed, "ignored event should not report queued work")
+				require.Equal(t, tt.expectedWhy, result.IgnoredReason, "ignored event should explain why no work was queued")
+				require.Equal(t, 0, jobs.enqueueCalls, "ignored event should not enqueue a reassessment starter")
+				return
+			}
+			require.True(t, result.Processed, "reviewed pull request event should be durably queued")
+			require.Equal(t, 1, jobs.enqueueCalls, "event should enqueue one reassessment starter")
+			require.Equal(t, models.JobTypeStartCodeReviewReassessment, jobs.jobType, "event should use the reassessment starter job type")
+			require.Equal(t, metadata.latest.SessionID, jobs.reassessmentPayload.PriorSessionID, "queued event should remember the assessment current when it arrived")
+			require.Contains(t, jobs.dedupeKey, input.ChangeKey, "starter job should dedupe webhook redeliveries")
+		})
+	}
+}
+
+func newReviewChangedInput() ReviewChangedInput {
+	return ReviewChangedInput{
+		OrgID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(),
+		GitHubRepo: "acme/repo", GitHubPRNumber: 42,
+		GitHubPRURL: "https://github.com/acme/repo/pull/42", PullRequestTitle: "Fix rounding",
+		BaseSHA: "base", HeadSHA: "head", ChangeKey: "delivery-143", ChangeReason: "pull_request.edited",
 	}
 }
 
@@ -242,24 +591,26 @@ func newPolicyStub() *policyStub {
 	return &policyStub{resolved: models.CodeReviewResolvedPolicy{Config: cfg, Source: "default"}}
 }
 
-func (s *policyStub) ResolvePolicy(_ context.Context, _ uuid.UUID, _ *uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
+func (s *policyStub) ResolvePolicy(_ context.Context, _ uuid.UUID) (models.CodeReviewResolvedPolicy, error) {
 	return s.resolved, nil
 }
 
-func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, repositoryID *uuid.UUID, config models.CodeReviewPolicyConfig, _ *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
+func (s *policyStub) SavePolicy(_ context.Context, orgID uuid.UUID, config models.CodeReviewPolicyConfig, _ *uuid.UUID) (models.CodeReviewPolicyRecord, error) {
 	s.saveCalls++
-	return models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, RepositoryID: repositoryID, Version: 1, Enabled: config.Enabled, ApprovalMode: config.ApprovalMode}, nil
+	return models.CodeReviewPolicyRecord{ID: uuid.New(), OrgID: orgID, Version: 1, Enabled: config.Enabled, ApprovalMode: config.ApprovalMode}, nil
 }
 
 type metadataStub struct {
-	createCalls  int
-	staleCalls   int
-	supersededBy *uuid.UUID
-	created      models.CodeReviewSessionMetadata
-	createResult models.CodeReviewSessionMetadata
-	running      models.CodeReviewSessionMetadata
-	byOutputKey  models.CodeReviewSessionMetadata
-	runningErr   error
+	createCalls     int
+	staleCalls      int
+	supersededBy    *uuid.UUID
+	created         models.CodeReviewSessionMetadata
+	createResult    models.CodeReviewSessionMetadata
+	latest          models.CodeReviewSessionMetadata
+	latestAfterFail models.CodeReviewSessionMetadata
+	failCalls       int
+	failErr         error
+	approved        bool
 }
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
@@ -274,21 +625,53 @@ func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models
 	return nil
 }
 
-func (s *metadataStub) GetByOutputKey(_ context.Context, _ uuid.UUID, _ string) (models.CodeReviewSessionMetadata, error) {
-	if s.byOutputKey.ID != uuid.Nil {
-		return s.byOutputKey, nil
+func (s *metadataStub) GetByOutputKey(context.Context, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+	if s.createResult.ID != uuid.Nil {
+		return s.createResult, nil
 	}
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
-func (s *metadataStub) GetRunningByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
-	if s.running.ID != uuid.Nil {
-		return s.running, nil
+func (s *metadataStub) GetLatestByPullRequestHead(_ context.Context, _, _ uuid.UUID, _ string, _ uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latest.ID != uuid.Nil {
+		return s.latest, nil
 	}
-	if s.runningErr != nil {
-		return models.CodeReviewSessionMetadata{}, s.runningErr
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *metadataStub) GetLatestByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latest.ID != uuid.Nil {
+		return s.latest, nil
 	}
-	return models.CodeReviewSessionMetadata{}, errors.New("unexpected running lookup")
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *metadataStub) GetLatestSubmittedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	if s.latest.GitHubReviewID != nil {
+		return s.latest, nil
+	}
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
+func (s *metadataStub) HasApprovedByPullRequest(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return s.approved, nil
+}
+
+func (s *metadataStub) FailReview(_ context.Context, _ uuid.UUID, _ uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	s.failCalls++
+	if s.failErr != nil {
+		err := s.failErr
+		s.failErr = nil
+		if s.latestAfterFail.ID != uuid.Nil {
+			s.latest = s.latestAfterFail
+		}
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	failed := s.latest
+	failed.Status = models.CodeReviewSessionStatusFailed
+	failed.FailureReason = &reason
+	s.latest = failed
+	return failed, nil
 }
 
 func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _ uuid.UUID, _ string, supersededBySessionID *uuid.UUID) (int64, error) {
@@ -298,8 +681,12 @@ func (s *metadataStub) MarkStaleForPullRequestExceptHead(_ context.Context, _, _
 }
 
 type sessionStub struct {
-	createCalls int
-	created     models.Session
+	createCalls        int
+	updateStatusCalls  int
+	updateFailureCalls int
+	updatedStatus      models.SessionStatus
+	created            models.Session
+	getResult          models.Session
 }
 
 func (s *sessionStub) Create(_ context.Context, session *models.Session) error {
@@ -309,22 +696,52 @@ func (s *sessionStub) Create(_ context.Context, session *models.Session) error {
 	return nil
 }
 
-type jobStub struct {
-	enqueueCalls int
-	jobID        uuid.UUID
-	jobType      string
-	dedupeKey    string
-	payload      RunCodeReviewJobPayload
+func (s *sessionStub) GetByID(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
+	return s.getResult, nil
 }
 
-func (s *jobStub) Enqueue(_ context.Context, _ uuid.UUID, _ string, jobType string, payload any, _ int, dedupeKey *string) (uuid.UUID, error) {
+func (s *sessionStub) UpdateStatus(_ context.Context, _, _ uuid.UUID, status models.SessionStatus) error {
+	s.updateStatusCalls++
+	s.updatedStatus = status
+	return nil
+}
+
+func (s *sessionStub) UpdateFailure(context.Context, uuid.UUID, uuid.UUID, string, string, []string, bool) error {
+	s.updateFailureCalls++
+	return nil
+}
+
+type jobStub struct {
+	enqueueCalls        int
+	jobID               uuid.UUID
+	jobType             string
+	dedupeKey           string
+	payload             RunCodeReviewJobPayload
+	reassessmentPayload ReviewChangedInput
+	opts                db.EnqueueOpts
+	active              bool
+}
+
+func (s *jobStub) EnqueueWithOpts(_ context.Context, _ uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
 	s.enqueueCalls++
-	s.jobType = jobType
-	if typed, ok := payload.(RunCodeReviewJobPayload); ok {
+	s.opts = opts
+	s.jobType = opts.JobType
+	if typed, ok := opts.Payload.(RunCodeReviewJobPayload); ok {
 		s.payload = typed
 	}
-	if dedupeKey != nil {
-		s.dedupeKey = *dedupeKey
+	if typed, ok := opts.Payload.(ReviewChangedInput); ok {
+		s.reassessmentPayload = typed
+	}
+	if opts.DedupeKey != nil {
+		s.dedupeKey = *opts.DedupeKey
 	}
 	return s.jobID, nil
+}
+
+func (s *jobStub) HasActiveByDedupeKey(context.Context, uuid.UUID, string, string) (bool, error) {
+	return s.active, nil
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }

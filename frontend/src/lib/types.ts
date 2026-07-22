@@ -108,6 +108,7 @@ export interface AutomaticPRFollowThroughUserSettings {
   readiness_after_review_loop?: AutomaticFollowThroughPreference;
   resolve_conflicts_when_idle?: AutomaticFollowThroughPreference;
   fix_tests_when_idle?: AutomaticFollowThroughPreference;
+  respond_to_pr_feedback?: AutomaticFollowThroughPreference;
 }
 
 // PATCH /api/v1/auth/me/settings is an RFC 7386 JSON merge patch: omitted
@@ -129,8 +130,19 @@ export interface UserSettingsUpdateRequest {
 }
 
 export type CodeReviewApprovalMode = "comment_only" | "approve_acceptable";
+export type CodeReviewPolicyEditSource = "manual" | "example" | "reset";
+export interface CodeReviewPolicyAnalyticsEvent {
+  event: "code_review_policy_viewed" | "code_review_prompt_edited" | "code_review_prompt_example_previewed" | "code_review_prompt_example_applied" | "code_review_advanced_opened" | "code_review_policy_enabled" | "code_review_approval_mode_changed" | "code_review_github_setup_completed" | "code_review_github_setup_failed";
+  scope?: "organization" | "repository";
+  source?: CodeReviewPolicyEditSource;
+  example_key?: string;
+  character_bucket?: string;
+  subsection?: string;
+  configured?: boolean;
+}
 export type CodeReviewSessionStatus = "queued" | "running" | "completed" | "failed" | "stale" | "cancelled";
 export type CodeReviewDecision = "approved" | "comment_only" | "needs_human_review" | "blocked";
+export type CodeReviewListOutcome = "automatically_approved" | "completed_not_approved";
 export type CodeReviewDescriptionApplicabilityKind =
   | "all"
   | "nontrivial"
@@ -160,6 +172,8 @@ export interface CodeReviewDescriptionRequirement {
 export interface CodeReviewPolicyConfig {
   enabled: boolean;
   approval_mode: CodeReviewApprovalMode;
+  review_instructions: string;
+  automated_approval_policy: string;
   description_policy: {
     requirements: CodeReviewDescriptionRequirement[];
   };
@@ -189,15 +203,12 @@ export interface CodeReviewPolicyConfig {
     orchestrator: string;
     reviewer_models?: string[];
     orchestrator_model?: string;
+    reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
     disagreement_blocks: boolean;
     require_reviewer_quorum: number;
     timeout_seconds: number;
   };
   inline_comment_limit: number;
-  inheritance?: {
-    inherit_org_defaults: boolean;
-    override_fields?: string[];
-  };
 }
 
 export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
@@ -214,7 +225,6 @@ export interface CodeReviewResolvedPolicy {
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
-  inherited_policy?: CodeReviewPolicyRecord;
 }
 
 export type CodeReviewGitHubTriggerStatus =
@@ -257,6 +267,25 @@ export interface CodeReviewTemplateOption {
   title: string;
   description: string;
   config: CodeReviewPolicyConfig;
+}
+
+export interface CodeReviewPromptExampleOption {
+  key: "balanced" | "security_focused" | "minimal";
+  title: string;
+  description: string;
+  instructions: string;
+}
+
+export interface CodeReviewAutomatedApprovalExampleOption {
+  key: "conservative_low_risk" | "documentation_only" | "small_routine_changes";
+  title: string;
+  description: string;
+  policy: string;
+}
+
+export interface CodeReviewPromptExamplesResponse {
+  review_instructions: CodeReviewPromptExampleOption[];
+  automated_approval_policies: CodeReviewAutomatedApprovalExampleOption[];
 }
 
 export interface CodeReviewListItem {
@@ -1427,6 +1456,8 @@ export interface ThreadRuntimeEvent {
   last_activity_at?: string;
   started_at?: string;
   completed_at?: string;
+  failure_explanation?: string | null;
+  failure_category?: string | null;
 }
 
 export interface SessionWorkspaceGenerationChangedEvent {
@@ -1657,7 +1688,52 @@ export interface ForkResult {
 export interface SessionDetail extends Session {
   threads: SessionThread[];
   changesets: ChangesetSummary[];
+  publications?: SessionPublication[];
   changeset_stack_state?: ChangesetStackState;
+}
+
+export type SessionPublicationState =
+  | "requested"
+  | "review_pending"
+  | "ready_to_publish"
+  | "branch_published"
+  | "pr_resolved"
+  | "recorded"
+  | "completed"
+  | "completed_noop"
+  | "retryable_failed"
+  | "terminal_failed";
+
+export type SessionPublicationReviewGateState =
+  | "not_required"
+  | "pending"
+  | "passed"
+  | "needs_human"
+  | "failed";
+
+export interface SessionPublication {
+  id: string;
+  session_id: string;
+  changeset_id: string;
+  repository_id: string;
+  state: SessionPublicationState;
+  source: "user" | "automation" | "agent_tool" | "backend" | "webhook" | "reconciler" | "backfill";
+  review_gate_state: SessionPublicationReviewGateState;
+  base_branch: string;
+  head_branch: string;
+  desired_head_sha?: string;
+  published_head_sha?: string;
+  github_pr_number?: number;
+  github_pr_url?: string;
+  attempt_count: number;
+  last_error_code?: string;
+  last_error_message?: string;
+  requested_at: string;
+  last_attempt_at?: string;
+  branch_published_at?: string;
+  pr_resolved_at?: string;
+  completed_at?: string;
+  updated_at: string;
 }
 
 export type ChangesetStackState = "one-pr" | "draft-stack" | "published" | "coherent" | "needs-restack" | "restacking" | "blocked" | "external-update-detected" | "partially-merged" | "merged";
@@ -2198,6 +2274,59 @@ export interface AutomaticFollowThroughOrgSettings {
   readiness_after_review_loop_states?: ReviewLoopStatus[];
   resolve_conflicts_when_idle?: boolean;
   fix_tests_when_idle?: boolean;
+  pr_feedback_mode?: "all_trusted_humans" | "mentions" | "off";
+  pr_feedback_bot_mode?: "all" | "allowlist" | "none";
+  pr_feedback_bot_cycle_limit?: number | null;
+  pr_feedback_bot_allowlist?: string[];
+}
+
+export type PRFeedbackMonitoring = "inherit" | "enabled" | "disabled";
+export type PRFeedbackItemStatus = "pending" | "ignored" | "claimed" | "running" | "responded" | "needs_attention" | "cancelled";
+export type PRFeedbackBatchStatus = "collecting" | "queued" | "running" | "pushing" | "responding" | "completed" | "needs_attention" | "cancelled";
+
+export interface PullRequestFeedbackItem {
+  id: string;
+  pull_request_id: string;
+  batch_id?: string;
+  surface: "issue_comment" | "review_body" | "review_comment";
+  author_login: string;
+  author_type: "User" | "Bot" | "Mannequin" | "Organization" | "Unknown";
+  body: string;
+  intent: "unknown" | "change_request" | "question" | "mixed" | "acknowledgement" | "unsafe_or_unsupported";
+  status: PRFeedbackItemStatus;
+  ignore_reason?: string;
+  received_at: string;
+  response_body?: string;
+  response_commit_sha?: string;
+}
+
+export interface PullRequestFeedbackBatch {
+  id: string;
+  pull_request_id: string;
+  session_id: string;
+  thread_id?: string;
+  status: PRFeedbackBatchStatus;
+  source_kind: "human_or_mixed" | "bot_only";
+  expected_head_sha: string;
+  result_head_sha?: string;
+  result_summary?: string;
+  error_code?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PullRequestFeedbackState {
+  pull_request_id: string;
+  effective_mode: "all_trusted_humans" | "mentions" | "off";
+  effective_bot_mode: "all" | "allowlist" | "none";
+  effective_bot_cycle_limit: number | null;
+  bot_scope: "all_private_repository_bots" | "installed_or_first_party_public_bots" | "selected_bots" | "none";
+  monitoring: PRFeedbackMonitoring;
+  paused_reason?: string;
+  pending_count: number;
+  needs_attention_count: number;
+  active_batch?: PullRequestFeedbackBatch;
+  recent_items: PullRequestFeedbackItem[];
 }
 
 export type SandboxResourceTier = "small" | "standard" | "large";
@@ -2987,6 +3116,7 @@ export type AuditResourceType =
   | "organization"
   | "preview_secret_bundle"
   | "preview_policy"
+  | "code_review_policy"
   | "pr_readiness_policy"
   | "pr_readiness_custom_check"
   | "pr_readiness_bypass"
@@ -3428,7 +3558,7 @@ export type AutomationGitHubEvent =
   | "github.pull_request_review.submitted"
   | "github.pull_request_review_comment.created";
 
-export type AutomationEventProvider = "pagerduty" | "linear";
+export type AutomationEventProvider = "github" | "pagerduty" | "linear";
 export type PagerDutyEventType =
   | "incident.triggered"
   | "incident.acknowledged"
@@ -3613,6 +3743,9 @@ export interface AutomationRun {
   triggered_by: "schedule" | "manual" | "github";
   triggered_by_user_id?: string;
   scheduled_time?: string;
+  provider?: AutomationEventProvider;
+  provider_event_id?: string;
+  trigger_context?: Record<string, unknown>;
   goal_snapshot: string;
   config_snapshot?: Record<string, unknown>;
   status: AutomationRunStatus;
@@ -3626,6 +3759,100 @@ export interface AutomationRun {
   // when the run hasn't spawned a session yet (pending/skipped, or
   // mid-flight before the worker creates the session).
   session?: AutomationRunSession;
+  trigger_target?: AutomationRunTriggerTarget;
+  trigger_details?: AutomationRunTriggerDetails;
+}
+
+export interface AutomationRunTriggerTarget {
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+}
+
+export interface AutomationRunTriggerDetails {
+  event: AutomationGitHubEvent;
+  provider_event_id?: string;
+  event_id?: string;
+  dedupe_group_id?: string;
+  actor?: string;
+  actor_type?: string;
+  bot_triggered: boolean;
+}
+
+export type AutomationOutcomeDecision =
+  | "passed"
+  | "changes_requested"
+  | "advisory"
+  | "not_applicable";
+
+export type AutomationOutcomeSource = "agent_reported" | "legacy_inferred";
+
+export type AutomationExternalActionType =
+  | "github_review_changes_requested"
+  | "github_review_approved"
+  | "github_comment";
+
+export type AutomationExternalActionVerificationStatus =
+  | "reported"
+  | "verified"
+  | "unavailable";
+
+export interface AutomationRunExternalAction {
+  id: string;
+  org_id: string;
+  outcome_id: string;
+  provider: string;
+  action_type: AutomationExternalActionType;
+  external_id?: string;
+  url: string;
+  verification_status: AutomationExternalActionVerificationStatus;
+  created_at: string;
+}
+
+export interface AutomationRunOutcome {
+  id: string;
+  org_id: string;
+  automation_id: string;
+  automation_run_id: string;
+  session_id: string;
+  repository: string;
+  pull_request_number: number;
+  pull_request_url: string;
+  pull_request_title?: string;
+  head_sha?: string;
+  decision: AutomationOutcomeDecision;
+  reason: string;
+  source: AutomationOutcomeSource;
+  reported_at: string;
+  created_at: string;
+  external_action?: AutomationRunExternalAction;
+}
+
+export interface AutomationDecision {
+  automation_id: string;
+  run_id: string;
+  session_id?: string;
+  target: AutomationRunTriggerTarget;
+  execution_status: AutomationRunStatus;
+  triggered_at: string;
+  completed_at?: string;
+  attempt_count: number;
+  outcome?: AutomationRunOutcome;
+}
+
+export interface AutomationDecisionStats {
+  unique_pull_requests: number;
+  unique_revisions: number;
+  total_runs: number;
+  evaluating: number;
+  passed: number;
+  changes_requested: number;
+  advisory: number;
+  not_applicable: number;
+  outcome_not_reported: number;
+  execution_failed: number;
 }
 
 // Mirrors the session publish lifecycle enums in internal/models/session_enums.go.

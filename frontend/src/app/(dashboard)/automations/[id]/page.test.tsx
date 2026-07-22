@@ -82,6 +82,19 @@ describe("AutomationDetailPage", () => {
     );
   });
 
+  it("renders the automation detail skeleton while the automation loads", () => {
+    server.use(
+      http.get("*/api/v1/automations/auto-1", async () => new Promise<never>(() => {})),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    expect(screen.getByLabelText("Loading automation")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("link", { name: "Back to automations" })).toBeInTheDocument();
+    expect(screen.queryByText("Loading...")).not.toBeInTheDocument();
+    expect(screen.getByTestId("automation-detail-header-skeleton-copy")).toHaveClass("min-w-0", "flex-1");
+  });
+
   it("matches the schedule controls and labels to the app input sizing", async () => {
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
@@ -467,7 +480,9 @@ describe("AutomationDetailPage", () => {
 
     renderWithProviders(<AutomationDetailPage />);
 
-    expect(await screen.findByText("Check release health")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Goal")).toHaveValue(
+      "## Goal\nCheck release health",
+    );
     expect(screen.queryByRole("tab")).not.toBeInTheDocument();
     expect(await screen.findByText("acme/repo")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run now" })).toBeInTheDocument();
@@ -480,6 +495,72 @@ describe("AutomationDetailPage", () => {
       screen.getByRole("dialog", { name: "Automation details" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("acme/repo").length).toBeGreaterThan(1);
+  });
+
+  it("renders the goal as markdown for viewers who cannot edit", async () => {
+    currentUserRole.value = "viewer";
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "## Goal\nCheck release health",
+            scope: "",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: "2026-01-01T00:00:00Z",
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await screen.findByText("Weekly audit");
+
+    // Viewers get rendered markdown, not the inline editor or raw source.
+    expect(screen.queryByLabelText("Goal")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Automation title")).not.toBeInTheDocument();
+    expect(screen.getByText("Check release health")).toBeInTheDocument();
+    expect(screen.queryByText(/##/)).not.toBeInTheDocument();
+    // The `## Goal` heading is rendered as a real heading in addition to the
+    // section title, confirming markdown rendering rather than raw text.
+    expect(
+      screen.getAllByRole("heading", { name: "Goal", level: 2 }).length,
+    ).toBeGreaterThan(1);
   });
 
   it("keeps run history in the main column instead of duplicating previous runs in the rail", async () => {
@@ -557,8 +638,12 @@ describe("AutomationDetailPage", () => {
     renderWithProviders(<AutomationDetailPage />);
 
     expect(
-      await screen.findByRole("heading", { name: "Run history" }),
+      await screen.findByRole("heading", { name: "Execution history" }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Latest execution" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Operational status only/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "Previous runs" }),
     ).not.toBeInTheDocument();
@@ -859,7 +944,7 @@ describe("AutomationDetailPage", () => {
     });
   });
 
-  it("saves the selected automation emoji", async () => {
+  it("saves the selected automation emoji inline", async () => {
     const user = userEvent.setup();
     let updateBody: Record<string, unknown> | null = null;
 
@@ -923,10 +1008,10 @@ describe("AutomationDetailPage", () => {
       expect(screen.getByText("Weekly audit")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Edit" }));
-    await user.click(screen.getByRole("button", { name: "Automation emoji" }));
+    await user.click(
+      screen.getByRole("button", { name: "Change automation emoji" }),
+    );
     await selectEmojiOption("Rocket");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(updateBody).toMatchObject({
@@ -936,7 +1021,10 @@ describe("AutomationDetailPage", () => {
     });
   });
 
-  it("keeps the settings emoji selector small on the same row as the name field", async () => {
+  it("edits the title inline and keeps title and goal out of settings", async () => {
+    const user = userEvent.setup();
+    let updateBody: Record<string, unknown> | null = null;
+    let updatedAt = "2026-01-01T00:00:00Z";
     server.use(
       http.get("*/api/v1/automations/auto-1", () =>
         HttpResponse.json({
@@ -949,6 +1037,93 @@ describe("AutomationDetailPage", () => {
             scope: "",
             icon_type: "emoji",
             icon_value: "🧪",
+            interval_value: 1,
+            interval_unit: "weeks",
+            base_branch: "main",
+            enabled: true,
+            timezone: "UTC",
+            last_run_at: null,
+            next_run_at: null,
+            priority: 50,
+            created_at: "2026-01-01T00:00:00Z",
+            updated_at: updatedAt,
+          },
+        }),
+      ),
+      http.get("*/api/v1/automations/auto-1/runs*", () =>
+        HttpResponse.json({ data: [], meta: {} }),
+      ),
+      http.get("*/api/v1/automations/auto-1/stats*", () =>
+        HttpResponse.json({
+          data: {
+            since: "2026-01-01T00:00:00Z",
+            until: "2026-01-31T00:00:00Z",
+            buckets: [],
+            totals: {
+              total: 0,
+              completed: 0,
+              completed_noop: 0,
+              failed: 0,
+              skipped: 0,
+              running: 0,
+              pending: 0,
+              success_rate: 0,
+              avg_duration_seconds: 0,
+            },
+          },
+        }),
+      ),
+      http.patch("*/api/v1/automations/auto-1", async ({ request }) => {
+        updateBody = (await request.json()) as Record<string, unknown>;
+        updatedAt = "2026-01-02T00:00:00Z";
+        return HttpResponse.json({
+          data: {
+            id: "auto-1",
+            name: "Release audit",
+            goal: "Check release health",
+          },
+        });
+      }),
+    );
+
+    renderWithProviders(<AutomationDetailPage />);
+
+    await screen.findByText("Weekly audit");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+    const scope = screen.getByLabelText(/Scope/);
+    await user.type(scope, "backend services");
+
+    const title = screen.getByLabelText("Automation title");
+    fireEvent.change(title, { target: { value: "Release audit" } });
+    fireEvent.blur(title);
+
+    await waitFor(() => {
+      expect(updateBody).toEqual({ name: "Release audit" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Scope/)).toHaveValue("backend services");
+    });
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Goal")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Automation emoji" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reverts a cleared title on blur instead of saving or leaving it blank", async () => {
+    const user = userEvent.setup();
+    let patched = false;
+    server.use(
+      http.get("*/api/v1/automations/auto-1", () =>
+        HttpResponse.json({
+          data: {
+            id: "auto-1",
+            org_id: "org-1",
+            repository_id: "repo-1",
+            name: "Weekly audit",
+            goal: "Check release health",
+            scope: "",
             interval_value: 1,
             interval_unit: "weeks",
             base_branch: "main",
@@ -985,19 +1160,26 @@ describe("AutomationDetailPage", () => {
           },
         }),
       ),
+      http.patch("*/api/v1/automations/auto-1", async () => {
+        patched = true;
+        return HttpResponse.json({ data: {} });
+      }),
     );
 
     renderWithProviders(<AutomationDetailPage />);
 
-    await screen.findByText("Weekly audit");
-    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const title = await screen.findByLabelText("Automation title");
+    await user.clear(title);
+    await user.tab();
 
-    const identityRow = screen.getByTestId("automation-settings-identity-row");
-    expect(identityRow).toHaveClass("grid-cols-[4.75rem_minmax(0,1fr)]");
-    expect(
-      screen.getByRole("button", { name: "Automation emoji" }),
-    ).toHaveClass("size-10", "w-16", "border-transparent", "bg-transparent", "shadow-none");
-    expect(screen.getByLabelText("Name")).toHaveValue("Weekly audit");
+    // Empty is never persisted, and the field snaps back to the saved name
+    // rather than being left blank.
+    await waitFor(() => {
+      expect(screen.getByLabelText("Automation title")).toHaveValue(
+        "Weekly audit",
+      );
+    });
+    expect(patched).toBe(false);
   });
 
   it(
@@ -1151,6 +1333,10 @@ describe("AutomationDetailPage", () => {
           meta: {},
         });
       }),
+      http.patch("*/api/v1/automations/auto-1", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return HttpResponse.json({ data: { id: "auto-1" } });
+      }),
     );
 
     renderWithProviders(<AutomationDetailPage />);
@@ -1169,6 +1355,10 @@ describe("AutomationDetailPage", () => {
     );
 
     expect(goalInput).toHaveValue("Inspect @internal/services ");
+    expect(await screen.findByText("Saving…")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Improve goal" }),
+    ).toBeEnabled();
   });
 
   it("inserts selected slash commands into the edit goal field", async () => {
@@ -1339,7 +1529,10 @@ describe("AutomationDetailPage", () => {
         `${(AUTOMATION_GOAL_MAX_LENGTH + 1).toLocaleString("en-US")} / ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")}`,
       ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
+    expect(screen.getByLabelText("Goal")).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
   });
 
   it("saves the selected model override", async () => {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/internalapi"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -25,7 +26,7 @@ func NewInternalMetaToolSource(base ToolSource, token, apiURL string) ToolSource
 	return &internalMetaToolSource{
 		base:   base,
 		token:  token,
-		apiURL: strings.TrimRight(apiURL, "/"),
+		apiURL: internalapi.NormalizeBaseURL(apiURL),
 		client: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -154,7 +155,7 @@ func (s *internalMetaToolSource) do(ctx context.Context, method, path string, q 
 }
 
 func FetchCapabilitySnapshot(ctx context.Context, token, apiURL string) ([]models.AgentCapabilitySnapshotItem, error) {
-	source := &internalMetaToolSource{token: token, apiURL: strings.TrimRight(apiURL, "/"), client: &http.Client{Timeout: 30 * time.Second}}
+	source := &internalMetaToolSource{token: token, apiURL: internalapi.NormalizeBaseURL(apiURL), client: &http.Client{Timeout: 30 * time.Second}}
 	result := source.do(ctx, http.MethodGet, "/api/v1/internal/agent-capabilities/effective", nil, nil)
 	if result == nil || len(result.Content) == 0 {
 		return nil, fmt.Errorf("capability list failed: empty response")

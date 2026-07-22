@@ -148,6 +148,19 @@ var ErrSandboxPreviewRace = errors.New("sandbox race: preview holder attached fi
 // winning container.
 var ErrSandboxSiblingRace = errors.New("sandbox race: sibling thread attached first, retry")
 
+// ErrSandboxWorkspaceNotReady is returned when a thread reuses a sibling's
+// published code-review container before that sibling has finished cloning
+// and checking out the authoritative pull request head. The worker retries
+// the thread against the same node instead of starting an agent in a partial
+// or default-branch workspace.
+var ErrSandboxWorkspaceNotReady = errors.New("sandbox workspace is not ready, retry")
+
+// ErrThreadCancelledBeforeWorkspaceReady is returned when a durable thread
+// cancellation lands while a sibling is waiting for the shared code-review
+// checkout. The worker must stop this job without resetting the already-
+// cancelled thread to idle or retrying it.
+var ErrThreadCancelledBeforeWorkspaceReady = errors.New("thread cancelled before sandbox workspace became ready")
+
 // ErrSandboxOnDifferentNode is returned from ContinueSession's reuse path
 // when the session's recorded worker_node_id points at a different worker
 // than the one running this job. Container ids are local to a docker
@@ -162,6 +175,34 @@ var ErrSandboxSiblingRace = errors.New("sandbox race: sibling thread attached fi
 // depth safety net for any job enqueued before pinning landed.
 var ErrSandboxOnDifferentNode = errors.New("sandbox race: session sandbox lives on a different worker node, retry")
 
+// recordedRunFailureError marks an error whose terminal session/thread failure
+// has already been persisted with structured, user-facing metadata. Callers
+// that add context may wrap it normally; terminal error handlers use
+// errors.As to avoid replacing the categorized failure with a generic one.
+type recordedRunFailureError struct {
+	err error
+}
+
+func (e *recordedRunFailureError) Error() string {
+	return e.err.Error()
+}
+
+func (e *recordedRunFailureError) Unwrap() error {
+	return e.err
+}
+
+func markRunFailureRecorded(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &recordedRunFailureError{err: err}
+}
+
+func isRunFailureRecorded(err error) bool {
+	var recorded *recordedRunFailureError
+	return errors.As(err, &recorded)
+}
+
 // canonicalTimeoutLogMessage is the single log phrase emitted whenever a
 // session hits its configured deadline. Kept deliberately narrow so
 // Grafana alerts can key off one string across RunAgent and ContinueSession.
@@ -174,6 +215,12 @@ const maxNoCheckpointRecoveryAttempts = 3
 // stall the loser's cleanup, long enough that a healthy IsAlive (typically
 // sub-100ms) succeeds with margin.
 const sandboxRaceProbeTimeout = 3 * time.Second
+
+const (
+	reusedCodeReviewWorkspaceReadyTimeout        = 2 * time.Minute
+	reusedCodeReviewWorkspaceReadyInitialBackoff = 100 * time.Millisecond
+	reusedCodeReviewWorkspaceReadyMaxBackoff     = 2 * time.Second
+)
 
 func logAgentRunFinished(log zerolog.Logger, run *models.Session, outcome string, runStartedAt time.Time, addFields func(*zerolog.Event)) {
 	event := log.Info().
@@ -278,6 +325,159 @@ func (o *Orchestrator) diagnoseAcquireHoldRaceLoss(
 		Str("stale_container_id", actualContainerID).
 		Msg("cleared stale orphan container_id from a crashed prior turn; signaling retry to re-enter against the clean row")
 	return ErrStaleSandboxIDCleared
+}
+
+// waitForSandboxWorkspaceReady blocks a reused code-review thread until the
+// shared checkout has both a valid commit and the exact branch/head prepared
+// by the winning sibling. A live container alone is not sufficient: the
+// winner publishes container_id before CloneRepo and pull/<n>/head checkout
+// finish, so an immediate reuse can otherwise start in an empty repository.
+func waitForSandboxWorkspaceReady(
+	ctx context.Context,
+	provider SandboxProvider,
+	sandbox *Sandbox,
+	expectedBranch, expectedHead string,
+	timeout, initialBackoff, maxBackoff time.Duration,
+	checkCancellation func(context.Context) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if initialBackoff <= 0 {
+		initialBackoff = 100 * time.Millisecond
+	}
+	if maxBackoff < initialBackoff {
+		maxBackoff = initialBackoff
+	}
+
+	quotedWorkDir := "'" + shellEscapeSingleQuote(sandbox.WorkDir) + "'"
+	probeCommand := fmt.Sprintf(
+		"git -C %s rev-parse --verify HEAD && git -C %s branch --show-current",
+		quotedWorkDir,
+		quotedWorkDir,
+	)
+	waitCtx, cancelWait := context.WithTimeout(ctx, timeout)
+	defer cancelWait()
+
+	lastObserved := "workspace probe has not completed"
+	backoff := initialBackoff
+	for {
+		if err := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); err != nil {
+			return err
+		}
+		if checkCancellation != nil {
+			if err := checkCancellation(waitCtx); err != nil {
+				if errors.Is(err, ErrThreadCancelledBeforeWorkspaceReady) {
+					return err
+				}
+				if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
+					return waitErr
+				}
+				return err
+			}
+		}
+
+		var stdout, stderr bytes.Buffer
+		exitCode, execErr := provider.Exec(waitCtx, sandbox, probeCommand, &stdout, &stderr)
+		if execErr == nil && exitCode == 0 {
+			fields := strings.Fields(stdout.String())
+			if len(fields) >= 2 {
+				actualHead, actualBranch := fields[0], fields[1]
+				headMatches := expectedHead == "" || strings.EqualFold(actualHead, expectedHead)
+				branchMatches := expectedBranch == "" || actualBranch == expectedBranch
+				if headMatches && branchMatches {
+					// Close the race between the last unsuccessful probe and a
+					// cancellation that arrived while this successful probe ran.
+					if checkCancellation != nil {
+						if err := checkCancellation(waitCtx); err != nil {
+							if errors.Is(err, ErrThreadCancelledBeforeWorkspaceReady) {
+								return err
+							}
+							if waitErr := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); waitErr != nil {
+								return waitErr
+							}
+							return err
+						}
+					}
+					return nil
+				}
+				lastObserved = fmt.Sprintf("branch=%q head=%q", actualBranch, actualHead)
+			} else {
+				lastObserved = fmt.Sprintf("incomplete git probe output %q", strings.TrimSpace(stdout.String()))
+			}
+		} else {
+			lastObserved = fmt.Sprintf("exit=%d exec_error=%v stderr=%q", exitCode, execErr, strings.TrimSpace(stderr.String()))
+		}
+
+		if err := sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved); err != nil {
+			return err
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-waitCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return sandboxWorkspaceWaitContextError(ctx, waitCtx, expectedBranch, expectedHead, lastObserved)
+		case <-timer.C:
+		}
+		backoff = nextSandboxWorkspaceReadyBackoff(backoff, maxBackoff)
+	}
+}
+
+func sandboxWorkspaceWaitContextError(parentCtx, waitCtx context.Context, expectedBranch, expectedHead, lastObserved string) error {
+	if parentErr := parentCtx.Err(); parentErr != nil {
+		return parentErr
+	}
+	if waitCtx.Err() == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: expected branch=%q head=%q; last observed %s",
+		ErrSandboxWorkspaceNotReady,
+		expectedBranch,
+		expectedHead,
+		lastObserved,
+	)
+}
+
+func nextSandboxWorkspaceReadyBackoff(current, maximum time.Duration) time.Duration {
+	if current >= maximum || current > maximum/2 {
+		return maximum
+	}
+	return current * 2
+}
+
+func (o *Orchestrator) stopWorkspaceWaitIfThreadCancelled(ctx context.Context, orgID, threadID uuid.UUID) error {
+	if o.sessionThreads == nil {
+		return nil
+	}
+	thread, err := o.sessionThreads.GetByID(ctx, orgID, threadID)
+	if err != nil {
+		return fmt.Errorf("check thread cancellation while waiting for workspace: %w", err)
+	}
+	if thread.CancelRequestedAt == nil && thread.Status != models.ThreadStatusCancelled {
+		return nil
+	}
+	if thread.Status != models.ThreadStatusCancelled {
+		updateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := o.sessionThreads.UpdateStatus(updateCtx, orgID, threadID, models.ThreadStatusCancelled); err != nil {
+			return fmt.Errorf("mark workspace-waiting thread cancelled: %w", err)
+		}
+	}
+	return fmt.Errorf("%w: thread %s", ErrThreadCancelledBeforeWorkspaceReady, threadID)
 }
 
 // GitHubTokenProvider abstracts retrieving a GitHub App installation token.
@@ -1062,6 +1262,7 @@ type ContinueSessionOptions struct {
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
+	PRFeedback           *PRFeedbackContinueOptions
 	HumanInputRequestID  *uuid.UUID
 	QueuedMessageID      *int64
 	ChangesetID          *uuid.UUID
@@ -1091,6 +1292,18 @@ type PRRepairContinueOptions struct {
 	HealthVersion     int64
 	HeadSHA           string
 	WorkspaceMode     models.PullRequestRepairWorkspaceMode
+}
+
+// PRFeedbackContinueOptions identifies an automatic feedback-follow-through
+// turn. It is deliberately distinct from repair commands so feedback jobs
+// cannot accidentally inherit repair command semantics or user-message input.
+type PRFeedbackContinueOptions struct {
+	BatchID           uuid.UUID
+	PullRequestID     uuid.UUID
+	PullRequestNumber int
+	HeadSHA           string
+	WorkspaceMode     models.PRFeedbackWorkspaceMode
+	StructuredPrompt  string
 }
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
@@ -1261,6 +1474,12 @@ func (o *Orchestrator) verifySuccessfulTurn(ctx context.Context, session *models
 	if err := o.successfulTurnVerifier.VerifySuccessfulTurn(ctx, SuccessfulTurnVerification{
 		Session: session, Sandbox: sandbox, Result: result, WorkspaceRevision: revision, Diff: diff,
 	}); err != nil {
+		// Automatic preview verification is advisory: it records durable
+		// evidence and surfaces results in the session preview UI, but must not
+		// fail an otherwise-successful coding turn. Adapter fix-and-resume is not
+		// yet wired (see design doc Phase 3), so a verification failure has no
+		// in-turn remediation path and gating it would drop the completed turn's
+		// output and mark the session failed with no way to recover.
 		log.Warn().Err(err).Int64("workspace_revision", revision).Msg("automatic preview verification did not complete")
 	}
 }
@@ -1504,6 +1723,10 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	sandboxCfg.Env["INTERNAL_API_TOKEN"] = internalToken
 	sandboxCfg.Env["INTERNAL_API_URL"] = o.internalAPIURL
+	sandboxCfg.Env["ASSEMBLED_SESSION_ID"] = session.ID.String()
+	// Compatibility for existing skills and older 143-tools binaries. New
+	// clients use the token-derived current-session endpoint and do not depend
+	// on either environment variable for authorization.
 	sandboxCfg.Env["143_SESSION_ID"] = session.ID.String()
 	if evalBootstrapRunID != nil {
 		sandboxCfg.Env["EVAL_BOOTSTRAP_TOOLS_ENABLED"] = "true"
@@ -2317,7 +2540,7 @@ func sessionPromptStyle(session *models.Session) PromptStyle {
 	if session == nil {
 		return PromptStyleIssueContext
 	}
-	if session.Origin == models.SessionOriginManual || session.AutomationRunID != nil {
+	if session.Origin == models.SessionOriginManual || session.Origin == models.SessionOriginCodeReview || session.AutomationRunID != nil {
 		return PromptStyleRawTask
 	}
 	if session.Origin == models.SessionOriginSlack {
@@ -3221,13 +3444,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 	authBillingMode := TokenBillingModeUnknown
 	switch run.AgentType {
 	case models.AgentTypeCodex:
-		mode, err := o.ensureCodexAuth(ctx, run, sandbox, sandboxCfg.Env)
+		mode, err := o.ensureCodexAuth(ctx, run, primaryThreadID, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
 		authBillingMode = mode
 	case models.AgentTypeClaudeCode:
-		mode, err := o.ensureClaudeCodeAuth(ctx, run, sandbox, sandboxCfg.Env)
+		mode, err := o.ensureClaudeCodeAuth(ctx, run, primaryThreadID, sandbox, sandboxCfg.Env)
 		if err != nil {
 			return err
 		}
@@ -3329,8 +3552,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		//   3. context.DeadlineExceeded — session hit its wall-clock limit.
 		//      Classify explicitly via failTimedOutSession so the category
 		//      is set without relying on text-matching in classifyFailure.
-		//   4. Any other error — fail with the underlying message and defer
-		//      classification to the async analyze_failure job.
+		//   4. Any other unclassified error — fail with the underlying message
+		//      and defer classification to the async analyze_failure job. Errors
+		//      marked as already recorded retain their structured failure.
 		if wasCancelled {
 			log.Info().Msg("session cancelled by user")
 			deregisterSessionCancel()
@@ -3363,13 +3587,18 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 			o.failTimedOutSession(run, elapsed, 0, err, log)
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
 		}
-		o.failRun(ctx, run, err.Error())
+		failureAlreadyRecorded := isRunFailureRecorded(err)
+		if !failureAlreadyRecorded {
+			o.failRun(ctx, run, err.Error())
+		}
 		logAgentRunFailed(log, run, err, "failed", runStartedAt, nil)
-		// failRun now terminalizes the primary thread; no explicit update needed here.
-		o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
-			"session_id": run.ID.String(),
-			"org_id":     run.OrgID.String(),
-		})
+		if !failureAlreadyRecorded {
+			// failRun now terminalizes the primary thread; no explicit update needed here.
+			o.enqueueJob(ctx, run.OrgID, "agent", "analyze_failure", map[string]interface{}{
+				"session_id": run.ID.String(),
+				"org_id":     run.OrgID.String(),
+			})
+		}
 		return fmt.Errorf("execute agent: %w", err)
 	}
 
@@ -3485,6 +3714,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 		o.cleanupReviewArtifact(ctx, runResult, log)
 		return fmt.Errorf("update run result: %w", err)
 	}
+	// Completion hooks consume the in-memory session after UpdateResult.
+	// Keep it aligned with the persisted terminal result so automation runs
+	// can distinguish a shippable change from a clean no-op and retain the
+	// agent's actual summary instead of a generic fallback.
+	run.Status = status
+	run.ResultSummary = runResult.ResultSummary
+	run.Diff = runResult.Diff
+	run.Error = runResult.Error
 	o.verifySuccessfulTurn(ctx, run, sandbox, result, log)
 	if primaryThreadID != nil && o.sessionThreads != nil {
 		if err := o.sessionThreads.UpdateResult(ctx, run.OrgID, *primaryThreadID, models.ThreadStatusCompleted, runResult); err != nil {
@@ -3513,8 +3750,14 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) error 
 
 	if o.shouldQueueAutomaticPR(ctx, run, runResult, log) {
 		payload := map[string]interface{}{
-			"session_id": run.ID.String(),
-			"org_id":     run.OrgID.String(),
+			"session_id":        run.ID.String(),
+			"org_id":            run.OrgID.String(),
+			"publication_queue": string(models.SessionPublicationJobQueueDefault),
+		}
+		if run.AutomationRunID != nil {
+			payload["publication_source"] = string(models.SessionPublicationSourceAutomation)
+		} else {
+			payload["publication_source"] = string(models.SessionPublicationSourceBackend)
 		}
 		if issueSnapshot != nil {
 			payload["issue_snapshot_id"] = issueSnapshot.ID.String()
@@ -3642,6 +3885,16 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	prRepairOpts := (*PRRepairContinueOptions)(nil)
 	if opts != nil && opts.PRRepair != nil {
 		prRepairOpts = opts.PRRepair
+	} else if opts != nil && opts.PRFeedback != nil {
+		// Feedback uses the same verified PR-head checkout primitive as repair,
+		// but keeps its own typed execution identity throughout the worker and
+		// prompt path.
+		prRepairOpts = &PRRepairContinueOptions{
+			PullRequestID:     opts.PRFeedback.PullRequestID,
+			PullRequestNumber: opts.PRFeedback.PullRequestNumber,
+			HeadSHA:           opts.PRFeedback.HeadSHA,
+			WorkspaceMode:     models.PullRequestRepairWorkspaceMode(opts.PRFeedback.WorkspaceMode),
+		}
 	}
 	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
 
@@ -3823,6 +4076,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	if formatted := FormatRevisionContextForContinuation(revisionContext); formatted != "" {
 		userMessage = strings.TrimSpace(userMessage + "\n\n" + formatted)
+	}
+	if opts != nil && opts.PRFeedback != nil {
+		if strings.TrimSpace(opts.PRFeedback.StructuredPrompt) == "" {
+			o.failRun(ctx, session, "PR feedback continuation prompt is empty")
+			return errors.New("PR feedback continuation prompt is empty")
+		}
+		userMessage = opts.PRFeedback.StructuredPrompt
 	}
 
 	var humanInputAnswer *HumanInputAnswer
@@ -4152,7 +4412,72 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 		}
 	}
+	// A sibling code-review thread can publish container_id before its fresh
+	// CloneRepo and pull-request checkout finish. Do not acquire the shared
+	// turn hold or start this thread's runtime until the checkout proves it is
+	// on the review session's authoritative branch and head SHA. Keeping this
+	// barrier before AcquireTurnHold also prevents a waiting sibling from
+	// releasing the winner's single shared turn-hold bit on timeout.
+	if reusedExisting && session.Origin == models.SessionOriginCodeReview && resolvedRepoID != nil && opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
+		_, expectedHead, _, checkoutErr := codeReviewCheckoutContextFromSession(session)
+		if checkoutErr != nil {
+			return checkoutErr
+		}
+		expectedBranch := sessionWorkingBranch(session, promptIssue)
+		workspaceThreadID := *opts.ThreadID
+		workspaceSandbox := &Sandbox{
+			ID:        *session.ContainerID,
+			Provider:  "docker",
+			WorkDir:   sandboxCfg.WorkDir,
+			HomeDir:   sandboxCfg.HomeDir,
+			SessionID: sandboxCfg.SessionID,
+			OrgID:     sandboxCfg.OrgID,
+			Purpose:   sandboxCfg.Purpose,
+		}
+		log.Info().
+			Str("container_id", workspaceSandbox.ID).
+			Str("expected_branch", expectedBranch).
+			Str("expected_head_sha", expectedHead).
+			Msg("waiting for reused code review workspace to become ready")
+		if readyErr := waitForSandboxWorkspaceReady(
+			ctx,
+			o.provider,
+			workspaceSandbox,
+			expectedBranch,
+			expectedHead,
+			reusedCodeReviewWorkspaceReadyTimeout,
+			reusedCodeReviewWorkspaceReadyInitialBackoff,
+			reusedCodeReviewWorkspaceReadyMaxBackoff,
+			func(checkCtx context.Context) error {
+				return o.stopWorkspaceWaitIfThreadCancelled(checkCtx, session.OrgID, workspaceThreadID)
+			},
+		); readyErr != nil {
+			if errors.Is(readyErr, ErrThreadCancelledBeforeWorkspaceReady) {
+				log.Info().
+					Err(readyErr).
+					Str("container_id", workspaceSandbox.ID).
+					Str("thread_id", workspaceThreadID.String()).
+					Msg("stopped waiting for reused code review workspace because the thread was cancelled")
+			} else {
+				log.Warn().
+					Err(readyErr).
+					Str("container_id", workspaceSandbox.ID).
+					Msg("reused code review workspace did not become ready before retry")
+			}
+			return readyErr
+		}
+		log.Info().
+			Str("container_id", workspaceSandbox.ID).
+			Str("head_sha", expectedHead).
+			Msg("reused code review workspace is ready")
+	}
 	integrationSkills := o.BuildIntegrationSkills(ctx, session.OrgID)
+	restrictedPRFeedback := opts != nil && opts.PRFeedback != nil
+	if restrictedPRFeedback {
+		// The control plane owns pushes, comments, and review-thread mutations.
+		// Do not expose integration tools to the feedback execution sandbox.
+		integrationSkills = ""
+	}
 	var authState *sandboxGitHubAuthState
 	var authErr error
 	// continueTargetBranch is the resolved target branch (repo default,
@@ -4224,7 +4549,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			fallbackToken = token
 		}
 		repoCopy := repo
-		authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
+		if !restrictedPRFeedback {
+			authState, authErr = o.prepareSandboxGitHubAuth(ctx, session, &repoCopy, fallbackToken, &sandboxCfg, log)
+		}
 		if authErr != nil {
 			log.Error().Err(authErr).Msg("failed to wire GitHub auth for continue-session sandbox")
 			o.cleanupContinueSessionStartupFailure(
@@ -4575,7 +4902,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// container without agent credentials).
 		switch session.AgentType {
 		case models.AgentTypeCodex:
-			mode, err := o.ensureCodexAuth(ctx, session, sandbox, sandboxCfg.Env)
+			mode, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, sandboxCfg.Env)
 			if err != nil {
 				return err
 			}
@@ -4584,7 +4911,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if err := o.restoreClaudeCodeConfigFromBackup(ctx, sandbox); err != nil {
 				log.Warn().Err(err).Msg("failed to restore Claude Code config from backup; continuing with existing sandbox state")
 			}
-			mode, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, sandboxCfg.Env)
+			mode, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, sandboxCfg.Env)
 			if err != nil {
 				return err
 			}
@@ -4710,7 +5037,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		// reconstruct the prior state.
 		log.Info().Msg("continuing session without snapshot, starting fresh")
 
-		issue, repoFullName, authMode, err := o.setupFreshSandbox(ctx, session, sandbox, sandboxCfg.Env, log, prRepairOpts)
+		issue, repoFullName, authMode, err := o.setupFreshSandboxForThread(ctx, session, threadID, sandbox, sandboxCfg.Env, log, prRepairOpts)
 		if err != nil {
 			if errors.Is(err, ErrStalePullRequestHead) {
 				if revertErr := o.sessions.UpdateStatus(ctx, session.OrgID, session.ID, fallbackStatus); revertErr != nil {
@@ -4721,7 +5048,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				}
 				return err
 			}
-			o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
+			if !isRunFailureRecorded(err) {
+				o.failRun(ctx, session, fmt.Sprintf("setup fresh sandbox: %s", err))
+			}
 			return fmt.Errorf("setup fresh sandbox: %w", err)
 		}
 		authBillingMode = authMode
@@ -4902,7 +5231,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			o.failTimedOutSession(session, elapsed, messageTurnNumber, err, log)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
 		}
-		o.failRun(ctx, session, err.Error())
+		if !isRunFailureRecorded(err) {
+			o.failRun(ctx, session, err.Error())
+		}
 		return fmt.Errorf("execute agent on continue: %w", err)
 	}
 
@@ -5205,6 +5536,10 @@ func continueSessionDrainDedupeKey(sessionID uuid.UUID, processedMessageID int64
 // The resolved env is passed in from the caller so auth injection honors the
 // exact credential selection already baked into SandboxConfig.
 func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
+	return o.setupFreshSandboxForThread(ctx, session, session.PrimaryThreadID, sandbox, env, log, repairOpts)
+}
+
+func (o *Orchestrator) setupFreshSandboxForThread(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string, log zerolog.Logger, repairOpts *PRRepairContinueOptions) (models.Issue, string, TokenBillingMode, error) {
 	var issue models.Issue
 	if session.PrimaryIssueID != nil {
 		fetched, err := o.issues.GetByID(ctx, session.OrgID, *session.PrimaryIssueID)
@@ -5289,13 +5624,13 @@ func (o *Orchestrator) setupFreshSandbox(ctx context.Context, session *models.Se
 	authBillingMode := TokenBillingModeUnknown
 	switch session.AgentType {
 	case models.AgentTypeCodex:
-		mode, err := o.ensureCodexAuth(ctx, session, sandbox, env)
+		mode, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, env)
 		if err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 		}
 		authBillingMode = mode
 	case models.AgentTypeClaudeCode:
-		mode, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env)
+		mode, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, env)
 		if err != nil {
 			return models.Issue{}, "", TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
 		}
@@ -6091,15 +6426,18 @@ func (o *Orchestrator) failRunWithResult(ctx context.Context, run *models.Sessio
 	if result.Error == nil || strings.TrimSpace(*result.Error) == "" {
 		result.Error = strPtr(errMsg)
 	}
-	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
-		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
-	}
-	// Drive the primary thread terminal too. The frontend's "Agent is working…"
+	// Drive the primary thread terminal before publishing the terminal session
+	// status. The session SSE closes after its first terminal status event, so
+	// every thread field needed by that payload must already be durable.
+	// The frontend's "Agent is working…"
 	// indicator is bound to the thread status, not the session status, so failing
 	// only the session leaves the thread stuck at "running" — the UI keeps spinning
 	// until the reaper sweeps it (~2.5h later). updatePrimaryThreadTerminal also
 	// publishes a thread-runtime SSE event so any open page flips immediately.
 	o.updatePrimaryThreadTerminal(ctx, run, models.ThreadStatusFailed, result, o.logger)
+	if err := o.sessions.UpdateResult(ctx, run.OrgID, run.ID, models.SessionStatusFailed, result); err != nil {
+		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run to failed")
+	}
 	if run.ProjectTaskID != nil && o.projectTasks != nil {
 		if err := o.projectTasks.OnSessionComplete(ctx, run, "failed"); err != nil {
 			o.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update project task on run failure")
@@ -6178,10 +6516,26 @@ func (o *Orchestrator) enqueueLinearMilestone(ctx context.Context, run *models.S
 // explanation, and next steps. Used for well-known failure modes (e.g. auth expiry)
 // where we can provide actionable guidance in the UI.
 func (o *Orchestrator) failRunWithCategory(ctx context.Context, run *models.Session, errMsg, category, explanation string, nextSteps []string) {
-	o.failRun(ctx, run, errMsg)
-	if err := o.sessions.UpdateFailure(ctx, run.OrgID, run.ID, explanation, category, nextSteps, true); err != nil {
-		o.logger.Error().Err(err).Str("run_id", run.ID.String()).Msg("failed to update run failure details")
+	o.failRunWithCategoryForThread(ctx, run, nil, errMsg, category, explanation, nextSteps)
+}
+
+// failRunWithCategoryForThread mirrors categorized failure metadata onto the
+// exact executing thread in addition to the session's primary thread. Reviewer
+// tabs are non-primary threads, so session-level failure bookkeeping alone does
+// not give their per-tab UI enough information to explain the failure.
+func (o *Orchestrator) failRunWithCategoryForThread(ctx context.Context, run *models.Session, threadID *uuid.UUID, errMsg, category, explanation string, nextSteps []string) {
+	result := &models.SessionResult{
+		Error:               strPtr(errMsg),
+		FailureExplanation:  strPtr(explanation),
+		FailureCategory:     strPtr(category),
+		FailureNextSteps:    append([]string(nil), nextSteps...),
+		FailureRetryAdvised: true,
 	}
+	// Persist the exact executing thread first. failRunWithResult then persists
+	// the primary thread before atomically writing and publishing the fully
+	// structured terminal session result.
+	o.failNonPrimaryThreadWithResult(ctx, run, threadID, result, o.logger)
+	o.failRunWithResult(ctx, run, result, errMsg)
 }
 
 // failTimedOutSession handles the common bookkeeping for a session that hit
@@ -6268,7 +6622,7 @@ func (o *Orchestrator) failTimedOutSession(run *models.Session, elapsed time.Dur
 //
 // It returns the resolved billing mode so downstream usage normalization can
 // distinguish direct provider-reported USD from derived subscription credits.
-func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
 	// For Codex, OPENAI_API_KEY is only populated when AgentEnv resolved an
 	// OpenAI API-key credential. Subscription-backed Codex auth uses auth.json
 	// instead and does not inject OPENAI_API_KEY. That makes the env var itself
@@ -6280,13 +6634,13 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
 	if err != nil {
 		if errors.Is(err, ErrCodexAuthInvalid) {
-			o.failRunWithCategory(ctx, run,
+			o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("codex auth injection failed: %s", err),
 				FailureCategoryCodexAuth,
 				"Your ChatGPT authentication has expired or was revoked. Please re-authenticate to continue using Codex.",
 				[]string{"Re-authenticate with ChatGPT from the session page to sign in again"},
 			)
-			return TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
+			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("codex auth injection: %w", err))
 		}
 		// Transient infra failure: defer the user-facing failure to the
 		// dead-letter hook so retries don't churn session.status, emit
@@ -6302,13 +6656,13 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 		return TokenBillingModeUnknown, fmt.Errorf("codex auth injection: %w", err)
 	}
 	if !injected {
-		o.failRunWithCategory(ctx, run,
+		o.failRunWithCategoryForThread(ctx, run, threadID,
 			"no credentials configured for codex: connect ChatGPT from the Overview page",
 			FailureCategoryCodexAuth,
 			"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.",
 			[]string{"Re-authenticate with ChatGPT from the session page to sign in"},
 		)
-		return TokenBillingModeUnknown, fmt.Errorf("no credentials for codex agent")
+		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("no credentials for codex agent"))
 	}
 	return TokenBillingModeSubscription, nil
 }
@@ -6980,7 +7334,7 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // an API key, that key wins; otherwise subscription file injection is preferred
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
-func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
@@ -6990,13 +7344,13 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 		// the credentials file over the env var, so leaving it in place
 		// would silently bill a revoked/stale subscription token.
 		if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr != nil {
-			o.failRunWithCategory(ctx, run,
+			o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("claude API-key auth could not be prepared: %s", fallbackErr),
 				FailureCategoryClaudeCodeAuth,
 				"The Anthropic API key is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
 				[]string{"Retry the session after verifying sandbox access"},
 			)
-			return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr)
+			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key auth: %w", fallbackErr))
 		}
 		return TokenBillingModeAPIKey, nil
 	}
@@ -7011,13 +7365,13 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 				Msg("unified claude subscription injection failed; continuing with Anthropic API-key fallback")
 			return TokenBillingModeAPIKey, nil
 		}
-		o.failRunWithCategory(ctx, run,
+		o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("unified claude subscription injection failed: %s", err),
 			FailureCategoryClaudeCodeAuth,
 			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
-			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+			[]string{"Reconnect your Claude subscription from Account settings"},
 		)
-		return TokenBillingModeUnknown, fmt.Errorf("unified claude code auth injection: %w", err)
+		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("unified claude code auth injection: %w", err))
 	}
 	if injected {
 		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
@@ -7034,21 +7388,21 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 				Msg("claude subscription injection failed; continuing with Anthropic API-key fallback")
 			return TokenBillingModeAPIKey, nil
 		} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
-			o.failRunWithCategory(ctx, run,
+			o.failRunWithCategoryForThread(ctx, run, threadID,
 				fmt.Sprintf("claude subscription injection failed and API-key fallback could not be prepared: %s", fallbackErr),
 				FailureCategoryClaudeCodeAuth,
 				"Your Claude subscription token could not be injected, and the sandbox could not be prepared to use the Anthropic API key fallback.",
 				[]string{"Retry the session after reconnecting your Claude subscription or verifying Anthropic credentials"},
 			)
-			return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
+			return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr))
 		}
-		o.failRunWithCategory(ctx, run,
+		o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("claude subscription injection failed: %s", err),
 			FailureCategoryClaudeCodeAuth,
 			"Your Claude subscription token could not be injected into the sandbox. The token may have been revoked or the refresh failed.",
-			[]string{"Re-connect your Claude subscription from the Agent settings page"},
+			[]string{"Reconnect your Claude subscription from Account settings"},
 		)
-		return TokenBillingModeUnknown, fmt.Errorf("claude code auth injection: %w", err)
+		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("claude code auth injection: %w", err))
 	}
 	if injected {
 		setClaudeCodePermissionMode(sandbox, claudeCodePermissionModeForAuth(TokenBillingModeSubscription, accountType, model, claudeCodeVersion))
@@ -7061,41 +7415,41 @@ func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Ses
 	if fallbackErr := o.prepareClaudeCodeAPIKeyFallback(ctx, run, sandbox, env); fallbackErr == nil {
 		return TokenBillingModeAPIKey, nil
 	} else if !errors.Is(fallbackErr, errClaudeCodeFallbackUnavailable) {
-		o.failRunWithCategory(ctx, run,
+		o.failRunWithCategoryForThread(ctx, run, threadID,
 			fmt.Sprintf("claude API-key fallback could not be prepared: %s", fallbackErr),
 			FailureCategoryClaudeCodeAuth,
 			"The Anthropic API key fallback is configured, but the sandbox could not be prepared to use it because stale Claude credentials could not be cleared.",
 			[]string{"Retry the session after reconnecting your Claude subscription or verifying sandbox access"},
 		)
-		return TokenBillingModeUnknown, fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr)
+		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("prepare claude code API-key fallback: %w", fallbackErr))
 	}
 
 	// Distinguish "never connected anything" from "a subscription exists but
 	// was invalidated" — telling a user who DID connect a subscription that
 	// no credentials are configured sends them hunting in the wrong place.
 	if o.claudeCodeInvalidSubscriptionExists(ctx, run) {
-		o.failRunWithCategory(ctx, run,
+		o.failRunWithCategoryForThread(ctx, run, threadID,
 			"claude subscription is marked invalid; reconnect required",
 			FailureCategoryClaudeCodeAuth,
-			"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from the Agent settings page to continue.",
+			"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from Account settings to continue.",
 			[]string{
-				"Reconnect your Claude subscription from the Agent settings page",
-				"Or add an Anthropic API key under Credentials",
+				"Reconnect your Claude subscription from Account settings",
+				"Or add an Anthropic API key in Account settings",
 			},
 		)
-		return TokenBillingModeUnknown, fmt.Errorf("claude subscription invalid for claude code agent")
+		return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("claude subscription invalid for claude code agent"))
 	}
 
-	o.failRunWithCategory(ctx, run,
+	o.failRunWithCategoryForThread(ctx, run, threadID,
 		"no credentials configured for Claude Code: connect a Claude subscription or add an Anthropic API key",
 		FailureCategoryClaudeCodeAuth,
-		"No Claude Code credentials are configured. Connect your Claude subscription (recommended) or add an Anthropic API key from the Agent settings page.",
+		"No Claude Code credentials are configured. Connect your Claude subscription (recommended) or add an Anthropic API key from Account settings.",
 		[]string{
-			"Connect a Claude subscription from the Agent settings page",
-			"Or add an Anthropic API key under Credentials",
+			"Connect a Claude subscription from Account settings",
+			"Or add an Anthropic API key in Account settings",
 		},
 	)
-	return TokenBillingModeUnknown, fmt.Errorf("no credentials for claude code agent")
+	return TokenBillingModeUnknown, markRunFailureRecorded(fmt.Errorf("no credentials for claude code agent"))
 }
 
 // claudeCodeInvalidSubscriptionExists probes whether the run's org (or the
@@ -8145,7 +8499,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	}
 
 	sandbox.Env = cloneStringMap(refreshedEnv)
-	if authErr := o.prepareAgentAuthForRetry(ctx, session, sandbox, refreshedEnv); authErr != nil {
+	if authErr := o.prepareAgentAuthForRetry(ctx, session, threadID, sandbox, refreshedEnv); authErr != nil {
 		return result, authErr, false
 	}
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint)
@@ -8272,16 +8626,16 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 	}
 }
 
-func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, sandbox *Sandbox, env map[string]string) error {
+func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) error {
 	switch session.AgentType {
 	case models.AgentTypeCodex:
 		if env["OPENAI_API_KEY"] != "" {
 			return o.removeCodexAuthFile(ctx, sandbox)
 		}
-		_, err := o.ensureCodexAuth(ctx, session, sandbox, env)
+		_, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, env)
 		return err
 	case models.AgentTypeClaudeCode:
-		_, err := o.ensureClaudeCodeAuth(ctx, session, sandbox, env)
+		_, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, env)
 		return err
 	default:
 		return nil

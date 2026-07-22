@@ -138,6 +138,22 @@ func TestParseAndFormatRevisionContext(t *testing.T) {
 	require.NotContains(t, formatted, "Conflict resolution guidance", "FormatRevisionContextForContinuation should not inject conflict guidance for fix_tests repair runs")
 }
 
+func TestParseRevisionContextIgnoresUnrelatedSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{
+		"kind":"code_review",
+		"github_pr_number":54038,
+		"head_sha":"d9d948",
+		"base_sha":"main"
+	}`)
+
+	parsed, err := ParseRevisionContext(raw)
+
+	require.NoError(t, err, "ParseRevisionContext should accept unrelated session metadata")
+	require.Nil(t, parsed, "unrelated code review metadata should not activate revision prompting")
+}
+
 func TestFormatRevisionContextForContinuation_ResolveConflictsGuidance(t *testing.T) {
 	t.Parallel()
 

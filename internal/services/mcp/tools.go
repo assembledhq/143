@@ -403,7 +403,7 @@ func (tr *ToolRegistry) ListTools() []Tool {
 				InputSchema: ToolSchema{
 					Type: "object",
 					Properties: map[string]SchemaProperty{
-						"session_id":  {Type: "string", Description: "Session UUID. Defaults to 143_SESSION_ID when omitted."},
+						"session_id":  {Type: "string", Description: "Session UUID. Omit inside a session sandbox; the server derives it from the signed internal token."},
 						"draft":       {Type: "boolean", Description: "Whether to create a draft PR. Omit to use the repo default."},
 						"author_mode": {Type: "string", Description: "PR author mode. Omit to use the default (auto).", Enum: []string{"auto", "app", "user"}},
 					},

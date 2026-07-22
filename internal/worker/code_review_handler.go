@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
@@ -23,19 +25,22 @@ import (
 )
 
 type runCodeReviewPayload struct {
-	OrgID                  uuid.UUID `json:"org_id"`
-	SessionID              uuid.UUID `json:"session_id"`
-	MetadataID             uuid.UUID `json:"metadata_id"`
-	RepositoryID           uuid.UUID `json:"repository_id"`
-	PullRequestID          uuid.UUID `json:"pull_request_id"`
-	PolicyID               uuid.UUID `json:"policy_id"`
-	PolicyVersion          int       `json:"policy_version"`
-	HeadSHA                string    `json:"head_sha"`
-	FromFork               bool      `json:"from_fork"`
-	PullRequestAuthor      string    `json:"pull_request_author,omitempty"`
-	OutputKey              string    `json:"review_output_key"`
-	RequestedReviewerLogin string    `json:"requested_reviewer_login,omitempty"`
-	RequestedTeamSlug      string    `json:"requested_team_slug,omitempty"`
+	OrgID                   uuid.UUID `json:"org_id"`
+	SessionID               uuid.UUID `json:"session_id"`
+	MetadataID              uuid.UUID `json:"metadata_id"`
+	RepositoryID            uuid.UUID `json:"repository_id"`
+	PullRequestID           uuid.UUID `json:"pull_request_id"`
+	PolicyID                uuid.UUID `json:"policy_id"`
+	PolicyVersion           int       `json:"policy_version"`
+	HeadSHA                 string    `json:"head_sha"`
+	FromFork                bool      `json:"from_fork"`
+	PullRequestAuthor       string    `json:"pull_request_author,omitempty"`
+	OutputKey               string    `json:"review_output_key"`
+	RequestedReviewerLogin  string    `json:"requested_reviewer_login,omitempty"`
+	RequestedTeamSlug       string    `json:"requested_team_slug,omitempty"`
+	PreviousOutputKey       string    `json:"previous_review_output_key,omitempty"`
+	ExistingGitHubReviewID  *int64    `json:"existing_github_review_id,omitempty"`
+	ExistingGitHubReviewURL *string   `json:"existing_github_review_url,omitempty"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -49,6 +54,7 @@ type codeReviewDescriptionEvaluation struct {
 
 type codeReviewOrchestratorSynthesis struct {
 	Summary                 string   `json:"summary,omitempty"`
+	ReviewSummary           string   `json:"review_summary,omitempty"`
 	RiskNotes               []string `json:"risk_notes,omitempty"`
 	ScopeMismatch           bool     `json:"scope_mismatch,omitempty"`
 	UnresolvedUncertainty   bool     `json:"unresolved_uncertainty,omitempty"`
@@ -68,6 +74,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
 			return fmt.Errorf("org_id and session_id are required")
 		}
+		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -101,9 +108,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("load captured code review policy: %w", err)
 		}
-		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
-			return syncErr
-		}
 		pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
 		if err != nil {
 			return fmt.Errorf("load code review pull request: %w", err)
@@ -111,7 +115,37 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
-		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStatePending, "143 Code Reviewer is running")
+		// Reviewer and orchestrator waits requeue this job every few seconds. Use
+		// their durable result/thread state as a phase checkpoint so polling does
+		// not repeat the expensive GitHub preflight. Terminal or inconsistent
+		// state falls through, preserving the live refresh before every phase
+		// transition and final decision.
+		if codeReviewCanRunReviewerThreads(stores) {
+			phase, phaseErr := codeReviewInFlightAgentPhase(ctx, stores, job, pr, policy.Config(), metadata)
+			if phaseErr != nil {
+				return phaseErr
+			}
+			if phase != codeReviewAgentPhaseNone {
+				logger.Debug().
+					Str("org_id", job.OrgID.String()).
+					Str("session_id", job.SessionID.String()).
+					Str("agent_phase", string(phase)).
+					Msg("deferring code review without refreshing GitHub while agent work remains in flight")
+			}
+			switch phase {
+			case codeReviewAgentPhaseReviewers:
+				return codeReviewWaitingForReviewers(policy.Config())
+			case codeReviewAgentPhaseOrchestrator:
+				return codeReviewWaitingForOrchestrator(policy.Config())
+			}
+		}
+		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			return syncErr
+		}
+		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("reload code review pull request after sync: %w", err)
+		}
 		health, err := loadStoredCodeReviewHealth(ctx, stores, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review health: %w", err)
@@ -124,7 +158,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return fmt.Errorf("list code review findings: %w", err)
 		}
-		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		changedFiles, _, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
 		if err != nil {
 			return fmt.Errorf("load code review changed files: %w", err)
 		}
@@ -132,7 +166,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed after review started"); staleErr != nil {
 				return fmt.Errorf("mark code review stale: %w", staleErr)
 			}
-			publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateFailure, "143 Code Reviewer stopped because the PR head changed")
 			logger.Info().
 				Str("org_id", job.OrgID.String()).
 				Str("session_id", job.SessionID.String()).
@@ -145,12 +178,8 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err != nil {
 			return err
 		}
-		reviewContext, reviewContextChecked, reviewContextAvailable, err := loadCodeReviewReviewContext(ctx, stores, services, job, pr)
-		if err != nil {
-			return err
-		}
 		if codeReviewCanRunReviewerThreads(stores) {
-			if err := ensureCodeReviewReviewerThreads(ctx, stores, logger, job, pr, policy, metadata, changedFiles); err != nil {
+			if err := ensureCodeReviewReviewerThreads(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles); err != nil {
 				return err
 			}
 			if err := harvestCodeReviewReviewerResults(ctx, stores, services, logger, job, policy, metadata, changedFiles); err != nil {
@@ -173,7 +202,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if codeReviewReviewerExecutionFailed(policy.Config(), agentResults) {
 				return failCodeReviewWithoutReviewerOutput(ctx, stores, services, logger, job, pr, agentResults)
 			}
-			if err := ensureCodeReviewOrchestratorThread(ctx, stores, logger, job, pr, health, policy, metadata, changedFiles, descriptionEvaluation, reviewContext, reviewContextAvailable, agentResults, findings); err != nil {
+			if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, descriptionEvaluation, agentResults, findings); err != nil {
 				return err
 			}
 			if err := harvestCodeReviewOrchestratorResult(ctx, stores, services, logger, job, policy, metadata, changedFiles); err != nil {
@@ -201,21 +230,47 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
 		}
+		// Re-read all mutable PR gates immediately before deciding. A description,
+		// code, or check event can arrive while reviewer agents are still running;
+		// the final recommendation must reflect that newer state.
+		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
+			return syncErr
+		}
+		pr, err = stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("reload code review pull request before decision: %w", err)
+		}
+		health, err = loadStoredCodeReviewHealth(ctx, stores, job, pr)
+		if err != nil {
+			return fmt.Errorf("reload code review health before decision: %w", err)
+		}
+		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
+			if _, staleErr := stores.CodeReviews.MarkStale(ctx, job.OrgID, job.SessionID, "PR head changed before final recommendation"); staleErr != nil {
+				return fmt.Errorf("mark code review stale before decision: %w", staleErr)
+			}
+			reconcileCodeReviewSessionStale(ctx, stores, logger, job)
+			return nil
+		}
+		changedFiles, changedFilesAvailable, err := loadCodeReviewChangedFiles(ctx, stores, services, job, pr)
+		if err != nil {
+			return fmt.Errorf("reload code review changed files before decision: %w", err)
+		}
+		descriptionEvaluation, err = evaluateCodeReviewDescriptionPolicy(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles)
+		if err != nil {
+			return err
+		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
-			Policy:                 policy.Config(),
-			Job:                    job,
-			SessionURL:             codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
-			PullRequest:            pr,
-			Health:                 health,
-			AgentResults:           agentResults,
-			Findings:               findings,
-			ChangedFiles:           changedFiles,
-			ChangedFilesAvailable:  changedFilesAvailable,
-			DescriptionEvaluation:  descriptionEvaluation,
-			ReviewContext:          reviewContext,
-			ReviewContextChecked:   reviewContextChecked,
-			ReviewContextAvailable: reviewContextAvailable,
-			OrchestratorSynthesis:  codeReviewOrchestratorSynthesisFromResults(agentResults),
+			Policy:                policy.Config(),
+			Job:                   job,
+			SessionURL:            codeReviewSessionURL(services.FrontendURL, job.SessionID),
+			PullRequest:           pr,
+			Health:                health,
+			AgentResults:          agentResults,
+			Findings:              findings,
+			ChangedFiles:          changedFiles,
+			ChangedFilesAvailable: changedFilesAvailable,
+			DescriptionEvaluation: descriptionEvaluation,
+			OrchestratorSynthesis: codeReviewOrchestratorSynthesisFromResults(agentResults),
 		})
 		if err := ensureCodeReviewInlineSelection(ctx, stores.CodeReviews, job, findings, changedFiles, policy.Config().InlineCommentLimit); err != nil {
 			return fmt.Errorf("select code review inline findings: %w", err)
@@ -245,7 +300,6 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if submission.GitHubReviewID != nil {
 			event = event.Int64("github_review_id", *submission.GitHubReviewID)
 		}
-		publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateSuccess, codeReviewFinalStatusDescription(decision.Decision))
 		event.Str("decision", string(decision.Decision)).Msg("completed code review")
 		reconcileCodeReviewSessionSuccess(ctx, stores, logger, job)
 		return nil
@@ -272,7 +326,6 @@ func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores,
 			return false, fmt.Errorf("cancel code review after parent cancellation: %w", err)
 		}
 	}
-	publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateError, "143 Code Reviewer was cancelled")
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	logger.Info().
 		Str("session_id", job.SessionID.String()).
@@ -285,7 +338,6 @@ func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, se
 	if _, err := stores.CodeReviews.FailReview(ctx, job.OrgID, job.SessionID, reason); err != nil {
 		return fmt.Errorf("fail code review without usable reviewer output: %w", err)
 	}
-	publishCodeReviewStatus(ctx, stores, services, logger, job, pr, codereviewsvc.CommitStatusStateFailure, "143 Code Reviewer failed: no reviewer completed")
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	if err := reconcileCodeReviewSessionFailure(ctx, stores, job, reason); err != nil {
 		return err
@@ -352,6 +404,18 @@ func reconcileCodeReviewSessionCompletion(ctx context.Context, stores *Stores, l
 }
 
 func reconcileCodeReviewSessionFailure(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason string) error {
+	return reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason,
+		"code_review_no_reviewer_output",
+		[]string{"Configure at least one reviewer credential and request the review again."})
+}
+
+func reconcileCodeReviewSessionJobFailure(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason string) error {
+	return reconcileCodeReviewSessionFailureWithDetails(ctx, stores, job, reason,
+		"code_review_job_failed",
+		[]string{"Request the code reviewer again to start a fresh attempt."})
+}
+
+func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason, category string, nextSteps []string) error {
 	if stores == nil || stores.Sessions == nil {
 		return nil
 	}
@@ -370,10 +434,72 @@ func reconcileCodeReviewSessionFailure(ctx context.Context, stores *Stores, job 
 			return fmt.Errorf("reconcile code review parent session to failed: %w", err)
 		}
 	}
-	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, "code_review_no_reviewer_output", []string{"Configure at least one reviewer credential and request the review again."}, true); err != nil {
+	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, category, nextSteps, true); err != nil {
 		return fmt.Errorf("record code review parent session failure details: %w", err)
 	}
 	return nil
+}
+
+func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
+		reason := codeReviewDeadLetterReason(deadLetterErr)
+		if stores != nil && stores.CodeReviews != nil {
+			if _, err := stores.CodeReviews.FailReview(hookCtx, job.OrgID, job.SessionID, reason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				logger.Warn().Err(err).
+					Str("session_id", job.SessionID.String()).
+					Msg("failed to reconcile dead-lettered code review metadata")
+			}
+		}
+		if err := reconcileCodeReviewSessionJobFailure(hookCtx, stores, job, reason); err != nil {
+			logger.Warn().Err(err).
+				Str("session_id", job.SessionID.String()).
+				Msg("failed to reconcile dead-lettered code review session")
+		}
+		removeCodeReviewRequestedReviewerAfterDeadLetter(hookCtx, stores, services, logger, job)
+	})
+}
+
+func removeCodeReviewRequestedReviewerAfterDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {
+	if strings.TrimSpace(job.RequestedReviewerLogin) == "" && strings.TrimSpace(job.RequestedTeamSlug) == "" {
+		return
+	}
+	if services == nil || services.CodeReviews == nil {
+		return
+	}
+	if _, ok := services.CodeReviews.(codeReviewRequestedReviewerRemover); !ok {
+		return
+	}
+	if stores == nil || stores.PullRequests == nil {
+		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping dead-lettered requested reviewer cleanup: pull request store unavailable")
+		return
+	}
+	pr, err := stores.PullRequests.GetByID(ctx, job.OrgID, job.PullRequestID)
+	if err != nil {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Str("pull_request_id", job.PullRequestID.String()).
+			Msg("failed to load pull request for dead-lettered requested reviewer cleanup")
+		return
+	}
+	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
+}
+
+func codeReviewDeadLetterReason(err error) string {
+	const maxRunes = 2000
+
+	detail := "unknown worker failure"
+	var apiErr *ghservice.GitHubAPIError
+	if errors.As(err, &apiErr) {
+		detail = fmt.Sprintf("GitHub API %s %s returned %d", apiErr.Method, apiErr.Path, apiErr.StatusCode)
+	} else if err != nil && strings.TrimSpace(err.Error()) != "" {
+		detail = strings.TrimSpace(err.Error())
+	}
+	reason := "code review job exhausted retries: " + detail
+	runes := []rune(reason)
+	if len(runes) > maxRunes {
+		reason = string(runes[:maxRunes-1]) + "…"
+	}
+	return reason
 }
 
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
@@ -392,7 +518,8 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 				Msg("skipping code review PR state sync for disconnected repository")
 			return nil
 		}
-		return fmt.Errorf("sync code review pull request state: %w", err)
+		wrapped := fmt.Errorf("sync code review pull request state: %w", err)
+		return classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
 	return nil
 }
@@ -418,25 +545,27 @@ type codeReviewReviewerStructuredResult struct {
 	ReadOnly          bool    `json:"read_only,omitempty"`
 	ReadOnlyViolation bool    `json:"read_only_violation,omitempty"`
 	Reverted          bool    `json:"reverted,omitempty"`
+	Unavailable       bool    `json:"unavailable,omitempty"`
 	Error             string  `json:"error,omitempty"`
 	CompletedAt       string  `json:"completed_at,omitempty"`
 }
 
 type codeReviewOrchestratorStructuredResult struct {
-	ThreadID          string                          `json:"thread_id,omitempty"`
-	PromptArtifactKey string                          `json:"prompt_artifact_key,omitempty"`
-	FindingCount      int                             `json:"finding_count,omitempty"`
-	CostCents         float64                         `json:"cost_cents,omitempty"`
-	RawArtifactKey    string                          `json:"raw_artifact_key,omitempty"`
-	Synthesis         codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
-	ReadOnly          bool                            `json:"read_only,omitempty"`
-	ReadOnlyViolation bool                            `json:"read_only_violation,omitempty"`
-	Reverted          bool                            `json:"reverted,omitempty"`
-	Error             string                          `json:"error,omitempty"`
-	CompletedAt       string                          `json:"completed_at,omitempty"`
+	ThreadID           string                          `json:"thread_id,omitempty"`
+	PromptArtifactKey  string                          `json:"prompt_artifact_key,omitempty"`
+	FindingCount       int                             `json:"finding_count,omitempty"`
+	CostCents          float64                         `json:"cost_cents,omitempty"`
+	RawArtifactKey     string                          `json:"raw_artifact_key,omitempty"`
+	Synthesis          codeReviewOrchestratorSynthesis `json:"synthesis,omitempty"`
+	SynthesisValidated bool                            `json:"synthesis_validated,omitempty"`
+	ReadOnly           bool                            `json:"read_only,omitempty"`
+	ReadOnlyViolation  bool                            `json:"read_only_violation,omitempty"`
+	Reverted           bool                            `json:"reverted,omitempty"`
+	Error              string                          `json:"error,omitempty"`
+	CompletedAt        string                          `json:"completed_at,omitempty"`
 }
 
-func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
+func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results: %w", err)
@@ -452,10 +581,27 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
-	for idx, agentType := range cfg.AgentRoster.Reviewers {
+	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg)
+	if err != nil {
+		return err
+	}
+	for _, selection := range selections {
+		idx := selection.Index
+		agentType := selection.AgentType
 		agentModel := codeReviewReviewerAgentModel(cfg, idx, agentType)
 		key := codeReviewReviewerKey(idx, agentType)
 		if _, ok := existing[key]; ok {
+			continue
+		}
+		if !selection.Available {
+			result := unavailableCodeReviewReviewerResult(job, idx, agentType, agentModel)
+			if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+				return fmt.Errorf("create unavailable code review reviewer result: %w", err)
+			}
+			logger.Info().
+				Str("session_id", job.SessionID.String()).
+				Str("reviewer", string(agentType)).
+				Msg("skipped unavailable code review reviewer")
 			continue
 		}
 		if timedOutBeforeStart {
@@ -571,6 +717,96 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, logger
 		}
 	}
 	return nil
+}
+
+type codeReviewReviewerSelection struct {
+	Index     int
+	AgentType models.AgentType
+	Available bool
+}
+
+type codeReviewOrchestratorSelection struct {
+	AgentType  models.AgentType
+	AgentModel *string
+	Available  bool
+}
+
+func resolveCodeReviewReviewerAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) ([]codeReviewReviewerSelection, error) {
+	reviewers := cfg.AgentRoster.Reviewers
+	selections := make([]codeReviewReviewerSelection, 0, len(reviewers))
+	for idx, agentType := range reviewers {
+		available := true
+		if services != nil && services.CodingAgents != nil {
+			var err error
+			available, err = services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, agentType, stringPtrValue(codeReviewReviewerAgentModel(cfg, idx, agentType)))
+			if err != nil {
+				return nil, fmt.Errorf("resolve code review reviewer %s availability: %w", agentType, err)
+			}
+		}
+		selections = append(selections, codeReviewReviewerSelection{
+			Index:     idx,
+			AgentType: agentType,
+			Available: available,
+		})
+	}
+	return selections, nil
+}
+
+func resolveCodeReviewOrchestratorAvailability(ctx context.Context, services *Services, orgID uuid.UUID, cfg models.CodeReviewPolicyConfig) (codeReviewOrchestratorSelection, error) {
+	configured := codeReviewOrchestratorSelection{
+		AgentType:  cfg.AgentRoster.Orchestrator,
+		AgentModel: codeReviewOrchestratorAgentModel(cfg),
+		Available:  true,
+	}
+	if services == nil || services.CodingAgents == nil {
+		return configured, nil
+	}
+
+	available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, configured.AgentType, stringPtrValue(configured.AgentModel))
+	if err != nil {
+		return codeReviewOrchestratorSelection{}, fmt.Errorf("resolve code review orchestrator %s availability: %w", configured.AgentType, err)
+	}
+	if available {
+		return configured, nil
+	}
+
+	for idx, agentType := range cfg.AgentRoster.Reviewers {
+		agentModel := codeReviewReviewerAgentModel(cfg, idx, agentType)
+		available, err := services.CodingAgents.IsAgentAvailable(ctx, orgID, nil, agentType, stringPtrValue(agentModel))
+		if err != nil {
+			return codeReviewOrchestratorSelection{}, fmt.Errorf("resolve code review orchestrator fallback %s availability: %w", agentType, err)
+		}
+		if available {
+			return codeReviewOrchestratorSelection{
+				AgentType:  agentType,
+				AgentModel: agentModel,
+				Available:  true,
+			}, nil
+		}
+	}
+
+	configured.Available = false
+	return configured, nil
+}
+
+func unavailableCodeReviewReviewerResult(job runCodeReviewPayload, index int, agentType models.AgentType, agentModel *string) *models.CodeReviewAgentResult {
+	raw := fmt.Sprintf("reviewer skipped because %s authentication is not configured", agentType)
+	return &models.CodeReviewAgentResult{
+		OrgID:         job.OrgID,
+		SessionID:     job.SessionID,
+		AgentProvider: string(agentType),
+		AgentModel:    agentModel,
+		Role:          models.CodeReviewAgentRoleReviewer,
+		Status:        models.CodeReviewAgentResultStatusFailed,
+		RawOutput:     &raw,
+		StructuredResult: marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
+			ReviewerKey:   codeReviewReviewerKey(index, agentType),
+			ReviewerIndex: index,
+			Unavailable:   true,
+			Error:         raw,
+			CompletedAt:   time.Now().UTC().Format(time.RFC3339),
+		}),
+	}
 }
 
 func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -944,68 +1180,71 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 }
 
 func codeReviewReviewerPrompt(job runCodeReviewPayload, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile) string {
-	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{}))
+	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
+	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+		ReviewInstructions: cfg.ReviewInstructions,
+		Repository:         pr.GitHubRepo,
+		PullNumber:         pr.GitHubPRNumber,
+		PullRequestURL:     pr.GitHubPRURL,
+		BaseSHA:            firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
+		HeadSHA:            job.HeadSHA,
+		ChangedFiles:       codeReviewChangedPaths(changedFiles),
+	}))
 }
 
-func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
-	reviewContextSummary := "GitHub review context unavailable"
-	if reviewContextAvailable && reviewContext != nil {
-		reviewContextSummary = fmt.Sprintf("Unresolved human threads: %d; blocking human reviews: %d", reviewContext.UnresolvedHumanThreads, reviewContext.BlockingHumanReviews)
-	}
+func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) string {
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
-		Repository:             pr.GitHubRepo,
-		PullNumber:             pr.GitHubPRNumber,
-		PullRequestURL:         pr.GitHubPRURL,
-		Title:                  pr.Title,
-		Author:                 codeReviewAuthor(job, pr),
-		BaseSHA:                firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
-		HeadSHA:                job.HeadSHA,
-		PolicyVersion:          policyVersion,
-		ApprovalMode:           cfg.ApprovalMode,
-		RequiredReviewerQuorum: cfg.AgentRoster.RequireReviewerQuorum,
-		InlineCommentLimit:     cfg.InlineCommentLimit,
-		DescriptionResults:     append([]string(nil), description.RequirementSummaries...),
-		RiskReasons:            codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings),
-		ReviewerOutputs:        codeReviewReviewerOutputsForPrompt(agentResults),
-		Findings:               codeReviewFindingsForPrompt(findings),
-		ChangedFiles:           codeReviewChangedPaths(changedFiles),
-		Checklist:              []string{reviewContextSummary},
+		Repository:                 pr.GitHubRepo,
+		PullNumber:                 pr.GitHubPRNumber,
+		PullRequestURL:             pr.GitHubPRURL,
+		Title:                      pr.Title,
+		Author:                     codeReviewAuthor(job, pr),
+		BaseSHA:                    firstNonEmpty(baseSHA, stringPtrValue(pr.BaseSHA)),
+		HeadSHA:                    job.HeadSHA,
+		PolicyVersion:              policyVersion,
+		ApprovalMode:               cfg.ApprovalMode,
+		RequiredReviewerQuorum:     codeReviewRequiredReviewerQuorum(cfg, agentResults),
+		InlineCommentLimit:         cfg.InlineCommentLimit,
+		DescriptionResults:         append([]string(nil), description.RequirementSummaries...),
+		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, description, agentResults, findings)),
+		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
+		Findings:                   codeReviewFindingsForPrompt(findings),
+		ChangedFiles:               codeReviewChangedPaths(changedFiles),
+		ReviewInstructions:         cfg.ReviewInstructions,
+		AutomatedApprovalPolicy:    cfg.AutomatedApprovalPolicy,
+		UseAutomatedApprovalPolicy: cfg.ApprovalMode == models.CodeReviewApprovalModeApproveAcceptable,
 	})
 }
 
-func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
+func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	descriptionPassed := description.Passed
 	if len(description.RequirementSummaries) == 0 {
 		descriptionPassed = codeReviewDescriptionPassed(cfg, pr, changedFiles)
 	}
-	unresolvedHumanThreads := codeReviewUnresolvedHumanThreads(pr)
-	if reviewContext != nil {
-		unresolvedHumanThreads += reviewContext.UnresolvedHumanThreads + reviewContext.BlockingHumanReviews
-	}
 	risk := models.EvaluateCodeReviewRisk(cfg, models.CodeReviewRiskInput{
-		FilesChanged:           len(changedFiles),
-		LinesChanged:           codeReviewLinesChanged(changedFiles),
-		ChangedPaths:           codeReviewChangedPaths(changedFiles),
-		Categories:             codeReviewChangedCategories(changedFiles),
-		ChecksPassing:          codeReviewChecksPassing(cfg, health),
-		RequiredChecksPassing:  codeReviewRequiredChecksPassing(cfg, health),
-		DescriptionPassed:      descriptionPassed,
-		UpToDate:               codeReviewUpToDate(health),
-		Author:                 codeReviewAuthor(job, pr),
-		AuthorClass:            codeReviewAuthorClass(pr),
-		FromFork:               job.FromFork,
-		ContextFetchFailed:     health == nil || !reviewContextAvailable,
-		HeadSHAChanged:         codeReviewHeadChanged(job.HeadSHA, pr, health),
-		BlockingFindings:       codeReviewBlockingFindings(findings),
-		ReviewerDisagreement:   false,
-		UnresolvedHumanThreads: unresolvedHumanThreads,
-		PromptInjectionFound:   description.PromptInjectionFound,
+		FilesChanged:          len(changedFiles),
+		LinesChanged:          codeReviewLinesChanged(changedFiles),
+		ChangedPaths:          codeReviewChangedPaths(changedFiles),
+		Categories:            codeReviewChangedCategories(changedFiles),
+		ChecksPassing:         codeReviewChecksPassing(cfg, health),
+		RequiredChecksPassing: codeReviewRequiredChecksPassing(cfg, health),
+		DescriptionPassed:     descriptionPassed,
+		UpToDate:              codeReviewUpToDate(health),
+		Author:                codeReviewAuthor(job, pr),
+		AuthorClass:           codeReviewAuthorClass(pr),
+		FromFork:              job.FromFork,
+		ContextFetchFailed:    health == nil,
+		HeadSHAChanged:        codeReviewHeadChanged(job.HeadSHA, pr, health),
+		BlockingFindings:      codeReviewBlockingFindings(findings),
+		ReviewerDisagreement:  false,
+		PromptInjectionFound:  description.PromptInjectionFound,
 	})
-	if reviewerQuorum < cfg.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
-		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, cfg.AgentRoster.RequireReviewerQuorum))
+	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
+	if reviewerQuorum < requiredReviewerQuorum && !codeReviewLowRiskQuorumWaived(cfg, changedFiles) {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
 	}
-	return risk.Reasons
+	return risk.ReasonDetails
 }
 
 // codeReviewLowRiskQuorumWaived reports whether the resolved policy's low-risk
@@ -1075,6 +1314,7 @@ type codeReviewDescriptionArtifactMetadata struct {
 	PromptInjectionDetected bool   `json:"prompt_injection_detected"`
 	PolicyVersion           int    `json:"policy_version"`
 	HeadSHA                 string `json:"head_sha"`
+	InputHash               string `json:"input_hash"`
 }
 
 func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) (codeReviewDescriptionEvaluation, error) {
@@ -1085,7 +1325,8 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 	}
 	evaluation := codeReviewDescriptionEvaluation{Passed: true}
 	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey)
+	inputHash := codeReviewDescriptionInputHash(pr)
+	cachedResults, err := loadCodeReviewDescriptionArtifactResults(ctx, stores, job, rootKey, inputHash)
 	if err != nil {
 		return codeReviewDescriptionEvaluation{}, err
 	}
@@ -1130,6 +1371,7 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 					"prompt_injection_detected": result.PromptInjectionDetected,
 					"policy_version":            policy.Version,
 					"head_sha":                  job.HeadSHA,
+					"input_hash":                inputHash,
 				}),
 			}); err != nil {
 				return codeReviewDescriptionEvaluation{}, err
@@ -1154,7 +1396,7 @@ func evaluateCodeReviewDescriptionPolicy(ctx context.Context, stores *Stores, se
 	return evaluation, nil
 }
 
-func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey string) (map[string]codeReviewDescriptionLLMResponse, error) {
+func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Stores, job runCodeReviewPayload, rootKey, inputHash string) (map[string]codeReviewDescriptionLLMResponse, error) {
 	if stores == nil || stores.CodeReviews == nil {
 		return nil, nil
 	}
@@ -1167,7 +1409,7 @@ func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Store
 		if artifact.Role != "description_policy" || !strings.HasPrefix(artifact.ArtifactKey, rootKey+"/description-") {
 			continue
 		}
-		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact)
+		result, ok := codeReviewDescriptionResultFromArtifact(job, artifact, inputHash)
 		if ok {
 			results[artifact.ArtifactKey] = result
 		}
@@ -1175,7 +1417,7 @@ func loadCodeReviewDescriptionArtifactResults(ctx context.Context, stores *Store
 	return results, nil
 }
 
-func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact) (codeReviewDescriptionLLMResponse, bool) {
+func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact models.CodeReviewPromptArtifact, inputHash string) (codeReviewDescriptionLLMResponse, bool) {
 	if len(artifact.Metadata) == 0 {
 		return codeReviewDescriptionLLMResponse{}, false
 	}
@@ -1187,6 +1429,9 @@ func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact 
 		return codeReviewDescriptionLLMResponse{}, false
 	}
 	if metadata.PolicyVersion != 0 && metadata.PolicyVersion != job.PolicyVersion {
+		return codeReviewDescriptionLLMResponse{}, false
+	}
+	if strings.TrimSpace(metadata.InputHash) != "" && metadata.InputHash != inputHash {
 		return codeReviewDescriptionLLMResponse{}, false
 	}
 	reason := strings.TrimSpace(metadata.Reason)
@@ -1202,6 +1447,15 @@ func codeReviewDescriptionResultFromArtifact(job runCodeReviewPayload, artifact 
 		Reason:                  reason,
 		PromptInjectionDetected: metadata.PromptInjectionDetected,
 	}, true
+}
+
+func codeReviewDescriptionInputHash(pr models.PullRequest) string {
+	body := ""
+	if pr.Body != nil {
+		body = *pr.Body
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(pr.Title) + "\n" + strings.TrimSpace(body)))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func evaluateCodeReviewDescriptionRequirement(ctx context.Context, services *Services, requirement models.CodeReviewDescriptionRequirement, body, userPrompt string) (codeReviewDescriptionLLMResponse, error) {
@@ -1312,26 +1566,79 @@ func parseCodeReviewOrchestratorStructuredResult(raw json.RawMessage) (codeRevie
 	return state, true
 }
 
-func parseCodeReviewOrchestratorSynthesis(raw string) codeReviewOrchestratorSynthesis {
-	var parsed codeReviewOrchestratorSynthesis
-	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &parsed); err != nil {
-		return codeReviewOrchestratorSynthesis{}
+func parseCodeReviewOrchestratorSynthesis(raw string) (codeReviewOrchestratorSynthesis, error) {
+	var payload struct {
+		Summary                 *string   `json:"summary"`
+		ReviewSummary           *string   `json:"review_summary"`
+		RiskNotes               *[]string `json:"risk_notes"`
+		ScopeMismatch           *bool     `json:"scope_mismatch"`
+		UnresolvedUncertainty   *bool     `json:"unresolved_uncertainty"`
+		ReviewerDisagreement    *bool     `json:"reviewer_disagreement"`
+		PromptInjectionDetected *bool     `json:"prompt_injection_detected"`
 	}
-	return parsed
+	if err := json.Unmarshal([]byte(extractCodeReviewJSON(raw)), &payload); err != nil {
+		return codeReviewOrchestratorSynthesis{}, fmt.Errorf("parse orchestrator synthesis: %w", err)
+	}
+	if payload.Summary == nil || strings.TrimSpace(*payload.Summary) == "" ||
+		payload.ReviewSummary == nil || strings.TrimSpace(*payload.ReviewSummary) == "" ||
+		payload.RiskNotes == nil ||
+		payload.ScopeMismatch == nil ||
+		payload.UnresolvedUncertainty == nil ||
+		payload.ReviewerDisagreement == nil ||
+		payload.PromptInjectionDetected == nil {
+		return codeReviewOrchestratorSynthesis{}, errors.New("orchestrator synthesis is missing required fields")
+	}
+	return codeReviewOrchestratorSynthesis{
+		Summary:                 *payload.Summary,
+		ReviewSummary:           *payload.ReviewSummary,
+		RiskNotes:               *payload.RiskNotes,
+		ScopeMismatch:           *payload.ScopeMismatch,
+		UnresolvedUncertainty:   *payload.UnresolvedUncertainty,
+		ReviewerDisagreement:    *payload.ReviewerDisagreement,
+		PromptInjectionDetected: *payload.PromptInjectionDetected,
+	}, nil
+}
+
+func codeReviewOrchestratorSynthesisUsable(synthesis codeReviewOrchestratorSynthesis) bool {
+	return strings.TrimSpace(synthesis.Summary) != "" && strings.TrimSpace(synthesis.ReviewSummary) != ""
 }
 
 func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgentResult) codeReviewOrchestratorSynthesis {
 	for _, result := range results {
-		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator || result.Status != models.CodeReviewAgentResultStatusCompleted {
 			continue
 		}
 		state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
-		if !ok {
+		if !ok || !state.SynthesisValidated || !codeReviewOrchestratorSynthesisUsable(state.Synthesis) {
 			continue
 		}
 		return state.Synthesis
 	}
 	return codeReviewOrchestratorSynthesis{}
+}
+
+func codeReviewOrchestratorEvidence(results []models.CodeReviewAgentResult) (present, usable bool) {
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		present = true
+		if result.Status != models.CodeReviewAgentResultStatusCompleted {
+			continue
+		}
+		state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+		if ok && state.SynthesisValidated && codeReviewOrchestratorSynthesisUsable(state.Synthesis) {
+			usable = true
+		}
+	}
+	return present, usable
+}
+
+func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthesis) string {
+	if summary := strings.TrimSpace(synthesis.ReviewSummary); summary != "" {
+		return summary
+	}
+	return strings.TrimSpace(synthesis.Summary)
 }
 
 func extractCodeReviewJSON(raw string) string {
@@ -1360,6 +1667,97 @@ func codeReviewReviewerResultTerminal(status models.CodeReviewAgentResultStatus)
 	default:
 		return false
 	}
+}
+
+type codeReviewAgentPhase string
+
+const (
+	codeReviewAgentPhaseNone         codeReviewAgentPhase = ""
+	codeReviewAgentPhaseReviewers    codeReviewAgentPhase = "reviewers"
+	codeReviewAgentPhaseOrchestrator codeReviewAgentPhase = "orchestrator"
+)
+
+func codeReviewInFlightAgentPhase(ctx context.Context, stores *Stores, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) (codeReviewAgentPhase, error) {
+	if stores == nil || stores.CodeReviews == nil || stores.SessionThreads == nil {
+		return codeReviewAgentPhaseNone, nil
+	}
+	if codeReviewHeadChanged(job.HeadSHA, pr, nil) || codeReviewReviewTimedOut(policy, metadata) {
+		return codeReviewAgentPhaseNone, nil
+	}
+	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return codeReviewAgentPhaseNone, fmt.Errorf("list code review agent results for in-flight check: %w", err)
+	}
+	hasNonterminalAgent := false
+	for _, result := range results {
+		if (result.Role == models.CodeReviewAgentRoleReviewer || result.Role == models.CodeReviewAgentRoleOrchestrator) && !codeReviewReviewerResultTerminal(result.Status) {
+			hasNonterminalAgent = true
+			break
+		}
+	}
+	if !hasNonterminalAgent {
+		return codeReviewAgentPhaseNone, nil
+	}
+	threads, err := stores.SessionThreads.ListBySession(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return codeReviewAgentPhaseNone, fmt.Errorf("list code review threads for in-flight check: %w", err)
+	}
+	return codeReviewInFlightAgentPhaseFromState(policy, results, threads), nil
+}
+
+func codeReviewInFlightAgentPhaseFromState(policy models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult, threads []models.SessionThread) codeReviewAgentPhase {
+	threadsByID := make(map[uuid.UUID]models.SessionThread, len(threads))
+	for _, thread := range threads {
+		threadsByID[thread.ID] = thread
+	}
+
+	orchestratorResults := make([]models.CodeReviewAgentResult, 0, 1)
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleOrchestrator {
+			continue
+		}
+		if codeReviewReviewerResultTerminal(result.Status) {
+			return codeReviewAgentPhaseNone
+		}
+		orchestratorResults = append(orchestratorResults, result)
+	}
+	if len(orchestratorResults) > 0 {
+		for _, result := range orchestratorResults {
+			state, ok := parseCodeReviewOrchestratorStructuredResult(result.StructuredResult)
+			threadID, parseErr := uuid.Parse(strings.TrimSpace(state.ThreadID))
+			thread, found := threadsByID[threadID]
+			if !ok || parseErr != nil || !found || !codeReviewThreadStillRunning(thread.Status) {
+				return codeReviewAgentPhaseNone
+			}
+		}
+		return codeReviewAgentPhaseOrchestrator
+	}
+
+	byKey := codeReviewReviewerResultsByKey(results)
+	if len(policy.AgentRoster.Reviewers) == 0 {
+		return codeReviewAgentPhaseNone
+	}
+	waiting := false
+	for idx, agentType := range policy.AgentRoster.Reviewers {
+		result, found := byKey[codeReviewReviewerKey(idx, agentType)]
+		if !found {
+			return codeReviewAgentPhaseNone
+		}
+		if codeReviewReviewerResultTerminal(result.Status) {
+			continue
+		}
+		state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+		threadID, parseErr := uuid.Parse(strings.TrimSpace(state.ThreadID))
+		thread, found := threadsByID[threadID]
+		if !ok || parseErr != nil || !found || !codeReviewThreadStillRunning(thread.Status) {
+			return codeReviewAgentPhaseNone
+		}
+		waiting = true
+	}
+	if waiting {
+		return codeReviewAgentPhaseReviewers
+	}
+	return codeReviewAgentPhaseNone
 }
 
 func codeReviewReviewTimedOut(policy models.CodeReviewPolicyConfig, metadata models.CodeReviewSessionMetadata) bool {
@@ -1435,20 +1833,48 @@ func codeReviewWaitingForReviewers(policy models.CodeReviewPolicyConfig) error {
 	}
 }
 
-func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, reviewContext *codereviewsvc.ReviewContext, reviewContextAvailable bool, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) error {
+func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, description codeReviewDescriptionEvaluation, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) error {
 	for _, result := range agentResults {
 		if result.Role == models.CodeReviewAgentRoleOrchestrator {
 			return nil
 		}
 	}
 	cfg := policy.Config()
-	agentModel := codeReviewOrchestratorAgentModel(cfg)
+	selection, err := resolveCodeReviewOrchestratorAvailability(ctx, services, job.OrgID, cfg)
+	if err != nil {
+		return err
+	}
+	agentType := selection.AgentType
+	agentModel := selection.AgentModel
+	if !selection.Available {
+		raw := "orchestrator skipped because no authenticated coding agent is configured"
+		result := &models.CodeReviewAgentResult{
+			OrgID:         job.OrgID,
+			SessionID:     job.SessionID,
+			AgentProvider: string(agentType),
+			AgentModel:    agentModel,
+			Role:          models.CodeReviewAgentRoleOrchestrator,
+			Status:        models.CodeReviewAgentResultStatusFailed,
+			RawOutput:     &raw,
+			StructuredResult: marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+				Error:       raw,
+				CompletedAt: time.Now().UTC().Format(time.RFC3339),
+			}),
+		}
+		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+			return fmt.Errorf("create unavailable code review orchestrator result: %w", err)
+		}
+		logger.Info().
+			Str("session_id", job.SessionID.String()).
+			Msg("skipped unavailable code review orchestrator")
+		return nil
+	}
 	if codeReviewReviewTimedOut(cfg, metadata) {
 		raw := "orchestrator timed out before the worker could start the orchestrator thread"
 		result := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
-			AgentProvider: string(cfg.AgentRoster.Orchestrator),
+			AgentProvider: string(agentType),
 			AgentModel:    agentModel,
 			Role:          models.CodeReviewAgentRoleOrchestrator,
 			Status:        models.CodeReviewAgentResultStatusTimedOut,
@@ -1461,14 +1887,14 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		return stores.CodeReviews.CreateAgentResult(ctx, result)
 	}
 	rootKey := codeReviewPromptArtifactRoot(metadata, job)
-	artifactKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, cfg.AgentRoster.Orchestrator)
-	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, description, reviewContext, reviewContextAvailable, agentResults, findings)
+	artifactKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
+	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, description, agentResults, findings)
 	if err := storeCodeReviewPromptArtifact(ctx, stores, models.CodeReviewPromptArtifact{
 		OrgID:         job.OrgID,
 		SessionID:     job.SessionID,
 		ArtifactKey:   artifactKey,
 		Role:          string(models.CodeReviewAgentRoleOrchestrator),
-		AgentProvider: string(cfg.AgentRoster.Orchestrator),
+		AgentProvider: string(agentType),
 		Content:       promptText,
 		Metadata: mustMarshalCodeReviewJSON(map[string]any{
 			"head_sha":       job.HeadSHA,
@@ -1480,11 +1906,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	}
 	threads := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
 	// Run the orchestrator on the session's primary ("Main") thread rather than
-	// spinning up a dedicated tab. The primary thread is created with the
-	// session's AgentType (the orchestrator) and model, so synthesis lands on the
-	// main session thread the user sees first instead of a separate review tab.
-	// The reviewers keep their own read-only tabs; only the final synthesis is
-	// folded back onto the main thread.
+	// spinning up a dedicated tab. The primary thread starts with the policy's
+	// configured orchestrator and is retargeted below when only a reviewer agent
+	// is authenticated. The reviewers keep their own read-only tabs; only the
+	// final synthesis is folded back onto the main thread.
 	session, err := stores.Sessions.GetByID(ctx, job.OrgID, job.SessionID)
 	if err != nil {
 		return fmt.Errorf("load code review session for orchestrator: %w", err)
@@ -1509,6 +1934,32 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	threadID, err := primaryThreadIDForSession(ctx, stores, session)
 	if err != nil {
 		return fmt.Errorf("resolve code review primary thread for orchestrator: %w", err)
+	}
+	primaryThread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, threadID)
+	if err != nil {
+		return fmt.Errorf("load code review primary thread for orchestrator: %w", err)
+	}
+	if primaryThread.AgentType != agentType || !codeReviewAgentModelsEqual(primaryThread.ModelOverride, agentModel) {
+		model := ""
+		if agentModel != nil {
+			model = *agentModel
+		}
+		_, updateErr := threads.UpdateThread(ctx, threadsvc.UpdateThreadInput{
+			SessionID: job.SessionID,
+			OrgID:     job.OrgID,
+			ThreadID:  threadID,
+			AgentType: string(agentType),
+			Model:     &model,
+			Label:     primaryThread.Label,
+		})
+		if updateErr != nil {
+			return fmt.Errorf("retarget code review primary thread to available orchestrator %s: %w", agentType, updateErr)
+		}
+		logger.Info().
+			Str("session_id", job.SessionID.String()).
+			Str("thread_id", threadID.String()).
+			Str("orchestrator", string(agentType)).
+			Msg("retargeted code review primary thread to available orchestrator")
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:          threadID.String(),
@@ -1542,7 +1993,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		failed := &models.CodeReviewAgentResult{
 			OrgID:         job.OrgID,
 			SessionID:     job.SessionID,
-			AgentProvider: string(cfg.AgentRoster.Orchestrator),
+			AgentProvider: string(agentType),
 			AgentModel:    agentModel,
 			Role:          models.CodeReviewAgentRoleOrchestrator,
 			Status:        models.CodeReviewAgentResultStatusFailed,
@@ -1562,7 +2013,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
 		SessionID:        job.SessionID,
-		AgentProvider:    string(cfg.AgentRoster.Orchestrator),
+		AgentProvider:    string(agentType),
 		AgentModel:       agentModel,
 		Role:             models.CodeReviewAgentRoleOrchestrator,
 		Status:           models.CodeReviewAgentResultStatusRunning,
@@ -1572,6 +2023,13 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, log
 		return fmt.Errorf("create code review orchestrator result: %w", err)
 	}
 	return nil
+}
+
+func codeReviewAgentModelsEqual(left, right *string) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return strings.TrimSpace(*left) == strings.TrimSpace(*right)
 }
 
 func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile) error {
@@ -1657,7 +2115,22 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 			continue
 		}
-		synthesis := parseCodeReviewOrchestratorSynthesis(raw)
+		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
+		if synthesisErr != nil {
+			state.Synthesis = codeReviewOrchestratorSynthesis{}
+			state.SynthesisValidated = false
+			state.Error = "invalid orchestrator synthesis: " + synthesisErr.Error()
+			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
+			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+			if err != nil {
+				return err
+			}
+			state.RawArtifactKey = rawArtifactKey
+			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+				return fmt.Errorf("mark malformed orchestrator synthesis failed: %w", err)
+			}
+			continue
+		}
 		findings := parseCodeReviewFindings(raw, changedPaths)
 		for i := range findings {
 			findings[i].OrgID = job.OrgID
@@ -1668,6 +2141,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			}
 		}
 		state.Synthesis = synthesis
+		state.SynthesisValidated = true
 		state.FindingCount = len(findings)
 		state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 		rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
@@ -1708,130 +2182,85 @@ type codeReviewSubmission struct {
 	GitHubReviewURL *string
 }
 
-type codeReviewStatusPublisher interface {
-	PublishCommitStatus(ctx context.Context, req codereviewsvc.CommitStatusRequest) error
-}
-
 type codeReviewRequestedReviewerRemover interface {
 	RemoveRequestedReviewers(ctx context.Context, req codereviewsvc.RequestedReviewersRequest) error
 }
 
 type liveCodeReviewOutcomeInput struct {
-	Policy                 models.CodeReviewPolicyConfig
-	Job                    runCodeReviewPayload
-	SessionURL             string
-	PullRequest            models.PullRequest
-	Health                 *models.PullRequestHealthResponse
-	AgentResults           []models.CodeReviewAgentResult
-	Findings               []models.CodeReviewFinding
-	ChangedFiles           []codereviewsvc.PullRequestFile
-	ChangedFilesAvailable  bool
-	DescriptionEvaluation  codeReviewDescriptionEvaluation
-	ReviewContext          *codereviewsvc.ReviewContext
-	ReviewContextChecked   bool
-	ReviewContextAvailable bool
-	OrchestratorSynthesis  codeReviewOrchestratorSynthesis
+	Policy                models.CodeReviewPolicyConfig
+	Job                   runCodeReviewPayload
+	SessionURL            string
+	PullRequest           models.PullRequest
+	Health                *models.PullRequestHealthResponse
+	AgentResults          []models.CodeReviewAgentResult
+	Findings              []models.CodeReviewFinding
+	ChangedFiles          []codereviewsvc.PullRequestFile
+	ChangedFilesAvailable bool
+	DescriptionEvaluation codeReviewDescriptionEvaluation
+	OrchestratorSynthesis codeReviewOrchestratorSynthesis
 }
 
 func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.CodeReviewDecisionEvaluation, string) {
 	policy := models.ResolveCodeReviewPolicyConfig(&input.Policy)
 	reviewerQuorum, _ := codeReviewReviewerEvidence(input.AgentResults)
+	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(policy, input.AgentResults)
+	reviewerQuorumWaived := reviewerQuorum < requiredReviewerQuorum && codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles)
 	blockingFindings := codeReviewBlockingFindings(input.Findings)
 	descriptionPassed := input.DescriptionEvaluation.Passed
 	if len(input.DescriptionEvaluation.RequirementSummaries) == 0 {
 		descriptionPassed = codeReviewDescriptionPassed(policy, input.PullRequest, input.ChangedFiles)
 	}
-	reviewContextFetchFailed := input.ReviewContextChecked && !input.ReviewContextAvailable
-	unresolvedHumanThreads := codeReviewUnresolvedHumanThreads(input.PullRequest)
-	if input.ReviewContext != nil {
-		unresolvedHumanThreads += input.ReviewContext.UnresolvedHumanThreads + input.ReviewContext.BlockingHumanReviews
-	}
 	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
-		FilesChanged:           len(input.ChangedFiles),
-		LinesChanged:           codeReviewLinesChanged(input.ChangedFiles),
-		ChangedPaths:           codeReviewChangedPaths(input.ChangedFiles),
-		Categories:             codeReviewChangedCategories(input.ChangedFiles),
-		ChecksPassing:          codeReviewChecksPassing(policy, input.Health),
-		RequiredChecksPassing:  codeReviewRequiredChecksPassing(policy, input.Health),
-		DescriptionPassed:      descriptionPassed,
-		UpToDate:               codeReviewUpToDate(input.Health),
-		Author:                 codeReviewAuthor(input.Job, input.PullRequest),
-		AuthorClass:            codeReviewAuthorClass(input.PullRequest),
-		FromFork:               input.Job.FromFork,
-		ContextFetchFailed:     input.Health == nil || !input.ChangedFilesAvailable || reviewContextFetchFailed,
-		HeadSHAChanged:         codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
-		BlockingFindings:       blockingFindings,
-		ReviewerDisagreement:   input.OrchestratorSynthesis.ReviewerDisagreement,
-		UnresolvedHumanThreads: unresolvedHumanThreads,
-		ScopeMismatch:          input.OrchestratorSynthesis.ScopeMismatch,
-		UnresolvedUncertainty:  input.OrchestratorSynthesis.UnresolvedUncertainty,
-		PromptInjectionFound:   input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
+		FilesChanged:          len(input.ChangedFiles),
+		LinesChanged:          codeReviewLinesChanged(input.ChangedFiles),
+		ChangedPaths:          codeReviewChangedPaths(input.ChangedFiles),
+		Categories:            codeReviewChangedCategories(input.ChangedFiles),
+		ChecksPassing:         codeReviewChecksPassing(policy, input.Health),
+		RequiredChecksPassing: codeReviewRequiredChecksPassing(policy, input.Health),
+		DescriptionPassed:     descriptionPassed,
+		UpToDate:              codeReviewUpToDate(input.Health),
+		Author:                codeReviewAuthor(input.Job, input.PullRequest),
+		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
+		FromFork:              input.Job.FromFork,
+		ContextFetchFailed:    input.Health == nil || !input.ChangedFilesAvailable,
+		HeadSHAChanged:        codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
+		BlockingFindings:      blockingFindings,
+		ReviewerDisagreement:  input.OrchestratorSynthesis.ReviewerDisagreement,
+		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
+		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
+		PromptInjectionFound:  input.DescriptionEvaluation.PromptInjectionFound || input.OrchestratorSynthesis.PromptInjectionDetected,
 	})
-	if reviewerQuorum < policy.AgentRoster.RequireReviewerQuorum && !codeReviewLowRiskQuorumWaived(policy, input.ChangedFiles) {
-		risk.Acceptable = false
-		risk.Reasons = append(risk.Reasons, fmt.Sprintf("reviewer quorum %d is below policy requirement %d", reviewerQuorum, policy.AgentRoster.RequireReviewerQuorum))
+	if reviewerQuorum < requiredReviewerQuorum && !reviewerQuorumWaived {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})
+	}
+	if orchestratorPresent, orchestratorUsable := codeReviewOrchestratorEvidence(input.AgentResults); orchestratorPresent && !orchestratorUsable {
+		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonOrchestratorSynthesisInvalid})
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
 		Decision:                  decision.Decision,
 		Acceptable:                decision.Acceptable,
-		RiskReasons:               decision.RiskReasons,
+		RiskReasons:               decision.RiskReasonDetails,
+		GeneratedSummary:          codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis),
 		SessionURL:                input.SessionURL,
-		PolicyVersion:             input.Job.PolicyVersion,
-		HeadSHA:                   input.Job.HeadSHA,
-		Summary:                   codeReviewOutcomeSummary(decision, input.OrchestratorSynthesis),
 		DescriptionPassed:         &descriptionPassed,
+		DescriptionIssues:         codeReviewFailedDescriptionRequirements(input.DescriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),
 		Findings:                  input.Findings,
-		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasons, input.ChangedFiles),
+		RecommendedHumanReviewers: codeReviewRecommendedHumanReviewers(decision.RiskReasonDetails, input.ChangedFiles),
+		ChangeStatsAvailable:      input.ChangedFilesAvailable,
+		FilesChanged:              len(input.ChangedFiles),
+		LinesChanged:              codeReviewLinesChanged(input.ChangedFiles),
+		ChecksRequired:            policy.RiskPolicy.RequirePassingChecks || len(policy.RiskPolicy.RequiredChecks) > 0,
+		ReviewerQuorum:            reviewerQuorum,
+		RequiredReviewerQuorum:    requiredReviewerQuorum,
+		ReviewerQuorumWaived:      reviewerQuorumWaived,
 	})
 	return decision, body
 }
 
 type codeReviewFileLister interface {
 	ListPullRequestFiles(ctx context.Context, req codereviewsvc.PullRequestFilesRequest) ([]codereviewsvc.PullRequestFile, error)
-}
-
-type codeReviewContextLister interface {
-	ListReviewContext(ctx context.Context, req codereviewsvc.ReviewContextRequest) (codereviewsvc.ReviewContext, error)
-}
-
-func publishCodeReviewStatus(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, state codereviewsvc.CommitStatusState, description string) {
-	if services == nil || services.CodeReviews == nil {
-		return
-	}
-	publisher, ok := services.CodeReviews.(codeReviewStatusPublisher)
-	if !ok {
-		return
-	}
-	if stores == nil || stores.Repositories == nil {
-		logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository store unavailable")
-		return
-	}
-	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
-	if err != nil {
-		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to load repository for code review status")
-		return
-	}
-	if repo.InstallationID == 0 {
-		logger.Warn().Str("repository_id", repo.ID.String()).Str("session_id", job.SessionID.String()).Msg("skipping code review status: repository has no GitHub installation id")
-		return
-	}
-	repository := strings.TrimSpace(pr.GitHubRepo)
-	if repository == "" {
-		repository = strings.TrimSpace(repo.FullName)
-	}
-	if err := publisher.PublishCommitStatus(ctx, codereviewsvc.CommitStatusRequest{
-		InstallationID: repo.InstallationID,
-		Repository:     repository,
-		SHA:            job.HeadSHA,
-		State:          state,
-		Context:        "143 Code Reviewer",
-		Description:    description,
-		TargetURL:      codeReviewStatusTargetURL(services.FrontendURL, job.SessionID),
-	}); err != nil {
-		logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Str("state", string(state)).Msg("failed to publish code review status")
-	}
 }
 
 func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest) {
@@ -1880,19 +2309,12 @@ func removeCodeReviewRequestedReviewer(ctx context.Context, stores *Stores, serv
 	}
 }
 
-func codeReviewStatusTargetURL(frontendURL string, sessionID uuid.UUID) string {
+func codeReviewSessionURL(frontendURL string, sessionID uuid.UUID) string {
 	base := strings.TrimRight(strings.TrimSpace(frontendURL), "/")
 	if base == "" || sessionID == uuid.Nil {
 		return ""
 	}
 	return base + "/sessions/" + sessionID.String()
-}
-
-func codeReviewFinalStatusDescription(decision models.CodeReviewDecision) string {
-	if decision == models.CodeReviewDecisionApproved {
-		return "143 Code Reviewer approved this PR"
-	}
-	return "143 Code Reviewer completed without approval"
 }
 
 func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) ([]codereviewsvc.PullRequestFile, bool, error) {
@@ -1923,69 +2345,9 @@ func loadCodeReviewChangedFiles(ctx context.Context, stores *Stores, services *S
 		PullNumber:     pr.GitHubPRNumber,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, false, classifyGitHubJobError(fmt.Errorf("list GitHub pull request files: %w", err), job.SessionID.String())
 	}
 	return files, true, nil
-}
-
-func loadCodeReviewReviewContext(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, pr models.PullRequest) (*codereviewsvc.ReviewContext, bool, bool, error) {
-	if services == nil || services.CodeReviews == nil {
-		return nil, false, false, nil
-	}
-	lister, ok := services.CodeReviews.(codeReviewContextLister)
-	if !ok {
-		return nil, false, false, nil
-	}
-	if stores == nil || stores.Repositories == nil {
-		return nil, true, false, fmt.Errorf("repository store is required")
-	}
-	repo, err := stores.Repositories.GetByID(ctx, job.OrgID, job.RepositoryID)
-	if err != nil {
-		return nil, true, false, fmt.Errorf("load code review repository: %w", err)
-	}
-	if repo.InstallationID == 0 {
-		return nil, true, false, fmt.Errorf("repository %s has no GitHub installation id", repo.ID)
-	}
-	repository := strings.TrimSpace(pr.GitHubRepo)
-	if repository == "" {
-		repository = strings.TrimSpace(repo.FullName)
-	}
-	context, err := lister.ListReviewContext(ctx, codereviewsvc.ReviewContextRequest{
-		InstallationID: repo.InstallationID,
-		Repository:     repository,
-		PullNumber:     pr.GitHubPRNumber,
-		BotLogins:      codeReviewBotLogins(job),
-	})
-	if err != nil {
-		return nil, true, false, err
-	}
-	return &context, true, true, nil
-}
-
-func codeReviewBotLogins(job runCodeReviewPayload) []string {
-	logins := []string{"143", "143-code-reviewer", "143 Code Reviewer", "github-actions[bot]"}
-	if reviewer := strings.TrimSpace(job.RequestedReviewerLogin); reviewer != "" {
-		logins = append(logins, reviewer)
-	}
-	return compactCodeReviewStrings(logins)
-}
-
-func compactCodeReviewStrings(values []string) []string {
-	out := make([]string, 0, len(values))
-	seen := make(map[string]struct{})
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		key := strings.ToLower(value)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, value)
-	}
-	return out
 }
 
 func loadStoredCodeReviewHealth(ctx context.Context, stores *Stores, job runCodeReviewPayload, pr models.PullRequest) (*models.PullRequestHealthResponse, error) {
@@ -2050,6 +2412,33 @@ func codeReviewReviewerEvidence(results []models.CodeReviewAgentResult) (quorum 
 		}
 	}
 	return quorum, failures
+}
+
+// codeReviewRequiredReviewerQuorum returns the reviewer quorum this run is
+// held to: the configured requirement clamped to the number of roster
+// reviewers that could actually run. Reviewers skipped because their
+// credential is unavailable can never produce a report, so they shrink the
+// requirement instead of making approval impossible; reviewers that ran and
+// failed or timed out still count against the configured quorum. The
+// requirement never drops below one reviewer.
+func codeReviewRequiredReviewerQuorum(cfg models.CodeReviewPolicyConfig, results []models.CodeReviewAgentResult) int {
+	required := cfg.AgentRoster.RequireReviewerQuorum
+	available := len(cfg.AgentRoster.Reviewers)
+	for _, result := range results {
+		if result.Role != models.CodeReviewAgentRoleReviewer {
+			continue
+		}
+		if state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult); ok && state.Unavailable {
+			available--
+		}
+	}
+	if available < 1 {
+		available = 1
+	}
+	if required > available {
+		return available
+	}
+	return required
 }
 
 func codeReviewReviewerResultHasUsableOutput(result models.CodeReviewAgentResult) bool {
@@ -2392,10 +2781,9 @@ func codeReviewChecksPassing(policy models.CodeReviewPolicyConfig, health *model
 }
 
 // codeReviewExternalChecks drops 143's own non-CI status contexts before the
-// checks-passing gate is evaluated. The code reviewer publishes its own
-// "143 Code Reviewer" commit status (and the preview integration publishes
-// "preview/143"); both are pending by construction while the review runs, so
-// counting them would make the reviewer block its own approval.
+// checks-passing gate is evaluated. Historical "143 Code Reviewer" statuses
+// and current "preview/143" statuses are not CI signals and must not affect
+// the reviewer's approval decision.
 func codeReviewExternalChecks(checks []models.PullRequestCheckSummary) []models.PullRequestCheckSummary {
 	filtered := make([]models.PullRequestCheckSummary, 0, len(checks))
 	for _, check := range checks {
@@ -2480,13 +2868,6 @@ func codeReviewAuthorClass(pr models.PullRequest) string {
 	default:
 		return ""
 	}
-}
-
-func codeReviewUnresolvedHumanThreads(pr models.PullRequest) int {
-	if pr.ReviewStatus == models.PullRequestReviewStatusChangesRequested {
-		return 1
-	}
-	return 0
 }
 
 func ensureCodeReviewInlineSelection(ctx context.Context, store *db.CodeReviewStore, job runCodeReviewPayload, findings []models.CodeReviewFinding, changedFiles []codereviewsvc.PullRequestFile, limit int) error {
@@ -2724,16 +3105,6 @@ func codeReviewFindingDedupeKey(path string, startLine, endLine int, summary str
 	return fmt.Sprintf("%s:%d:%d:%s", path, startLine, endLine, strings.ToLower(strings.TrimSpace(summary)))
 }
 
-func codeReviewOutcomeSummary(decision models.CodeReviewDecisionEvaluation, synthesis codeReviewOrchestratorSynthesis) string {
-	if summary := strings.TrimSpace(synthesis.Summary); summary != "" {
-		return summary
-	}
-	if decision.Decision == models.CodeReviewDecisionApproved {
-		return "143 reviewed the stored PR health and reviewer evidence and found the change acceptable under policy."
-	}
-	return "143 reviewed the stored PR health and reviewer evidence and withheld automated approval."
-}
-
 func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings []models.CodeReviewFinding) []string {
 	findingCounts := make(map[uuid.UUID]int)
 	for _, finding := range findings {
@@ -2746,10 +3117,7 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 		if result.Role != models.CodeReviewAgentRoleReviewer {
 			continue
 		}
-		name := strings.TrimSpace(result.AgentProvider)
-		if name == "" {
-			name = "reviewer"
-		}
+		name := codeReviewAgentDisplayName(result.AgentProvider)
 		switch result.Status {
 		case models.CodeReviewAgentResultStatusCompleted:
 			if !codeReviewReviewerResultHasUsableOutput(result) {
@@ -2757,12 +3125,22 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				continue
 			}
 			if findingCounts[result.ID] == 0 {
-				summaries = append(summaries, name+" clean")
+				summaries = append(summaries, name+" found no blocking issues")
 			} else {
-				summaries = append(summaries, fmt.Sprintf("%s reported %d finding(s)", name, findingCounts[result.ID]))
+				count := findingCounts[result.ID]
+				label := "findings"
+				if count == 1 {
+					label = "finding"
+				}
+				summaries = append(summaries, fmt.Sprintf("%s reported %d %s", name, count, label))
 			}
 		case models.CodeReviewAgentResultStatusFailed:
-			summaries = append(summaries, name+" failed")
+			state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+			if ok && state.Unavailable {
+				summaries = append(summaries, name+" unavailable")
+			} else {
+				summaries = append(summaries, name+" failed")
+			}
 		case models.CodeReviewAgentResultStatusTimedOut:
 			summaries = append(summaries, name+" timed out")
 		default:
@@ -2772,7 +3150,49 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 	return summaries
 }
 
-func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codereviewsvc.PullRequestFile) []string {
+func codeReviewFailedDescriptionRequirements(summaries []string) []string {
+	issues := make([]string, 0)
+	for _, summary := range summaries {
+		summary = strings.TrimSpace(summary)
+		if !strings.Contains(summary, ": failed") {
+			continue
+		}
+		issues = append(issues, strings.TrimSpace(strings.Replace(summary, ": failed", "", 1)))
+	}
+	return issues
+}
+
+func codeReviewAgentDisplayName(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "codex":
+		return "Codex"
+	case "claude", "claude_code":
+		return "Claude Code"
+	case "opencode", "open_code":
+		return "OpenCode"
+	case "gemini":
+		return "Gemini"
+	case "":
+		return "Review agent"
+	}
+
+	words := strings.FieldsFunc(provider, func(r rune) bool {
+		return r == '_' || r == '-' || r == ' '
+	})
+	for i, word := range words {
+		if word == "" {
+			continue
+		}
+		words[i] = strings.ToUpper(word[:1]) + word[1:]
+	}
+	if len(words) == 0 {
+		return "Review agent"
+	}
+	return strings.Join(words, " ")
+}
+
+func codeReviewRecommendedHumanReviewers(reasons []models.CodeReviewRiskReason, changedFiles []codereviewsvc.PullRequestFile) []string {
 	seen := make(map[string]struct{})
 	out := make([]string, 0)
 	add := func(value string) {
@@ -2786,16 +3206,11 @@ func codeReviewRecommendedHumanReviewers(reasons []string, changedFiles []codere
 		out = append(out, value)
 	}
 	for _, reason := range reasons {
-		lower := strings.ToLower(reason)
-		switch {
-		case strings.Contains(lower, "auth") || strings.Contains(lower, "permission") || strings.Contains(lower, "secret") || strings.Contains(lower, "crypto"):
+		switch reason.Code {
+		case models.CodeReviewRiskReasonPromptInjection:
 			add("security/platform")
-		case strings.Contains(lower, "billing") || strings.Contains(lower, "invoice") || strings.Contains(lower, "payment"):
-			add("billing")
-		case strings.Contains(lower, "infra") || strings.Contains(lower, "workflow") || strings.Contains(lower, "deploy"):
+		case models.CodeReviewRiskReasonPolicyPathChanged:
 			add("platform")
-		case strings.Contains(lower, "migration") || strings.Contains(lower, "database"):
-			add("backend/platform")
 		}
 	}
 	for _, category := range codeReviewChangedCategories(changedFiles) {
@@ -2849,17 +3264,20 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 	}
 	comments := codeReviewInlineComments(findings)
 	result, err := services.CodeReviews.SubmitReview(ctx, codereviewsvc.SubmitReviewRequest{
-		InstallationID: repo.InstallationID,
-		Repository:     repository,
-		PullNumber:     pr.GitHubPRNumber,
-		HeadSHA:        job.HeadSHA,
-		OutputKey:      job.OutputKey,
-		Decision:       codeReviewSubmitDecision(decision),
-		Body:           body,
-		Comments:       comments,
+		InstallationID:    repo.InstallationID,
+		Repository:        repository,
+		PullNumber:        pr.GitHubPRNumber,
+		HeadSHA:           job.HeadSHA,
+		OutputKey:         job.OutputKey,
+		PreviousOutputKey: job.PreviousOutputKey,
+		ExistingReviewID:  int64PtrValue(job.ExistingGitHubReviewID),
+		ExistingReviewURL: stringPtrValue(job.ExistingGitHubReviewURL),
+		Decision:          codeReviewSubmitDecision(decision),
+		Body:              body,
+		Comments:          comments,
 	})
 	if err != nil {
-		return codeReviewSubmission{}, false, fmt.Errorf("submit code review to GitHub: %w", err)
+		return codeReviewSubmission{}, false, classifyGitHubJobError(fmt.Errorf("submit code review to GitHub: %w", err), job.SessionID.String())
 	}
 	if _, err := stores.CodeReviews.RecordGitHubReview(ctx, job.OrgID, job.SessionID, result.ID, result.URL, body); err != nil {
 		return codeReviewSubmission{}, true, fmt.Errorf("record submitted code review: %w", err)
@@ -2869,6 +3287,13 @@ func submitCodeReviewToGitHub(ctx context.Context, stores *Stores, services *Ser
 		GitHubReviewID:  &result.ID,
 		GitHubReviewURL: &result.URL,
 	}, true, nil
+}
+
+func int64PtrValue(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func codeReviewSubmitDecision(decision models.CodeReviewDecision) codereviewsvc.SubmitReviewDecision {

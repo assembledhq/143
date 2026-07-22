@@ -15,7 +15,7 @@ func TestInternalSessionTabManagerSendGeneratesClientMessageID(t *testing.T) {
 
 	var gotBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/session-tabs/tab-1/messages", r.URL.Path, "manager should post to the target tab messages endpoint")
+		require.Equal(t, "/api/v1/internal/session-tabs/tab-1/messages", r.URL.Path, "manager should post to the target tab messages endpoint")
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "request body should be valid JSON")
 		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
 	}))

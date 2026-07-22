@@ -74,6 +74,7 @@ type SessionHandler struct {
 	capabilityService  *agentcapabilities.Service
 	pullRequestStore   *db.PullRequestStore
 	changesetStore     *db.SessionChangesetStore
+	publicationStore   *db.SessionPublicationStore
 	issueStore         *db.IssueStore
 	repoStore          *db.RepositoryStore
 	orgStore           *db.OrganizationStore
@@ -563,6 +564,10 @@ func (h *SessionHandler) SetChangesetStore(store *db.SessionChangesetStore) {
 	h.changesetStore = store
 }
 
+func (h *SessionHandler) SetPublicationStore(store *db.SessionPublicationStore) {
+	h.publicationStore = store
+}
+
 func (h *SessionHandler) primaryChangesetID(ctx context.Context, orgID, sessionID uuid.UUID) (uuid.UUID, error) {
 	if h.changesetStore == nil {
 		return sessionID, nil
@@ -896,6 +901,14 @@ func (h *SessionHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 	detail.Changesets = changesets
 	detail.ChangesetStackState = models.DeriveChangesetStackState(changesets)
+	if h.publicationStore != nil {
+		publications, publicationErr := h.publicationStore.ListBySession(r.Context(), orgID, runID)
+		if publicationErr != nil {
+			writeError(w, r, http.StatusInternalServerError, "PUBLICATIONS_FAILED", "failed to load publication status", publicationErr)
+			return
+		}
+		detail.Publications = publications
+	}
 	if h.repoStore != nil && run.RepositoryID != nil {
 		repo, err := h.repoStore.GetByID(r.Context(), orgID, *run.RepositoryID)
 		if err != nil {
@@ -3361,10 +3374,12 @@ func (h *SessionHandler) CreatePR(w http.ResponseWriter, r *http.Request) {
 
 	changesetID := targetChangeset.ID
 	payload := map[string]any{
-		"session_id":     sessionID.String(),
-		"changeset_id":   changesetID.String(),
-		"org_id":         orgID.String(),
-		"requested_role": middleware.ActiveRoleFromContext(r.Context()),
+		"session_id":         sessionID.String(),
+		"changeset_id":       changesetID.String(),
+		"org_id":             orgID.String(),
+		"requested_role":     middleware.ActiveRoleFromContext(r.Context()),
+		"publication_source": string(models.SessionPublicationSourceUser),
+		"publication_queue":  string(models.SessionPublicationJobQueueAgent),
 	}
 	if req.Draft != nil {
 		payload["draft"] = *req.Draft
@@ -4612,9 +4627,11 @@ func (h *SessionHandler) EndSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload := map[string]string{
-		"session_id":   sessionID.String(),
-		"changeset_id": changesetID.String(),
-		"org_id":       orgID.String(),
+		"session_id":         sessionID.String(),
+		"changeset_id":       changesetID.String(),
+		"org_id":             orgID.String(),
+		"publication_source": string(models.SessionPublicationSourceUser),
+		"publication_queue":  string(models.SessionPublicationJobQueueDefault),
 	}
 	if h.issueSnapshots != nil && session.CurrentTurn > 0 {
 		if issueSnapshot, snapErr := h.issueSnapshots.GetByTurn(r.Context(), orgID, sessionID, session.CurrentTurn); snapErr == nil {

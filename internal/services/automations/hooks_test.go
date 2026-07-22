@@ -112,10 +112,12 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 	runID := uuid.New()
 	orgID := uuid.New()
 	summary := "wrote tests, opened PR"
+	diff := "--- a/service.go\n+++ b/service.go\n@@ -1 +1 @@\n-old\n+new"
 	session := &models.Session{
 		OrgID:           orgID,
 		AutomationRunID: &runID,
 		ResultSummary:   &summary,
+		Diff:            &diff,
 	}
 
 	err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
@@ -130,6 +132,44 @@ func TestAutomationHooks_OnSessionComplete_CompletedMaps(t *testing.T) {
 	require.NotNil(t, call.completedAt)
 	require.NotNil(t, call.resultSummary)
 	require.Equal(t, summary, *call.resultSummary)
+}
+
+func TestAutomationHooks_OnSessionComplete_CompletedWithoutChangesMapsToNoop(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		diff *string
+	}{
+		{name: "missing diff", diff: nil},
+		{name: "empty diff", diff: stringPointer("")},
+		{name: "whitespace diff", diff: stringPointer(" \n\t")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &fakeAutomationRunStore{transitioned: true}
+			h := NewAutomationHooks(store, zerolog.Nop())
+			runID := uuid.New()
+			session := &models.Session{
+				OrgID:           uuid.New(),
+				AutomationRunID: &runID,
+				Diff:            tt.diff,
+			}
+
+			err := h.OnSessionComplete(context.Background(), session, models.SessionStatusCompleted)
+
+			require.NoError(t, err, "completed automation session should transition cleanly")
+			require.Len(t, store.calls, 1, "completed automation session should write one terminal transition")
+			require.Equal(t, models.AutomationRunStatusCompletedNoop, store.calls[0].toStatus, "zero-diff automation session should be recorded as a no-op")
+		})
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func TestAutomationHooks_OnSessionComplete_WritebackAfterTransition(t *testing.T) {

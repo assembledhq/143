@@ -25,7 +25,7 @@ func NewInternalEvalCandidateReporter(token, baseURL string, bootstrapRunID ...s
 	}
 	return &InternalEvalCandidateReporter{
 		token:          token,
-		baseURL:        strings.TrimRight(baseURL, "/"),
+		baseURL:        internalAPIBaseURL(baseURL),
 		bootstrapRunID: runID,
 		client:         &http.Client{Timeout: 10 * time.Second},
 	}

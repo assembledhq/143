@@ -17,4 +17,11 @@ describe("StatusLabel", () => {
     expect(screen.getByText("Starting")).toBeVisible();
     expect(container.querySelector("svg")).toHaveClass("animate-spin");
   });
+
+  it("can render colored text without a dot", () => {
+    const { container } = render(<StatusLabel label="Approved" tone="success" indicator={false} />);
+
+    expect(screen.getByText("Approved")).toHaveClass("text-success");
+    expect(container.querySelector('[aria-hidden="true"]')).toBeNull();
+  });
 });

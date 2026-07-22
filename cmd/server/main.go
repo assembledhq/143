@@ -462,11 +462,14 @@ func main() {
 			jobStore.SetNotifier(jobNotifier)
 		}
 
+		workerPullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
+		workerPullRequestFeedbackStore.SetJobStore(jobStore)
 		stores := &worker.Stores{
 			Issues:              issueStore,
 			Users:               db.NewUserStore(pool),
 			Sessions:            sessionStore,
 			SessionChangesets:   db.NewSessionChangesetStore(pool),
+			SessionPublications: db.NewSessionPublicationStore(pool),
 			Jobs:                jobStore,
 			Integrations:        integrationStore,
 			Memberships:         db.NewOrganizationMembershipStore(pool),
@@ -499,6 +502,7 @@ func main() {
 			SessionIssueLinks:   db.NewSessionIssueLinkStore(pool),
 			Previews:            previewStore,
 			PullRequests:        pullRequestStore,
+			PullRequestFeedback: workerPullRequestFeedbackStore,
 			SlackInstallations:  db.NewSlackInstallationStore(pool),
 			SlackOrgSelections:  db.NewSlackOrgSelectionStore(pool),
 			SlackBotSettings:    db.NewSlackBotSettingsStore(pool),
@@ -528,6 +532,18 @@ func main() {
 				sandboxAuthShutdown = services.SandboxAuthShutdown
 				registerInternalSandboxAuthRoutes(router, services.SandboxAuthBroker, cfg, logger)
 				if previewManager != nil && pvProvider != nil {
+					if concreteOrchestrator, ok := services.Orchestrator.(*agent.Orchestrator); ok {
+						var sessionBrowserInspector preview.SessionBrowserInspector
+						if inspector, ok := previewManager.Inspector().(preview.SessionBrowserInspector); ok {
+							sessionBrowserInspector = inspector
+						}
+						concreteOrchestrator.SetSuccessfulTurnVerifier(preview.NewSuccessfulTurnVerifier(
+							previewManager,
+							previewStore,
+							preview.NewBrowserSessionService(db.NewPreviewBrowserSessionStore(pool), sessionBrowserInspector),
+							db.NewPreviewVerificationRunStore(pool),
+						))
+					}
 					var prewarmDependencyCache preview.PreviewPathCache
 					if pathCache, ok := dependencyCache.(preview.PreviewPathCache); ok {
 						prewarmDependencyCache = pathCache
@@ -1425,11 +1441,11 @@ func buildServices(
 	usageTracker := agent.NewUsageTracker(containerUsageStore, billingMetrics, logger)
 
 	// Identity resolver + per-session credential socket server. Wired
-	// together so an agent's `git push` / `gh pr comment` can reach a fresh
+	// together so an agent's `git push` / read-only `gh pr view` can reach a fresh
 	// GitHub token without the host ever planting a long-lived secret in the
-	// container's env. Both are optional: when SandboxAuthSocketDir is empty
-	// (e.g. local dev that hasn't provisioned the directory) sessions fall
-	// back to the legacy GITHUB_TOKEN env path.
+	// container's env. Local development may omit SandboxAuthSocketDir and use
+	// the legacy fallback; production worker/all configuration validation
+	// requires the socket path and startup preflight below must succeed.
 	userStore := db.NewUserStore(pool)
 	identityResolver := identity.NewResolver(ghSvc, logger)
 	if appUserAuthSvc != nil {
@@ -1536,7 +1552,7 @@ func buildServices(
 		SandboxAuth:                orchestratorSandboxAuth,
 		Users:                      userStore,
 		EvalBootstraps:             evalBootstrapStore,
-		InternalAPIURL:             cfg.BaseURL + "/api/v1/internal",
+		InternalAPIURL:             cfg.BaseURL,
 		InternalAPISecret:          cfg.SessionSecret,
 		NodeID:                     cfg.NodeID,
 		Logger:                     logger,
@@ -1548,7 +1564,11 @@ func buildServices(
 		ghSvc, pullRequestStore, sessionStore, issueStore,
 		deployStore, repoStore, jobStore, logger,
 	)
+	workerFeedbackStore := db.NewPullRequestFeedbackStore(pool)
+	workerFeedbackStore.SetJobStore(jobStore)
+	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
 	prService.SetChangesetStore(db.NewSessionChangesetStore(pool))
+	prService.SetPublicationStore(db.NewSessionPublicationStore(pool))
 	prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 	wireWorkerPRService(
 		prService,
@@ -1597,7 +1617,7 @@ func buildServices(
 	pmSvc.SetSlackStores(integrationStore, credentialStore)
 	pmSvc.SetSessionLogStore(sessionLogStore)
 	pmSvc.SetSessionMessageStore(sessionMessageStore)
-	pmSvc.SetInternalAPI(cfg.BaseURL+"/api/v1/internal", cfg.SessionSecret)
+	pmSvc.SetInternalAPI(cfg.BaseURL, cfg.SessionSecret)
 	pmSvc.SetSkillsBuilder(orchestrator)
 	threadSvc := threadservice.NewService(
 		sessionThreadStore,
@@ -1736,30 +1756,47 @@ func buildServices(
 		}
 	}
 
+	codeReviewLifecycleStore := db.NewCodeReviewStore(pool)
+	codeReviewLifecycleStore.SetStreams(cache.NewCodeReviewStreams(redisClient, logger))
+	codeReviewLifecycleStore.SetLogger(logger)
+	codeReviewLifecycle := codereviewsvc.NewService(
+		codeReviewLifecycleStore,
+		codeReviewLifecycleStore,
+		sessionStore,
+		jobStore,
+		logger,
+		codereviewsvc.Config{
+			AppReviewerLogins: cfg.CodeReviewAppReviewerLogins,
+			AliasLogins:       cfg.CodeReviewAliasLogins,
+			TeamSlugs:         cfg.CodeReviewTeamSlugs,
+		},
+	)
 	svc := &worker.Services{
-		Orchestrator:      orchestrator,
-		PR:                prService,
-		Failure:           failureSvc,
-		SandboxProvider:   sandboxProvider,
-		ProjectTasks:      projectTaskUpdater,
-		AutomationRuns:    automationRunUpdater,
-		Prioritization:    prioritizationSvc,
-		PM:                pmSvc,
-		SlackSummarizer:   slackSummarizer,
-		LLM:               llmClient,
-		GitHub:            ghSvc,
-		CodeReviews:       codereviewsvc.NewGitHubSubmitter(ghSvc),
-		GitHubOrgRoster:   ghSvc,
-		Snapshots:         snapshotStore,
-		TitleService:      titleService,
-		Linear:            linearService,
-		SlackbotMetrics:   workerSlackbotMetrics,
-		Redis:             redisClient,
-		FrontendURL:       cfg.FrontendURL,
-		ReviewLoops:       reviewLoopSvc,
-		RuntimeSampler:    runtimeSampler,
-		SandboxGC:         sandboxGC,
-		SandboxAuthBroker: sandboxAuthBroker,
+		Orchestrator:        orchestrator,
+		PR:                  prService,
+		Failure:             failureSvc,
+		SandboxProvider:     sandboxProvider,
+		ProjectTasks:        projectTaskUpdater,
+		AutomationRuns:      automationRunUpdater,
+		Prioritization:      prioritizationSvc,
+		PM:                  pmSvc,
+		SlackSummarizer:     slackSummarizer,
+		LLM:                 llmClient,
+		GitHub:              ghSvc,
+		CodeReviews:         codereviewsvc.NewGitHubSubmitter(ghSvc),
+		CodeReviewLifecycle: codeReviewLifecycle,
+		CodingAgents:        agentEnv,
+		GitHubOrgRoster:     ghSvc,
+		Snapshots:           snapshotStore,
+		TitleService:        titleService,
+		Linear:              linearService,
+		SlackbotMetrics:     workerSlackbotMetrics,
+		Redis:               redisClient,
+		FrontendURL:         cfg.FrontendURL,
+		ReviewLoops:         reviewLoopSvc,
+		RuntimeSampler:      runtimeSampler,
+		SandboxGC:           sandboxGC,
+		SandboxAuthBroker:   sandboxAuthBroker,
 	}
 	pagerDutyTriggerer := automations.NewPagerDutyEventTriggerService(
 		db.NewAutomationEventTriggerStore(pool),

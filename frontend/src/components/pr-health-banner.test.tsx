@@ -74,6 +74,27 @@ describe("PRHealthBanner", () => {
     expect(button).toHaveAttribute("title", "GitHub is not allowing this PR to merge yet.");
   });
 
+  it("uses compact spacing for the merge and review actions", () => {
+    renderWithProviders(
+      <PRHealthBanner
+        health={{ ...baseHealth, checks_confirmed: true }}
+        pendingAction={null}
+        repairError={null}
+        mergeAuthRequired={false}
+        mergeWhenReadyPending={false}
+        onFixTests={vi.fn()}
+        onResolveConflicts={vi.fn()}
+        onMerge={vi.fn()}
+        onQueueMergeWhenReady={vi.fn()}
+        reviewAction={{ disabled: false, spinning: false, onClick: vi.fn() }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "More merge actions" })).toHaveClass("w-8", "sm:w-6");
+    expect(screen.getByRole("button", { name: /^Merge$/ }).querySelector("svg")).not.toHaveClass("mr-1.5");
+    expect(screen.getByRole("button", { name: "Review" }).querySelector("svg")).not.toHaveClass("mr-1.5");
+  });
+
   it("shows Fix tests for failed checks even when the legacy failing test count is zero", async () => {
     const onFixTests = vi.fn();
     renderWithProviders(
@@ -358,9 +379,9 @@ describe("PRHealthBanner", () => {
     const actionGroup = moreActions.closest("[data-slot='button-group']");
     expect(actionGroup).toHaveAttribute("data-size", "xs");
     expect(mergeAction).toHaveAttribute("data-size", "xs");
-    expect(mergeAction).toHaveClass("h-10", "sm:h-6");
+    expect(mergeAction).toHaveClass("h-10", "sm:h-6", "shadow-none");
     expect(moreActions).toHaveAttribute("data-size", "icon-xs");
-    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none");
+    expect(moreActions).toHaveClass("size-10", "sm:size-6", "rounded-l-none", "shadow-none");
     expect(moreActions).not.toHaveClass("h-7", "w-7");
 
     await userEvent.setup().click(moreActions);

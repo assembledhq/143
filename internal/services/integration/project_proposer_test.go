@@ -23,8 +23,8 @@ func TestInternalProjectProposer_ProposeProject_Success(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %q, want POST", r.Method)
 		}
-		if r.URL.Path != "/projects/propose" {
-			t.Errorf("path = %q, want /projects/propose", r.URL.Path)
+		if r.URL.Path != "/api/v1/internal/projects/propose" {
+			t.Errorf("path = %q, want /api/v1/internal/projects/propose", r.URL.Path)
 		}
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Errorf("auth header = %q", r.Header.Get("Authorization"))

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -41,7 +43,7 @@ type fakeGitHubAutomationRunStore struct {
 	dedupeClaims []string
 }
 
-func (f *fakeGitHubAutomationRunStore) CreateRun(_ context.Context, run *models.AutomationRun) (bool, error) {
+func (f *fakeGitHubAutomationRunStore) CreateRunInTx(_ context.Context, _ pgx.Tx, run *models.AutomationRun) (bool, error) {
 	if f.err != nil {
 		return false, f.err
 	}
@@ -82,7 +84,7 @@ type fakeGitHubAutomationJob struct {
 	dedupeKey *string
 }
 
-func (f *fakeGitHubAutomationJobStore) Enqueue(_ context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
+func (f *fakeGitHubAutomationJobStore) EnqueueInTx(_ context.Context, _ pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error) {
 	if f.err != nil {
 		return uuid.Nil, f.err
 	}
@@ -101,7 +103,7 @@ func (f *fakeGitHubAutomationJobStore) Notify(_ context.Context, jobID uuid.UUID
 }
 
 func newTestService(store *fakeGitHubAutomationStore, runs *fakeGitHubAutomationRunStore, jobs *fakeGitHubAutomationJobStore) *GitHubEventTriggerService {
-	return NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	return NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 }
 
 func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
@@ -118,7 +120,7 @@ func TestGitHubEventTriggerService_TriggersMatchingAutomations(t *testing.T) {
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{nextJobID: jobID}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestOpened,
@@ -218,7 +220,7 @@ func TestGitHubEventTriggerService_DedupesFeedbackByReviewGroup(t *testing.T) {
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	req := GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestReviewCommentCreated,
@@ -248,7 +250,7 @@ func TestGitHubEventTriggerService_DoesNotDedupeDistinctFeedbackEvents(t *testin
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	req := GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventIssueCommentCreated,
@@ -275,7 +277,7 @@ func TestGitHubEventTriggerService_AppliesGitHubEventFilters(t *testing.T) {
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestReviewCommentCreated,
@@ -309,7 +311,7 @@ func TestGitHubEventTriggerService_PathFilterSkipsEventsWithNoPath(t *testing.T)
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestReviewSubmitted,
@@ -337,7 +339,7 @@ func TestGitHubEventTriggerService_FeedbackTypeFilterSkipsNonFeedbackEvents(t *t
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestOpened,
@@ -363,7 +365,7 @@ func TestGitHubEventTriggerService_ReviewStateFilterSkipsEventsWithNoState(t *te
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestReviewCommentCreated,
@@ -391,7 +393,7 @@ func TestGitHubEventTriggerService_BaseBranchFilterAllowsFeedbackWithNoBaseBranc
 	}}}
 	runs := &fakeGitHubAutomationRunStore{}
 	jobs := &fakeGitHubAutomationJobStore{}
-	service := NewGitHubEventTriggerService(store, runs, jobs, zerolog.Nop())
+	service := NewGitHubEventTriggerService(store, runs, jobs, &pagerDutyTxStarterFake{}, zerolog.Nop())
 
 	err := service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
 		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventIssueCommentCreated,
@@ -451,6 +453,36 @@ func TestGitHubEventTriggerService_NoMatchingAutomations(t *testing.T) {
 	require.NoError(t, err, "no matching automations should not be an error")
 	require.Empty(t, runs.runs, "no runs should be created when no automations match")
 	require.Empty(t, jobs.jobs, "no jobs should be enqueued when no automations match")
+}
+
+func TestGitHubEventTriggerService_RollsBackRunWhenEnqueueFails(t *testing.T) {
+	t.Parallel()
+
+	txStarter, err := pgxmock.NewPool()
+	require.NoError(t, err, "transaction mock should initialize")
+	defer txStarter.Close()
+	txStarter.ExpectBegin()
+	txStarter.ExpectRollback()
+
+	orgID := uuid.New()
+	repoID := uuid.New()
+	store := &fakeGitHubAutomationStore{automations: []models.Automation{{
+		ID: uuid.New(), OrgID: orgID, RepositoryID: &repoID, Name: "Review PR", Goal: "Run a review",
+		ExecutionMode: models.AutomationExecutionModeSequential, MaxConcurrent: 1,
+		IdentityScope: models.AutomationIdentityScopeOrg,
+	}}}
+	runs := &fakeGitHubAutomationRunStore{}
+	jobs := &fakeGitHubAutomationJobStore{err: errors.New("queue unavailable")}
+	service := NewGitHubEventTriggerService(store, runs, jobs, txStarter, zerolog.Nop())
+
+	err = service.TriggerGitHubEvent(context.Background(), GitHubEventTriggerRequest{
+		OrgID: orgID, RepositoryID: repoID, Event: models.AutomationGitHubEventPullRequestOpened,
+		Repository: "acme/api", PullRequestNumber: 42, ProviderEventID: "delivery-123",
+	})
+
+	require.ErrorContains(t, err, "enqueue github-triggered automation run", "enqueue failure should be returned to the webhook path")
+	require.Empty(t, jobs.notified, "a rolled-back job should not notify workers")
+	require.NoError(t, txStarter.ExpectationsWereMet(), "run insert and job enqueue should roll back together")
 }
 
 func TestGitHubEventTriggerService_InvalidEvent(t *testing.T) {

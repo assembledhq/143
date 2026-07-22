@@ -541,6 +541,62 @@ function AutomationMobileRow({ automation, canManage }: { automation: Automation
   );
 }
 
+function AutomationsPageSkeleton() {
+  return (
+    <div className="space-y-8" aria-busy="true" aria-label="Loading automations">
+      <SectionGroup
+        aria-label="Your automations"
+        title="Your automations"
+        description="Recurring agents currently configured for this team."
+      >
+        <div className="space-y-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="h-8 w-64 animate-pulse rounded-lg bg-muted" />
+            <div className="h-8 w-full animate-pulse rounded-lg bg-muted lg:max-w-72" />
+          </div>
+          <Card>
+            <CardContent className="p-0">
+              <div className="hidden h-10 border-b border-border bg-muted/30 md:block" />
+              {[0, 1, 2].map((row) => (
+                <div
+                  key={row}
+                  className="flex h-[72px] items-center gap-4 border-b border-border px-4 last:border-b-0"
+                >
+                  <div className="h-7 w-7 shrink-0 animate-pulse rounded-md bg-muted" />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="h-4 w-2/5 animate-pulse rounded bg-muted" />
+                    <div className="h-3 w-3/5 animate-pulse rounded bg-muted/70" />
+                  </div>
+                  <div className="hidden h-5 w-16 animate-pulse rounded-full bg-muted md:block" />
+                  <div className="hidden h-3 w-28 animate-pulse rounded bg-muted md:block" />
+                  <div className="hidden h-3 w-20 animate-pulse rounded bg-muted lg:block" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+      </SectionGroup>
+
+      <SectionGroup
+        aria-label="Template library"
+        title="Template library"
+        description="Start with a proven recurring workflow and tailor it to your team."
+      >
+        <Card>
+          <CardContent className="space-y-4 p-4">
+            <div className="h-8 w-full animate-pulse rounded-lg bg-muted sm:w-72" />
+            <div className="grid gap-3 md:grid-cols-2">
+              {[0, 1, 2, 3].map((card) => (
+                <div key={card} className="h-32 animate-pulse rounded-xl border border-border bg-muted/30" />
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </SectionGroup>
+    </div>
+  );
+}
+
 export default function AutomationsPage() {
   const { user } = useAuth();
   const canManage = user?.role === "admin" || user?.role === "member";
@@ -570,11 +626,7 @@ export default function AutomationsPage() {
           ) : undefined}
         />
 
-        {isLoading && (
-          <div className="text-center py-12 text-sm text-muted-foreground">
-            Loading automations...
-          </div>
-        )}
+        {isLoading && <AutomationsPageSkeleton />}
 
         {!isLoading && (
           <AutomationsWorkspace enabled={enabled} paused={paused} canManage={canManage} />

@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 )
@@ -42,6 +44,8 @@ var (
 type gitHubPullRequestDetails struct {
 	Number         int    `json:"number"`
 	HTMLURL        string `json:"html_url"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
 	State          string `json:"state"`
 	Merged         bool   `json:"merged"`
 	MergeCommitSHA string `json:"merge_commit_sha"`
@@ -55,6 +59,10 @@ type gitHubPullRequestDetails struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"base"`
+	User struct {
+		Login string `json:"login"`
+		Type  string `json:"type"`
+	} `json:"user"`
 }
 
 type gitHubCheckRunsResponse struct {
@@ -634,7 +642,267 @@ func (s *PRService) ReconcilePullRequestState(ctx context.Context, orgID uuid.UU
 		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
 	s.reconcileStuckPublishActions(ctx, orgID, limit)
+	s.reconcileSessionPublications(ctx, orgID, limit)
 	return nil
+}
+
+const publicationReconcileDelay = 30 * time.Second
+
+func (s *PRService) reconcileSessionPublications(ctx context.Context, orgID uuid.UUID, limit int) {
+	if s.publications == nil || s.pullRequests == nil || s.changesets == nil || s.sessions == nil || s.repos == nil {
+		return
+	}
+	candidates, err := s.publications.ListReconcileCandidates(ctx, orgID, time.Now().Add(-publicationReconcileDelay), limit)
+	if err != nil {
+		s.logger.Warn().Err(err).Str("org_id", orgID.String()).Msg("failed to list session publication reconciliation candidates")
+		return
+	}
+	for _, publication := range candidates {
+		if err := s.reconcileSessionPublication(ctx, publication); err != nil {
+			metrics.RecordSessionPublicationReconciliation(ctx, "error")
+			if markErr := s.publications.MarkFailed(
+				ctx,
+				publication.OrgID,
+				publication.SessionID,
+				publication.ChangesetID,
+				"reconciliation_failed",
+				err.Error(),
+				false,
+			); markErr != nil && !errors.Is(markErr, pgx.ErrNoRows) {
+				s.logger.Error().
+					Err(markErr).
+					Str("publication_id", publication.ID.String()).
+					Msg("failed to rotate errored session publication behind the reconciliation window")
+			}
+			s.logger.Warn().
+				Err(err).
+				Str("publication_id", publication.ID.String()).
+				Str("session_id", publication.SessionID.String()).
+				Str("state", string(publication.State)).
+				Msg("failed to reconcile session publication")
+		}
+	}
+}
+
+func (s *PRService) reconcileSessionPublication(ctx context.Context, publication models.SessionPublication) error {
+	if existing, err := s.pullRequests.GetByChangesetID(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err == nil {
+		if err := s.completeReconciledSessionPublication(ctx, publication, existing, ""); err != nil {
+			return err
+		}
+		metrics.RecordSessionPublicationReconciliation(ctx, "already_recorded")
+		return nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("look up publication pull request: %w", err)
+	}
+	if publication.ReviewGateState != models.SessionPublicationReviewGateNotRequired &&
+		publication.ReviewGateState != models.SessionPublicationReviewGatePassed {
+		metrics.RecordSessionPublicationReconciliation(ctx, "review_blocked")
+		return nil
+	}
+
+	repo, err := s.repos.GetByID(ctx, publication.OrgID, publication.RepositoryID)
+	if err != nil {
+		return fmt.Errorf("load publication repository: %w", err)
+	}
+	token, err := s.getInstallationTokenForRepo(ctx, publication.OrgID, &repo)
+	if err != nil {
+		return fmt.Errorf("load publication reconciliation token: %w", err)
+	}
+	owner, repoName := splitRepo(repo.FullName)
+	prNumber := 0
+	if publication.GitHubPRNumber != nil {
+		prNumber = *publication.GitHubPRNumber
+	} else {
+		prNumber, _, err = s.findPullRequestByHead(ctx, token, owner, repoName, publication.HeadBranch, "all")
+		if errors.Is(err, errNoPullRequestForHead) {
+			return s.resumeSessionPublicationCreation(ctx, publication)
+		}
+		if err != nil {
+			return err
+		}
+	}
+
+	details, err := s.fetchPullRequestDetails(ctx, token, owner, repoName, prNumber)
+	if publication.GitHubPRNumber != nil && isGitHubStatus(err, http.StatusNotFound) {
+		// A stale checkpoint can point at a PR that was deleted or transferred.
+		// Re-resolve by the owned head branch before deciding whether the server
+		// must resume creation.
+		prNumber, _, err = s.findPullRequestByHead(ctx, token, owner, repoName, publication.HeadBranch, "all")
+		if errors.Is(err, errNoPullRequestForHead) {
+			return s.resumeSessionPublicationCreation(ctx, publication)
+		}
+		if err != nil {
+			return err
+		}
+		details, err = s.fetchPullRequestDetails(ctx, token, owner, repoName, prNumber)
+	}
+	if err != nil {
+		return fmt.Errorf("fetch publication pull request: %w", err)
+	}
+	status := models.PullRequestStatusOpen
+	if details.Merged {
+		status = models.PullRequestStatusMerged
+	} else if details.State == "closed" {
+		status = models.PullRequestStatusClosed
+	}
+	body := details.Body
+	headSHA := details.Head.SHA
+	headRef := details.Head.Ref
+	baseSHA := details.Base.SHA
+	pr := models.PullRequest{
+		SessionID:      &publication.SessionID,
+		ChangesetID:    &publication.ChangesetID,
+		OrgID:          publication.OrgID,
+		GitHubPRNumber: details.Number,
+		GitHubPRURL:    details.HTMLURL,
+		GitHubRepo:     repo.FullName,
+		Title:          details.Title,
+		Body:           &body,
+		Status:         status,
+		ReviewStatus:   models.PullRequestReviewStatusPending,
+		AuthoredBy:     gitIdentitySourceForGitHubAuthor(details.User.Login, details.User.Type),
+		HeadSHA:        &headSHA,
+		HeadRef:        &headRef,
+		BaseSHA:        &baseSHA,
+	}
+	if err := s.pullRequests.AssociateGitHubPullRequest(ctx, publication.OrgID, &pr); err != nil {
+		return err
+	}
+	if err := s.completeReconciledSessionPublication(ctx, publication, pr, details.MergeCommitSHA); err != nil {
+		return err
+	}
+	s.logger.Info().
+		Str("publication_id", publication.ID.String()).
+		Str("session_id", publication.SessionID.String()).
+		Int("pr_number", details.Number).
+		Msg("reconciled durable session publication")
+	metrics.RecordSessionPublicationReconciliation(ctx, "adopted")
+	return nil
+}
+
+// completeReconciledSessionPublication applies every required local
+// checkpoint before making a durable publication terminal. Terminal GitHub
+// states must flow through the same lifecycle transition as webhooks and
+// health syncs so merged stacks, deploys, previews, and external issue state
+// converge even when the original webhook was missed.
+func (s *PRService) completeReconciledSessionPublication(
+	ctx context.Context,
+	publication models.SessionPublication,
+	pr models.PullRequest,
+	mergeCommitSHA string,
+) error {
+	headSHA := strings.TrimSpace(stringValue(pr.HeadSHA))
+	if headSHA == "" {
+		return errors.New("reconciled pull request is missing its head SHA")
+	}
+	if err := s.publications.RecordBranchPublished(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA); err != nil {
+		return err
+	}
+	if publication.GitHubPRNumber == nil || *publication.GitHubPRNumber != pr.GitHubPRNumber {
+		if err := s.publications.RecordPRResolved(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, pr.GitHubPRNumber, pr.GitHubPRURL); err != nil {
+			return err
+		}
+	}
+	if err := s.publications.MarkRecorded(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		return err
+	}
+	if err := s.changesets.RecordPublishedHead(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, headSHA, true); err != nil {
+		return fmt.Errorf("update reconciled publication changeset: %w", err)
+	}
+	if err := s.sessions.UpdateStatus(ctx, publication.OrgID, publication.SessionID, models.SessionStatusPRCreated); err != nil {
+		return fmt.Errorf("update reconciled publication session status: %w", err)
+	}
+
+	switch pr.Status {
+	case models.PullRequestStatusOpen:
+		// The ordinary open-PR checkpoints above are the complete lifecycle.
+	case models.PullRequestStatusMerged:
+		if err := s.applyClosedPRTransition(ctx, pr, true, mergeCommitSHA, headSHA); err != nil {
+			return fmt.Errorf("apply reconciled merged pull request transition: %w", err)
+		}
+	case models.PullRequestStatusClosed:
+		if err := s.applyClosedPRTransition(ctx, pr, false, "", headSHA); err != nil {
+			return fmt.Errorf("apply reconciled closed pull request transition: %w", err)
+		}
+	default:
+		return fmt.Errorf("reconciled pull request has unsupported status %q", pr.Status)
+	}
+
+	if err := s.publications.MarkCompleted(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *PRService) resumeSessionPublicationCreation(ctx context.Context, publication models.SessionPublication) error {
+	if s.jobs == nil {
+		return errors.New("publication reconciliation job store is unavailable")
+	}
+	payload, queue, err := validatedPublicationReplayIntent(publication)
+	if err != nil {
+		if markErr := s.publications.MarkFailed(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID, "invalid_replay_intent", err.Error(), true); markErr != nil {
+			return fmt.Errorf("validate publication replay intent: %v; persist terminal failure: %w", err, markErr)
+		}
+		return fmt.Errorf("validate publication replay intent: %w", err)
+	}
+	dedupeKey := db.OpenPRDedupeKey(publication.ChangesetID)
+	jobID, err := s.jobs.Enqueue(ctx, publication.OrgID, string(queue), "open_pr", payload, 5, &dedupeKey)
+	if err != nil {
+		return fmt.Errorf("requeue guarded publication workflow: %w", err)
+	}
+	if err := s.publications.RecordRequeued(ctx, publication.OrgID, publication.SessionID, publication.ChangesetID); err != nil {
+		return err
+	}
+	s.logger.Info().
+		Str("publication_id", publication.ID.String()).
+		Str("session_id", publication.SessionID.String()).
+		Str("changeset_id", publication.ChangesetID.String()).
+		Str("queue", string(queue)).
+		Str("job_id", jobID.String()).
+		Msg("requeued durable publication through guarded open_pr workflow")
+	metrics.RecordSessionPublicationReconciliation(ctx, "requeued")
+	return nil
+}
+
+func validatedPublicationReplayIntent(publication models.SessionPublication) (json.RawMessage, models.SessionPublicationJobQueue, error) {
+	queue := publication.JobQueue
+	if queue == "" {
+		queue = models.SessionPublicationJobQueueDefault
+	}
+	if err := queue.Validate(); err != nil {
+		return nil, "", err
+	}
+	payload := bytes.TrimSpace(publication.RequestPayload)
+	if len(payload) == 0 || bytes.Equal(payload, []byte("{}")) || !json.Valid(payload) {
+		return nil, "", errors.New("publication request payload is missing or invalid")
+	}
+	var identity struct {
+		OrgID            string `json:"org_id"`
+		SessionID        string `json:"session_id"`
+		ChangesetID      string `json:"changeset_id"`
+		PublicationQueue string `json:"publication_queue,omitempty"`
+	}
+	if err := json.Unmarshal(payload, &identity); err != nil {
+		return nil, "", fmt.Errorf("decode publication request payload: %w", err)
+	}
+	orgID, orgErr := uuid.Parse(identity.OrgID)
+	sessionID, sessionErr := uuid.Parse(identity.SessionID)
+	changesetID, changesetErr := uuid.Parse(identity.ChangesetID)
+	if orgErr != nil || sessionErr != nil || changesetErr != nil {
+		return nil, "", errors.New("publication request payload contains invalid scoped IDs")
+	}
+	if orgID != publication.OrgID || sessionID != publication.SessionID || changesetID != publication.ChangesetID {
+		return nil, "", errors.New("publication request payload scope does not match publication row")
+	}
+	if identity.PublicationQueue != "" && identity.PublicationQueue != string(queue) {
+		return nil, "", errors.New("publication request payload queue does not match publication row")
+	}
+	return append(json.RawMessage(nil), payload...), queue, nil
+}
+
+func isGitHubStatus(err error, status int) bool {
+	var apiErr *GitHubAPIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == status
 }
 
 // stuckPublishActionAfter bounds how long a PR-level action column may sit in an

@@ -7,6 +7,7 @@ package automations
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,7 +77,11 @@ func (h *AutomationHooks) OnSessionComplete(ctx context.Context, run *models.Ses
 	var runStatus models.AutomationRunStatus
 	switch status {
 	case models.SessionStatusCompleted:
-		runStatus = models.AutomationRunStatusCompleted
+		if run.Diff == nil || strings.TrimSpace(*run.Diff) == "" {
+			runStatus = models.AutomationRunStatusCompletedNoop
+		} else {
+			runStatus = models.AutomationRunStatusCompleted
+		}
 	case models.SessionStatusFailed, models.SessionStatusNeedsHumanGuidance:
 		// needs_human_guidance is terminal from the orchestrator's
 		// perspective — a human response starts a fresh session rather than

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/cache"
@@ -169,6 +170,10 @@ type EnqueueOpts struct {
 	Payload   any
 	Priority  int
 	DedupeKey *string
+	// MaxAttempts overrides the jobs table default when positive. Zero keeps
+	// the schema default so existing enqueue call sites retain their current
+	// retry budget.
+	MaxAttempts int
 
 	// TargetNodeID, when set, restricts the job to be claimed by this
 	// specific worker node. Used for sandbox-bound jobs (continue_session,
@@ -205,6 +210,30 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 		Priority:  priority,
 		DedupeKey: dedupeKey,
 	})
+}
+
+// HasActiveByDedupeKey reports whether a pending or running job currently
+// owns a dedupe key. Terminal jobs intentionally do not count, matching the
+// partial unique index used by EnqueueWithOpts.
+func (s *JobStore) HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (bool, error) {
+	var active bool
+	err := s.db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM jobs
+			WHERE org_id = @org_id
+			  AND queue = @queue
+			  AND dedupe_key = @dedupe_key
+			  AND status IN ('pending', 'running')
+		)`, pgx.NamedArgs{
+		"org_id":     orgID,
+		"queue":      queue,
+		"dedupe_key": dedupeKey,
+	}).Scan(&active)
+	if err != nil {
+		return false, fmt.Errorf("query active job by dedupe key: %w", err)
+	}
+	return active, nil
 }
 
 // QueueChangesetPRCreation atomically reserves a changeset's PR slot and
@@ -558,6 +587,9 @@ type jobQuerier interface {
 }
 
 func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	if opts.MaxAttempts < 0 {
+		return uuid.Nil, fmt.Errorf("max attempts must not be negative")
+	}
 	payloadJSON, err := json.Marshal(opts.Payload)
 	if err != nil {
 		return uuid.Nil, err
@@ -565,27 +597,30 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 
 	var id uuid.UUID
 	args := pgx.NamedArgs{
-		"org_id":         orgID,
-		"queue":          opts.Queue,
-		"job_type":       opts.JobType,
-		"payload":        payloadJSON,
-		"priority":       opts.Priority,
-		"dedupe_key":     opts.DedupeKey,
-		"target_node_id": opts.TargetNodeID,
+		"org_id":     orgID,
+		"queue":      opts.Queue,
+		"job_type":   opts.JobType,
+		"payload":    payloadJSON,
+		"priority":   opts.Priority,
+		"dedupe_key": opts.DedupeKey,
 	}
-	query := `
-		INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key, target_node_id)
-		VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key, @target_node_id)
+	columns := []string{"queue", "job_type", "payload", "priority", "dedupe_key"}
+	values := []string{"@queue", "@job_type", "@payload", "@priority", "@dedupe_key"}
+	if opts.TargetNodeID != nil {
+		columns = append(columns, "target_node_id")
+		values = append(values, "@target_node_id")
+		args["target_node_id"] = opts.TargetNodeID
+	}
+	if opts.MaxAttempts > 0 {
+		columns = append(columns, "max_attempts")
+		values = append(values, "@max_attempts")
+		args["max_attempts"] = opts.MaxAttempts
+	}
+	query := fmt.Sprintf(`
+		INSERT INTO jobs (org_id, %s)
+		VALUES (@org_id, %s)
 		ON CONFLICT DO NOTHING
-		RETURNING id`
-	if opts.TargetNodeID == nil {
-		query = `
-			INSERT INTO jobs (org_id, queue, job_type, payload, priority, dedupe_key)
-			VALUES (@org_id, @queue, @job_type, @payload, @priority, @dedupe_key)
-			ON CONFLICT DO NOTHING
-			RETURNING id`
-		delete(args, "target_node_id")
-	}
+		RETURNING id`, strings.Join(columns, ", "), strings.Join(values, ", "))
 
 	err = q.QueryRow(ctx, query, args).Scan(&id)
 	// ON CONFLICT DO NOTHING returns no row when a pending/running job with the
@@ -610,7 +645,7 @@ func (s *JobStore) DeleteExpiredCompleted(ctx context.Context, retentionDays int
 const claimedJobColumns = `j.id, j.org_id, j.queue, j.job_type, j.payload, j.priority, j.status,
 	j.attempts, j.max_attempts, j.run_at, j.locked_by_node_id, j.locked_at,
 	j.lease_expires_at, j.lock_token, j.run_owner_id, j.owner_kind, j.last_error,
-	j.dedupe_key, j.target_node_id, j.created_at, j.updated_at, j.completed_at`
+	j.dedupe_key, j.target_node_id, j.retry_window_started_at, j.created_at, j.updated_at, j.completed_at`
 
 // nodeDeadHeartbeatThreshold is how long a node can go without heartbeating
 // before its pinned jobs become claimable by any worker. Set generously
@@ -702,12 +737,13 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	var lastError pgtype.Text
 	var dedupeKey pgtype.Text
 	var targetNodeID pgtype.Text
+	var retryWindowStartedAt pgtype.Timestamptz
 	var completedAt pgtype.Timestamptz
 	err := row.Scan(
 		&job.ID, &job.OrgID, &job.Queue, &job.JobType, &job.Payload, &job.Priority,
 		&job.Status, &job.Attempts, &job.MaxAttempts, &job.RunAt, &lockedByNodeID,
 		&lockedAt, &leaseExpiresAt, &persistedLockToken, &runOwnerID,
-		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &job.CreatedAt, &job.UpdatedAt, &completedAt,
+		&ownerKind, &lastError, &dedupeKey, &targetNodeID, &retryWindowStartedAt, &job.CreatedAt, &job.UpdatedAt, &completedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -738,10 +774,36 @@ func scanJobRow(row pgx.Row) (*models.Job, error) {
 	if targetNodeID.Valid {
 		job.TargetNodeID = &targetNodeID.String
 	}
+	if retryWindowStartedAt.Valid {
+		job.RetryWindowStartedAt = &retryWindowStartedAt.Time
+	}
 	if completedAt.Valid {
 		job.CompletedAt = &completedAt.Time
 	}
 	return &job, nil
+}
+
+// EnsureRetryWindowStartedAtWithLease records the first bounded retry under
+// the current fencing token and returns the durable start time. Repeated calls
+// preserve the original timestamp so worker restarts cannot extend the window.
+// lint:allow-no-orgid reason="worker queue consumer updates cross-org jobs by globally unique fenced job id"
+func (s *JobStore) EnsureRetryWindowStartedAtWithLease(ctx context.Context, jobID, lockToken uuid.UUID, startedAt time.Time) (time.Time, bool, error) {
+	var persisted time.Time
+	err := s.db.QueryRow(ctx, `
+		UPDATE jobs
+		SET retry_window_started_at = COALESCE(retry_window_started_at, $1),
+			updated_at = now()
+		WHERE id = $2
+		  AND status = 'running'
+		  AND lock_token = $3
+		RETURNING retry_window_started_at`, startedAt, jobID, lockToken).Scan(&persisted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("ensure retry window started at with lease: %w", err)
+	}
+	return persisted, true, nil
 }
 
 // GetRunningForSessionExecutor returns the running job only when the executor

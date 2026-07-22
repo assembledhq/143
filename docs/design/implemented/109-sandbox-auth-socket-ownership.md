@@ -1,6 +1,6 @@
 # Design: Sandbox GitHub-Auth Socket Ownership
 
-> **Status:** Implemented | **Last reviewed:** 2026-06-30
+> **Status:** Implemented | **Last reviewed:** 2026-07-15
 
 ## Implementation status
 
@@ -47,8 +47,14 @@ The host listens on `<socket-dir>/<session-id>/sock`; the sandbox dials it at
 fresh GitHub token resolved per request (see
 [65-unified-coding-credentials.md](65-unified-coding-credentials.md)
 and `internal/services/sandboxauth/`). The per-request resolve is deliberate:
-it lets each push pick up token refreshes and org-policy changes without
-restarting the session.
+it issues a fresh repository-bound token for each action without exposing
+user-to-server GitHub credentials inside the sandbox. Push tokens have
+`contents:write`; API tokens have read-only contents and pull-request access.
+Neither can create PRs directly; agents request the server-owned workflow with
+`143-tools pr create`. See [118-durable-session-publication.md](118-durable-session-publication.md).
+Production worker/all configuration requires `SANDBOX_AUTH_SOCKET_DIR`, and
+startup fails if the directory preflight fails. The legacy `GITHUB_TOKEN`
+environment fallback is retained only for local development and test setups.
 
 The socket has a **lifetime-ownership bug**: it is bound by the **per-turn
 `session-executor` process**, but the sandbox container **outlives every

@@ -2,6 +2,7 @@
 
 import { forwardRef, memo, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQueryState } from "nuqs";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -144,7 +145,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -216,6 +217,51 @@ function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus |
   return "neutral";
 }
 
+const publicationStatePresentation: Record<SessionPublication["state"], { label: string; variant: "secondary" | "success" | "warning" | "destructive" | "info" }> = {
+  requested: { label: "Publication queued", variant: "secondary" },
+  review_pending: { label: "Reviewing changes", variant: "info" },
+  ready_to_publish: { label: "Ready to publish", variant: "info" },
+  branch_published: { label: "Branch published", variant: "info" },
+  pr_resolved: { label: "PR found", variant: "info" },
+  recorded: { label: "Recording PR", variant: "info" },
+  completed: { label: "PR published", variant: "success" },
+  completed_noop: { label: "No changes to publish", variant: "secondary" },
+  retryable_failed: { label: "Publication retrying", variant: "warning" },
+  terminal_failed: { label: "Publication failed", variant: "destructive" },
+};
+
+function publicationPresentation(publication: SessionPublication) {
+  if (publication.review_gate_state === "needs_human") {
+    return { label: "Human review needed", variant: "warning" as const };
+  }
+  if (publication.review_gate_state === "failed") {
+    return { label: "Review failed", variant: "destructive" as const };
+  }
+  if (publication.review_gate_state === "pending" &&
+    publication.state !== "requested" &&
+    publication.state !== "review_pending" &&
+    publication.state !== "ready_to_publish") {
+    return { label: "Review gate bypassed", variant: "warning" as const };
+  }
+  return publicationStatePresentation[publication.state];
+}
+
+function publicationHasReviewWarning(publication: SessionPublication) {
+  return publication.review_gate_state === "needs_human" ||
+    publication.review_gate_state === "failed" ||
+    (publication.review_gate_state === "pending" &&
+      publication.state !== "requested" &&
+      publication.state !== "review_pending" &&
+      publication.state !== "ready_to_publish");
+}
+
+function publicationIsVolatile(publication: SessionPublication) {
+  return publication.review_gate_state !== "needs_human" &&
+    publication.state !== "completed" &&
+    publication.state !== "completed_noop" &&
+    publication.state !== "terminal_failed";
+}
+
 // Defer the diff viewer until the user actually opens review mode. Saves
 // review-specific code from the initial session-detail bundle for the common
 // case of just chatting with the agent.
@@ -268,6 +314,7 @@ function PreviewTabErrorFallback() {
 }
 
 const FAILURE_CATEGORY_CODEX_AUTH = "codex_auth_expired";
+const FAILURE_CATEGORY_CLAUDE_CODE_AUTH = "claude_code_auth_expired";
 const PR_ERROR_TOAST_DURATION_MS = 10_000;
 const PR_ERROR_TOAST_MESSAGE = "PR creation failed";
 const MAX_RESOLVE_REVIEW_COMMENTS_PER_MESSAGE = 50;
@@ -654,7 +701,74 @@ function readinessStatusIcon(readiness: PRReadinessRun | undefined, stale: boole
   return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
-function OverviewTab({ session, members, prStatus }: { session: Session; members: User[]; prStatus?: PullRequestStatus | null }) {
+function hasVisibleThreadFailure(thread?: SessionThread | null): thread is SessionThread {
+  return !!thread &&
+    !workingStatusesSet.has(thread.status) &&
+    !!(thread.failure_explanation?.trim() || thread.failure_category?.trim());
+}
+
+function isClaudeCodeAuthFailure(thread: SessionThread): boolean {
+  if (thread.failure_category === FAILURE_CATEGORY_CLAUDE_CODE_AUTH) {
+    return true;
+  }
+  if (thread.agent_type !== "claude_code") {
+    return false;
+  }
+  const explanation = thread.failure_explanation?.toLowerCase() ?? "";
+  return [
+    "claude subscription",
+    "claude code auth",
+    "no credentials for claude code",
+    "no claude code credentials",
+    "anthropic api key",
+  ].some((signal) => explanation.includes(signal));
+}
+
+function threadFailureDescription(thread: SessionThread): string {
+  const explanation = thread.failure_explanation?.trim() ?? "";
+  if (!isClaudeCodeAuthFailure(thread)) {
+    return explanation || "This tab stopped before the agent produced a response.";
+  }
+  if (/no credentials|credentials (?:are )?not configured/i.test(explanation)) {
+    return "No Claude Code credentials are configured. Connect a Claude subscription or add an Anthropic API key in Account settings, then retry the tab.";
+  }
+  if (/marked invalid|no longer valid|reconnect required/i.test(explanation)) {
+    return "Your Claude subscription is no longer valid. Reconnect Claude Code in Account settings, then retry the tab.";
+  }
+  return explanation || "Claude Code authentication failed before this tab could start.";
+}
+
+function ThreadFailureDetailsCard({ thread }: { thread: SessionThread }) {
+  const description = threadFailureDescription(thread);
+  const showClaudeSettingsAction = isClaudeCodeAuthFailure(thread) &&
+    /no credentials|not configured|connect|reconnect|revoked|expired|no longer valid/i.test(description);
+
+  return (
+    <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
+      <CardHeader className="pb-0">
+        <CardTitle className="flex items-center gap-2 text-xs text-destructive">
+          <XCircle className="h-3.5 w-3.5" />
+          Failure details
+          {thread.failure_category ? (
+            <Badge variant="secondary" className="border-destructive/20 bg-destructive/10 text-xs text-destructive">
+              {thread.failure_category}
+            </Badge>
+          ) : null}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 pt-0">
+        <p className="break-words text-xs">{description}</p>
+        {showClaudeSettingsAction ? (
+          <Button asChild size="sm" variant="outline">
+            <Link href="/settings/account">Open Account settings</Link>
+          </Button>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function OverviewTab({ session, activeThread, members, prStatus }: { session: Session; activeThread?: SessionThread | null; members: User[]; prStatus?: PullRequestStatus | null }) {
   const queryClient = useQueryClient();
   const [showDeviceCodeModal, setShowDeviceCodeModal] = useState(false);
   const [showStartOverRetryDialog, setShowStartOverRetryDialog] = useState(false);
@@ -676,6 +790,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
     },
   });
   const recoveryActive = isRuntimeRecoveryActive(session);
+  const showThreadFailureDetails = session.status !== "failed" && hasVisibleThreadFailure(activeThread);
   const checkpointRetryUnavailable = !session.snapshot_key || session.sandbox_state === "destroyed" || recoveryActive;
 
   const status = getDisplayStatus(session.status, prStatus);
@@ -731,6 +846,7 @@ function OverviewTab({ session, members, prStatus }: { session: Session; members
 
       {/* Failure card — shown prominently at top for failed sessions */}
       {recoveryActive && <RuntimeRecoveryNotice border="border" />}
+      {showThreadFailureDetails && activeThread ? <ThreadFailureDetailsCard thread={activeThread} /> : null}
       {session.status === "failed" && (session.failure_explanation || session.error) && (
         <Card className="border-l-2 border-l-destructive border-destructive/20 dark:border-destructive/30">
           <CardHeader className="pb-0">
@@ -2550,12 +2666,14 @@ function ChatPanel({
     timelineEntries.length === 0 &&
     session.status !== "pending" &&
     (!hasLoadedTimelineInputs || expectingMoreContent);
+  const hasThreadFailure = hasVisibleThreadFailure(activeThread);
   const showFreshThreadShell =
     !!activeThread &&
     activeThread.status === "idle" &&
     activeThread.current_turn === 0 &&
     timelineEntries.length === 0 &&
-    !showLoadingSkeleton;
+    !showLoadingSkeleton &&
+    !hasThreadFailure;
 
   const persistScrollPosition = useCallback((scrollTop: number) => {
     if (typeof window === "undefined" || !viewerScope) return;
@@ -3308,7 +3426,10 @@ function areChatPanelPropsEqual(previous: ChatPanelProps, next: ChatPanelProps):
     previous.activeThread?.id === next.activeThread?.id &&
     previous.activeThread?.status === next.activeThread?.status &&
     previous.activeThread?.current_turn === next.activeThread?.current_turn &&
-    previous.activeThread?.label === next.activeThread?.label;
+    previous.activeThread?.label === next.activeThread?.label &&
+    previous.activeThread?.agent_type === next.activeThread?.agent_type &&
+    previous.activeThread?.failure_explanation === next.activeThread?.failure_explanation &&
+    previous.activeThread?.failure_category === next.activeThread?.failure_category;
 }
 
 const MemoizedChatPanel = memo(ChatPanel, areChatPanelPropsEqual);
@@ -3391,9 +3512,9 @@ export function PullRequestList({
                 <span className="block truncate text-xs text-muted-foreground">
                   {changeset.base_branch} → {changeset.working_branch ?? "not materialized"}
                 </span>
-                {changeset.has_unpushed_changes && <span className="block text-xs text-amber-600">Unpushed changes</span>}
+                {changeset.has_unpushed_changes && <span className="block text-xs text-warning">Unpushed changes</span>}
                 {changeset.active_lease_holder_label && (
-                  <span className="block truncate text-xs text-blue-600">
+                  <span className="block truncate text-xs text-info">
                     {changeset.active_lease_holder_type === "agent_turn" ? "Being edited in" : "In use by"} {changeset.active_lease_holder_label}
                   </span>
                 )}
@@ -3684,6 +3805,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
+      const publicationVolatile = (s.publications ?? []).some(publicationIsVolatile);
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -3701,7 +3823,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
+      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer || publicationVolatile) {
         return pollMs(2000);
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
@@ -3734,6 +3856,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const selectedPublication = (session?.publications ?? []).find((publication) => publication.changeset_id === selectedChangeset?.id);
+  const selectedPublicationPresentation = selectedPublication ? publicationPresentation(selectedPublication) : null;
+  const selectedPublicationHasReviewWarning = selectedPublication ? publicationHasReviewWarning(selectedPublication) : false;
   const stackTopChangeset = changesets.filter((changeset) => changeset.status !== "abandoned").at(-1);
   const hasMultipleChangesets = changesets.length > 1;
   const changesetLifecycleMutation = useMutation({
@@ -6364,6 +6489,8 @@ export function SessionDetailContent({ id }: { id: string }) {
     setDraftTitle(currentTitle);
     setMobileRenameOpen(true);
   };
+  const detailActionSize = isMobileReviewViewport ? "xs" : "sm";
+  const detailActionIconSize = isMobileReviewViewport ? "icon-xs" : "icon-sm";
   // Right-panel content. Rendered inline on desktop and inside a bottom sheet
   // on mobile — the same JSX in both places so tab state stays consistent.
   const panelTabsEl = (
@@ -6405,6 +6532,18 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
+            {(!hasPR || selectedPublicationHasReviewWarning) && selectedPublication && selectedPublicationPresentation ? (
+              <Badge
+                variant={selectedPublicationPresentation.variant}
+                className="h-6"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
+              >
+                {selectedPublicationPresentation.label}
+              </Badge>
+            ) : null}
             {hasPR && selectedPR?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (
@@ -6412,7 +6551,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                     {closedPRLabel}
                   </Badge>
                 )}
-                <Button asChild variant="outline" size="xs" className="gap-1.5" title="View PR (p v)">
+                <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View PR (p v)">
                   <a href={selectedPR.github_pr_url} target="_blank" rel="noopener noreferrer">
                     <ExternalLink className="h-3 w-3" />
                     View PR
@@ -6422,7 +6561,7 @@ export function SessionDetailContent({ id }: { id: string }) {
             ) : showPRAction && !prErrorNotice ? (
               <>
                 {branchURL ? (
-                  <Button asChild variant="outline" size="xs" className="gap-1.5" title="View branch">
+                  <Button asChild variant="outline" size={detailActionSize} className="gap-1.5" title="View branch">
                     <a href={branchURL} target="_blank" rel="noopener noreferrer">
                       <GitBranch className="h-3 w-3" />
                       View branch
@@ -6430,10 +6569,10 @@ export function SessionDetailContent({ id }: { id: string }) {
                   </Button>
                 ) : null}
                 <DisabledTooltip disabled={prActionDisabled} content={prActionTitle}>
-                  <ButtonGroup size="xs">
+                  <ButtonGroup size={detailActionSize}>
                     <Button
                       variant="outline"
-                      size="xs"
+                      size={detailActionSize}
                       className="rounded-r-none border-r-0 text-xs gap-1.5"
                       loading={prActionSpinning}
                       disabled={prActionDisabled}
@@ -6451,7 +6590,7 @@ export function SessionDetailContent({ id }: { id: string }) {
                       <DropdownMenuTrigger asChild>
                         <Button
                           variant="outline"
-                          size="icon-xs"
+                          size={detailActionIconSize}
                           className="rounded-l-none"
                           disabled={prActionDisabled}
                           aria-label="More publish actions"
@@ -6883,7 +7022,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          <OverviewTab session={session} members={members} prStatus={prStatus} />
+          <OverviewTab session={session} activeThread={activeThread} members={members} prStatus={prStatus} />
         </div>
       </TabsContent>
       <TabsContent value="preview" className="flex-1 overflow-y-auto scrollbar-hide p-4">

@@ -138,6 +138,10 @@ func ReviewCommentPrompt() string {
 	return render("review_comment_prompt.template", nil)
 }
 
+func PRFeedbackTriagePrompt() string { return render("pr_feedback_triage.template", nil) }
+
+func PRFeedbackResponsePrompt() string { return render("pr_feedback_response.template", nil) }
+
 // ─── Agent ───────────────────────────────────────────────────────────────────
 
 // CodingTaskPreamble returns the preamble injected into coding agent system prompts
@@ -292,6 +296,7 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 // ─── Code Reviews ───────────────────────────────────────────────────────────
 
 type CodeReviewReviewerPromptData struct {
+	ReviewInstructions      string
 	Repository              string
 	PullNumber              int
 	PullRequestURL          string
@@ -345,23 +350,25 @@ func CodeReviewDescriptionCheckUserPrompt(data CodeReviewDescriptionCheckUserPro
 }
 
 type CodeReviewOrchestratorPromptData struct {
-	Repository             string
-	PullNumber             int
-	PullRequestURL         string
-	Title                  string
-	Author                 string
-	BaseSHA                string
-	HeadSHA                string
-	PolicyVersion          int
-	ApprovalMode           any
-	RequiredReviewerQuorum int
-	InlineCommentLimit     int
-	RiskReasons            []string
-	DescriptionResults     []string
-	ReviewerOutputs        []string
-	Findings               []string
-	ChangedFiles           []string
-	Checklist              []string
+	Repository                 string
+	PullNumber                 int
+	PullRequestURL             string
+	Title                      string
+	Author                     string
+	BaseSHA                    string
+	HeadSHA                    string
+	PolicyVersion              int
+	ApprovalMode               any
+	RequiredReviewerQuorum     int
+	InlineCommentLimit         int
+	RiskReasons                []string
+	DescriptionResults         []string
+	ReviewerOutputs            []string
+	Findings                   []string
+	ChangedFiles               []string
+	ReviewInstructions         string
+	AutomatedApprovalPolicy    string
+	UseAutomatedApprovalPolicy bool
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {

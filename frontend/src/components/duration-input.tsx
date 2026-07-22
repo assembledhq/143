@@ -1,15 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 export type DurationUnit = "seconds" | "minutes" | "hours";
@@ -36,6 +30,7 @@ export interface DurationInputProps {
   defaultUnit?: DurationUnit;
   debounceMs?: number;
   className?: string;
+  labelAction?: ReactNode;
 }
 
 function clampSeconds(value: number, minSeconds?: number, maxSeconds?: number): number {
@@ -70,6 +65,7 @@ export function DurationInput({
   defaultUnit = "minutes",
   debounceMs = 400,
   className,
+  labelAction,
 }: DurationInputProps) {
   const [unit, setUnit] = useState<DurationUnit>(() => chooseDurationUnit(valueSeconds, defaultUnit));
   const [amount, setAmount] = useState(() => formatAmount(valueSeconds, chooseDurationUnit(valueSeconds, defaultUnit)));
@@ -157,7 +153,10 @@ export function DurationInput({
 
   return (
     <div className={cn("rounded-md border border-border p-4", className)}>
+      <div className="flex items-center gap-1.5">
       <Label className="text-xs text-muted-foreground">{label}</Label>
+        {labelAction}
+      </div>
       <div className="mt-2 grid grid-cols-[minmax(0,1fr)_8.5rem] gap-2">
         <Input
           aria-label={`${label} value`}
@@ -191,4 +190,3 @@ export function DurationInput({
     </div>
   );
 }
-

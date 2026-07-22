@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -87,6 +88,70 @@ func (s *PullRequestStore) Create(ctx context.Context, pr *models.PullRequest) e
 
 	row := s.db.QueryRow(ctx, query, args)
 	return row.Scan(&pr.ID, &pr.CreatedAt, &pr.UpdatedAt)
+}
+
+// AssociateGitHubPullRequest idempotently records a PR discovered through a
+// webhook or reconciliation pass. It may fill an unowned row, but it never
+// reassigns a PR that is already linked to a different session.
+func (s *PullRequestStore) AssociateGitHubPullRequest(ctx context.Context, orgID uuid.UUID, pr *models.PullRequest) error {
+	if pr == nil {
+		return fmt.Errorf("pull request is required")
+	}
+	if pr.OrgID != uuid.Nil && pr.OrgID != orgID {
+		return fmt.Errorf("pull request org does not match orgID")
+	}
+	if pr.SessionID == nil || *pr.SessionID == uuid.Nil || pr.ChangesetID == nil || *pr.ChangesetID == uuid.Nil {
+		return fmt.Errorf("pull request association requires session and changeset IDs")
+	}
+	if pr.GitHubPRNumber <= 0 || strings.TrimSpace(pr.GitHubRepo) == "" {
+		return fmt.Errorf("pull request association requires a GitHub repository and positive PR number")
+	}
+	authoredBy := pr.AuthoredBy
+	if authoredBy == "" {
+		authoredBy = models.GitIdentitySourceApp
+	}
+	rows, err := s.db.Query(ctx, `INSERT INTO pull_requests (
+		session_id, changeset_id, org_id, github_pr_number, github_pr_url,
+		github_repo, title, body, status, review_status, authored_by,
+		head_sha, head_ref, base_sha
+	) VALUES (
+		@session_id, @changeset_id, @org_id, @github_pr_number, @github_pr_url,
+		@github_repo, @title, @body, @status, @review_status, @authored_by,
+		@head_sha, @head_ref, @base_sha
+	)
+	ON CONFLICT (org_id, github_repo, github_pr_number) DO UPDATE SET
+		session_id = COALESCE(pull_requests.session_id, EXCLUDED.session_id),
+		changeset_id = COALESCE(pull_requests.changeset_id, EXCLUDED.changeset_id),
+		github_pr_url = EXCLUDED.github_pr_url,
+		title = EXCLUDED.title,
+		body = EXCLUDED.body,
+		status = EXCLUDED.status,
+		authored_by = EXCLUDED.authored_by,
+		head_sha = COALESCE(EXCLUDED.head_sha, pull_requests.head_sha),
+		head_ref = COALESCE(EXCLUDED.head_ref, pull_requests.head_ref),
+		base_sha = COALESCE(EXCLUDED.base_sha, pull_requests.base_sha),
+		updated_at = now()
+	WHERE pull_requests.session_id IS NULL
+	   OR (
+		pull_requests.session_id = EXCLUDED.session_id
+		AND (pull_requests.changeset_id IS NULL OR pull_requests.changeset_id = EXCLUDED.changeset_id)
+	   )
+	RETURNING `+prSelectColumns, pgx.NamedArgs{
+		"session_id": pr.SessionID, "changeset_id": pr.ChangesetID, "org_id": orgID,
+		"github_pr_number": pr.GitHubPRNumber, "github_pr_url": pr.GitHubPRURL,
+		"github_repo": pr.GitHubRepo, "title": pr.Title, "body": pr.Body,
+		"status": pr.Status, "review_status": pr.ReviewStatus, "authored_by": authoredBy,
+		"head_sha": pr.HeadSHA, "head_ref": pr.HeadRef, "base_sha": pr.BaseSHA,
+	})
+	if err != nil {
+		return fmt.Errorf("associate GitHub pull request: %w", err)
+	}
+	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.PullRequest])
+	if err != nil {
+		return fmt.Errorf("collect associated GitHub pull request: %w", err)
+	}
+	*pr = stored
+	return nil
 }
 
 const prSelectColumns = `id, session_id, changeset_id, org_id, github_pr_number, github_pr_url, github_repo,
@@ -197,12 +262,12 @@ func (s *PullRequestStore) UpdateGitHubSnapshot(ctx context.Context, orgID, id u
 		    head_sha = @head_sha,
 		    head_ref = @head_ref,
 		    base_sha = @base_sha,
-		    github_state_synced_at = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN NULL ELSE github_state_synced_at END,
-		    health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE health_version END,
-		    merge_state = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN @merge_state ELSE merge_state END,
-		    has_conflicts = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE has_conflicts END,
-		    failing_test_count = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN 0 ELSE failing_test_count END,
-		    needs_agent_action = CASE WHEN head_sha IS DISTINCT FROM @head_sha THEN false ELSE needs_agent_action END,
+		    github_state_synced_at = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN NULL ELSE github_state_synced_at END,
+		    health_version = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0 ELSE health_version END,
+		    merge_state = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN @merge_state ELSE merge_state END,
+		    has_conflicts = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN false ELSE has_conflicts END,
+		    failing_test_count = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN 0 ELSE failing_test_count END,
+		    needs_agent_action = CASE WHEN head_sha IS DISTINCT FROM @head_sha OR base_sha IS DISTINCT FROM @base_sha THEN false ELSE needs_agent_action END,
 		    updated_at = now()
 		WHERE id = @id AND org_id = @org_id`
 	res, err := s.db.Exec(ctx, query, pgx.NamedArgs{

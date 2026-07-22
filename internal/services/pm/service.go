@@ -160,7 +160,7 @@ type Service struct {
 	env               *agent.AgentEnv
 	usageTracker      agent.UsageRecorder // nil-safe: container billing disabled if nil
 	github            agent.GitHubTokenProvider
-	internalAPIURL    string // base URL for internal API (e.g. "http://server:8080/api/v1/internal")
+	internalAPIURL    string // platform origin; sandbox clients append the internal API route prefix
 	internalAPISecret string // signing secret for internal API tokens
 	logger            zerolog.Logger
 }

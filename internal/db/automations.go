@@ -690,9 +690,8 @@ const createAutomationRunSQL = `
 	RETURNING id, triggered_at, created_at, updated_at`
 
 // insertRun runs the shared INSERT for automation_runs against either a pool
-// or a transaction. Returns (false, nil) on conflict — the partial unique
-// index only fires when scheduled_time IS NOT NULL (i.e. scheduler-triggered
-// runs), so manual runs always insert successfully.
+// or a transaction. Returns (false, nil) on a scheduler-time or provider-event
+// idempotency conflict; manual runs have neither key and always insert.
 func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (bool, error) {
 	if r.CapabilitySnapshot == nil {
 		r.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{}
@@ -733,8 +732,8 @@ func insertRun(ctx context.Context, q runInserter, r *models.AutomationRun) (boo
 	return err == nil, err
 }
 
-// CreateRun inserts a new automation run. If scheduled_time is set and a
-// duplicate exists (idempotency index), the insert is skipped and false is returned.
+// CreateRun inserts a new automation run. If a scheduler-time or provider-event
+// idempotency key already exists, the insert is skipped and false is returned.
 func (s *AutomationRunStore) CreateRun(ctx context.Context, r *models.AutomationRun) (bool, error) {
 	return insertRun(ctx, s.db, r)
 }
@@ -1171,6 +1170,27 @@ func (s *AutomationRunStore) TransitionStatusIf(ctx context.Context, orgID, runI
 		"from_status":    fromStatus,
 		"to_status":      toStatus,
 		"completed_at":   completedAt,
+		"result_summary": resultSummary,
+	})
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// MarkCompletedNoop records the authoritative no-changes outcome reported by
+// PR creation. It accepts both running and completed because open_pr can race
+// the session-completion hook: whichever worker arrives first must prevent a
+// later generic completed transition from misclassifying the run.
+func (s *AutomationRunStore) MarkCompletedNoop(ctx context.Context, orgID, runID uuid.UUID, resultSummary *string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE automation_runs
+		SET status = 'completed_noop',
+			completed_at = COALESCE(completed_at, now()),
+			result_summary = COALESCE(@result_summary, result_summary),
+			updated_at = now()
+		WHERE id = @id AND org_id = @org_id AND status IN ('running', 'completed')`, pgx.NamedArgs{
+		"id":             runID,
+		"org_id":         orgID,
 		"result_summary": resultSummary,
 	})
 	if err != nil {

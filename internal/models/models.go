@@ -463,10 +463,11 @@ type SessionTitleState struct {
 // SessionDetail is the API response for a single session, enriched with threads.
 type SessionDetail struct {
 	Session
-	RepositoryFullName  *string             `json:"repository_full_name,omitempty"`
-	Threads             []SessionThread     `json:"threads"`
-	Changesets          []ChangesetSummary  `json:"changesets"`
-	ChangesetStackState ChangesetStackState `json:"changeset_stack_state"`
+	RepositoryFullName  *string              `json:"repository_full_name,omitempty"`
+	Threads             []SessionThread      `json:"threads"`
+	Changesets          []ChangesetSummary   `json:"changesets"`
+	Publications        []SessionPublication `json:"publications,omitempty"`
+	ChangesetStackState ChangesetStackState  `json:"changeset_stack_state"`
 }
 
 // SessionDiff is the large, lazily-loaded diff payload for a session. It is
@@ -652,7 +653,10 @@ type SessionResult struct {
 	ResultSummary                   *string           `json:"result_summary,omitempty"`
 	Diff                            *string           `json:"diff,omitempty"`
 	Error                           *string           `json:"error,omitempty"`
+	FailureExplanation              *string           `json:"failure_explanation,omitempty"`
 	FailureCategory                 *string           `json:"failure_category,omitempty"`
+	FailureNextSteps                []string          `json:"failure_next_steps,omitempty"`
+	FailureRetryAdvised             bool              `json:"failure_retry_advised"`
 	DiffBaseCommitSHA               *string           `json:"-"`
 	DiffHeadCommitSHA               *string           `json:"-"`
 	DiffWorkspaceDirty              bool              `json:"-"`
@@ -1084,10 +1088,14 @@ const (
 	JobTypePagerDutyIngestEvent          = "pagerduty_ingest_event"
 	JobTypePagerDutySync                 = "pagerduty_sync"
 	JobTypeRunCodeReview                 = "run_code_review"
+	JobTypeStartCodeReviewReassessment   = "start_code_review_reassessment"
 	JobTypeMaterializeChangeset          = "materialize_changeset"
 	JobTypeVerifyChangesetSplit          = "verify_changeset_split"
 	JobTypeRestackChangesets             = "restack_changesets"
 	JobTypePublishChangesetStack         = "publish_changeset_stack"
+	JobTypeCollectPullRequestFeedback    = "collect_pull_request_feedback"
+	JobTypePublishPRFeedbackResponses    = "publish_pull_request_feedback_responses"
+	JobTypeReconcilePullRequestFeedback  = "reconcile_pull_request_feedback"
 )
 
 // Job represents an async work queue item.
@@ -1116,10 +1124,14 @@ type Job struct {
 	// docker daemon as the session's recorded container_id. NULL means any
 	// worker can claim. A pinned job becomes claimable by any worker if its
 	// target node is marked dead in the `nodes` table (starvation safety).
-	TargetNodeID *string    `db:"target_node_id" json:"target_node_id,omitempty"`
-	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt    time.Time  `db:"updated_at" json:"updated_at"`
-	CompletedAt  *time.Time `db:"completed_at" json:"completed_at,omitempty"`
+	TargetNodeID *string `db:"target_node_id" json:"target_node_id,omitempty"`
+	// RetryWindowStartedAt records the first bounded external retry for this job.
+	// It is set once under the job's fencing token so retry limits survive worker
+	// restarts without counting unrelated queue or execution time.
+	RetryWindowStartedAt *time.Time `db:"retry_window_started_at" json:"retry_window_started_at,omitempty"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time  `db:"updated_at" json:"updated_at"`
+	CompletedAt          *time.Time `db:"completed_at" json:"completed_at,omitempty"`
 }
 
 // SessionWorkerTarget returns the worker_node_id to pin sandbox-bound jobs

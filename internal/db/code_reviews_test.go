@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"regexp"
@@ -11,38 +12,41 @@ import (
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
 
-func TestCodeReviewStore_ResolvePolicyPrefersRepository(t *testing.T) {
+func TestCodeReviewStore_ResolvePolicyUsesOrganizationPolicy(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
-	repoID := uuid.New()
 	policyID := uuid.New()
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
+	config.ReviewInstructions = "historic review guidance"
+	config.AutomatedApprovalPolicy = "historic approval guidance"
 	config.ApprovalMode = models.CodeReviewApprovalModeApproveAcceptable
-	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
 	mock.ExpectQuery("FROM code_review_policies").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 3, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, nil, true, 3, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
 
-	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
+	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
 
 	require.NoError(t, err, "ResolvePolicy should load active code review policy")
-	require.Equal(t, "repository", resolved.Source, "repository override should win over org default")
+	require.Equal(t, "organization", resolved.Source, "the active organization policy should apply to every repository")
 	require.NotNil(t, resolved.Policy, "resolved policy should include the backing record")
 	require.Equal(t, 3, resolved.Policy.Version, "resolved policy should scan version")
 	require.Equal(t, models.CodeReviewApprovalModeApproveAcceptable, resolved.Config.ApprovalMode, "resolved config should include approval mode")
@@ -53,19 +57,19 @@ func TestCodeReviewStore_ResolvePolicyUsesDefaultWhenMissing(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
-	repoID := uuid.New()
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
 	mock.ExpectQuery("FROM code_review_policies").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
 		}))
 
-	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID, &repoID)
+	resolved, err := NewCodeReviewStore(mock).ResolvePolicy(context.Background(), orgID)
 
 	require.NoError(t, err, "ResolvePolicy should not error when no policy exists")
 	require.Equal(t, "default", resolved.Source, "missing policy should use built-in defaults")
@@ -83,7 +87,9 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
-	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
+	config.ReviewInstructions = "historic review guidance"
+	config.AutomatedApprovalPolicy = "historic approval guidance"
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
@@ -93,13 +99,16 @@ func TestCodeReviewStore_GetPolicyByID(t *testing.T) {
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, &repoID, true, 2, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
 
 	record, err := NewCodeReviewStore(mock).GetPolicyByID(context.Background(), orgID, policyID)
 
 	require.NoError(t, err, "GetPolicyByID should load captured policy version")
 	require.Equal(t, policyID, record.ID, "GetPolicyByID should return requested policy")
+	require.Equal(t, config.ReviewInstructions, record.ReviewInstructions, "GetPolicyByID should return captured historic review instructions")
+	require.Equal(t, config.AutomatedApprovalPolicy, record.AutomatedApprovalPolicy, "GetPolicyByID should return captured historic approval policy")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -107,48 +116,80 @@ func TestCodeReviewStore_SavePolicyVersionsInsertOnly(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
-	repoID := uuid.New()
 	policyID := uuid.New()
 	userID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 	config := models.DefaultCodeReviewPolicyConfig()
-	descriptionPolicy, riskPolicy, agentRoster, inheritance := mustCodeReviewPolicyJSON(t, config)
+	config.ReviewInstructions = "new review guidance"
+	config.AutomatedApprovalPolicy = "new approval guidance"
+	descriptionPolicy, riskPolicy, agentRoster := mustCodeReviewPolicyJSON(t, config)
 
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("repository_id IS NULL").
-		WithArgs(pgxmock.AnyArg()).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}))
 	mock.ExpectBegin()
+	mock.ExpectExec("pg_advisory_xact_lock").
+		WithArgs("code_review_policy:" + orgID.String()).
+		WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectQuery("SELECT COALESCE").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(4))
 	mock.ExpectExec("UPDATE code_review_policies").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("INSERT INTO code_review_policies").
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
+			config.ReviewInstructions, config.AutomatedApprovalPolicy,
+			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "repository_id", "active", "version", "enabled", "approval_mode",
-			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "inheritance", "created_by_user_id", "created_at",
-		}).AddRow(policyID, orgID, &repoID, true, 4, config.Enabled, config.ApprovalMode, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, inheritance, &userID, now))
+			"review_instructions", "automated_approval_policy",
+			"description_policy", "risk_policy", "agent_roster", "inline_comment_limit", "created_by_user_id", "created_at",
+		}).AddRow(policyID, orgID, nil, true, 4, config.Enabled, config.ApprovalMode, config.ReviewInstructions, config.AutomatedApprovalPolicy, descriptionPolicy, riskPolicy, agentRoster, config.InlineCommentLimit, &userID, now))
 	mock.ExpectCommit()
 
-	record, err := NewCodeReviewStore(mock).SavePolicy(context.Background(), orgID, &repoID, config, &userID)
+	var logOutput bytes.Buffer
+	store := NewCodeReviewStore(mock)
+	store.SetLogger(zerolog.New(&logOutput))
+	record, err := store.SavePolicy(context.Background(), orgID, config, &userID)
 
 	require.NoError(t, err, "SavePolicy should insert a new active version")
-	require.Equal(t, 4, record.Version, "SavePolicy should increment from the current scope max version")
+	require.Equal(t, 4, record.Version, "SavePolicy should increment the organization policy version")
 	require.Equal(t, policyID, record.ID, "SavePolicy should return inserted policy")
+	require.Equal(t, config.ReviewInstructions, record.ReviewInstructions, "SavePolicy should persist the complete review instructions in the new version")
+	require.Equal(t, config.AutomatedApprovalPolicy, record.AutomatedApprovalPolicy, "SavePolicy should persist the complete approval policy in the new version")
+	require.Contains(t, logOutput.String(), `"review_instructions_runes":19`, "policy logs should record review-instruction rune count")
+	require.Contains(t, logOutput.String(), `"automated_approval_policy_runes":21`, "policy logs should record approval-policy rune count")
+	require.NotContains(t, logOutput.String(), config.ReviewInstructions, "policy logs should never contain review-instruction text")
+	require.NotContains(t, logOutput.String(), config.AutomatedApprovalPolicy, "policy logs should never contain approval-policy text")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_CreatePromptArtifactPreservesEffectivePrompt(t *testing.T) {
+	t.Parallel()
+	orgID, sessionID, artifactID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	content := "/review\n\n<organization_review_instructions>\ncaptured guidance\n</organization_review_instructions>"
+	metadata := json.RawMessage(`{"policy_version":3}`)
+	artifact := &models.CodeReviewPromptArtifact{OrgID: orgID, SessionID: sessionID, ArtifactKey: "prompts/reviewer", Role: "reviewer", AgentProvider: "codex", Content: content, Metadata: metadata}
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+	mock.ExpectQuery("INSERT INTO code_review_prompt_artifacts").WithArgs(
+		orgID, sessionID, artifact.ArtifactKey, artifact.Role, artifact.AgentProvider, content, metadata,
+	).WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "artifact_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+		AddRow(artifactID, orgID, sessionID, artifact.ArtifactKey, artifact.Role, artifact.AgentProvider, content, metadata, now))
+
+	err = NewCodeReviewStore(mock).CreatePromptArtifact(context.Background(), artifact)
+
+	require.NoError(t, err, "CreatePromptArtifact should persist the exact effective prompt")
+	require.Equal(t, artifactID, artifact.ID, "CreatePromptArtifact should return the persisted artifact identity")
+	require.Equal(t, content, artifact.Content, "prompt artifact should preserve captured instructions byte-for-byte")
+	require.Equal(t, metadata, artifact.Metadata, "prompt artifact should preserve captured policy-version metadata")
+	require.NoError(t, mock.ExpectationsWereMet(), "all prompt artifact expectations should be met")
 }
 
 func TestCodeReviewStore_GetActiveGitHubTriggerFiltersByOrgAndRepo(t *testing.T) {
@@ -499,6 +540,134 @@ func TestCodeReviewStore_GetByOutputKeyFiltersByOrg(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_GetLatestByPullRequestHeadFiltersByOrgAndPolicy(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	repoID := uuid.New()
+	prID := uuid.New()
+	policyID := uuid.New()
+	metadataID := uuid.New()
+	now := time.Date(2026, 7, 16, 22, 55, 0, 0, time.UTC)
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgxmock should initialize")
+	defer mock.Close()
+
+	mock.ExpectQuery("pull_request_id = @pull_request_id[\\s\\S]+head_sha = @head_sha[\\s\\S]+policy_id = @policy_id[\\s\\S]+ORDER BY created_at DESC").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+			"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusFailed, nil, nil, false, nil, "output", nil, nil, nil, nil, nil, &now, now))
+
+	metadata, err := NewCodeReviewStore(mock).GetLatestByPullRequestHead(context.Background(), orgID, prID, "head", policyID)
+	require.NoError(t, err, "latest review lookup should succeed")
+	require.Equal(t, metadataID, metadata.ID, "latest review lookup should return the newest matching attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestCodeReviewStore_GetLatestByPullRequestFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		query string
+		load  func(context.Context, *CodeReviewStore, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error)
+	}{
+		{
+			name:  "latest assessment",
+			query: "WHERE org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+ORDER BY created_at DESC",
+			load: func(ctx context.Context, store *CodeReviewStore, orgID, prID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+				return store.GetLatestByPullRequest(ctx, orgID, prID)
+			},
+		},
+		{
+			name:  "latest submitted assessment",
+			query: "WHERE org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+github_review_id IS NOT NULL[\\s\\S]+ORDER BY created_at DESC",
+			load: func(ctx context.Context, store *CodeReviewStore, orgID, prID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+				return store.GetLatestSubmittedByPullRequest(ctx, orgID, prID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			sessionID := uuid.New()
+			repoID := uuid.New()
+			prID := uuid.New()
+			policyID := uuid.New()
+			metadataID := uuid.New()
+			reviewID := int64(143)
+			reviewURL := "https://github.com/acme/repo/pull/42#pullrequestreview-143"
+			now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+			expected := models.CodeReviewSessionMetadata{
+				ID: metadataID, OrgID: orgID, SessionID: sessionID, RepositoryID: repoID,
+				PullRequestID: prID, PolicyID: policyID, BaseSHA: "base", HeadSHA: "head",
+				TriggerSource: models.CodeReviewTriggerSourceTeamReviewer, Status: models.CodeReviewSessionStatusCompleted,
+				ReviewOutputKey: "output", GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL, CreatedAt: now,
+			}
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery(tt.query).
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
+				}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false,
+					models.CodeReviewTriggerSourceTeamReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, false,
+					nil, "output", nil, &reviewID, &reviewURL, nil, nil, nil, now))
+
+			actual, err := tt.load(context.Background(), NewCodeReviewStore(mock), orgID, prID)
+
+			require.NoError(t, err, "pull request review history lookup should succeed")
+			require.Equal(t, expected, actual, "pull request review history lookup should return exact org-scoped metadata")
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestCodeReviewStore_HasApprovedByPullRequestFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		exists   bool
+		expected bool
+	}{
+		{name: "has submitted approval", exists: true, expected: true},
+		{name: "has no submitted approval", exists: false, expected: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			prID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize")
+			defer mock.Close()
+			mock.ExpectQuery("SELECT EXISTS[\\s\\S]+org_id = @org_id[\\s\\S]+pull_request_id = @pull_request_id[\\s\\S]+decision = 'approved'[\\s\\S]+github_review_id IS NOT NULL").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.exists))
+
+			actual, err := NewCodeReviewStore(mock).HasApprovedByPullRequest(context.Background(), orgID, prID)
+
+			require.NoError(t, err, "approval history lookup should succeed")
+			require.Equal(t, tt.expected, actual, "approval history lookup should return the exact submitted approval state")
+			require.NoError(t, mock.ExpectationsWereMet(), "approval history lookup should remain org scoped")
+		})
+	}
+}
+
 func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	t.Parallel()
 
@@ -622,6 +791,56 @@ func TestCodeReviewStore_ListReviewsAppliesDesignFilters(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewStore_ListReviewsAppliesOutcomeFilters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		outcome         models.CodeReviewListOutcome
+		expectedPattern string
+	}{
+		{
+			name:            "automatically approved requires a completed posted approval",
+			outcome:         models.CodeReviewListOutcomeAutomaticallyApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND m\.decision = 'approved'\s+AND m\.github_review_id IS NOT NULL`,
+		},
+		{
+			name:            "completed not approved includes approval decisions that were not posted",
+			outcome:         models.CodeReviewListOutcomeCompletedNotApproved,
+			expectedPattern: `m\.status = 'completed'\s+AND \(m\.decision IS DISTINCT FROM 'approved'\s+OR m\.github_review_id IS NULL\)`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock should initialize for each outcome filter")
+			defer mock.Close()
+
+			mock.ExpectQuery(tt.expectedPattern).
+				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+				WillReturnRows(pgxmock.NewRows([]string{
+					"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
+					"base_sha", "head_sha", "from_fork", "trigger_source", "status", "decision", "acceptable", "stale",
+					"superseded_by_session_id", "review_output_key", "prompt_artifact_key", "github_review_id",
+					"github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at", "session_title",
+					"repository_name", "github_repo", "github_pr_number", "github_pr_url", "pull_request_title", "pull_request_author",
+				}))
+
+			reviews, err := NewCodeReviewStore(mock).ListReviews(context.Background(), orgID, CodeReviewListFilters{
+				Outcome: &tt.outcome,
+			})
+
+			require.NoError(t, err, "ListReviews should accept the selected outcome filter")
+			require.Equal(t, []models.CodeReviewListItem{}, reviews, "ListReviews should return the mocked empty outcome result")
+			require.NoError(t, mock.ExpectationsWereMet(), "the outcome filter should add the expected SQL conditions")
+		})
+	}
+}
+
 func TestCodeReviewStore_MarkFindingsSelectedForInlineFiltersByOrgAndSession(t *testing.T) {
 	t.Parallel()
 
@@ -696,7 +915,7 @@ func TestCodeReviewStore_ReplaceFindingUpdatesConflictContent(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
-func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte, []byte) {
+func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig) ([]byte, []byte, []byte) {
 	t.Helper()
 	descriptionPolicy, err := json.Marshal(config.DescriptionPolicy)
 	require.NoError(t, err, "description policy should marshal")
@@ -704,9 +923,7 @@ func mustCodeReviewPolicyJSON(t *testing.T, config models.CodeReviewPolicyConfig
 	require.NoError(t, err, "risk policy should marshal")
 	agentRoster, err := json.Marshal(config.AgentRoster)
 	require.NoError(t, err, "agent roster should marshal")
-	inheritance, err := json.Marshal(config.Inheritance)
-	require.NoError(t, err, "inheritance should marshal")
-	return descriptionPolicy, riskPolicy, agentRoster, inheritance
+	return descriptionPolicy, riskPolicy, agentRoster
 }
 
 func codeReviewGitHubTriggerColumns() []string {

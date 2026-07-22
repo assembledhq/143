@@ -19,11 +19,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/cache"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/llm"
+	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/prompts"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -46,7 +48,10 @@ const (
 	// produce a title that is just brackets with no human-readable content.
 	minPRTitleSubjectChars = 12
 	prTemplateCacheTTL     = 24 * time.Hour // re-fetch repo PR template after this duration
+	publicationMarkerName  = "143-publication"
 )
+
+var publicationMarkerRE = regexp.MustCompile(`(?m)^<!-- 143-publication session=([0-9a-f-]{36}) changeset=([0-9a-f-]{36}) -->\s*$`)
 
 // PreviewStopper stops a running preview instance. Implemented by
 // *preview.Manager; extracted as an interface here to avoid importing the
@@ -84,12 +89,14 @@ type PRService struct {
 	tokenProvider   *Service
 	pullRequests    *db.PullRequestStore
 	changesets      *db.SessionChangesetStore
+	publications    *db.SessionPublicationStore
 	sessions        *db.SessionStore
 	issues          *db.IssueStore
 	deploys         *db.DeployStore
 	repos           *db.RepositoryStore
 	jobs            *db.JobStore
 	reviewComments  *db.ReviewCommentStore
+	feedback        *db.PullRequestFeedbackStore
 	readiness       *db.PRReadinessStore
 	integrations    *db.IntegrationStore
 	userCredentials *db.UserCredentialStore
@@ -162,6 +169,10 @@ func (s *PRService) SetChangesetStore(store *db.SessionChangesetStore) {
 	s.changesets = store
 }
 
+func (s *PRService) SetPublicationStore(store *db.SessionPublicationStore) {
+	s.publications = store
+}
+
 func NewPRService(
 	tokenProvider *Service,
 	pullRequests *db.PullRequestStore,
@@ -191,6 +202,10 @@ func NewPRService(
 // SetReviewCommentStore sets the review comment store for the feedback loop.
 func (s *PRService) SetReviewCommentStore(store *db.ReviewCommentStore) {
 	s.reviewComments = store
+}
+
+func (s *PRService) SetPullRequestFeedbackStore(store *db.PullRequestFeedbackStore) {
+	s.feedback = store
 }
 
 // SetReadinessStore wires PR readiness data for best-effort PR body footers.
@@ -548,9 +563,24 @@ func (s *PRService) sessionURL(sessionID uuid.UUID) string {
 // API request (as opposed to org-level defaults). Fields use pointers to
 // distinguish "caller explicitly set this" from "use org default".
 type CreatePRParams struct {
-	Draft       *bool      `json:"draft,omitempty"`
-	AuthorMode  string     `json:"author_mode,omitempty"`
-	ChangesetID *uuid.UUID `json:"changeset_id,omitempty"`
+	Draft                     *bool                             `json:"draft,omitempty"`
+	AuthorMode                string                            `json:"author_mode,omitempty"`
+	ChangesetID               *uuid.UUID                        `json:"changeset_id,omitempty"`
+	PublicationSource         models.SessionPublicationSource   `json:"publication_source,omitempty"`
+	PublicationQueue          models.SessionPublicationJobQueue `json:"-"`
+	PublicationRequestPayload json.RawMessage                   `json:"-"`
+	PublicationGenerationAt   time.Time                         `json:"-"`
+	PublicationHeadBranch     string                            `json:"-"`
+}
+
+// PublicationAttempt is the durable publication request paired with the
+// exact parameters that CreatePR must use. In particular, HeadBranch is
+// resolved once and carried forward so snapshot-backed sessions cannot write
+// a ledger entry for one branch and later push another.
+type PublicationAttempt struct {
+	Params      CreatePRParams
+	Publication models.SessionPublication
+	Started     bool
 }
 
 type CreateBranchResult struct {
@@ -571,6 +601,321 @@ func targetBranchForPR(run *models.Session, repo *models.Repository) string {
 		}
 	}
 	return "main"
+}
+
+func upsertPublicationMarker(body string, sessionID uuid.UUID, changesetID *uuid.UUID) string {
+	cleaned := strings.TrimSpace(publicationMarkerRE.ReplaceAllString(body, ""))
+	if changesetID == nil || *changesetID == uuid.Nil {
+		return cleaned
+	}
+	marker := fmt.Sprintf("<!-- %s session=%s changeset=%s -->", publicationMarkerName, sessionID, *changesetID)
+	if cleaned == "" {
+		return marker
+	}
+	return cleaned + "\n\n" + marker
+}
+
+func parsePublicationMarker(body string) (uuid.UUID, uuid.UUID, bool) {
+	match := publicationMarkerRE.FindStringSubmatch(body)
+	if len(match) != 3 {
+		return uuid.Nil, uuid.Nil, false
+	}
+	sessionID, sessionErr := uuid.Parse(match[1])
+	changesetID, changesetErr := uuid.Parse(match[2])
+	if sessionErr != nil || changesetErr != nil {
+		return uuid.Nil, uuid.Nil, false
+	}
+	return sessionID, changesetID, true
+}
+
+func publicationWebhookOwnsChangesetBranch(event PullRequestEvent, changeset models.SessionChangeset) bool {
+	if changeset.WorkingBranch == nil || strings.TrimSpace(*changeset.WorkingBranch) == "" {
+		return false
+	}
+	if strings.TrimSpace(event.PR.Head.Ref) != strings.TrimSpace(*changeset.WorkingBranch) {
+		return false
+	}
+	return strings.TrimSpace(event.PR.Head.Repo.FullName) != "" &&
+		strings.EqualFold(strings.TrimSpace(event.PR.Head.Repo.FullName), strings.TrimSpace(event.Repository.FullName))
+}
+
+func gitIdentitySourceForGitHubAuthor(login, accountType string) models.GitIdentitySource {
+	if strings.EqualFold(strings.TrimSpace(accountType), "bot") || strings.HasSuffix(strings.ToLower(strings.TrimSpace(login)), "[bot]") {
+		return models.GitIdentitySourceApp
+	}
+	if strings.TrimSpace(login) != "" {
+		return models.GitIdentitySourceUser
+	}
+	// Recovery payloads should always contain the PR author. Default to the
+	// server-controlled identity when an incomplete payload omits it rather than
+	// classifying an unknown actor as a human for author-based review policy.
+	return models.GitIdentitySourceApp
+}
+
+func publicationSourceForRun(run *models.Session, source models.SessionPublicationSource) models.SessionPublicationSource {
+	if source != "" {
+		return source
+	}
+	if run != nil && run.AutomationRunID != nil {
+		return models.SessionPublicationSourceAutomation
+	}
+	return models.SessionPublicationSourceBackend
+}
+
+func publicationReviewGateForCreate(run *models.Session) models.SessionPublicationReviewGateState {
+	if run != nil && run.AutomationRunID != nil {
+		// The worker is responsible for moving this durable gate to passed after
+		// its review loop completes. CreatePR verifies that persisted transition
+		// before performing any GitHub side effects.
+		return models.SessionPublicationReviewGatePending
+	}
+	return models.SessionPublicationReviewGateNotRequired
+}
+
+func validatePublicationReviewGateForCreate(run *models.Session, state models.SessionPublicationReviewGateState) error {
+	if run != nil && run.AutomationRunID != nil && state != models.SessionPublicationReviewGatePassed {
+		return fmt.Errorf("automation publication review gate is %s", state)
+	}
+	return nil
+}
+
+func publicationJobQueueForCreate(queue models.SessionPublicationJobQueue) (models.SessionPublicationJobQueue, error) {
+	if queue == "" {
+		queue = models.SessionPublicationJobQueueDefault
+	}
+	if err := queue.Validate(); err != nil {
+		return "", err
+	}
+	return queue, nil
+}
+
+func publicationRequestPayloadForCreate(
+	run *models.Session,
+	changeset *models.SessionChangeset,
+	opts CreatePRParams,
+	source models.SessionPublicationSource,
+	queue models.SessionPublicationJobQueue,
+) (json.RawMessage, error) {
+	if payload := bytes.TrimSpace(opts.PublicationRequestPayload); len(payload) > 0 {
+		if !json.Valid(payload) {
+			return nil, errors.New("publication request payload must be valid JSON")
+		}
+		return append(json.RawMessage(nil), payload...), nil
+	}
+	if run == nil || changeset == nil {
+		return nil, nil
+	}
+	payload := map[string]any{
+		"session_id":         run.ID.String(),
+		"changeset_id":       changeset.ID.String(),
+		"org_id":             run.OrgID.String(),
+		"publication_source": string(source),
+		"publication_queue":  string(queue),
+	}
+	if opts.Draft != nil {
+		payload["draft"] = *opts.Draft
+	}
+	if opts.AuthorMode != "" {
+		payload["author_mode"] = opts.AuthorMode
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode publication request payload: %w", err)
+	}
+	return encoded, nil
+}
+
+// PreparePublicationAttempt persists publication intent and atomically gates
+// the caller before any sandbox or GitHub side effects. Keeping branch
+// resolution here lets snapshot-backed sessions participate even when their
+// mutable session/changeset branch fields were never persisted.
+func (s *PRService) PreparePublicationAttempt(
+	ctx context.Context,
+	run *models.Session,
+	changeset models.SessionChangeset,
+	params CreatePRParams,
+) (PublicationAttempt, error) {
+	if run == nil {
+		return PublicationAttempt{}, errors.New("session is required to prepare publication")
+	}
+	if s.publications == nil {
+		return PublicationAttempt{}, errors.New("session publication store is unavailable")
+	}
+	if run.RepositoryID == nil {
+		return PublicationAttempt{}, fmt.Errorf("session %s has no repository", run.ID)
+	}
+	if changeset.ID == uuid.Nil || changeset.SessionID != run.ID || changeset.OrgID != run.OrgID {
+		return PublicationAttempt{}, errors.New("publication changeset does not match session scope")
+	}
+
+	params.ChangesetID = &changeset.ID
+	params.PublicationSource = publicationSourceForRun(run, params.PublicationSource)
+	queue, err := publicationJobQueueForCreate(params.PublicationQueue)
+	if err != nil {
+		return PublicationAttempt{}, err
+	}
+	params.PublicationQueue = queue
+	payload, err := publicationRequestPayloadForCreate(run, &changeset, params, params.PublicationSource, queue)
+	if err != nil {
+		return PublicationAttempt{}, err
+	}
+	params.PublicationRequestPayload = payload
+
+	var issue *models.Issue
+	if run.PrimaryIssueID != nil && s.issues != nil {
+		resolved, issueErr := s.issues.GetByID(ctx, run.OrgID, *run.PrimaryIssueID)
+		if issueErr == nil {
+			issue = &resolved
+		} else {
+			// Branch generation has a deterministic session-only fallback. Do not
+			// let a best-effort title lookup prevent the durable request itself.
+			s.logger.Warn().Err(issueErr).
+				Str("session_id", run.ID.String()).
+				Str("issue_id", run.PrimaryIssueID.String()).
+				Msg("failed to load issue while preparing publication branch")
+		}
+	}
+	headBranch := publicationHeadBranch(run, issue, &changeset, params.PublicationHeadBranch)
+	if headBranch == "" {
+		return PublicationAttempt{}, errors.New("publication head branch is required")
+	}
+	params.PublicationHeadBranch = headBranch
+
+	publication := models.SessionPublication{
+		OrgID:               run.OrgID,
+		SessionID:           run.ID,
+		ChangesetID:         changeset.ID,
+		RepositoryID:        *run.RepositoryID,
+		Source:              params.PublicationSource,
+		ReviewGateState:     publicationReviewGateForCreate(run),
+		JobQueue:            queue,
+		RequestPayload:      append(json.RawMessage(nil), payload...),
+		RequestGenerationAt: params.PublicationGenerationAt,
+		BaseBranch:          changeset.BaseBranch,
+		HeadBranch:          headBranch,
+		DesiredHeadSHA:      changeset.HeadSHA,
+	}
+	if err := s.publications.EnsureRequested(ctx, run.OrgID, &publication); err != nil {
+		return PublicationAttempt{}, fmt.Errorf("ensure session publication: %w", err)
+	}
+	params.PublicationSource = publication.Source
+	params.PublicationQueue = publication.JobQueue
+	params.PublicationRequestPayload = append(json.RawMessage(nil), publication.RequestPayload...)
+	params.PublicationGenerationAt = publication.RequestGenerationAt
+	params.PublicationHeadBranch = publication.HeadBranch
+
+	started, err := s.publications.StartAttempt(ctx, run.OrgID, run.ID, changeset.ID)
+	if err != nil {
+		return PublicationAttempt{}, fmt.Errorf("start session publication attempt: %w", err)
+	}
+	return PublicationAttempt{Params: params, Publication: publication, Started: started}, nil
+}
+
+// completePublicationLocalState applies the required local convergence writes
+// before moving a durable publication to its terminal completed state. Keeping
+// these writes in one place prevents a retry path from accidentally making the
+// publication invisible to reconciliation while the session or changeset is
+// still stale.
+func (s *PRService) completePublicationLocalState(
+	ctx context.Context,
+	run *models.Session,
+	changeset *models.SessionChangeset,
+	headSHA string,
+) error {
+	if run == nil {
+		return errors.New("session is required to complete publication state")
+	}
+	durablePublication := changeset != nil && s.publications != nil
+	if durablePublication && s.changesets == nil {
+		return errors.New("changeset store is required to complete durable publication state")
+	}
+	if durablePublication && s.sessions == nil {
+		return errors.New("session store is required to complete durable publication state")
+	}
+	if changeset != nil && s.changesets != nil {
+		if strings.TrimSpace(headSHA) == "" {
+			return errors.New("published pull request is missing its head SHA")
+		}
+		if err := s.changesets.RecordPublishedHead(ctx, run.OrgID, run.ID, changeset.ID, headSHA, true); err != nil {
+			return fmt.Errorf("record published changeset head: %w", err)
+		}
+	}
+	if s.sessions != nil {
+		if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPRCreated); err != nil {
+			return fmt.Errorf("update published session status: %w", err)
+		}
+	}
+	if changeset != nil && s.publications != nil {
+		if err := s.publications.MarkCompleted(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
+			return fmt.Errorf("complete session publication: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *PRService) checkpointExistingPullRequestPublication(
+	ctx context.Context,
+	run *models.Session,
+	changeset *models.SessionChangeset,
+	existing *models.PullRequest,
+	source models.SessionPublicationSource,
+	queue models.SessionPublicationJobQueue,
+	payload json.RawMessage,
+	generationAt time.Time,
+) error {
+	if run == nil || changeset == nil || existing == nil {
+		return errors.New("session, changeset, and pull request are required for publication recovery")
+	}
+	headSHA := strings.TrimSpace(stringValue(existing.HeadSHA))
+	if headSHA == "" {
+		headSHA = strings.TrimSpace(stringValue(changeset.HeadSHA))
+	}
+	if headSHA == "" {
+		return errors.New("recovered pull request is missing its head SHA")
+	}
+
+	if s.publications != nil && run.RepositoryID != nil {
+		headBranch := strings.TrimSpace(stringValue(changeset.WorkingBranch))
+		if headBranch == "" {
+			headBranch = strings.TrimSpace(stringValue(existing.HeadRef))
+		}
+		if headBranch == "" {
+			return errors.New("recovered pull request is missing its head branch")
+		}
+		desiredHeadSHA := changeset.HeadSHA
+		if desiredHeadSHA == nil {
+			desiredHeadSHA = existing.HeadSHA
+		}
+		publication := &models.SessionPublication{
+			OrgID: run.OrgID, SessionID: run.ID, ChangesetID: changeset.ID, RepositoryID: *run.RepositoryID,
+			Source: source, ReviewGateState: publicationReviewGateForCreate(run),
+			JobQueue: queue, RequestPayload: payload, RequestGenerationAt: generationAt,
+			BaseBranch: changeset.BaseBranch, HeadBranch: headBranch, DesiredHeadSHA: desiredHeadSHA,
+		}
+		if err := s.publications.EnsureRequested(ctx, run.OrgID, publication); err != nil {
+			return fmt.Errorf("ensure recovered session publication: %w", err)
+		}
+		if publication.State.Terminal() {
+			return nil
+		}
+		if existing.Status == models.PullRequestStatusMerged || existing.Status == models.PullRequestStatusClosed {
+			return s.completeReconciledSessionPublication(ctx, *publication, *existing, "")
+		}
+		if existing.Status != models.PullRequestStatusOpen {
+			return fmt.Errorf("recovered pull request has unsupported status %q", existing.Status)
+		}
+		if err := s.publications.RecordBranchPublished(ctx, run.OrgID, run.ID, changeset.ID, headSHA); err != nil {
+			return fmt.Errorf("checkpoint recovered publication branch: %w", err)
+		}
+		if err := s.publications.RecordPRResolved(ctx, run.OrgID, run.ID, changeset.ID, existing.GitHubPRNumber, existing.GitHubPRURL); err != nil {
+			return fmt.Errorf("checkpoint recovered pull request: %w", err)
+		}
+		if err := s.publications.MarkRecorded(ctx, run.OrgID, run.ID, changeset.ID); err != nil {
+			return fmt.Errorf("checkpoint recovered pull request record: %w", err)
+		}
+	}
+
+	return s.completePublicationLocalState(ctx, run, changeset, headSHA)
 }
 
 // CreatePR opens a GitHub PR from a completed agent session by restoring the
@@ -602,6 +947,21 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		if param.ChangesetID != nil {
 			opts.ChangesetID = param.ChangesetID
 		}
+		if param.PublicationSource != "" {
+			opts.PublicationSource = param.PublicationSource
+		}
+		if param.PublicationQueue != "" {
+			opts.PublicationQueue = param.PublicationQueue
+		}
+		if len(param.PublicationRequestPayload) > 0 {
+			opts.PublicationRequestPayload = append(json.RawMessage(nil), param.PublicationRequestPayload...)
+		}
+		if !param.PublicationGenerationAt.IsZero() {
+			opts.PublicationGenerationAt = param.PublicationGenerationAt
+		}
+		if strings.TrimSpace(param.PublicationHeadBranch) != "" {
+			opts.PublicationHeadBranch = strings.TrimSpace(param.PublicationHeadBranch)
+		}
 	}
 	var targetChangeset *models.SessionChangeset
 	if s.changesets != nil {
@@ -616,6 +976,19 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			return nil, fmt.Errorf("resolve changeset for PR creation: %w", changesetErr)
 		}
 		targetChangeset = &changeset
+	}
+	var changesetID *uuid.UUID
+	if targetChangeset != nil {
+		changesetID = &targetChangeset.ID
+	}
+	publicationSource := publicationSourceForRun(run, opts.PublicationSource)
+	publicationQueue, err := publicationJobQueueForCreate(opts.PublicationQueue)
+	if err != nil {
+		return nil, err
+	}
+	publicationPayload, err := publicationRequestPayloadForCreate(run, targetChangeset, opts, publicationSource, publicationQueue)
+	if err != nil {
+		return nil, err
 	}
 	// Idempotency: a worker retry after a partial success (push landed, PR
 	// created, but state update crashed) would otherwise create a duplicate
@@ -640,13 +1013,19 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 				Str("pending_snapshot_key", *run.PendingSnapshotKey).
 				Msg("CreatePR retry hit existing PR with pending_snapshot_key still set; resume will block until cleared")
 		}
+		if targetChangeset != nil {
+			if recoveryErr := s.checkpointExistingPullRequestPublication(
+				ctx, run, targetChangeset, &existing, publicationSource, publicationQueue, publicationPayload, opts.PublicationGenerationAt,
+			); recoveryErr != nil {
+				return nil, recoveryErr
+			}
+			if s.publications != nil && run.RepositoryID != nil {
+				metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStateCompleted), string(publicationSource))
+			}
+		}
 		return &existing, nil
 	} else if !errors.Is(existingErr, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("check existing pull request: %w", existingErr)
-	}
-	var changesetID *uuid.UUID
-	if targetChangeset != nil {
-		changesetID = &targetChangeset.ID
 	}
 
 	if s.sandboxProvider == nil || s.snapshots == nil {
@@ -714,11 +1093,31 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	owner, repoName := splitRepo(repo.FullName)
 	defaultBranch := targetBranchForPR(run, &repo)
 
-	branchName := formatBranchName(run, issue)
+	branchName := publicationHeadBranch(run, issue, targetChangeset, opts.PublicationHeadBranch)
 	if targetChangeset != nil {
 		defaultBranch = targetChangeset.BaseBranch
-		if targetChangeset.WorkingBranch != nil && strings.TrimSpace(*targetChangeset.WorkingBranch) != "" {
-			branchName = *targetChangeset.WorkingBranch
+	}
+	if targetChangeset != nil && s.publications != nil {
+		opts.PublicationSource = publicationSource
+		publication := &models.SessionPublication{
+			OrgID:               run.OrgID,
+			SessionID:           run.ID,
+			ChangesetID:         targetChangeset.ID,
+			RepositoryID:        repo.ID,
+			Source:              publicationSource,
+			ReviewGateState:     publicationReviewGateForCreate(run),
+			JobQueue:            publicationQueue,
+			RequestPayload:      publicationPayload,
+			RequestGenerationAt: opts.PublicationGenerationAt,
+			BaseBranch:          defaultBranch,
+			HeadBranch:          branchName,
+			DesiredHeadSHA:      targetChangeset.HeadSHA,
+		}
+		if publicationErr := s.publications.EnsureRequested(ctx, run.OrgID, publication); publicationErr != nil {
+			return nil, fmt.Errorf("ensure publication operation: %w", publicationErr)
+		}
+		if gateErr := validatePublicationReviewGateForCreate(run, publication.ReviewGateState); gateErr != nil {
+			return nil, gateErr
 		}
 	}
 	commitMsg := formatCommitMessage(run, issue)
@@ -741,6 +1140,23 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	}
 	if err != nil {
 		return nil, err
+	}
+	if targetChangeset != nil && s.changesets != nil {
+		if checkpointErr := s.changesets.RecordPublishedHead(ctx, run.OrgID, run.ID, targetChangeset.ID, pushed.HeadSHA, false); checkpointErr != nil {
+			return nil, fmt.Errorf("checkpoint changeset published branch: %w", checkpointErr)
+		}
+	}
+	if targetChangeset != nil && s.publications != nil {
+		if publicationErr := s.publications.RecordBranchPublished(ctx, run.OrgID, run.ID, targetChangeset.ID, pushed.HeadSHA); publicationErr != nil {
+			return nil, fmt.Errorf("checkpoint published branch: %w", publicationErr)
+		}
+		metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStateBranchPublished), string(opts.PublicationSource))
+		s.logger.Info().
+			Str("session_id", run.ID.String()).
+			Str("changeset_id", targetChangeset.ID.String()).
+			Str("head_sha", pushed.HeadSHA).
+			Str("publish_outcome", string(pushed.Outcome)).
+			Msg("session publication branch checkpointed")
 	}
 	// Ensure the captured tar is removed on every error path between here
 	// and the dispatch site below — including PR-content generation, label
@@ -781,6 +1197,7 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 	if targetChangeset != nil && targetChangeset.StackedOnChangesetID != nil {
 		body = fmt.Sprintf("> Stacked pull request. Base: `%s`; target after the stack lands: `%s`.\n\n%s", targetChangeset.BaseBranch, targetChangeset.TargetBranch, body)
 	}
+	body = upsertPublicationMarker(body, run.ID, changesetID)
 
 	draft := orgSettings.PRDraftDefault
 	if opts.Draft != nil {
@@ -801,6 +1218,12 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			return nil, ErrNoChanges
 		}
 		return nil, fmt.Errorf("create pull request: %w", err)
+	}
+	if targetChangeset != nil && s.publications != nil {
+		if publicationErr := s.publications.RecordPRResolved(ctx, run.OrgID, run.ID, targetChangeset.ID, prNumber, prURL); publicationErr != nil {
+			return nil, fmt.Errorf("checkpoint resolved pull request: %w", publicationErr)
+		}
+		metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStatePRResolved), string(opts.PublicationSource))
 	}
 	if previewLink := s.prPreviewURL(ctx, run, &repo, owner, repoName, prNumber, branchName, pushed.HeadSHA, prURL); previewLink != "" {
 		updatedBody := upsertPRPreviewFooter(body, previewLink)
@@ -838,7 +1261,23 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		HeadRef:        &headRef,
 	}
 	if err := s.pullRequests.Create(ctx, pr); err != nil {
-		return nil, fmt.Errorf("store pull request: %w", err)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23505" ||
+			(pgErr.ConstraintName != "uq_pull_requests_github" && pgErr.ConstraintName != "uq_pull_requests_changeset") {
+			return nil, fmt.Errorf("store pull request: %w", err)
+		}
+		// A webhook can win the race after GitHub accepted the PR but before
+		// this worker persists it. Adopt the already-associated row instead of
+		// failing an otherwise successful idempotent publication.
+		if err := s.pullRequests.AssociateGitHubPullRequest(ctx, run.OrgID, pr); err != nil {
+			return nil, fmt.Errorf("recover pull request persistence race: %w", err)
+		}
+	}
+	if targetChangeset != nil && s.publications != nil {
+		if publicationErr := s.publications.MarkRecorded(ctx, run.OrgID, run.ID, targetChangeset.ID); publicationErr != nil {
+			return nil, fmt.Errorf("checkpoint recorded pull request: %w", publicationErr)
+		}
+		metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStateRecorded), string(opts.PublicationSource))
 	}
 	if s.readiness != nil {
 		var latest *models.PRReadinessRun
@@ -854,11 +1293,6 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			}
 		} else if readinessErr != nil && !errors.Is(readinessErr, pgx.ErrNoRows) {
 			s.logger.Warn().Err(readinessErr).Str("session_id", run.ID.String()).Msg("failed to load PR readiness for bypass attachment")
-		}
-	}
-	if targetChangeset != nil && s.changesets != nil {
-		if err := s.changesets.RecordPublishedHead(ctx, run.OrgID, run.ID, targetChangeset.ID, headSHA, true); err != nil {
-			s.logger.Warn().Err(err).Str("changeset_id", targetChangeset.ID.String()).Msg("failed to record published changeset head")
 		}
 	}
 	if !materializedTarget {
@@ -900,8 +1334,11 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 		s.linearMilestones(ctx, run.OrgID, run.ID, "pr_opened", prNumber)
 	}
 
-	if err := s.sessions.UpdateStatus(ctx, run.OrgID, run.ID, models.SessionStatusPRCreated); err != nil {
-		s.logger.Warn().Err(err).Str("run_id", run.ID.String()).Msg("failed to update agent run status")
+	if err := s.completePublicationLocalState(ctx, run, targetChangeset, headSHA); err != nil {
+		return nil, err
+	}
+	if targetChangeset != nil && s.publications != nil {
+		metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStateCompleted), string(publicationSource))
 	}
 
 	if issue != nil && run.PrimaryIssueID != nil {
@@ -909,7 +1346,6 @@ func (s *PRService) CreatePR(ctx context.Context, run *models.Session, params ..
 			s.logger.Warn().Err(err).Str("issue_id", run.PrimaryIssueID.String()).Msg("failed to update issue status")
 		}
 	}
-
 	return pr, nil
 }
 
@@ -948,10 +1384,20 @@ func (s *PRService) pushChangesetBranch(
 		expected = strings.TrimSpace(*changeset.ExpectedRemoteHeadSHA)
 	}
 	if remoteHead != expected {
-		if markErr := s.changesets.MarkExternalUpdateDetected(ctx, run.OrgID, run.ID, changeset.ID); markErr != nil {
-			s.logger.Warn().Err(markErr).Str("changeset_id", changeset.ID.String()).Msg("failed to mark unexpected remote changeset update")
+		localHeadCmd := fmt.Sprintf("git -C %s rev-parse HEAD", shellQuote(*changeset.WorktreePath))
+		var localHeadOut, localHeadErr bytes.Buffer
+		localExitCode, localExecErr := s.sandboxProvider.Exec(ctx, sandbox, localHeadCmd, &localHeadOut, &localHeadErr)
+		localHead := strings.TrimSpace(localHeadOut.String())
+		if localExecErr != nil || localExitCode != 0 || remoteHead == "" || remoteHead != localHead {
+			if markErr := s.changesets.MarkExternalUpdateDetected(ctx, run.OrgID, run.ID, changeset.ID); markErr != nil {
+				s.logger.Warn().Err(markErr).Str("changeset_id", changeset.ID.String()).Msg("failed to mark unexpected remote changeset update")
+			}
+			return nil, fmt.Errorf("%w: expected %q, found %q", db.ErrChangesetRemoteChanged, expected, remoteHead)
 		}
-		return nil, fmt.Errorf("%w: expected %q, found %q", db.ErrChangesetRemoteChanged, expected, remoteHead)
+		s.logger.Info().
+			Str("changeset_id", changeset.ID.String()).
+			Str("head_sha", remoteHead).
+			Msg("accepted materialized changeset branch already published at local HEAD")
 	}
 
 	commitMsgPath := pushCommitMsgPath(sandbox.HomeDir)
@@ -970,7 +1416,7 @@ func (s *PRService) pushChangesetBranch(
 	}
 	if exitCode != 0 {
 		if exitCode == pushExitNoChanges && remoteHead != "" {
-			return &pushResult{HeadSHA: remoteHead}, nil
+			return &pushResult{HeadSHA: remoteHead, Outcome: branchPublishOutcomeAlreadyAtHead}, nil
 		}
 		return nil, fmt.Errorf("changeset push failed (exit %d): %s", exitCode, strings.TrimSpace(stderr.String()))
 	}
@@ -978,7 +1424,7 @@ func (s *PRService) pushChangesetBranch(
 	if err != nil {
 		return nil, fmt.Errorf("parse changeset push head: %w", err)
 	}
-	return &pushResult{HeadSHA: headSHA}, nil
+	return &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}, nil
 }
 
 // CreateBranch pushes the session snapshot to the same remote branch that
@@ -1423,10 +1869,19 @@ func (s *PRService) SyncSessionTitle(ctx context.Context, session *models.Sessio
 // once it has finished streaming or has decided to abandon it.
 type pushResult struct {
 	HeadSHA              string
+	Outcome              branchPublishOutcome
 	CapturedSnapshotPath string
 	CapturedSnapshotSize int64
 	CapturedSnapshotErr  error
 }
+
+type branchPublishOutcome string
+
+const (
+	branchPublishOutcomeCreated       branchPublishOutcome = "created_remote_branch"
+	branchPublishOutcomeUpdated       branchPublishOutcome = "updated_remote_branch"
+	branchPublishOutcomeAlreadyAtHead branchPublishOutcome = "already_at_desired_head"
+)
 
 func (s *PRService) pushSessionBranch(
 	ctx context.Context,
@@ -1559,7 +2014,7 @@ func (s *PRService) pushSessionBranch(
 		return nil, fmt.Errorf("parse push head sha: %w", parseErr)
 	}
 
-	result := &pushResult{HeadSHA: headSHA}
+	result := &pushResult{HeadSHA: headSHA, Outcome: parsePushOutcome(stdout.String())}
 	// Capture a snapshot of the post-push sandbox before the deferred Destroy
 	// runs. This is the state we want a "Fix tests" / continue resume to see:
 	// clean working tree, HEAD at the just-pushed commit, working branch
@@ -1608,6 +2063,27 @@ func parsePushHeadSHA(stdout string) (string, error) {
 // scanner trims surrounding whitespace before matching.
 var pushHeadSHALineRE = regexp.MustCompile(`^` + regexp.QuoteMeta(pushHeadSHASentinel) + `([0-9a-f]{40})$`)
 
+func parsePushOutcome(stdout string) branchPublishOutcome {
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, pushOutcomeSentinel) {
+			continue
+		}
+		switch branchPublishOutcome(strings.TrimPrefix(line, pushOutcomeSentinel)) {
+		case branchPublishOutcomeCreated:
+			return branchPublishOutcomeCreated
+		case branchPublishOutcomeUpdated:
+			return branchPublishOutcomeUpdated
+		case branchPublishOutcomeAlreadyAtHead:
+			return branchPublishOutcomeAlreadyAtHead
+		}
+	}
+	// Older sandbox images and test providers only emit the head sentinel.
+	// Treat those successful pushes as an update for compatibility.
+	return branchPublishOutcomeUpdated
+}
+
 // captureSandboxSnapshot tars the sandbox via the provider and spools the
 // archive to a local temp file. Returns (path, size, nil) on success — the
 // caller owns the file and is responsible for os.Remove. On failure, the
@@ -1652,9 +2128,10 @@ func pushCommitMsgPath(homeDir string) string {
 	return root + "/" + pushCommitMsgFilename
 }
 
-// pushExitNoChanges is the sentinel exit code the push script uses when the
-// restored working tree has no uncommitted changes AND no commits ahead of
-// the remote tracking branch — i.e. there is nothing meaningful to push.
+// pushExitNoChanges is the sentinel exit code the push script uses only when
+// replaying the session diff onto the current base produces an empty patch.
+// A branch already present at the desired remote head is a successful,
+// idempotent publication and must not use this exit code.
 const pushExitNoChanges = 77
 
 // pushExitBranchDiverged is the sentinel exit code the push script uses when
@@ -1676,6 +2153,8 @@ const pushExitBaseUnrelated = 79
 // any line git itself prints.
 const pushHeadSHASentinel = "__143_HEAD_SHA="
 
+const pushOutcomeSentinel = "__143_PUSH_OUTCOME="
+
 const pushBranchDivergedMessage = "remote branch has changes that are not present in this session checkpoint; refusing to force push"
 
 const pushBaseUnrelatedMessage = "remote base branch could not be found or session changes could not be replayed onto the current base branch; refusing to push"
@@ -1687,10 +2166,11 @@ const pushBaseUnrelatedMessage = "remote base branch could not be found or sessi
 // .git/config) talking to the per-push host socket bridge — no token files,
 // no GIT_ASKPASS, no userinfo in the URL.
 //
-// On the success branch (push lands), the script prints
-// `__143_HEAD_SHA=<sha>` so the caller can persist the just-pushed commit
-// onto the PullRequest row without a second GitHub round-trip. The line is
-// only emitted on the success branch — the no-changes contract is unchanged.
+// On success, including an already-current remote branch, the script prints
+// `__143_PUSH_OUTCOME=<outcome>` and `__143_HEAD_SHA=<sha>` so the caller can
+// checkpoint the exact result without a second GitHub round-trip. The special
+// no-change exit is reserved for a session patch that becomes empty when
+// replayed onto the current base.
 //
 // Push uses --force-with-lease keyed on the SHA we just observed via
 // ls-remote. Rationale:
@@ -1734,11 +2214,6 @@ git add -A
 if ! git diff --cached --quiet; then
     git commit -F %[1]s
 fi
-if git rev-parse --abbrev-ref --symbolic-full-name @{u} >/dev/null 2>&1; then
-    if git merge-base --is-ancestor HEAD @{u}; then
-        exit %[5]d
-    fi
-fi
 if [ -n "$base_branch" ]; then
     base_sha=$(git ls-remote "$push_url" "$base_ref" | awk 'NR==1 {print $1}')
     if [ -z "$base_sha" ]; then
@@ -1770,8 +2245,13 @@ if [ -n "$base_branch" ]; then
     fi
 fi
 remote_sha=$(git ls-remote "$push_url" "$remote_ref" | awk 'NR==1 {print $1}')
+push_outcome=created_remote_branch
 if [ -n "$remote_sha" ]; then
+    push_outcome=updated_remote_branch
     git fetch --no-tags --quiet "$push_url" "+${remote_ref}:${remote_guard_ref}"
+    if [ "$remote_sha" = "$(git rev-parse HEAD)" ]; then
+        push_outcome=already_at_desired_head
+    fi
     if ! git merge-base --is-ancestor "$remote_guard_ref" HEAD; then
         if [ "$transplanted" = 1 ]; then
             if ! git diff --quiet "$original_head" "$remote_guard_ref"; then
@@ -1785,6 +2265,7 @@ if [ -n "$remote_sha" ]; then
     fi
 fi
 git push --force-with-lease="${remote_ref}:${remote_sha}" "$push_url" "HEAD:${remote_ref}"
+echo "%[15]s${push_outcome}"
 echo "%[10]s$(git rev-parse HEAD)"
 `
 
@@ -1813,6 +2294,7 @@ func buildPushScript(workDir, commitMsgPath, authorName, authorEmail, branchName
 		pushExitBaseUnrelated,
 		pushBranchDivergedMessage,
 		pushExitBranchDiverged,
+		pushOutcomeSentinel,
 	)
 }
 
@@ -1875,7 +2357,12 @@ type PullRequestEvent struct {
 		} `json:"head"`
 		Base struct {
 			Ref string `json:"ref"`
+			SHA string `json:"sha"`
 		} `json:"base"`
+		User struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"user"`
 	} `json:"pull_request"`
 	Repository struct {
 		ID            int64  `json:"id"`
@@ -1904,12 +2391,53 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.Number)
-	if err != nil {
-		// Not a 143-generated PR; repository auto-preview policies still apply.
-		return s.handleAutoPreviewEvent(ctx, event)
+	needsReconciliation := webhookPullRequestNeedsReconciliation(pr, err, event.Action)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if event.OwnerOrgID == nil || s.changesets == nil || s.sessions == nil || s.repos == nil {
+			// Preserve the historical best-effort behavior when the webhook
+			// cannot be tenant-scoped or reconciliation is not wired.
+			return s.handleAutoPreviewEvent(ctx, event)
+		}
+		return fmt.Errorf("look up webhook pull request: %w", err)
+	}
+	if needsReconciliation {
+		reconciled, ok, reconcileErr := s.reconcileWebhookPullRequest(ctx, event)
+		if reconcileErr != nil {
+			return reconcileErr
+		}
+		if !ok {
+			// Preserve lifecycle handling for a PR mirror that already exists but
+			// is not publication-owned. Closed events historically update these
+			// mirrors even when publication reconciliation is not configured or
+			// the ownership marker does not validate.
+			if err == nil && event.Action == "closed" {
+				// Continue below with the existing mirror.
+			} else {
+				// Not a 143-generated PR; repository auto-preview policies still apply.
+				return s.handleAutoPreviewEvent(ctx, event)
+			}
+		} else {
+			pr = reconciled
+		}
 	}
 
 	switch event.Action {
+	case "edited":
+		baseChanged := stringValue(pr.BaseSHA) != event.PR.Base.SHA
+		if err := s.pullRequests.UpdateGitHubSnapshot(ctx, pr.OrgID, pr.ID, db.PullRequestGitHubSnapshot{
+			GitHubPRURL: event.PR.HTMLURL,
+			Title:       event.PR.Title,
+			Body:        pullRequestWebhookOptionalString(event.PR.Body),
+			HeadSHA:     pullRequestWebhookOptionalString(event.PR.Head.SHA),
+			HeadRef:     pullRequestWebhookOptionalString(event.PR.Head.Ref),
+			BaseSHA:     pullRequestWebhookOptionalString(event.PR.Base.SHA),
+		}); err != nil {
+			return fmt.Errorf("refresh edited pull request snapshot: %w", err)
+		}
+		if baseChanged {
+			s.enqueuePullRequestStateSync(ctx, pr)
+		}
+		return nil
 	case "opened", "reopened", "ready_for_review", "synchronize":
 		s.enqueuePullRequestStateSync(ctx, pr)
 		return s.handleAutoPreviewEvent(ctx, event)
@@ -1925,6 +2453,170 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
+}
+
+func pullRequestWebhookOptionalString(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
+}
+
+func (s *PRService) reconcileWebhookPullRequest(ctx context.Context, event PullRequestEvent) (models.PullRequest, bool, error) {
+	if event.OwnerOrgID == nil || s.changesets == nil || s.sessions == nil || s.repos == nil || s.pullRequests == nil || s.publications == nil {
+		return models.PullRequest{}, false, nil
+	}
+	if !publicationWebhookReconciliationAction(event.Action) {
+		return models.PullRequest{}, false, nil
+	}
+	orgID := *event.OwnerOrgID
+	repo, err := s.repos.GetByFullName(ctx, orgID, event.Repository.FullName)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.PullRequest{}, false, nil
+		}
+		return models.PullRequest{}, false, fmt.Errorf("resolve webhook repository for PR reconciliation: %w", err)
+	}
+
+	var changeset models.SessionChangeset
+	markerSessionID, markerChangesetID, hasMarker := parsePublicationMarker(event.PR.Body)
+	if hasMarker {
+		changeset, err = s.changesets.GetByID(ctx, orgID, markerSessionID, markerChangesetID)
+	} else if strings.HasPrefix(event.PR.Head.Ref, "143/") {
+		changeset, err = s.changesets.GetByWorkingBranch(ctx, orgID, repo.ID, event.PR.Head.Ref)
+	} else {
+		return models.PullRequest{}, false, nil
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return models.PullRequest{}, false, nil
+		}
+		return models.PullRequest{}, false, fmt.Errorf("resolve webhook changeset for PR reconciliation: %w", err)
+	}
+	session, err := s.sessions.GetByID(ctx, orgID, changeset.SessionID)
+	if err != nil {
+		return models.PullRequest{}, false, fmt.Errorf("resolve webhook session for PR reconciliation: %w", err)
+	}
+	if session.RepositoryID == nil || *session.RepositoryID != repo.ID {
+		return models.PullRequest{}, false, nil
+	}
+	if !publicationWebhookOwnsChangesetBranch(event, changeset) {
+		s.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Str("changeset_id", changeset.ID.String()).
+			Str("expected_head_ref", stringValue(changeset.WorkingBranch)).
+			Str("webhook_head_ref", event.PR.Head.Ref).
+			Msg("ignored publication marker whose pull request head does not match the owned changeset branch")
+		return models.PullRequest{}, false, nil
+	}
+	if existing, existingErr := s.pullRequests.GetByChangesetID(ctx, orgID, session.ID, changeset.ID); existingErr == nil {
+		if existing.GitHubRepo == event.Repository.FullName && existing.GitHubPRNumber == event.Number {
+			return existing, true, nil
+		}
+		s.logger.Warn().
+			Str("session_id", session.ID.String()).
+			Str("changeset_id", changeset.ID.String()).
+			Int("existing_pr_number", existing.GitHubPRNumber).
+			Int("webhook_pr_number", event.Number).
+			Msg("ignored second pull request association for an owned changeset")
+		return models.PullRequest{}, false, nil
+	} else if !errors.Is(existingErr, pgx.ErrNoRows) {
+		return models.PullRequest{}, false, fmt.Errorf("check existing changeset pull request association: %w", existingErr)
+	}
+
+	body := event.PR.Body
+	headSHA := event.PR.Head.SHA
+	headRef := event.PR.Head.Ref
+	baseSHA := event.PR.Base.SHA
+	pr := models.PullRequest{
+		SessionID:      &session.ID,
+		ChangesetID:    &changeset.ID,
+		OrgID:          orgID,
+		GitHubPRNumber: event.Number,
+		GitHubPRURL:    event.PR.HTMLURL,
+		GitHubRepo:     event.Repository.FullName,
+		Title:          event.PR.Title,
+		Body:           &body,
+		Status:         models.PullRequestStatusOpen,
+		ReviewStatus:   models.PullRequestReviewStatusPending,
+		AuthoredBy:     gitIdentitySourceForGitHubAuthor(event.PR.User.Login, event.PR.User.Type),
+		HeadSHA:        &headSHA,
+		HeadRef:        &headRef,
+		BaseSHA:        &baseSHA,
+	}
+	var publication *models.SessionPublication
+	if s.publications != nil {
+		reviewGate := models.SessionPublicationReviewGateNotRequired
+		if session.AutomationRunID != nil {
+			reviewGate = models.SessionPublicationReviewGatePending
+			s.logger.Warn().
+				Str("session_id", session.ID.String()).
+				Int("pr_number", event.Number).
+				Msg("reconciled automation pull request that was opened outside the publication review gate")
+		}
+		publication = &models.SessionPublication{
+			OrgID:            orgID,
+			SessionID:        session.ID,
+			ChangesetID:      changeset.ID,
+			RepositoryID:     repo.ID,
+			Source:           models.SessionPublicationSourceWebhook,
+			ReviewGateState:  reviewGate,
+			BaseBranch:       event.PR.Base.Ref,
+			HeadBranch:       event.PR.Head.Ref,
+			DesiredHeadSHA:   &headSHA,
+			PublishedHeadSHA: &headSHA,
+		}
+		if err := s.publications.EnsureRequested(ctx, orgID, publication); err != nil {
+			return models.PullRequest{}, false, err
+		}
+	}
+	if err := s.pullRequests.AssociateGitHubPullRequest(ctx, orgID, &pr); err != nil {
+		return models.PullRequest{}, false, err
+	}
+	if publication != nil {
+		if err := s.publications.RecordBranchPublished(ctx, orgID, session.ID, changeset.ID, headSHA); err != nil {
+			return models.PullRequest{}, false, err
+		}
+		if err := s.publications.RecordPRResolved(ctx, orgID, session.ID, changeset.ID, event.Number, event.PR.HTMLURL); err != nil {
+			return models.PullRequest{}, false, err
+		}
+		if err := s.publications.MarkRecorded(ctx, orgID, session.ID, changeset.ID); err != nil {
+			return models.PullRequest{}, false, err
+		}
+	}
+	if err := s.changesets.RecordPublishedHead(ctx, orgID, session.ID, changeset.ID, headSHA, true); err != nil {
+		return models.PullRequest{}, false, fmt.Errorf("update webhook-reconciled changeset: %w", err)
+	}
+	if err := s.sessions.UpdateStatus(ctx, orgID, session.ID, models.SessionStatusPRCreated); err != nil {
+		return models.PullRequest{}, false, fmt.Errorf("update webhook-reconciled session status: %w", err)
+	}
+	if publication != nil {
+		if err := s.publications.MarkCompleted(ctx, orgID, session.ID, changeset.ID); err != nil {
+			return models.PullRequest{}, false, err
+		}
+		metrics.RecordSessionPublicationTransition(ctx, string(models.SessionPublicationStateCompleted), string(models.SessionPublicationSourceWebhook))
+	}
+	s.logger.Info().
+		Str("session_id", session.ID.String()).
+		Str("changeset_id", changeset.ID.String()).
+		Int("pr_number", event.Number).
+		Str("head_ref", event.PR.Head.Ref).
+		Msg("reconciled out-of-band GitHub pull request")
+	return pr, true, nil
+}
+
+func publicationWebhookReconciliationAction(action string) bool {
+	switch action {
+	case "opened", "reopened", "ready_for_review", "synchronize", "closed":
+		return true
+	default:
+		return false
+	}
+}
+
+func webhookPullRequestNeedsReconciliation(pr models.PullRequest, err error, action string) bool {
+	return errors.Is(err, pgx.ErrNoRows) ||
+		(err == nil && pr.SessionID == nil && publicationWebhookReconciliationAction(action))
 }
 
 func (s *PRService) enqueuePRPreviewSurfaceSyncForRepo(ctx context.Context, repo models.Repository, event PullRequestEvent) {
@@ -2521,10 +3213,11 @@ func (s *PRService) teardownPRPreview(ctx context.Context, pr models.PullRequest
 
 // PullRequestReviewEvent represents a GitHub pull_request_review webhook event.
 type PullRequestReviewEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	DeliveryID string     `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
@@ -2536,6 +3229,8 @@ type PullRequestReviewEvent struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"review"`
 	PullRequest struct {
 		Number  int    `json:"number"`
@@ -2556,6 +3251,16 @@ type PullRequestReviewEvent struct {
 
 // HandlePullRequestReviewEvent processes pull_request_review webhook events.
 func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event PullRequestReviewEvent) error {
+	if (event.Action == "submitted" && event.Review.Body != "") || event.Action == "dismissed" {
+		appID, appSlug := feedbackGitHubAppIdentity(event.Review.PerformedViaGitHubApp)
+		body := event.Review.Body
+		if event.Action == "dismissed" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewBody, ProviderObjectID: event.Review.ID, GitHubReviewID: &event.Review.ID, AuthorLogin: event.Review.User.Login, AuthorType: event.Review.User.Type, AuthorAssociation: event.Review.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "submitted" {
 		return nil
 	}
@@ -2629,10 +3334,11 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 
 // PullRequestReviewCommentEvent represents a GitHub pull_request_review_comment webhook event.
 type PullRequestReviewCommentEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	DeliveryID string     `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
@@ -2646,6 +3352,13 @@ type PullRequestReviewCommentEvent struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		InReplyToID           *int64                     `json:"in_reply_to_id"`
+		Line                  *int                       `json:"line"`
+		Side                  string                     `json:"side"`
+		DiffHunk              string                     `json:"diff_hunk"`
+		CommitID              string                     `json:"commit_id"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	PullRequest struct {
 		Number  int    `json:"number"`
@@ -2667,6 +3380,20 @@ type PullRequestReviewCommentEvent struct {
 // HandlePullRequestReviewCommentEvent processes pull_request_review_comment webhook events.
 // These are inline comments on specific diff lines.
 func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, event PullRequestReviewCommentEvent) error {
+	if event.Action == "created" || event.Action == "edited" || event.Action == "deleted" {
+		rootID := event.Comment.ID
+		if event.Comment.InReplyToID != nil {
+			rootID = *event.Comment.InReplyToID
+		}
+		appID, appSlug := feedbackGitHubAppIdentity(event.Comment.PerformedViaGitHubApp)
+		body := event.Comment.Body
+		if event.Action == "deleted" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.PullRequest.Number, Surface: models.PRFeedbackSurfaceReviewComment, ProviderObjectID: event.Comment.ID, GitHubReviewID: &event.Comment.PullRequestReviewID, ThreadRootID: &rootID, InReplyToID: event.Comment.InReplyToID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body, Path: &event.Comment.Path, Line: event.Comment.Line, Side: &event.Comment.Side, DiffHunk: &event.Comment.DiffHunk, CommitSHA: &event.Comment.CommitID}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "created" {
 		return nil
 	}
@@ -2722,10 +3449,11 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 }
 
 type IssueCommentEvent struct {
-	Action     string     `json:"action"`
-	OwnerOrgID *uuid.UUID `json:"-"`
-	DeliveryID string     `json:"-"`
-	Sender     struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	DeliveryID       string                  `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"sender"`
@@ -2736,6 +3464,8 @@ type IssueCommentEvent struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
+		AuthorAssociation     string                     `json:"author_association"`
+		PerformedViaGitHubApp *FeedbackGitHubAppIdentity `json:"performed_via_github_app"`
 	} `json:"comment"`
 	Issue struct {
 		Number      int       `json:"number"`
@@ -2749,7 +3479,58 @@ type IssueCommentEvent struct {
 	} `json:"repository"`
 }
 
+type PullRequestReviewThreadEvent struct {
+	Action           string                  `json:"action"`
+	OwnerOrgID       *uuid.UUID              `json:"-"`
+	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	Thread           struct {
+		Comments struct {
+			Nodes []struct {
+				DatabaseID int64 `json:"databaseId"`
+			} `json:"nodes"`
+		} `json:"comments"`
+	} `json:"thread"`
+	PullRequest struct {
+		Number int `json:"number"`
+	} `json:"pull_request"`
+	Repository struct {
+		ID       int64  `json:"id"`
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+func (s *PRService) HandlePullRequestReviewThreadEvent(ctx context.Context, event PullRequestReviewThreadEvent) error {
+	if event.Action != "resolved" || s.feedback == nil || event.OwnerOrgID == nil || len(event.Thread.Comments.Nodes) == 0 {
+		return nil
+	}
+	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	repo, err := s.repos.GetByOrgAndGitHubIDAnyStatus(ctx, pr.OrgID, event.Repository.ID)
+	if err != nil {
+		return err
+	}
+	deliveryID := event.FeedbackMetadata.DeliveryID
+	delivery := &models.WebhookDelivery{OrgID: pr.OrgID, IntegrationID: repo.IntegrationID, Provider: "github", DeliveryID: &deliveryID, EventType: event.FeedbackMetadata.EventType, Payload: event.FeedbackMetadata.Payload, Headers: event.FeedbackMetadata.Headers, Status: "processed"}
+	_, err = s.feedback.CancelPendingThreadWithDelivery(ctx, delivery, pr.ID, event.Thread.Comments.Nodes[0].DatabaseID)
+	return err
+}
+
 func (s *PRService) HandleIssueCommentEvent(ctx context.Context, event IssueCommentEvent) error {
+	if (event.Action == "created" || event.Action == "edited" || event.Action == "deleted") && event.Issue.PullRequest != nil {
+		appID, appSlug := feedbackGitHubAppIdentity(event.Comment.PerformedViaGitHubApp)
+		body := event.Comment.Body
+		if event.Action == "deleted" {
+			body = ""
+		}
+		if err := s.ingestPRFeedback(ctx, normalizedPRFeedback{Metadata: event.FeedbackMetadata, OwnerOrgID: event.OwnerOrgID, RepositoryID: event.Repository.ID, Repository: event.Repository.FullName, PullRequestNumber: event.Issue.Number, Surface: models.PRFeedbackSurfaceIssueComment, ProviderObjectID: event.Comment.ID, AuthorLogin: event.Comment.User.Login, AuthorType: event.Comment.User.Type, AuthorAssociation: event.Comment.AuthorAssociation, GitHubAppID: appID, GitHubAppSlug: appSlug, Body: body}); err != nil {
+			return err
+		}
+	}
 	if event.Action != "created" || event.Issue.PullRequest == nil {
 		return nil
 	}
@@ -2813,6 +3594,9 @@ func (s *PRService) populateGitHubAutomationHead(ctx context.Context, repo *mode
 	req.HeadSHA = head.SHA
 	if req.PullRequestURL == "" {
 		req.PullRequestURL = head.HTMLURL
+	}
+	if req.BaseBranch == "" {
+		req.BaseBranch = head.BaseBranch
 	}
 }
 
@@ -2921,6 +3705,7 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 			Path:       path,
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
+			Header:     resp.Header.Clone(),
 		}
 	}
 
@@ -2967,6 +3752,7 @@ func (s *PRService) doGitHubGraphQL(ctx context.Context, token, query string, va
 			Path:       "/graphql",
 			StatusCode: resp.StatusCode,
 			Body:       respBody,
+			Header:     resp.Header.Clone(),
 		}
 	}
 
@@ -2981,6 +3767,7 @@ type GitHubAPIError struct {
 	Path       string
 	StatusCode int
 	Body       []byte
+	Header     http.Header
 }
 
 func (e *GitHubAPIError) Error() string {
@@ -3188,11 +3975,12 @@ func (s *PRService) CommitExists(ctx context.Context, token, owner, repo, sha st
 // PullRequestHead is the small PR shape branch previews need to resolve a
 // durable PR URL into the current head branch and commit.
 type PullRequestHead struct {
-	Number  int
-	HTMLURL string
-	State   string
-	Branch  string
-	SHA     string
+	Number     int
+	HTMLURL    string
+	State      string
+	Branch     string
+	SHA        string
+	BaseBranch string
 }
 
 // GetPullRequestHead returns the current head branch/SHA for a pull request.
@@ -3210,6 +3998,9 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 			Ref string `json:"ref"`
 			SHA string `json:"sha"`
 		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
 	}
 	if err := json.Unmarshal(body, &details); err != nil {
 		return PullRequestHead{}, fmt.Errorf("decode pull request head: %w", err)
@@ -3218,11 +4009,12 @@ func (s *PRService) GetPullRequestHead(ctx context.Context, token, owner, repo s
 		return PullRequestHead{}, fmt.Errorf("pull request head missing branch or sha")
 	}
 	return PullRequestHead{
-		Number:  details.Number,
-		HTMLURL: details.HTMLURL,
-		State:   details.State,
-		Branch:  details.Head.Ref,
-		SHA:     details.Head.SHA,
+		Number:     details.Number,
+		HTMLURL:    details.HTMLURL,
+		State:      details.State,
+		Branch:     details.Head.Ref,
+		SHA:        details.Head.SHA,
+		BaseBranch: details.Base.Ref,
 	}, nil
 }
 
@@ -3768,10 +4560,19 @@ func (s *PRService) createOrGetPullRequest(ctx context.Context, token, owner, re
 	return 0, "", err
 }
 
+var errNoPullRequestForHead = errors.New("no pull request found for head branch")
+
 func (s *PRService) findOpenPullRequestByHead(ctx context.Context, token, owner, repo, head string) (int, string, error) {
+	return s.findPullRequestByHead(ctx, token, owner, repo, head, "open")
+}
+
+func (s *PRService) findPullRequestByHead(ctx context.Context, token, owner, repo, head, state string) (int, string, error) {
+	if state != "open" && state != "closed" && state != "all" {
+		return 0, "", fmt.Errorf("unsupported pull request lookup state %q", state)
+	}
 	query := url.Values{}
 	query.Set("head", owner+":"+head)
-	query.Set("state", "open")
+	query.Set("state", state)
 
 	path := fmt.Sprintf("/repos/%s/%s/pulls?%s", owner, repo, query.Encode())
 	respBody, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
@@ -3787,7 +4588,7 @@ func (s *PRService) findOpenPullRequestByHead(ctx context.Context, token, owner,
 		return 0, "", fmt.Errorf("decode existing pull request lookup: %w", err)
 	}
 	if len(pulls) == 0 {
-		return 0, "", fmt.Errorf("find existing pull request by head: no open pull request found for %s", head)
+		return 0, "", fmt.Errorf("find existing pull request by head: no %s pull request found for %s: %w", state, head, errNoPullRequestForHead)
 	}
 	return pulls[0].Number, pulls[0].HTMLURL, nil
 }
@@ -3922,6 +4723,22 @@ func formatBranchName(session *models.Session, issue *models.Issue) string {
 		}
 	}
 	return fmt.Sprintf("143/%s/%s", short, slug)
+}
+
+// publicationHeadBranch gives a branch already recorded for the publication
+// attempt precedence over mutable session state. Otherwise, a concurrent
+// changeset update could make CreatePR push a different branch from the one
+// stored in session_publications.
+func publicationHeadBranch(session *models.Session, issue *models.Issue, changeset *models.SessionChangeset, prepared string) string {
+	if branchName := strings.TrimSpace(prepared); branchName != "" {
+		return branchName
+	}
+	if changeset != nil && changeset.WorkingBranch != nil {
+		if branchName := strings.TrimSpace(*changeset.WorkingBranch); branchName != "" {
+			return branchName
+		}
+	}
+	return strings.TrimSpace(formatBranchName(session, issue))
 }
 
 func formatPRTitle(session *models.Session, issue *models.Issue) string {

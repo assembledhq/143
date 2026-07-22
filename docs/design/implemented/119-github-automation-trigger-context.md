@@ -17,7 +17,7 @@ Webhook handlers copy GitHub's `X-GitHub-Delivery` header into the typed event p
 
 Before creating a run, the trigger service trims the fields, constructs a canonical PR URL when GitHub omitted one, infers `Bot` for logins ending in `[bot]`, and scopes the provider event key to the pull request as `<delivery-id>:pr:<number>`. The suffix is required because one check delivery can reference multiple pull requests while the run idempotency index is keyed by automation and provider event ID.
 
-Some GitHub payloads, notably `issue_comment`, identify the pull request but omit its head revision. After resolving the repository, `PRService` uses its installation token to fetch the current pull request head before triggering the automation. This enrichment is best-effort: an API failure is logged, but the webhook event still triggers rather than being discarded.
+Some GitHub payloads, notably `issue_comment`, identify the pull request but omit its head revision and base branch. After resolving the repository, `PRService` uses its installation token to fetch the current pull request head and base before triggering the automation. This enrichment is best-effort: an API failure is logged, but the webhook event still triggers rather than being discarded.
 
 The normalized fields are stored in the existing run columns and snapshots:
 
@@ -25,6 +25,8 @@ The normalized fields are stored in the existing run columns and snapshots:
 - `trigger_context` carries provider, event, provider event ID, logical event ID, and feedback-dedupe group;
 - `config_snapshot.github` carries the target and actor metadata used to build the run;
 - `goal_snapshot` includes the PR title and head SHA so the agent sees the same revision context users see.
+
+Run creation and job enqueue happen in one database transaction. A transient queue write failure therefore cannot leave behind a pending run whose durable provider-event key suppresses every subsequent webhook retry.
 
 No new table or migration is required.
 

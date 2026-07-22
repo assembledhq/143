@@ -272,15 +272,15 @@ export function PRHealthBanner({
                         <Button
                           size="xs"
                           variant="default"
-                          className={cn(canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
+                          className={cn("shadow-none", canShowMergeWhenReady && "rounded-r-none border-r border-primary-foreground/20")}
                           disabled={mergeAction.disabled}
                           title={mergeAction.disabledReason ?? "Merge PR (p m)"}
                           onClick={onMerge}
                         >
                           {mergeAction.spinning ? (
-                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
                           ) : (
-                            <GitMerge className="mr-1.5 h-3.5 w-3.5" />
+                            <GitMerge className="h-3.5 w-3.5" />
                           )}
                           {mergeAction.label}
                         </Button>
@@ -291,7 +291,7 @@ export function PRHealthBanner({
                             <Button
                               size="icon-xs"
                               variant="default"
-                              className="rounded-l-none"
+                              className="w-8 rounded-l-none shadow-none sm:w-6"
                               disabled={mergeWhenReadyAction.disabled}
                               title={mergeWhenReadyAction.disabledReason ?? "More merge actions"}
                               aria-label="More merge actions"
@@ -416,9 +416,9 @@ export function PRHealthBanner({
                         onClick={reviewAction.onClick}
                       >
                         {reviewAction.spinning ? (
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         ) : (
-                          <ClipboardList className="mr-1.5 h-3.5 w-3.5" />
+                          <ClipboardList className="h-3.5 w-3.5" />
                         )}
                         Review
                       </Button>

@@ -31,6 +31,7 @@ type executorRuntimeExecutorStore interface {
 }
 
 type executorRuntimeJobStore interface {
+	retryWindowLeaseStore
 	GetRunningForSessionExecutor(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID) (*models.Job, bool, error)
 	RenewLeaseForSessionExecutor(ctx context.Context, orgID, jobID, lockToken, executorID uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
 	RenewLease(ctx context.Context, jobID, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, bool, error)
@@ -401,8 +402,16 @@ func (r *SessionExecutorRuntime) finishAttempt(ctx context.Context, handlerCtx c
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, err.Error())
 			return nil
 		}
-		if !retryable.BypassMaxRetryDuration && time.Since(job.CreatedAt) > maxRetryableDuration {
-			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", maxRetryableDuration, err)
+		now := time.Now()
+		retryWindowStartedAt, ok, startErr := ensureRetryWindowStartedAt(writeCtx, r.Jobs, job, retryable, now)
+		if startErr != nil {
+			return fmt.Errorf("persist session executor retry window start: %w", startErr)
+		}
+		if !ok {
+			return ErrExecutorLostLease
+		}
+		if timedOut, retryWindow := retryableDurationExceeded(retryWindowStartedAt, retryable, now); timedOut {
+			timeoutErr := fmt.Errorf("retryable job timed out after %s: %w", retryWindow, err)
 			r.markJobDeadLetter(writeCtx, handlerCtx, executor, job, timeoutErr)
 			r.markExecutorTerminal(writeCtx, executor, models.SessionExecutorStatusFailed, 1, timeoutErr.Error())
 			return nil

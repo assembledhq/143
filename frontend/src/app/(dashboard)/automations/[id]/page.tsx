@@ -64,12 +64,11 @@ import {
   githubEventsToAutomationProductTriggers,
   type AutomationProductTrigger,
 } from "@/lib/automation-triggers";
-import {
-  AUTOMATION_GOAL_MAX_LENGTH,
-  automationGoalLengthState,
-} from "@/lib/automation-validation";
+import { automationGoalLengthState } from "@/lib/automation-validation";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
+import { useAutosave, type AutosaveStatus } from "@/hooks/useAutosave";
+import { useDebouncedTextField } from "@/hooks/useDebouncedTextField";
 import type {
   AgentCapabilityDefinition,
   AgentCapabilityGrant,
@@ -85,7 +84,7 @@ import {
   toCodingAgentReasoningEffort,
   type CodingAgentReasoningEffort,
 } from "@/lib/coding-agent-reasoning";
-import { RunsTab } from "./runs-tab";
+import { DecisionHistory } from "./decision-history";
 import {
   browserTimezone,
   formatAutomationSchedule,
@@ -135,9 +134,6 @@ function SettingsTab({
   canManage: boolean;
 }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(automation.name);
-  const [goal, setGoal] = useState(automation.goal);
-  const [iconValue, setIconValue] = useState(automation.icon_value || "⚙️");
   const [scope, setScope] = useState(automation.scope ?? "");
   const [intervalValue, setIntervalValue] = useState(
     String(automation.interval_value ?? 1),
@@ -146,9 +142,9 @@ function SettingsTab({
     toIntervalUnit(automation.interval_unit ?? "days", "days"),
   );
   // Form state is seeded from the automation prop on first mount only. The
-  // parent polls every 10s and will refetch into a new `automation` object —
-  // SettingsTab is keyed on `automation.updated_at` (see AutomationDetailPage
-  // below) so a remote change remounts this subtree and reseeds the form.
+  // parent polls every 10s and may refetch into a new `automation` object.
+  // Keep this local draft mounted while the sheet is open so unrelated inline
+  // title/goal autosaves cannot discard mechanics edits in progress.
   const initialRunAt = splitRunAt(automation.interval_run_at ?? "09:00");
   const [intervalRunHour, setIntervalRunHour] = useState(initialRunAt.hour);
   const [intervalRunMinute, setIntervalRunMinute] = useState(
@@ -258,7 +254,6 @@ function SettingsTab({
     [automationCapabilityResponse?.data?.capabilities, capabilityCatalog],
   );
   const capabilityGrants = capabilityDraft ?? savedCapabilityGrants;
-  const goalLength = automationGoalLengthState(goal);
   const parsedIntervalValue = Number(intervalValue.trim());
   const intervalValueIsValid =
     intervalValue.trim() !== "" &&
@@ -298,10 +293,6 @@ function SettingsTab({
   const updateMutation = useMutation({
     mutationFn: () =>
       api.automations.update(automation.id, {
-        name: name.trim(),
-        goal: goal.trim(),
-        icon_type: "emoji",
-        icon_value: iconValue,
         scope: scope.trim() || undefined,
         schedule_type: scheduleEnabled ? "interval" : "none",
         ...(scheduleEnabled
@@ -344,87 +335,6 @@ function SettingsTab({
 
   return (
     <div className="space-y-4 rounded-lg border border-border bg-card p-5">
-      <div
-        data-testid="automation-settings-identity-row"
-        className="grid grid-cols-[4.75rem_minmax(0,1fr)] items-end gap-3"
-      >
-        <div className="space-y-1.5">
-          <Label>Emoji</Label>
-          <AutomationEmojiPicker
-            value={iconValue}
-            onChange={setIconValue}
-            className="w-16"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="name">Name</Label>
-          <Input
-            id="name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-3">
-          <Label htmlFor="goal">Goal</Label>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            {canManage && (
-              <AutomationGoalImprovementControl
-                automationId={automation.id}
-                name={name}
-                goal={goal}
-                repositoryId={automation.repository_id ?? undefined}
-                scope={scope.trim() || undefined}
-                disabled={updateMutation.isPending}
-                onSavedApply={(updated) => {
-                  setGoal(updated.goal);
-                  upsertAutomationInListCaches(queryClient, updated);
-                  queryClient.setQueryData(
-                    queryKeys.automations.detail(updated.id),
-                    { data: updated },
-                  );
-                  queryClient.invalidateQueries({
-                    queryKey: queryKeys.automations.detail(updated.id),
-                  });
-                  queryClient.invalidateQueries({
-                    queryKey: queryKeys.automations.all,
-                  });
-                }}
-              />
-            )}
-            <span
-              className={cn(
-                "text-xs tabular-nums",
-                goalLength.isTooLong
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-            >
-              {goalLength.countText}
-            </span>
-          </div>
-        </div>
-        <AutomationGoalEditor
-          id="goal"
-          value={goal}
-          onChange={setGoal}
-          repositoryId={automation.repository_id ?? undefined}
-          branch={baseBranch?.trim() || automation.base_branch || undefined}
-          agentType={effectiveAgentType}
-          rows={9}
-          ariaInvalid={goalLength.isTooLong}
-        />
-        <p
-          className={cn(
-            "text-xs",
-            goalLength.isTooLong ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {goalLength.message ??
-            `Up to ${AUTOMATION_GOAL_MAX_LENGTH.toLocaleString("en-US")} characters.`}
-        </p>
-      </div>
       <div className="space-y-1.5">
         <Label htmlFor="scope">
           Scope{" "}
@@ -825,7 +735,6 @@ function SettingsTab({
             onClick={() => updateMutation.mutate()}
             disabled={
               updateMutation.isPending ||
-              goalLength.isTooLong ||
               !hasTrigger ||
               (scheduleEnabled && !intervalValueIsValid)
             }
@@ -844,6 +753,207 @@ function SettingsTab({
         </div>
       )}
     </div>
+  );
+}
+
+type AutomationTextPatch = Partial<Pick<Automation, "name" | "goal">>;
+const coalesceAutomationTextPatches = (
+  queued: AutomationTextPatch,
+  incoming: AutomationTextPatch,
+): AutomationTextPatch => ({ ...queued, ...incoming });
+
+function AutosaveIndicator({ status }: { status: AutosaveStatus }) {
+  if (status === "idle") return null;
+
+  return (
+    <span
+      role="status"
+      className={cn(
+        "text-xs",
+        status === "error" ? "text-destructive" : "text-muted-foreground",
+      )}
+    >
+      {status === "saving"
+        ? "Saving…"
+        : status === "saved"
+          ? "Saved"
+          : "Couldn’t save"}
+    </span>
+  );
+}
+
+function InlineAutomationText({
+  automation,
+  canManage,
+  field,
+}: {
+  automation: Automation;
+  canManage: boolean;
+  field: "name" | "goal";
+}) {
+  const queryClient = useQueryClient();
+  const detailKey = queryKeys.automations.detail(automation.id);
+  const autosave = useAutosave<AutomationTextPatch>({
+    queryKey: detailKey,
+    debounceMs: 0,
+    mutationFn: async (patch) => {
+      const response = await api.automations.update(automation.id, patch);
+      upsertAutomationInListCaches(queryClient, response.data);
+      return response;
+    },
+    applyOptimistic: (previous, patch) => {
+      const response = previous as { data?: Automation } | undefined;
+      if (!response?.data) return previous;
+      return { ...response, data: { ...response.data, ...patch } };
+    },
+    coalesce: coalesceAutomationTextPatches,
+    errorMessage: "Couldn’t save automation text. Your change was reverted.",
+  });
+  const nameField = useDebouncedTextField({
+    serverValue: automation.name,
+    onCommit: (name) => autosave.save({ name: name.trim() }),
+    // A required field: an empty title is rejected (never saved) and reverts to
+    // the last saved name on blur rather than being left silently blank.
+    rejectValue: (name) => name.trim() === "",
+  });
+  const goalField = useDebouncedTextField({
+    serverValue: automation.goal,
+    onCommit: (goal) => {
+      if (!automationGoalLengthState(goal).isTooLong) autosave.save({ goal });
+    },
+  });
+  const goalLength = automationGoalLengthState(goalField.value);
+
+  if (field === "name") {
+    return (
+      <span className="flex min-w-0 flex-1 items-center gap-2">
+        {canManage ? (
+          <>
+            <span className="sr-only">{automation.name}</span>
+            <Input
+              aria-label="Automation title"
+              value={nameField.value}
+              onChange={(event) => nameField.onChange(event.target.value)}
+              onBlur={nameField.onBlur}
+              className="h-auto border-transparent bg-transparent px-1 py-0 text-2xl font-semibold tracking-tight shadow-none hover:border-border focus-visible:border-border md:text-3xl"
+            />
+          </>
+        ) : (
+          <span className="min-w-0 truncate">{automation.name}</span>
+        )}
+        <AutosaveIndicator status={autosave.status} />
+      </span>
+    );
+  }
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-5">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-foreground">Goal</h2>
+        <div className="flex items-center gap-2">
+          {canManage ? (
+            <AutomationGoalImprovementControl
+              automationId={automation.id}
+              name={nameField.value}
+              goal={goalField.value}
+              repositoryId={automation.repository_id ?? undefined}
+              scope={automation.scope ?? undefined}
+              onSavedApply={(updated) => {
+                upsertAutomationInListCaches(queryClient, updated);
+                queryClient.setQueryData(detailKey, { data: updated });
+                queryClient.invalidateQueries({ queryKey: detailKey });
+                queryClient.invalidateQueries({
+                  queryKey: queryKeys.automations.all,
+                });
+              }}
+            />
+          ) : null}
+          <AutosaveIndicator status={autosave.status} />
+        </div>
+      </div>
+      {canManage ? (
+        <>
+          <Label htmlFor="automation-goal" className="sr-only">
+            Goal
+          </Label>
+          <AutomationGoalEditor
+            id="automation-goal"
+            value={goalField.value}
+            onChange={goalField.onChange}
+            onBlur={goalField.onBlur}
+            repositoryId={automation.repository_id ?? undefined}
+            branch={automation.base_branch || undefined}
+            agentType={automation.agent_type ?? "codex"}
+            rows={9}
+            ariaInvalid={goalLength.isTooLong}
+            className="border-transparent bg-transparent px-1 shadow-none hover:border-border focus-within:border-border"
+          />
+          <p
+            className={cn(
+              "mt-2 text-xs",
+              goalLength.isTooLong
+                ? "text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            {goalLength.message ? (
+              <span className="mr-2">{goalLength.message}</span>
+            ) : null}
+            <span className="tabular-nums">{goalLength.countText}</span>
+          </p>
+        </>
+      ) : (
+        <MarkdownContent
+          content={automation.goal}
+          className="text-sm leading-6 text-foreground [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm"
+        />
+      )}
+    </section>
+  );
+}
+
+function AutomationDetailPageSkeleton() {
+  return (
+    <PageContainer size="wide">
+      <div className="space-y-6" aria-busy="true" aria-label="Loading automation">
+        <MobileBackButton to="/automations" label="Back to automations" />
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="h-9 w-9 shrink-0 animate-pulse rounded-lg bg-muted" />
+            <div
+              className="min-w-0 flex-1 space-y-2"
+              data-testid="automation-detail-header-skeleton-copy"
+            >
+              <div className="h-6 w-full max-w-56 animate-pulse rounded bg-muted sm:max-w-72" />
+              <div className="h-4 w-full max-w-72 animate-pulse rounded bg-muted/70 sm:max-w-96" />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <div className="h-8 w-16 animate-pulse rounded-lg bg-muted" />
+            <div className="h-8 w-20 animate-pulse rounded-lg bg-muted" />
+          </div>
+        </div>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <div className="space-y-4">
+            <div className="h-9 w-64 animate-pulse rounded-lg bg-muted" />
+            <div className="space-y-3">
+              <div className="h-28 animate-pulse rounded-xl border border-border bg-muted/30" />
+              <div className="h-20 animate-pulse rounded-xl border border-border bg-muted/30" />
+              <div className="h-20 animate-pulse rounded-xl border border-border bg-muted/30" />
+            </div>
+          </div>
+          <div className="hidden space-y-4 rounded-xl border border-border p-4 lg:block">
+            <div className="h-4 w-28 animate-pulse rounded bg-muted" />
+            {[0, 1, 2, 3].map((row) => (
+              <div key={row} className="space-y-2">
+                <div className="h-3 w-20 animate-pulse rounded bg-muted/70" />
+                <div className="h-4 w-4/5 animate-pulse rounded bg-muted" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </PageContainer>
   );
 }
 
@@ -987,16 +1097,7 @@ export default function AutomationDetailPage() {
   });
 
   if (isLoading) {
-    return (
-      <PageContainer size="default">
-        <div className="space-y-6">
-          <MobileBackButton to="/automations" label="Back to automations" />
-          <div className="text-center py-12 text-sm text-muted-foreground">
-            Loading...
-          </div>
-        </div>
-      </PageContainer>
-    );
+    return <AutomationDetailPageSkeleton />;
   }
 
   if (!automation) {
@@ -1119,12 +1220,12 @@ export default function AutomationDetailPage() {
             <SheetHeader>
               <SheetTitle>Automation settings</SheetTitle>
               <SheetDescription>
-                Update the goal and recurring execution defaults.
+                Update triggers and recurring execution defaults.
               </SheetDescription>
             </SheetHeader>
             <div className="mt-6">
               <SettingsTab
-                key={automation.updated_at}
+                key={automation.id}
                 automation={automation}
                 canManage={canManage}
               />
@@ -1168,7 +1269,11 @@ export default function AutomationDetailPage() {
                   {automation.icon_value || "⚙️"}
                 </span>
               )}
-              <span className="min-w-0 truncate">{automation.name}</span>
+              <InlineAutomationText
+                automation={automation}
+                canManage={canManage}
+                field="name"
+              />
             </span>
           }
           description={headerDescription}
@@ -1183,24 +1288,15 @@ export default function AutomationDetailPage() {
 
         <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-start">
           <main className="min-w-0 space-y-6">
-            <section className="rounded-lg border border-border bg-card p-5">
-              <div className="mb-4">
-                <h2 className="text-sm font-semibold text-foreground">Goal</h2>
-              </div>
-              <MarkdownContent
-                content={automation.goal}
-                className="text-sm leading-6 text-foreground [&_h1]:text-lg [&_h2]:text-base [&_h3]:text-sm"
-              />
-            </section>
+            <InlineAutomationText
+              automation={automation}
+              canManage={canManage}
+              field="goal"
+            />
 
             <LatestRunSummary automationId={automationId} />
 
-            <section className="space-y-3">
-              <h2 className="text-sm font-semibold text-foreground">
-                Run history
-              </h2>
-              <RunsTab automationId={automationId} />
-            </section>
+            <DecisionHistory automationId={automationId} />
           </main>
 
           <aside className="hidden space-y-4 lg:sticky lg:top-4 lg:block">
@@ -1333,7 +1429,12 @@ function LatestRunSummary({ automationId }: { automationId: string }) {
 
   return (
     <section className="rounded-lg border border-border bg-card p-5">
-      <h2 className="text-sm font-semibold text-foreground">Latest run</h2>
+      <h2 className="text-sm font-semibold text-foreground">
+        Latest execution
+      </h2>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Operational status only. Review outcomes are shown in PR decisions.
+      </p>
       {isLoading ? (
         <p className="mt-3 text-sm text-muted-foreground">
           Loading latest run...
@@ -1357,13 +1458,11 @@ function LatestRunBody({ run }: { run: AutomationRun }) {
     <div className="mt-3 space-y-2">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={run.status === "failed" ? "destructive" : "secondary"}>
-          {statusLabel(run.status)}
+          Execution: {statusLabel(run.status)}
         </Badge>
         <span className="text-xs text-muted-foreground">
           {formatTimeAgo(run.triggered_at)}
-          {run.completed_at
-            ? ` · ${formatDateTime(run.completed_at)}`
-            : ""}
+          {run.completed_at ? ` · ${formatDateTime(run.completed_at)}` : ""}
         </span>
       </div>
       <p className="text-sm text-foreground">{summary}</p>
@@ -1381,6 +1480,8 @@ function statusLabel(status: AutomationRun["status"]): string {
     case "completed_noop":
       return "No-op";
     default:
-      return status.replaceAll("_", " ");
+      return status
+        .replaceAll("_", " ")
+        .replace(/^./, (letter) => letter.toUpperCase());
   }
 }

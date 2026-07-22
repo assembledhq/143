@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 
 	"github.com/assembledhq/143/internal/models"
@@ -19,13 +20,17 @@ type githubAutomationStore interface {
 }
 
 type githubAutomationRunStore interface {
-	CreateRun(ctx context.Context, run *models.AutomationRun) (bool, error)
+	CreateRunInTx(ctx context.Context, tx pgx.Tx, run *models.AutomationRun) (bool, error)
 	ClaimTriggerDedupe(ctx context.Context, orgID, automationID uuid.UUID, dedupeKey string, expiresAt time.Time) (bool, error)
 }
 
 type githubAutomationJobStore interface {
-	Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
+	EnqueueInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, queue, jobType string, payload any, priority int, dedupeKey *string) (uuid.UUID, error)
 	Notify(ctx context.Context, jobID uuid.UUID)
+}
+
+type githubEventTxStarter interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 type GitHubEventTriggerRequest struct {
@@ -52,6 +57,7 @@ type GitHubEventTriggerService struct {
 	automations  githubAutomationStore
 	runs         githubAutomationRunStore
 	jobs         githubAutomationJobStore
+	txStarter    githubEventTxStarter
 	capabilities githubCapabilityResolver
 	logger       zerolog.Logger
 	now          func() time.Time
@@ -63,11 +69,12 @@ type githubCapabilityResolver interface {
 
 const githubFeedbackDebounceWindow = 90 * time.Second
 
-func NewGitHubEventTriggerService(automations githubAutomationStore, runs githubAutomationRunStore, jobs githubAutomationJobStore, logger zerolog.Logger) *GitHubEventTriggerService {
+func NewGitHubEventTriggerService(automations githubAutomationStore, runs githubAutomationRunStore, jobs githubAutomationJobStore, txStarter githubEventTxStarter, logger zerolog.Logger) *GitHubEventTriggerService {
 	return &GitHubEventTriggerService{
 		automations: automations,
 		runs:        runs,
 		jobs:        jobs,
+		txStarter:   txStarter,
 		logger:      logger,
 		now:         time.Now,
 	}
@@ -78,7 +85,7 @@ func (s *GitHubEventTriggerService) SetCapabilityResolver(resolver githubCapabil
 }
 
 func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req GitHubEventTriggerRequest) error {
-	if s == nil || s.automations == nil || s.runs == nil || s.jobs == nil {
+	if s == nil || s.automations == nil || s.runs == nil || s.jobs == nil || s.txStarter == nil {
 		return nil
 	}
 	if err := req.Event.Validate(); err != nil {
@@ -148,11 +155,20 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		}
 		run.CapabilitySnapshot = snapshot
 	}
-	created, err := s.runs.CreateRun(ctx, &run)
+	tx, err := s.txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin github automation run tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	created, err := s.runs.CreateRunInTx(ctx, tx, &run)
 	if err != nil {
 		return fmt.Errorf("create github-triggered automation run: %w", err)
 	}
 	if !created {
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit duplicate github automation run tx: %w", err)
+		}
 		return nil
 	}
 	dedupeKey := fmt.Sprintf("automation_run:%s", run.ID.String())
@@ -161,9 +177,12 @@ func (s *GitHubEventTriggerService) triggerAutomation(ctx context.Context, autom
 		"automation_id":     automation.ID.String(),
 		"automation_run_id": run.ID.String(),
 	}
-	jobID, err := s.jobs.Enqueue(ctx, automation.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey)
+	jobID, err := s.jobs.EnqueueInTx(ctx, tx, automation.OrgID, "default", models.JobTypeAutomationRun, payload, 5, &dedupeKey)
 	if err != nil {
 		return fmt.Errorf("enqueue github-triggered automation run: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit github automation run tx: %w", err)
 	}
 	s.jobs.Notify(ctx, jobID)
 	return nil

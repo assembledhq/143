@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -81,6 +82,8 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 		h.handlePullRequestReview(w, r, body)
 	case "pull_request_review_comment":
 		h.handlePullRequestReviewComment(w, r, body)
+	case "pull_request_review_thread":
+		h.handlePullRequestReviewThread(w, r, body)
 	case "issue_comment":
 		h.handleIssueComment(w, r, body)
 	case "check_suite":
@@ -94,6 +97,36 @@ func (h *WebhookHandler) HandleGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *WebhookHandler) handlePullRequestReviewThread(w http.ResponseWriter, r *http.Request, body []byte) {
+	if h.prService == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
+		return
+	}
+	var event ghservice.PullRequestReviewThreadEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_thread event")
+		return
+	}
+	metadata, err := feedbackWebhookMetadata(r, body, "pull_request_review_thread")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "WEBHOOK_METADATA_FAILED", "failed to capture webhook metadata", err)
+		return
+	}
+	event.FeedbackMetadata = metadata
+	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
+	if !ok {
+		return
+	}
+	if owner.OrgID != uuid.Nil {
+		event.OwnerOrgID = &owner.OrgID
+	}
+	if err := h.prService.HandlePullRequestReviewThreadEvent(r.Context(), event); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "REVIEW_THREAD_EVENT_FAILED", "failed to process pull_request_review_thread event", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
 func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Request, body []byte) {
 	if h.prService == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "pr_service_not_configured"})
@@ -105,7 +138,13 @@ func (h *WebhookHandler) handleIssueComment(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse issue_comment event")
 		return
 	}
-	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	metadata, err := feedbackWebhookMetadata(r, body, "issue_comment")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "WEBHOOK_METADATA_FAILED", "failed to capture webhook metadata", err)
+		return
+	}
+	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -357,6 +396,10 @@ func (h *WebhookHandler) handlePullRequest(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -493,7 +536,13 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review event")
 		return
 	}
-	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	metadata, err := feedbackWebhookMetadata(r, body, "pull_request_review")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "WEBHOOK_METADATA_FAILED", "failed to capture webhook metadata", err)
+		return
+	}
+	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -521,7 +570,13 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 		writeError(w, r, http.StatusBadRequest, "INVALID_JSON", "failed to parse pull_request_review_comment event")
 		return
 	}
-	event.DeliveryID = strings.TrimSpace(r.Header.Get("X-GitHub-Delivery"))
+	metadata, err := feedbackWebhookMetadata(r, body, "pull_request_review_comment")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "WEBHOOK_METADATA_FAILED", "failed to capture webhook metadata", err)
+		return
+	}
+	event.FeedbackMetadata = metadata
+	event.DeliveryID = metadata.DeliveryID
 	owner, ok := h.githubWebhookRepoActiveOwner(w, r, event.Repository.ID)
 	if !ok {
 		return
@@ -536,6 +591,14 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
+}
+
+func feedbackWebhookMetadata(r *http.Request, body []byte, eventType string) (ghservice.FeedbackWebhookMetadata, error) {
+	headers, err := json.Marshal(r.Header)
+	if err != nil {
+		return ghservice.FeedbackWebhookMetadata{}, fmt.Errorf("marshal GitHub webhook headers: %w", err)
+	}
+	return ghservice.FeedbackWebhookMetadata{DeliveryID: r.Header.Get("X-GitHub-Delivery"), EventType: eventType, Payload: append([]byte(nil), body...), Headers: headers}, nil
 }
 
 func (h *WebhookHandler) handleCheckSuite(w http.ResponseWriter, r *http.Request, body []byte) {

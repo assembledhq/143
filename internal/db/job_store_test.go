@@ -9,6 +9,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/assembledhq/143/internal/cache"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -300,6 +301,52 @@ func TestJobStore_EnqueueWithOpts_PinsTargetNode(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestJobStore_EnqueueWithOpts_SetsCustomMaxAttempts(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	store := NewJobStore(mock)
+	orgID := uuid.New()
+	generatedID := uuid.New()
+
+	mock.ExpectQuery("INSERT INTO jobs[\\s\\S]+max_attempts").
+		WithArgs(orgID, "agent", models.JobTypeRunCodeReview, pgxmock.AnyArg(), 5, jobDedupeKeyPtr("review"), 8).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(generatedID))
+
+	id, err := store.EnqueueWithOpts(context.Background(), orgID, EnqueueOpts{
+		Queue:       "agent",
+		JobType:     models.JobTypeRunCodeReview,
+		Payload:     map[string]string{"session_id": "abc"},
+		Priority:    5,
+		DedupeKey:   jobDedupeKeyPtr("review"),
+		MaxAttempts: 8,
+	})
+	require.NoError(t, err, "custom retry budget enqueue should succeed")
+	require.Equal(t, generatedID, id, "custom retry budget enqueue should return the job id")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestJobStore_HasActiveByDedupeKeyFiltersByOrg(t *testing.T) {
+	t.Parallel()
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "should create mock pool")
+	defer mock.Close()
+
+	orgID := uuid.New()
+	mock.ExpectQuery("SELECT EXISTS[\\s\\S]+org_id[\\s\\S]+dedupe_key[\\s\\S]+status IN").
+		WithArgs(orgID, "agent", "code_review:key").
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+
+	active, err := NewJobStore(mock).HasActiveByDedupeKey(context.Background(), orgID, "agent", "code_review:key")
+	require.NoError(t, err, "active dedupe lookup should succeed")
+	require.True(t, active, "active dedupe lookup should return the stored state")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestJobStore_RetryWithoutConsumingAttemptWithLeaseAndTarget_PinsRetry(t *testing.T) {
 	t.Parallel()
 
@@ -459,11 +506,13 @@ func TestJobStore_Notify_PublishFailureIsBestEffort(t *testing.T) {
 func TestJobStore_ClaimNextRunnable(t *testing.T) {
 	t.Parallel()
 
+	persistedRetryStart := time.Date(2026, time.July, 21, 19, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name      string
-		setupMock func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID)
-		expectNil bool
-		expectErr bool
+		name                     string
+		setupMock                func(mock pgxmock.PgxPoolIface, leaseDuration time.Duration, lockToken uuid.UUID)
+		expectNil                bool
+		expectErr                bool
+		expectedRetryWindowStart *time.Time
 	}{
 		{
 			name: "claims next due job with lease and fencing token",
@@ -477,10 +526,10 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, now, now, nil,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", nil, nil, nil, nil, now, now, nil,
 					))
 			},
 		},
@@ -497,12 +546,13 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 						"id", "org_id", "queue", "job_type", "payload", "priority", "status",
 						"attempts", "max_attempts", "run_at", "locked_by_node_id", "locked_at",
 						"lease_expires_at", "lock_token", "run_owner_id", "owner_kind", "last_error",
-						"dedupe_key", "target_node_id", "created_at", "updated_at", "completed_at",
+						"dedupe_key", "target_node_id", "retry_window_started_at", "created_at", "updated_at", "completed_at",
 					}).AddRow(
 						jobID, orgID, "default", "run_agent", []byte(`{"session_id":"abc"}`), 5, "running",
-						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", now, now, completedAt,
+						1, 3, now, "worker-1", now, now.Add(leaseDuration), lockToken.String(), "worker-1", "worker", "boom", "dedupe-1", "worker-1", persistedRetryStart, now, now, completedAt,
 					))
 			},
+			expectedRetryWindowStart: &persistedRetryStart,
 		},
 		{
 			name: "returns nil when no pending job exists",
@@ -549,7 +599,83 @@ func TestJobStore_ClaimNextRunnable(t *testing.T) {
 			} else {
 				require.NotNil(t, job, "ClaimNextRunnable should return the claimed job")
 				require.Equal(t, lockToken, *job.LockToken, "ClaimNextRunnable should persist the fencing token")
+				require.Equal(t, tt.expectedRetryWindowStart, job.RetryWindowStartedAt, "ClaimNextRunnable should hydrate the durable retry window start")
 			}
+			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+		})
+	}
+}
+
+func TestJobStore_EnsureRetryWindowStartedAtWithLease(t *testing.T) {
+	t.Parallel()
+
+	requestedStart := time.Date(2026, time.July, 21, 19, 0, 0, 0, time.UTC)
+	existingStart := requestedStart.Add(-time.Hour)
+	tests := []struct {
+		name          string
+		setupMock     func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID)
+		expectedStart time.Time
+		expectedOK    bool
+		expectErr     bool
+	}{
+		{
+			name: "records first retry window",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectQuery("UPDATE jobs[\\s\\S]+retry_window_started_at = COALESCE\\(retry_window_started_at, \\$1\\)").
+					WithArgs(requestedStart, jobID, lockToken).
+					WillReturnRows(pgxmock.NewRows([]string{"retry_window_started_at"}).AddRow(requestedStart))
+			},
+			expectedStart: requestedStart,
+			expectedOK:    true,
+		},
+		{
+			name: "preserves existing retry window",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectQuery("UPDATE jobs[\\s\\S]+retry_window_started_at = COALESCE\\(retry_window_started_at, \\$1\\)").
+					WithArgs(requestedStart, jobID, lockToken).
+					WillReturnRows(pgxmock.NewRows([]string{"retry_window_started_at"}).AddRow(existingStart))
+			},
+			expectedStart: existingStart,
+			expectedOK:    true,
+		},
+		{
+			name: "reports lost ownership",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectQuery("UPDATE jobs[\\s\\S]+retry_window_started_at").
+					WithArgs(requestedStart, jobID, lockToken).
+					WillReturnError(pgx.ErrNoRows)
+			},
+		},
+		{
+			name: "wraps database failure",
+			setupMock: func(mock pgxmock.PgxPoolIface, jobID, lockToken uuid.UUID) {
+				mock.ExpectQuery("UPDATE jobs[\\s\\S]+retry_window_started_at").
+					WithArgs(requestedStart, jobID, lockToken).
+					WillReturnError(errors.New("db unavailable"))
+			},
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "pgxmock pool should initialize")
+			defer mock.Close()
+			jobID := uuid.New()
+			lockToken := uuid.New()
+			tt.setupMock(mock, jobID, lockToken)
+
+			actual, ok, err := NewJobStore(mock).EnsureRetryWindowStartedAtWithLease(context.Background(), jobID, lockToken, requestedStart)
+			if tt.expectErr {
+				require.Error(t, err, "EnsureRetryWindowStartedAtWithLease should return database failures")
+			} else {
+				require.NoError(t, err, "EnsureRetryWindowStartedAtWithLease should complete without error")
+			}
+			require.Equal(t, tt.expectedOK, ok, "EnsureRetryWindowStartedAtWithLease should report fenced ownership")
+			require.Equal(t, tt.expectedStart, actual, "EnsureRetryWindowStartedAtWithLease should return the durable first retry time")
 			require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 		})
 	}

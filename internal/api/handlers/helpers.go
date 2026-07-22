@@ -190,6 +190,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // level for 5xx status codes and Info level for 4xx. If an error is provided
 // via errs, it is attached to the log entry with .Err().
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, errs ...error) {
+	writeErrorWithDetails(w, r, status, code, message, nil, errs...)
+}
+
+func writeErrorWithDetails(w http.ResponseWriter, r *http.Request, status int, code, message string, details any, errs ...error) {
 	logger := zerolog.Ctx(r.Context()).With().Str("code", code).Int("status", status).Logger()
 	var evt *zerolog.Event
 	if status >= 500 {
@@ -203,7 +207,7 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	evt.Msg(message)
 
 	writeJSON(w, status, models.ErrorResponse{
-		Error: models.ErrorDetail{Code: code, Message: message},
+		Error: models.ErrorDetail{Code: code, Message: message, Details: details},
 	})
 }
 

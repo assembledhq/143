@@ -27,6 +27,13 @@ function isActiveStatus(status: string): boolean {
   return status === "pending" || status === "running" || status === "awaiting_input";
 }
 
+function threadNeedsAttention(thread: SessionThread): boolean {
+  if (thread.status === "awaiting_input" || thread.status === "failed") {
+    return true;
+  }
+  return !isActiveStatus(thread.status) && !!(thread.failure_explanation || thread.failure_category);
+}
+
 function shouldShowUnreadDot(thread: SessionThread, viewedThreadIds: ReadonlySet<string>): boolean {
   if (!viewedThreadIds.has(thread.id)) {
     return true;
@@ -187,8 +194,7 @@ export function AgentTabStrip({
     const queued = activeThread.pending_message_count ?? 0;
     const deliverySummary = formatDeliverySummary(activeThread);
     const provenance = formatThreadProvenance(activeThread);
-    const needsAttention =
-      activeThread.status === "awaiting_input" || activeThread.status === "failed";
+    const needsAttention = threadNeedsAttention(activeThread);
     const showUnreadDot = shouldShowUnreadDot(activeThread, viewedThreadIds);
 
     return (
@@ -317,7 +323,7 @@ export function AgentTabStrip({
                   const agent = AGENTS_BY_KEY[thread.agent_type];
                   const agentLabel = agent?.label ?? thread.agent_type;
                   const statusLabel = threadStatusLabel(thread.status, statusConfig);
-                  const needsAttention = thread.status === "awaiting_input" || thread.status === "failed";
+                  const needsAttention = threadNeedsAttention(thread);
                   const overlap = overlapsByThreadId.get(thread.id) ?? [];
                   const isCancelling = thread.cancel_requested_at != null && isActiveStatus(thread.status);
                   const queued = thread.pending_message_count ?? 0;
