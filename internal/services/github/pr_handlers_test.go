@@ -1648,6 +1648,54 @@ func TestHandlePullRequestEvent_NonClosedAction(t *testing.T) {
 	require.NoError(t, err, "HandlePullRequestEvent should ignore non-closed actions")
 }
 
+func TestHandlePullRequestEvent_EditedRefreshesSnapshot(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.New()
+	sessionID := uuid.New()
+	now := time.Now()
+	prMock := newMockPool(t)
+	svc := &PRService{
+		pullRequests: db.NewPullRequestStore(prMock),
+		logger:       zerolog.Nop(),
+	}
+
+	prMock.ExpectQuery("SELECT .+ FROM pull_requests[\\s\\S]*WHERE org_id").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "github_repo": "testorg/testrepo", "github_pr_number": 42}).
+		WillReturnRows(
+			pgxmock.NewRows(handlerPRColumns).
+				AddRow(handlerPRRow(prID, &sessionID, orgID, "testorg/testrepo", now)...),
+		)
+	body := "Updated pull request description"
+	headSHA := "head-sha"
+	headRef := "feature/metadata-sync"
+	baseSHA := "base-sha"
+	prMock.ExpectExec("UPDATE pull_requests[\\s\\S]*github_pr_url = @github_pr_url[\\s\\S]*title = @title[\\s\\S]*body = @body").
+		WithArgs(pgx.NamedArgs{
+			"id": prID, "org_id": orgID,
+			"github_pr_url": "https://github.com/testorg/testrepo/pull/42",
+			"title":         "Updated pull request title", "body": &body,
+			"head_sha": &headSHA, "head_ref": &headRef, "base_sha": &baseSHA,
+			"merge_state": models.PullRequestMergeStateUnknown,
+		}).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	event := PullRequestEvent{Action: "edited", Number: 42, OwnerOrgID: &orgID}
+	event.Repository.FullName = "testorg/testrepo"
+	event.PR.HTMLURL = "https://github.com/testorg/testrepo/pull/42"
+	event.PR.Title = "Updated pull request title"
+	event.PR.Body = body
+	event.PR.Head.SHA = headSHA
+	event.PR.Head.Ref = headRef
+	event.PR.Base.SHA = baseSHA
+
+	err := svc.HandlePullRequestEvent(context.Background(), event)
+
+	require.NoError(t, err, "edited pull request should refresh its stored GitHub snapshot")
+	require.NoError(t, prMock.ExpectationsWereMet(), "edited pull request snapshot update should remain org-scoped")
+}
+
 func TestHandlePullRequestEvent_OpenedEnqueuesHealthSync(t *testing.T) {
 	t.Parallel()
 

@@ -124,10 +124,6 @@ func (h *WebhookHandler) handlePullRequestReviewThread(w http.ResponseWriter, r 
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_THREAD_EVENT_FAILED", "failed to process pull_request_review_thread event", err)
 		return
 	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review_thread", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
 
@@ -556,10 +552,6 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event", err)
 		return
 	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
-		return
-	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "processed"})
 }
@@ -591,10 +583,6 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
-		return
-	}
-	if err := h.reassessCodeReviewsForGitHubEvent(r.Context(), owner, "pull_request_review_comment", body, r.Header.Get("X-GitHub-Delivery")); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_REASSESSMENT_FAILED", "failed to reassess code review", err)
 		return
 	}
 

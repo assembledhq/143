@@ -2416,6 +2416,18 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 	}
 
 	switch event.Action {
+	case "edited":
+		if err := s.pullRequests.UpdateGitHubSnapshot(ctx, pr.OrgID, pr.ID, db.PullRequestGitHubSnapshot{
+			GitHubPRURL: event.PR.HTMLURL,
+			Title:       event.PR.Title,
+			Body:        pullRequestWebhookOptionalString(event.PR.Body),
+			HeadSHA:     pullRequestWebhookOptionalString(event.PR.Head.SHA),
+			HeadRef:     pullRequestWebhookOptionalString(event.PR.Head.Ref),
+			BaseSHA:     pullRequestWebhookOptionalString(event.PR.Base.SHA),
+		}); err != nil {
+			return fmt.Errorf("refresh edited pull request snapshot: %w", err)
+		}
+		return nil
 	case "opened", "reopened", "ready_for_review", "synchronize":
 		s.enqueuePullRequestStateSync(ctx, pr)
 		return s.handleAutoPreviewEvent(ctx, event)
@@ -2431,6 +2443,13 @@ func (s *PRService) HandlePullRequestEvent(ctx context.Context, event PullReques
 
 	s.enqueuePullRequestStateSync(ctx, pr)
 	return s.handleAutoPreviewEvent(ctx, event)
+}
+
+func pullRequestWebhookOptionalString(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
 }
 
 func (s *PRService) reconcileWebhookPullRequest(ctx context.Context, event PullRequestEvent) (models.PullRequest, bool, error) {

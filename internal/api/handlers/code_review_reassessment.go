@@ -16,11 +16,8 @@ import (
 )
 
 type codeReviewReassessmentWebhook struct {
-	Action string `json:"action"`
-	Number int    `json:"number"`
-	Sender struct {
-		Login string `json:"login"`
-	} `json:"sender"`
+	Action     string `json:"action"`
+	Number     int    `json:"number"`
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
@@ -43,35 +40,6 @@ type codeReviewReassessmentWebhook struct {
 			SHA string `json:"sha"`
 		} `json:"base"`
 	} `json:"pull_request"`
-	Review struct {
-		ID       int64  `json:"id"`
-		State    string `json:"state"`
-		Body     string `json:"body"`
-		CommitID string `json:"commit_id"`
-		User     struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		PerformedViaGitHubApp *codeReviewGitHubAppIdentity `json:"performed_via_github_app"`
-	} `json:"review"`
-	Comment struct {
-		ID       int64  `json:"id"`
-		Body     string `json:"body"`
-		Path     string `json:"path"`
-		Line     *int   `json:"line"`
-		CommitID string `json:"commit_id"`
-		User     struct {
-			Login string `json:"login"`
-		} `json:"user"`
-		PerformedViaGitHubApp *codeReviewGitHubAppIdentity `json:"performed_via_github_app"`
-	} `json:"comment"`
-	Thread struct {
-		NodeID string `json:"node_id"`
-	} `json:"thread"`
-}
-
-type codeReviewGitHubAppIdentity struct {
-	ID   int64  `json:"id"`
-	Slug string `json:"slug"`
 }
 
 func (h *WebhookHandler) reassessCodeReviewsForGitHubEvent(ctx context.Context, owner db.GitHubRepoOwner, eventType string, body []byte, _ string) error {
@@ -82,25 +50,19 @@ func (h *WebhookHandler) reassessCodeReviewsForGitHubEvent(ctx context.Context, 
 	if err := json.Unmarshal(body, &event); err != nil {
 		return fmt.Errorf("decode code review reassessment event: %w", err)
 	}
-	if !codeReviewEventChangesAssessment(eventType, event) {
-		return nil
-	}
-	if h.codeReviewReassessmentIsSelfAuthored(eventType, event) {
+	if !codeReviewEventChangesAssessment(eventType, event) || event.Number <= 0 {
 		return nil
 	}
 
-	numbers := codeReviewReassessmentPullRequestNumbers(eventType, event)
-	for _, number := range numbers {
-		pr, err := h.pullRequests.GetByOrgRepoAndNumber(ctx, owner.OrgID, event.Repository.FullName, number)
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("load pull request for code review reassessment: %w", err)
-		}
-		if err := h.reassessCodeReviewTarget(ctx, owner, eventType, event, pr); err != nil {
-			return err
-		}
+	pr, err := h.pullRequests.GetByOrgRepoAndNumber(ctx, owner.OrgID, event.Repository.FullName, event.Number)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load pull request for code review reassessment: %w", err)
+	}
+	if err := h.reassessCodeReviewTarget(ctx, owner, eventType, event, pr); err != nil {
+		return err
 	}
 	return nil
 }
@@ -125,7 +87,7 @@ func (h *WebhookHandler) reassessCodeReviewTarget(ctx context.Context, owner db.
 		pr.HeadRef = snapshot.HeadRef
 		pr.BaseSHA = snapshot.BaseSHA
 	}
-	changeKey, err := codeReviewMaterialChangeKey(eventType, event, pr)
+	changeKey, err := codeReviewMaterialChangeKey(pr)
 	if err != nil {
 		return fmt.Errorf("build code review material change key: %w", err)
 	}
@@ -150,119 +112,17 @@ func (h *WebhookHandler) reassessCodeReviewTarget(ctx context.Context, owner db.
 	return nil
 }
 
-func (h *WebhookHandler) codeReviewReassessmentIsSelfAuthored(eventType string, event codeReviewReassessmentWebhook) bool {
-	switch eventType {
-	case "pull_request_review":
-		if event.Action == "dismissed" {
-			return false
-		}
-		// Standalone inline comments can produce an empty-body COMMENTED review
-		// container, so app identity must be authoritative when no marker exists.
-		return codereviewsvc.IsCodeReviewAuthoredBody(event.Review.Body) ||
-			h.codeReviewActorIsOwnApp(firstNonEmptyString(event.Review.User.Login, event.Sender.Login), event.Review.PerformedViaGitHubApp)
-	case "pull_request_review_comment":
-		if event.Action == "deleted" {
-			return false
-		}
-		return codereviewsvc.IsCodeReviewAuthoredBody(event.Comment.Body) ||
-			h.codeReviewActorIsOwnApp(firstNonEmptyString(event.Comment.User.Login, event.Sender.Login), event.Comment.PerformedViaGitHubApp)
-	default:
-		return false
-	}
-}
-
-func (h *WebhookHandler) codeReviewActorIsOwnApp(login string, app *codeReviewGitHubAppIdentity) bool {
-	if h == nil || h.cfg == nil {
-		return false
-	}
-	if app != nil && h.cfg.GitHubAppID > 0 && app.ID == h.cfg.GitHubAppID {
-		return true
-	}
-	ownSlug := canonicalCodeReviewBotLogin(h.cfg.GitHubAppSlug)
-	if ownSlug == "" {
-		return false
-	}
-	return canonicalCodeReviewBotLogin(login) == ownSlug ||
-		(app != nil && canonicalCodeReviewBotLogin(app.Slug) == ownSlug)
-}
-
-func canonicalCodeReviewBotLogin(login string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(login)), "[bot]")
-}
-
-type codeReviewMaterialEventState struct {
-	Class       string `json:"class"`
-	ObjectID    string `json:"object_id,omitempty"`
-	State       string `json:"state,omitempty"`
-	Body        string `json:"body,omitempty"`
-	Path        string `json:"path,omitempty"`
-	Line        int    `json:"line,omitempty"`
-	CommitID    string `json:"commit_id,omitempty"`
-	AuthorLogin string `json:"author_login,omitempty"`
-}
-
 type codeReviewMaterialAssessmentState struct {
-	HeadSHA string                       `json:"head_sha"`
-	Event   codeReviewMaterialEventState `json:"event"`
+	HeadSHA string `json:"head_sha"`
 }
 
-func codeReviewMaterialChangeKey(eventType string, event codeReviewReassessmentWebhook, pr models.PullRequest) (string, error) {
-	state := codeReviewMaterialAssessmentState{
-		HeadSHA: codeReviewStringValue(pr.HeadSHA),
-	}
-	switch eventType {
-	case "pull_request":
-		state.Event = codeReviewMaterialEventState{Class: "pull_request"}
-	case "pull_request_review":
-		reviewState := strings.ToLower(strings.TrimSpace(event.Review.State))
-		if event.Action == "dismissed" {
-			reviewState = "dismissed"
-		}
-		state.Event = codeReviewMaterialEventState{
-			Class:       "review",
-			ObjectID:    fmt.Sprintf("%d", event.Review.ID),
-			State:       reviewState,
-			Body:        strings.TrimSpace(event.Review.Body),
-			CommitID:    strings.TrimSpace(event.Review.CommitID),
-			AuthorLogin: canonicalCodeReviewBotLogin(event.Review.User.Login),
-		}
-	case "pull_request_review_comment":
-		commentState := "present"
-		if event.Action == "deleted" {
-			commentState = "deleted"
-		}
-		state.Event = codeReviewMaterialEventState{
-			Class:       "review_comment",
-			ObjectID:    fmt.Sprintf("%d", event.Comment.ID),
-			State:       commentState,
-			Body:        strings.TrimSpace(event.Comment.Body),
-			Path:        strings.TrimSpace(event.Comment.Path),
-			Line:        codeReviewIntValue(event.Comment.Line),
-			CommitID:    strings.TrimSpace(event.Comment.CommitID),
-			AuthorLogin: canonicalCodeReviewBotLogin(event.Comment.User.Login),
-		}
-	case "pull_request_review_thread":
-		state.Event = codeReviewMaterialEventState{
-			Class:    "review_thread",
-			ObjectID: strings.TrimSpace(event.Thread.NodeID),
-			State:    strings.ToLower(strings.TrimSpace(event.Action)),
-		}
-	default:
-		state.Event = codeReviewMaterialEventState{Class: eventType, State: strings.ToLower(strings.TrimSpace(event.Action))}
-	}
-	raw, err := json.Marshal(state)
+func codeReviewMaterialChangeKey(pr models.PullRequest) (string, error) {
+	raw, err := json.Marshal(codeReviewMaterialAssessmentState{HeadSHA: codeReviewStringValue(pr.HeadSHA)})
 	if err != nil {
 		return "", fmt.Errorf("marshal material assessment state: %w", err)
 	}
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("material:%x", sum[:]), nil
-}
-
-func codeReviewIntValue(value *int) int {
-	if value == nil {
-		return 0
-	}
-	return *value
 }
 
 func codeReviewStringValue(value *string) string {
@@ -273,37 +133,5 @@ func codeReviewStringValue(value *string) string {
 }
 
 func codeReviewEventChangesAssessment(eventType string, event codeReviewReassessmentWebhook) bool {
-	switch eventType {
-	case "pull_request":
-		return event.Action == "synchronize"
-	case "pull_request_review":
-		return event.Action == "submitted" || event.Action == "edited" || event.Action == "dismissed"
-	case "pull_request_review_comment":
-		return event.Action == "created" || event.Action == "edited" || event.Action == "deleted"
-	case "pull_request_review_thread":
-		return event.Action == "resolved" || event.Action == "unresolved"
-	}
-	return false
-}
-
-func codeReviewReassessmentPullRequestNumbers(eventType string, event codeReviewReassessmentWebhook) []int {
-	seen := make(map[int]struct{})
-	add := func(numbers []int, number int) []int {
-		if number <= 0 {
-			return numbers
-		}
-		if _, ok := seen[number]; ok {
-			return numbers
-		}
-		seen[number] = struct{}{}
-		return append(numbers, number)
-	}
-	numbers := make([]int, 0, 2)
-	switch eventType {
-	case "pull_request":
-		numbers = add(numbers, event.Number)
-	case "pull_request_review", "pull_request_review_comment", "pull_request_review_thread":
-		numbers = add(numbers, event.PullRequest.Number)
-	}
-	return numbers
+	return eventType == "pull_request" && event.Action == "synchronize"
 }
