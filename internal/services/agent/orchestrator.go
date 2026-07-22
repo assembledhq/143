@@ -1716,6 +1716,16 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	if session.Origin == models.SessionOriginAutomationGoalImprovement {
 		scopes = append(scopes, "automation-goal-improvement:complete")
 	}
+	automationOutcomeReportingEnabled := session.Origin == models.SessionOriginAutomation &&
+		session.AutomationRunID != nil && *session.AutomationRunID != uuid.Nil &&
+		threadID != nil && *threadID != uuid.Nil &&
+		session.PrimaryThreadID != nil && *session.PrimaryThreadID == *threadID
+	if automationOutcomeReportingEnabled {
+		// Only the primary Main thread receives this scope. Pre-PR review-loop
+		// threads share the session but must never overwrite the business
+		// decision with their internal REVIEW_CLEAN result.
+		scopes = append(scopes, "automation-run:report-outcome")
+	}
 	internalToken, err := auth.GenerateSessionThreadTokenWithClaims(o.internalAPISecret, session.OrgID, *repoID, session.ID, threadID, scopes, sessionOrigin, evalBootstrapRunID, tokenTTL)
 	if err != nil {
 		log.Warn().Err(err).Str("session_id", session.ID.String()).Msg("failed to generate internal API token")
@@ -1734,6 +1744,10 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 	}
 	if session.Origin == models.SessionOriginAutomationGoalImprovement {
 		sandboxCfg.Env["AUTOMATION_GOAL_IMPROVEMENT_TOOLS_ENABLED"] = "true"
+	}
+	if automationOutcomeReportingEnabled {
+		sandboxCfg.Env["AUTOMATION_RUN_REPORTING_ENABLED"] = "true"
+		sandboxCfg.Env["AUTOMATION_RUN_ID"] = session.AutomationRunID.String()
 	}
 }
 

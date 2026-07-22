@@ -703,6 +703,32 @@ type CompleteAutomationGoalImprovementResult struct {
 }
 
 // --------------------------------------------------------------------------
+// AutomationOutcomeReporter — structured outcome for the current run
+// --------------------------------------------------------------------------
+
+type AutomationOutcomeReporter interface {
+	Name() string
+	ReportAutomationOutcome(ctx context.Context, params ReportAutomationOutcomeParams) (*ReportAutomationOutcomeResult, error)
+}
+
+type ReportAutomationOutcomeParams struct {
+	Decision           string `json:"decision"`
+	Reason             string `json:"reason"`
+	PullRequestTitle   string `json:"pull_request_title,omitempty"`
+	HeadSHA            string `json:"head_sha,omitempty"`
+	ExternalActionType string `json:"external_action_type,omitempty"`
+	ExternalActionURL  string `json:"external_action_url,omitempty"`
+	ExternalActionID   string `json:"external_action_id,omitempty"`
+}
+
+type ReportAutomationOutcomeResult struct {
+	OutcomeID       string `json:"outcome_id"`
+	AutomationRunID string `json:"automation_run_id"`
+	Decision        string `json:"decision"`
+	Status          string `json:"status"`
+}
+
+// --------------------------------------------------------------------------
 // AutomationManager — internal 143 automation management
 // --------------------------------------------------------------------------
 

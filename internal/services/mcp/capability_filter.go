@@ -53,6 +53,9 @@ func (s *capabilityFilteredToolSource) toolAllowed(name string) bool {
 	if namespace == NamespaceAutomationGoalImprovement && action == ActionComplete {
 		return true
 	}
+	if namespace == NamespaceAutomationRun && action == ActionReport {
+		return true
+	}
 	// Preview tools are intrinsic to the current coding session and are
 	// independently constrained by session-scoped token capabilities.
 	if namespace == NamespacePreview {

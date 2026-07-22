@@ -60,6 +60,7 @@ func TestHandlersMustUseOrgIDFromContext(t *testing.T) {
 		"InternalIssueHandler.Create":                       "internal API, uses claims.OrgID",
 		"InternalEvalHandler.AddCandidate":                  "internal sandbox API, uses claims.OrgID and requires eval_bootstrap session origin",
 		"InternalAutomationGoalImprovementHandler.Complete": "internal sandbox API, uses claims.OrgID and requires automation_goal_improvement session origin",
+		"InternalAutomationOutcomeHandler.Report":           "internal sandbox API, uses claims.OrgID and requires automation session outcome scope",
 		"InternalPullRequestHandler.Create":                 "internal API, uses claims.OrgID",
 		"InternalProjectHandler.Propose":                    "internal API, uses claims.OrgID",
 		"InternalSessionTabsHandler.List":                   "internal sandbox API, uses claims.OrgID and claims.SessionID",

@@ -95,6 +95,12 @@ func BuildRegistryFromEnv(logger io.Writer) *integration.Registry {
 				fmt.Fprintln(logger, "143-tools: registered eval candidate reporter")
 			}
 
+			if os.Getenv("AUTOMATION_RUN_REPORTING_ENABLED") == "true" {
+				reporter := integration.NewInternalAutomationOutcomeReporter(token, apiURL)
+				reg.RegisterAutomationOutcomeReporter(reporter)
+				fmt.Fprintln(logger, "143-tools: registered automation outcome reporter")
+			}
+
 			if goalImprovementToolsOnly {
 				completer := integration.NewInternalAutomationGoalImprovementCompleter(token, apiURL)
 				reg.RegisterAutomationGoalImprovementCompleter(completer)

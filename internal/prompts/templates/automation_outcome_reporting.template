@@ -1,0 +1,17 @@
+Structured automation outcome
+
+This run is evaluating {{.Repository}} pull request #{{.PullRequestNumber}} ({{.PullRequestURL}}).
+
+Before your final response, call `143-tools automation-run report` exactly once with:
+- `decision`: `passed`, `changes_requested`, `advisory`, or `not_applicable`
+- `reason`: one concise sentence explaining the decision
+- `pull_request_title` and `head_sha` when known
+- `external_action_type`, `external_action_url`, and `external_action_id` only when you actually created a GitHub review or comment
+
+Decision meanings:
+- `passed`: evaluated and no blocking change was requested
+- `changes_requested`: you submitted a GitHub changes-requested review; the linked review URL is required
+- `advisory`: you left non-blocking guidance, or found concerns that did not reject the PR
+- `not_applicable`: the automation intentionally skipped this PR (for example draft, closed, or out of scope)
+
+Do not infer the business decision from agent execution success. Do not use `REVIEW_CLEAN` or any internal pre-PR review-loop result as the outcome. Report only what this Main automation run decided and what external GitHub action it actually took.

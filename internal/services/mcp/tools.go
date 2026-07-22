@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/integration"
 	"github.com/google/uuid"
 )
@@ -466,6 +467,26 @@ func (tr *ToolRegistry) ListTools() []Tool {
 		})
 	}
 
+	if len(tr.integrations.AutomationOutcomeReporters()) > 0 {
+		tools = append(tools, Tool{
+			Name:        "automation_run_report_outcome",
+			Description: "Record the final business outcome for the current GitHub PR automation run. Call exactly once from the Main automation thread before finishing.",
+			InputSchema: ToolSchema{
+				Type: "object",
+				Properties: map[string]SchemaProperty{
+					"decision":             {Type: "string", Description: "Final PR decision", Enum: []string{"passed", "changes_requested", "advisory", "not_applicable"}},
+					"reason":               {Type: "string", Description: "Concise human-readable reason for the decision"},
+					"pull_request_title":   {Type: "string", Description: "Target pull request title, when known"},
+					"head_sha":             {Type: "string", Description: "Evaluated pull request head SHA, when known"},
+					"external_action_type": {Type: "string", Description: "GitHub action actually taken", Enum: []string{"github_review_changes_requested", "github_review_approved", "github_comment"}},
+					"external_action_url":  {Type: "string", Description: "Direct github.com URL for the review or comment"},
+					"external_action_id":   {Type: "string", Description: "Provider identifier for the review or comment, when known"},
+				},
+				Required: []string{"decision", "reason"},
+			},
+		})
+	}
+
 	if logProviders := tr.integrations.LogProviders(); len(logProviders) > 0 {
 		tools = append(tools, logToolDefinitions(logProviders)...)
 	}
@@ -621,6 +642,12 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 			return ErrorResult("automation goal improvement completer not registered")
 		}
 		return tr.callAutomationGoalImprovementCompleter(ctx, completers[0], name, args)
+	case "automation_run_report_outcome":
+		reporters := tr.integrations.AutomationOutcomeReporters()
+		if len(reporters) == 0 {
+			return ErrorResult("automation outcome reporter not registered")
+		}
+		return tr.callAutomationOutcomeReporter(ctx, reporters[0], name, args)
 	}
 
 	switch name {
@@ -724,6 +751,40 @@ func (tr *ToolRegistry) CallTool(ctx context.Context, name string, args json.Raw
 	}
 
 	return ErrorResult(fmt.Sprintf("unknown tool: %s", name))
+}
+
+// --------------------------------------------------------------------------
+// Automation outcome reporter dispatch
+// --------------------------------------------------------------------------
+
+func (tr *ToolRegistry) callAutomationOutcomeReporter(ctx context.Context, reporter integration.AutomationOutcomeReporter, method string, args json.RawMessage) *ToolCallResult {
+	if method != "automation_run_report_outcome" {
+		return ErrorResult(fmt.Sprintf("unknown automation outcome reporter method: %s", method))
+	}
+	var params integration.ReportAutomationOutcomeParams
+	if err := json.Unmarshal(args, &params); err != nil {
+		return ErrorResult(fmt.Sprintf("invalid arguments: %s", err))
+	}
+	params.Decision = strings.TrimSpace(params.Decision)
+	params.Reason = strings.TrimSpace(params.Reason)
+	decision := models.AutomationOutcomeDecision(params.Decision)
+	if err := decision.Validate(); err != nil {
+		return ErrorResult(err.Error())
+	}
+	if params.Reason == "" {
+		return ErrorResult("reason is required")
+	}
+	if params.ExternalActionType != "" {
+		actionType := models.AutomationExternalActionType(params.ExternalActionType)
+		if err := actionType.Validate(); err != nil {
+			return ErrorResult(err.Error())
+		}
+	}
+	result, err := reporter.ReportAutomationOutcome(ctx, params)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("report automation outcome failed: %s", err))
+	}
+	return jsonResult(result)
 }
 
 // --------------------------------------------------------------------------

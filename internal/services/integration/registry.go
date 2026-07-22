@@ -31,6 +31,7 @@ type Registry struct {
 	evalReporters                       map[string]EvalCandidateReporter
 	automationManagers                  map[string]AutomationManager
 	automationGoalImprovementCompleters map[string]AutomationGoalImprovementCompleter
+	automationOutcomeReporters          map[string]AutomationOutcomeReporter
 	ciTestInsights                      map[string]CITestInsights
 	logProviders                        map[string]LogProvider
 }
@@ -52,9 +53,26 @@ func NewRegistry() *Registry {
 		evalReporters:                       make(map[string]EvalCandidateReporter),
 		automationManagers:                  make(map[string]AutomationManager),
 		automationGoalImprovementCompleters: make(map[string]AutomationGoalImprovementCompleter),
+		automationOutcomeReporters:          make(map[string]AutomationOutcomeReporter),
 		ciTestInsights:                      make(map[string]CITestInsights),
 		logProviders:                        make(map[string]LogProvider),
 	}
+}
+
+func (r *Registry) RegisterAutomationOutcomeReporter(provider AutomationOutcomeReporter) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.automationOutcomeReporters[provider.Name()] = provider
+}
+
+func (r *Registry) AutomationOutcomeReporters() []AutomationOutcomeReporter {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]AutomationOutcomeReporter, 0, len(r.automationOutcomeReporters))
+	for _, provider := range r.automationOutcomeReporters {
+		result = append(result, provider)
+	}
+	return result
 }
 
 func (r *Registry) RegisterIncidentProvider(provider IncidentProvider) {
