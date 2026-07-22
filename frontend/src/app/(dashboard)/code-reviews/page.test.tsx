@@ -1413,7 +1413,8 @@ describe("CodeReviewsPage", () => {
     server.use(http.get("/api/v1/auth/me", () => HttpResponse.json({ data: { id: "viewer-1", org_id: "org-1", email: "viewer@example.com", name: "Viewer", role: "viewer", created_at: "2026-01-01T00:00:00Z" } })));
     renderWithProviders(<CodeReviewsPage />);
     await user.click(await screen.findByRole("tab", { name: "Policy" }));
-    expect(await screen.findByText(/view-only access/i)).toBeInTheDocument();
+    const viewOnlyNotice = await screen.findByText(/view-only access/i);
+    expect(viewOnlyNotice.closest('[data-slot="card"]')).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Code reviews enabled" })).toBeDisabled();
     expect(screen.getByRole("textbox", { name: "Additional review instructions (optional)" })).toBeDisabled();
 
