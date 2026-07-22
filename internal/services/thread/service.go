@@ -185,6 +185,7 @@ type CreateThreadInput struct {
 	OrgID             uuid.UUID
 	AgentType         string
 	Model             string
+	ReasoningEffort   *models.ReasoningEffort
 	Label             string
 	Instructions      string
 	FileScope         []string
@@ -207,13 +208,17 @@ type threadStoreWithListOptions interface {
 //   - nil:       field absent from the patch — keep the existing override
 //   - non-nil "": field present as JSON null or empty string — clear the override
 //   - non-nil v: field present with a value — set/validate to v
+//
+// ReasoningEffort is internal-only today: nil preserves the existing value and
+// a non-nil value replaces it after agent compatibility validation.
 type UpdateThreadInput struct {
-	SessionID uuid.UUID
-	OrgID     uuid.UUID
-	ThreadID  uuid.UUID
-	AgentType string
-	Model     *string
-	Label     string
+	SessionID       uuid.UUID
+	OrgID           uuid.UUID
+	ThreadID        uuid.UUID
+	AgentType       string
+	Model           *string
+	ReasoningEffort *models.ReasoningEffort
+	Label           string
 }
 
 // SendMessageInput holds the input for sending a message to a thread.
@@ -420,6 +425,14 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		}
 		modelOverride = &input.Model
 	}
+	if input.ReasoningEffort != nil {
+		if err := input.ReasoningEffort.Validate(); err != nil {
+			return nil, err
+		}
+		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(*input.ReasoningEffort) {
+			return nil, fmt.Errorf("reasoning effort %q is not supported by agent type %q", *input.ReasoningEffort, agentType)
+		}
+	}
 	executionMode := input.ExecutionMode
 	if executionMode == "" {
 		executionMode = models.ThreadExecutionModeWork
@@ -445,6 +458,7 @@ func (s *Service) CreateThread(ctx context.Context, input CreateThreadInput) (*m
 		OrgID:             input.OrgID,
 		AgentType:         agentType,
 		ModelOverride:     modelOverride,
+		ReasoningEffort:   input.ReasoningEffort,
 		Label:             input.Label,
 		Instructions:      instructions,
 		FileScope:         input.FileScope,
@@ -529,6 +543,19 @@ func (s *Service) UpdateThread(ctx context.Context, input UpdateThreadInput) (*m
 		// Agent switched without an explicit model: drop the inherited override
 		// because it was scoped to the previous agent.
 		thread.ModelOverride = nil
+	}
+	if input.ReasoningEffort != nil {
+		if *input.ReasoningEffort == "" {
+			return nil, fmt.Errorf("reasoning effort must be non-empty")
+		}
+		if err := input.ReasoningEffort.Validate(); err != nil {
+			return nil, err
+		}
+		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(*input.ReasoningEffort) {
+			return nil, fmt.Errorf("reasoning effort %q is not supported by agent type %q", *input.ReasoningEffort, agentType)
+		}
+		reasoningEffort := *input.ReasoningEffort
+		thread.ReasoningEffort = &reasoningEffort
 	}
 
 	if err := s.threadStore.UpdateEditable(ctx, &thread); err != nil {

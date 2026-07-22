@@ -327,21 +327,32 @@ function ensureReviewerModels(config: CodeReviewPolicyConfig, modelGroups: Agent
 
 type CodeReviewReasoningEffort = NonNullable<CodeReviewPolicyConfig["agent_roster"]["reasoning_effort"]>;
 
-function reasoningOptionsForRoster(config: CodeReviewPolicyConfig) {
-  const agents = [...config.agent_roster.reviewers, config.agent_roster.orchestrator];
-  return CODE_REVIEW_REASONING_OPTIONS.filter((option) =>
-    agents.every((agent) => {
-      const supported = getCodingAgentReasoningOptions(agent);
-      return supported.length === 0 || supported.some((effort) => effort.value === option.value);
-    }),
+function reasoningOptionsForAgent(agent: string) {
+  const supported = getCodingAgentReasoningOptions(agent);
+  return supported.length > 0
+    ? CODE_REVIEW_REASONING_OPTIONS.filter((option) => supported.some((effort) => effort.value === option.value))
+    : CODE_REVIEW_REASONING_OPTIONS.filter((option) => option.value !== "max");
+}
+
+function normalizeReasoningEffortForAgent(agent: string, effort: CodeReviewReasoningEffort | undefined): CodeReviewReasoningEffort {
+  const current = effort ?? "high";
+  return reasoningOptionsForAgent(agent).some((option) => option.value === current) ? current : "high";
+}
+
+function ensureReviewerReasoningEfforts(config: CodeReviewPolicyConfig): CodeReviewReasoningEffort[] {
+  return config.agent_roster.reviewers.map((agent, index) =>
+    normalizeReasoningEffortForAgent(
+      agent,
+      config.agent_roster.reviewer_reasoning_efforts?.[index] ?? config.agent_roster.reasoning_effort,
+    ),
   );
 }
 
-function normalizeReasoningEffortForRoster(config: CodeReviewPolicyConfig): void {
-  const current = config.agent_roster.reasoning_effort ?? "high";
-  if (!reasoningOptionsForRoster(config).some((option) => option.value === current)) {
-    config.agent_roster.reasoning_effort = "high";
-  }
+function normalizeOrchestratorReasoningEffort(config: CodeReviewPolicyConfig): void {
+  config.agent_roster.reasoning_effort = normalizeReasoningEffortForAgent(
+    config.agent_roster.orchestrator,
+    config.agent_roster.reasoning_effort,
+  );
 }
 
 export default function CodeReviewsPage() {
@@ -2183,18 +2194,18 @@ function AgentRosterControls({
 }) {
   const reviewers = config?.agent_roster.reviewers ?? [];
   const reviewerModels = config ? ensureReviewerModels(config, modelGroups) : [];
+  const reviewerReasoningEfforts = config ? ensureReviewerReasoningEfforts(config) : [];
   const canAddReviewer = Boolean(config) && reviewers.length < MAX_REVIEWER_MODELS && modelGroups.length > 0;
   const fallbackGroup = modelGroups[0];
-  const reasoningOptions = config ? reasoningOptionsForRoster(config) : CODE_REVIEW_REASONING_OPTIONS.filter((option) => option.value !== "max");
   const orchestratorModel =
     config?.agent_roster.orchestrator_model && modelBelongsToAgent(config.agent_roster.orchestrator, config.agent_roster.orchestrator_model)
       ? config.agent_roster.orchestrator_model
       : defaultModelForAgent(config?.agent_roster.orchestrator ?? "", modelGroups);
 
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(18rem,22rem)]">
+    <div className="space-y-5">
       <div className="space-y-3">
-        <div className="flex items-center justify-between gap-3">
+        <div className="grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]">
           <div>
             <SettingLabel
               label="Reviewer models"
@@ -2202,33 +2213,46 @@ function AgentRosterControls({
             />
             <p className="mt-1 text-xs text-muted-foreground">Run one to three independent reviewers. Quorum stays in Approval criteria.</p>
           </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={!canAddReviewer}
-            onClick={() =>
-              commitPolicy((next) => {
-                if (!fallbackGroup || next.agent_roster.reviewers.length >= MAX_REVIEWER_MODELS) return;
-                const reviewerModels = ensureReviewerModels(next, modelGroups);
-                next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
-                next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
-                normalizeReasoningEffortForRoster(next);
-              })
-            }
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Add
-          </Button>
-          <SettingInfoTooltip
-            label="Add reviewer model"
-            description="Adds another independent reviewer agent, up to three. Automatic approval still requires the configured reviewer quorum."
+          <SettingLabel
+            label="Reasoning level"
+            info="Sets reasoning independently for each reviewer. Available levels follow the agent selected in that row; High is the default."
           />
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={!canAddReviewer}
+              onClick={() =>
+                commitPolicy((next) => {
+                  if (!fallbackGroup || next.agent_roster.reviewers.length >= MAX_REVIEWER_MODELS) return;
+                  const reviewerModels = ensureReviewerModels(next, modelGroups);
+                  const reasoningEfforts = ensureReviewerReasoningEfforts(next);
+                  next.agent_roster.reviewers = [...next.agent_roster.reviewers, fallbackGroup.key];
+                  next.agent_roster.reviewer_models = [...reviewerModels, fallbackGroup.models[0] ?? ""];
+                  next.agent_roster.reviewer_reasoning_efforts = [
+                    ...reasoningEfforts,
+                    normalizeReasoningEffortForAgent(fallbackGroup.key, "high"),
+                  ];
+                })
+              }
+            >
+              <Plus className="mr-2 h-4 w-4" />
+              Add
+            </Button>
+            <SettingInfoTooltip
+              label="Add reviewer model"
+              description="Adds another independent reviewer agent, up to three. Automatic approval still requires the configured reviewer quorum."
+            />
+          </div>
         </div>
 
         <div className="space-y-2">
           {reviewers.map((agent, index) => (
-            <div key={`${agent}-${index}`} className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[1fr_auto]">
+            <div
+              key={`${agent}-${index}`}
+              className="grid gap-2 rounded-md border border-border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)_auto]"
+            >
               <AgentModelSelect
                 ariaLabel={`Reviewer ${index + 1} model`}
                 infoDescription="Chooses the agent and model for this independent review slot. Each slot must have a selection; the current resolved default remains until changed and contributes to quorum and disagreement handling."
@@ -2242,10 +2266,26 @@ function AgentRosterControls({
                   commitPolicy((next) => {
                     const selection = parseSelectionValue(value);
                     const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
                     next.agent_roster.reviewers[index] = selection.agent;
                     reviewerModels[index] = selection.model;
+                    reasoningEfforts[index] = normalizeReasoningEffortForAgent(selection.agent, reasoningEfforts[index]);
                     next.agent_roster.reviewer_models = reviewerModels;
-                    normalizeReasoningEffortForRoster(next);
+                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts;
+                  })
+                }
+              />
+              <ReasoningEffortSelect
+                ariaLabel={`Reviewer ${index + 1} reasoning level`}
+                agent={agent}
+                value={reviewerReasoningEfforts[index] ?? "high"}
+                disabled={disabled}
+                infoDescription="Sets the reasoning effort for this reviewer only. The available levels depend on the agent selected in this row."
+                onValueChange={(value) =>
+                  commitPolicy((next) => {
+                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
+                    reasoningEfforts[index] = value;
+                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts;
                   })
                 }
               />
@@ -2258,8 +2298,10 @@ function AgentRosterControls({
                 onClick={() =>
                   commitPolicy((next) => {
                     const reviewerModels = ensureReviewerModels(next, modelGroups);
+                    const reasoningEfforts = ensureReviewerReasoningEfforts(next);
                     next.agent_roster.reviewers = next.agent_roster.reviewers.filter((_, i) => i !== index);
                     next.agent_roster.reviewer_models = reviewerModels.filter((_, i) => i !== index);
+                    next.agent_roster.reviewer_reasoning_efforts = reasoningEfforts.filter((_, i) => i !== index);
                     next.agent_roster.require_reviewer_quorum = Math.min(
                       next.agent_roster.require_reviewer_quorum,
                       Math.max(1, next.agent_roster.reviewers.length),
@@ -2274,56 +2316,84 @@ function AgentRosterControls({
         </div>
       </div>
 
-      <div className="space-y-3">
-        <div className="space-y-2">
-          <SettingLabel
-            label="Reasoning level"
-            info="Controls the reasoning effort used by every reviewer and the orchestrator when the selected agent supports explicit reasoning. High is the default."
-          />
-          <Select
-            value={config?.agent_roster.reasoning_effort ?? "high"}
+      <div className="space-y-3 border-t border-border pt-4">
+        <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
+          <div>
+            <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
+            <p className="mt-1 text-xs text-muted-foreground">Synthesizes reviewer evidence and decides the final review outcome.</p>
+          </div>
+          <Label className="text-xs text-muted-foreground">Reasoning level</Label>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
+          <AgentModelSelect
+            ariaLabel="Orchestrator model"
+            infoDescription="Chooses the agent and model that combines reviewer evidence. A selection is required; the resolved default remains until changed, and its recommendation remains subject to every deterministic safeguard."
+            value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
+            modelGroups={modelGroups}
+            openCodeAvailability={openCodeAvailability}
+            currentAgent={config?.agent_roster.orchestrator}
+            currentModel={orchestratorModel}
             disabled={disabled}
             onValueChange={(value) =>
               commitPolicy((next) => {
-                next.agent_roster.reasoning_effort = value as CodeReviewReasoningEffort;
+                const selection = parseSelectionValue(value);
+                next.agent_roster.orchestrator = selection.agent;
+                next.agent_roster.orchestrator_model = selection.model;
+                normalizeOrchestratorReasoningEffort(next);
               })
             }
-          >
-            <SelectTrigger aria-label="Reasoning level">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {reasoningOptions.map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          />
+          <ReasoningEffortSelect
+            ariaLabel="Orchestrator reasoning level"
+            agent={config?.agent_roster.orchestrator ?? ""}
+            value={normalizeReasoningEffortForAgent(
+              config?.agent_roster.orchestrator ?? "",
+              config?.agent_roster.reasoning_effort,
+            )}
+            disabled={disabled}
+            infoDescription="Sets reasoning for the orchestrator only; reviewer reasoning is configured independently in each reviewer row."
+            onValueChange={(value) =>
+              commitPolicy((next) => {
+                next.agent_roster.reasoning_effort = value;
+              })
+            }
+          />
         </div>
-        <div>
-          <Label className="text-xs text-muted-foreground">Orchestrator model</Label>
-          <p className="mt-1 text-xs text-muted-foreground">Synthesizes reviewer evidence and decides the final review outcome.</p>
-        </div>
-        <AgentModelSelect
-          ariaLabel="Orchestrator model"
-          infoDescription="Chooses the agent and model that combines reviewer evidence. A selection is required; the resolved default remains until changed, and its recommendation remains subject to every deterministic safeguard."
-          value={selectionValue(config?.agent_roster.orchestrator ?? "", orchestratorModel)}
-          modelGroups={modelGroups}
-          openCodeAvailability={openCodeAvailability}
-          currentAgent={config?.agent_roster.orchestrator}
-          currentModel={orchestratorModel}
-          disabled={disabled}
-          onValueChange={(value) =>
-            commitPolicy((next) => {
-              const selection = parseSelectionValue(value);
-              next.agent_roster.orchestrator = selection.agent;
-              next.agent_roster.orchestrator_model = selection.model;
-              normalizeReasoningEffortForRoster(next);
-            })
-          }
-        />
       </div>
+    </div>
+  );
+}
+
+function ReasoningEffortSelect({
+  ariaLabel,
+  agent,
+  value,
+  disabled,
+  infoDescription,
+  onValueChange,
+}: {
+  ariaLabel: string;
+  agent: string;
+  value: CodeReviewReasoningEffort;
+  disabled?: boolean;
+  infoDescription: string;
+  onValueChange: (value: CodeReviewReasoningEffort) => void;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <Select value={value} disabled={disabled} onValueChange={(next) => onValueChange(next as CodeReviewReasoningEffort)}>
+        <SelectTrigger aria-label={ariaLabel}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {reasoningOptionsForAgent(agent).map((option) => (
+            <SelectItem key={option.value} value={option.value}>
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <SettingInfoTooltip label={ariaLabel} description={infoDescription} />
     </div>
   );
 }

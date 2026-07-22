@@ -1259,6 +1259,7 @@ type DurableCheckpoint struct {
 type ContinueSessionOptions struct {
 	AgentType            models.AgentType
 	ModelOverride        *string
+	ReasoningEffort      *models.ReasoningEffort
 	ThreadAgentSessionID *string
 	ResultAgentSessionID *string
 	PRRepair             *PRRepairContinueOptions
@@ -3912,6 +3913,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		executionSession := *session
 		executionSession.AgentType = opts.AgentType
 		executionSession.ModelOverride = opts.ModelOverride
+		if opts.ReasoningEffort != nil {
+			executionSession.ReasoningEffort = opts.ReasoningEffort
+		}
 		executionSession.AgentSessionID = opts.ThreadAgentSessionID
 		session = &executionSession
 	}
