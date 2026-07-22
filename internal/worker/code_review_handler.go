@@ -578,8 +578,6 @@ type codeReviewReviewerStructuredResult struct {
 	ReviewerKey       string  `json:"reviewer_key"`
 	ReviewerIndex     int     `json:"reviewer_index"`
 	ThreadID          string  `json:"thread_id"`
-	RequestMessageID  int64   `json:"request_message_id,omitempty"`
-	ExpectedTurn      int     `json:"expected_turn,omitempty"`
 	PromptArtifactKey string  `json:"prompt_artifact_key,omitempty"`
 	FindingCount      int     `json:"finding_count,omitempty"`
 	CostCents         float64 `json:"cost_cents,omitempty"`
@@ -595,8 +593,6 @@ type codeReviewReviewerStructuredResult struct {
 
 type codeReviewOrchestratorStructuredResult struct {
 	ThreadID           string                          `json:"thread_id,omitempty"`
-	RequestMessageID   int64                           `json:"request_message_id,omitempty"`
-	ExpectedTurn       int                             `json:"expected_turn,omitempty"`
 	PromptArtifactKey  string                          `json:"prompt_artifact_key,omitempty"`
 	FindingCount       int                             `json:"finding_count,omitempty"`
 	CostCents          float64                         `json:"cost_cents,omitempty"`
@@ -708,15 +704,14 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err != nil {
 			return fmt.Errorf("create code review reviewer thread: %w", err)
 		}
-		reviewerState := codeReviewReviewerStructuredResult{
+		structured := marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
 			ReviewerKey:       key,
 			ReviewerIndex:     idx,
 			ThreadID:          thread.ID.String(),
 			PromptArtifactKey: artifactKey,
 			NativeReview:      codeReviewAgentHasBuiltinReviewCommand(agentType),
 			ReadOnly:          true,
-		}
-		structured := marshalCodeReviewReviewerStructuredResult(reviewerState)
+		})
 		result := &models.CodeReviewAgentResult{
 			OrgID:            job.OrgID,
 			SessionID:        job.SessionID,
@@ -729,18 +724,14 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
 			return fmt.Errorf("create code review reviewer result: %w", err)
 		}
-		sendResult, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
+		if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
 			SessionID:     job.SessionID,
 			OrgID:         job.OrgID,
 			ThreadID:      thread.ID,
 			Message:       codeReviewReviewerMessage(agentType, promptText),
 			Commands:      codeReviewNativeReviewCommands(agentType, promptText),
 			MessageSource: models.SessionMessageSourceAgentTool,
-		})
-		if err == nil && (sendResult == nil || sendResult.Message == nil) {
-			err = errors.New("code review reviewer message send returned no message")
-		}
-		if err != nil {
+		}); err != nil {
 			raw := err.Error()
 			if _, updateErr := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(codeReviewReviewerStructuredResult{
 				ReviewerKey:       key,
@@ -762,9 +753,6 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				Msg("failed to start code review reviewer thread")
 			continue
 		}
-		reviewerState.RequestMessageID = sendResult.Message.ID
-		reviewerState.ExpectedTurn = sendResult.Message.TurnNumber
-		structured = marshalCodeReviewReviewerStructuredResult(reviewerState)
 		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusRunning, nil, structured); err != nil {
 			return fmt.Errorf("mark code review reviewer running: %w", err)
 		}
@@ -910,22 +898,6 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			return fmt.Errorf("load code review reviewer thread: %w", err)
 		}
 		state.CostCents = thread.CostCents
-		expectedTurn := state.ExpectedTurn
-		if expectedTurn <= 0 {
-			// Reviewer threads are created solely for the review request, so
-			// historic in-flight results written before expected_turn was added
-			// always target their first turn.
-			expectedTurn = 1
-		}
-		threadFailed := thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled
-		turnPersistenceFailed := strings.EqualFold(strings.TrimSpace(stringPtrValue(thread.FailureCategory)), "turn_persistence_failed")
-		if thread.CurrentTurn < expectedTurn && (!threadFailed || turnPersistenceFailed) {
-			// Assistant messages are written before the session and thread turn
-			// completion records. An idle thread with an assistant message but an
-			// older current_turn is an incomplete/retrying attempt, not a review
-			// result that can be harvested.
-			continue
-		}
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -939,11 +911,12 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				Str("reviewer", result.AgentProvider).
 				Msg("code review reviewer thread produced workspace changes; continuing")
 		}
-		raw, ok, err := latestAssistantMessageForThreadTurn(ctx, stores, job.OrgID, threadID, expectedTurn, state.RequestMessageID)
+		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
 			return err
 		}
-		if threadFailed && !codeReviewFailedThreadOutputUsable(thread, raw, ok, expectedTurn) {
+		threadFailed := thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled
+		if threadFailed && !codeReviewFailedReviewerThreadOutputUsable(thread, raw, ok) {
 			failure := strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
 			if !ok {
 				raw = failure
@@ -971,8 +944,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				Str("session_id", job.SessionID.String()).
 				Str("thread_id", thread.ID.String()).
 				Str("reviewer", result.AgentProvider).
-				Int("expected_turn", expectedTurn).
-				Msg("using durably completed reviewer output from a subsequently failed thread")
+				Msg("using persisted reviewer output from a subsequently failed thread")
 		}
 		if !ok {
 			if readOnlyViolation {
@@ -1016,8 +988,8 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 	return nil
 }
 
-func codeReviewFailedThreadOutputUsable(thread models.SessionThread, raw string, ok bool, expectedTurn int) bool {
-	if !ok || thread.CurrentTurn < expectedTurn {
+func codeReviewFailedReviewerThreadOutputUsable(thread models.SessionThread, raw string, ok bool) bool {
+	if !ok {
 		return false
 	}
 	output := strings.TrimSpace(raw)
@@ -1750,17 +1722,16 @@ func codeReviewThreadStillRunning(status models.ThreadStatus) bool {
 	return status == models.ThreadStatusPending || status == models.ThreadStatusRunning || status == models.ThreadStatusAwaitingInput
 }
 
-func latestAssistantMessageForThreadTurn(ctx context.Context, stores *Stores, orgID, threadID uuid.UUID, turn int, afterMessageID int64) (string, bool, error) {
+func latestAssistantMessageForThread(ctx context.Context, stores *Stores, orgID, threadID uuid.UUID) (string, bool, error) {
 	messages, err := stores.SessionMessages.ListByThread(ctx, orgID, threadID)
 	if err != nil {
 		return "", false, fmt.Errorf("list reviewer thread messages: %w", err)
 	}
 	for i := len(messages) - 1; i >= 0; i-- {
-		message := messages[i]
-		if message.Role != models.MessageRoleAssistant || message.TurnNumber != turn || message.ID <= afterMessageID {
+		if messages[i].Role != models.MessageRoleAssistant {
 			continue
 		}
-		content := strings.TrimSpace(message.Content)
+		content := strings.TrimSpace(messages[i].Content)
 		if content == "" {
 			continue
 		}
@@ -1940,25 +1911,21 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			Str("orchestrator", string(agentType)).
 			Msg("retargeted code review primary thread to available orchestrator")
 	}
-	orchestratorState := codeReviewOrchestratorStructuredResult{
+	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
 		ThreadID:          threadID.String(),
 		PromptArtifactKey: artifactKey,
 		ReadOnly:          false,
-	}
+	})
 	// The orchestrator agent result is created only once the thread is actually
 	// dispatched. A transient claim race leaves no result behind, so the next
 	// run_code_review poll re-enters this function cleanly and retries.
-	sendResult, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
+	if _, err := threads.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:     job.SessionID,
 		OrgID:         job.OrgID,
 		ThreadID:      threadID,
 		Message:       promptText,
 		MessageSource: models.SessionMessageSourceAgentTool,
-	})
-	if err == nil && (sendResult == nil || sendResult.Message == nil) {
-		err = errors.New("code review orchestrator message send returned no message")
-	}
-	if err != nil {
+	}); err != nil {
 		// Transient: the session was momentarily non-resumable despite the reset
 		// above (e.g. re-parked by a sibling's sandbox-node retry between the
 		// reset and the claim). Don't record a permanent orchestrator failure —
@@ -1993,9 +1960,6 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		logger.Warn().Err(err).Str("thread_id", threadID.String()).Msg("failed to start code review orchestrator thread")
 		return nil
 	}
-	orchestratorState.RequestMessageID = sendResult.Message.ID
-	orchestratorState.ExpectedTurn = sendResult.Message.TurnNumber
-	structured := marshalCodeReviewOrchestratorStructuredResult(orchestratorState)
 	result := &models.CodeReviewAgentResult{
 		OrgID:            job.OrgID,
 		SessionID:        job.SessionID,
@@ -2063,17 +2027,6 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			return fmt.Errorf("load code review orchestrator thread: %w", err)
 		}
 		state.CostCents = thread.CostCents
-		expectedTurn := state.ExpectedTurn
-		if expectedTurn <= 0 {
-			// Historic code-review primary threads had not run before the
-			// orchestrator request, so pre-field results target turn one.
-			expectedTurn = 1
-		}
-		threadFailed := thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled
-		turnPersistenceFailed := strings.EqualFold(strings.TrimSpace(stringPtrValue(thread.FailureCategory)), "turn_persistence_failed")
-		if thread.CurrentTurn < expectedTurn && (!threadFailed || turnPersistenceFailed) {
-			continue
-		}
 		if codeReviewThreadStillRunning(thread.Status) {
 			continue
 		}
@@ -2090,41 +2043,26 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 				Bool("reverted", state.Reverted).
 				Msg("code review orchestrator thread produced workspace changes; ignoring for review validity")
 		}
-		raw, ok, err := latestAssistantMessageForThreadTurn(ctx, stores, job.OrgID, threadID, expectedTurn, state.RequestMessageID)
+		raw, ok, err := latestAssistantMessageForThread(ctx, stores, job.OrgID, threadID)
 		if err != nil {
 			return err
 		}
-		if threadFailed && !codeReviewFailedThreadOutputUsable(thread, raw, ok, expectedTurn) {
-			failure := strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
-			if !ok {
-				raw = failure
+		if !ok {
+			if thread.Status == models.ThreadStatusFailed || thread.Status == models.ThreadStatusCancelled {
+				raw = strings.TrimSpace(stringPtrValue(thread.FailureExplanation))
 				if raw == "" {
 					raw = "orchestrator thread did not complete successfully"
 				}
+				state.Error = raw
+				rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
+				if err != nil {
+					return err
+				}
+				state.RawArtifactKey = rawArtifactKey
+				if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
+					return fmt.Errorf("mark orchestrator failed: %w", err)
+				}
 			}
-			if failure == "" {
-				failure = raw
-			}
-			state.Error = failure
-			rawOutput, rawArtifactKey, err := codeReviewRawOutputForStorage(ctx, stores, job, result.ID, models.CodeReviewAgentRoleOrchestrator, result.AgentProvider, raw)
-			if err != nil {
-				return err
-			}
-			state.RawArtifactKey = rawArtifactKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewOrchestratorStructuredResult(state)); err != nil {
-				return fmt.Errorf("mark orchestrator failed: %w", err)
-			}
-			continue
-		}
-		if threadFailed {
-			logger.Warn().
-				Str("session_id", job.SessionID.String()).
-				Str("thread_id", thread.ID.String()).
-				Str("orchestrator", result.AgentProvider).
-				Int("expected_turn", expectedTurn).
-				Msg("using durably completed orchestrator output from a subsequently failed thread")
-		}
-		if !ok {
 			continue
 		}
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)

@@ -10083,9 +10083,6 @@ func newContinueSessionHandler(stores *Stores, services *Services, logger zerolo
 					Diff:          diffPtr,
 				}
 				if err := stores.SessionThreads.UpdateTurnComplete(ctx, orgID, threadID, threadTurnBefore+1, threadResult, resultAgentSessionID); err != nil {
-					if session.Origin == models.SessionOriginCodeReview {
-						return fmt.Errorf("persist code review thread turn result: %w", err)
-					}
 					logger.Warn().Err(err).
 						Str("session_id", sessionID.String()).
 						Str("thread_id", threadID.String()).
