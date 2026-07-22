@@ -242,6 +242,9 @@ describe('SessionDetailPage PR creation', () => {
 
     const publicationBadge = await screen.findByText('Publication retrying');
     expect(publicationBadge).toHaveAttribute('title', 'GitHub accepted the PR; reconciling local state.');
+    expect(publicationBadge).toHaveAttribute('role', 'status');
+    expect(publicationBadge).toHaveAttribute('aria-live', 'polite');
+    expect(publicationBadge).toHaveAttribute('aria-atomic', 'true');
   });
 
   it('keeps a review-gate warning visible after the pull request exists', async () => {
