@@ -255,7 +255,12 @@ func (s *PRService) buildPullRequestHealthResponse(ctx context.Context, pr model
 				resp.HealthVersion = current.Version
 				resp.HeadSHA = current.HeadSHA
 				resp.BaseSHA = current.BaseSHA
-				resp.ChecksConfirmed = summary.ChecksConfirmed || (len(summary.Checks) > 0 && determineChecksConfirmed(summary.Checks, false))
+				resp.ChecksConfirmed = summary.ChecksConfirmed
+				if summary.CheckSetComplete == nil {
+					// Summaries written before check-set completeness was persisted
+					// remain readable until the next authoritative reconciliation.
+					resp.ChecksConfirmed = resp.ChecksConfirmed || (len(summary.Checks) > 0 && determineChecksConfirmed(summary.Checks, false))
+				}
 				resp.EnrichmentStatus = current.EnrichmentStatus
 				resp.EnrichmentRequested = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusPending
 				resp.EnrichmentReady = current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady
@@ -453,8 +458,8 @@ func blockPullRequestHealthSync(resp *models.PullRequestHealthResponse) {
 }
 
 func checksAllowMerge(checksConfirmed bool, checks []models.PullRequestCheckSummary) bool {
-	if len(checks) == 0 {
-		return checksConfirmed
+	if !checksConfirmed {
+		return false
 	}
 	for _, check := range checks {
 		if classifyStoredCheckStatus(check) != models.PullRequestCheckStatusPassed {
@@ -562,8 +567,10 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		return priorErr
 	}
 
+	checkSetComplete := true
 	summary := models.PullRequestHealthSummary{
-		Checks: make([]models.PullRequestCheckSummary, 0),
+		Checks:           make([]models.PullRequestCheckSummary, 0),
+		CheckSetComplete: &checkSetComplete,
 	}
 	checkStates := make([]models.PullRequestCheckState, 0, len(checkRuns)+len(commitStatuses))
 	summary.MergeState, summary.HasConflicts = normalizeMergeState(details.Mergeable, details.MergeableState)
@@ -655,6 +662,17 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			return nil
 		}
 	}
+	// Reconcile the fetched check set before exposing its corresponding health
+	// snapshot. This prevents a projected rebuild from advancing the aggregate
+	// with an older webhook immediately before reconciliation replaces that
+	// webhook row with the newer authoritative state.
+	if err := s.pullRequests.ReconcileCheckStates(ctx, orgID, pullRequestID, details.Head.SHA, checkStateVersion, checkStates); err != nil {
+		s.logger.Warn().Err(err).
+			Str("pull_request_id", pullRequestID.String()).
+			Str("head_sha", details.Head.SHA).
+			Msg("failed to seed pull request check projection during GitHub reconciliation")
+	}
+
 	current, err := s.pullRequests.UpsertHealthSummary(ctx, orgID, pullRequestID, details.Head.SHA, details.Base.SHA, summary, nil, checkStateVersion)
 	if err != nil {
 		return err
@@ -665,14 +683,7 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during pull request health sync")
 	}
 
-	s.publishPullRequestUpdated(ctx, pr, current)
-	s.enqueueMergeWhenReadyProcessing(ctx, pr)
-	if err := s.pullRequests.ReconcileCheckStates(ctx, orgID, pullRequestID, details.Head.SHA, checkStateVersion, checkStates); err != nil {
-		s.logger.Warn().Err(err).
-			Str("pull_request_id", pullRequestID.String()).
-			Str("head_sha", details.Head.SHA).
-			Msg("failed to seed pull request check projection during GitHub reconciliation")
-	}
+	projectedHealthChanged := false
 	pendingCheckStates, pendingErr := s.pullRequests.HasCheckStatesAfter(ctx, orgID, pullRequestID, details.Head.SHA, checkStateVersion)
 	if pendingErr != nil {
 		s.logger.Warn().Err(pendingErr).
@@ -680,12 +691,21 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 			Str("head_sha", details.Head.SHA).
 			Msg("failed to detect check webhooks that raced GitHub reconciliation")
 	} else if pendingCheckStates {
-		if _, rebuildErr := s.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID); rebuildErr != nil {
+		var rebuildErr error
+		projectedHealthChanged, rebuildErr = s.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID)
+		if rebuildErr != nil {
 			s.logger.Warn().Err(rebuildErr).
 				Str("pull_request_id", pullRequestID.String()).
 				Str("head_sha", details.Head.SHA).
 				Msg("failed to overlay check webhooks that raced GitHub reconciliation")
 		}
+	}
+	// A changed projected rebuild publishes and queues merge processing with the
+	// final aggregate itself. Otherwise expose the authoritative snapshot only
+	// after reconciliation and the race overlay have completed.
+	if !projectedHealthChanged {
+		s.publishPullRequestUpdated(ctx, pr, current)
+		s.enqueueMergeWhenReadyProcessing(ctx, pr)
 	}
 	if mergeStateIndeterminate {
 		return ErrPullRequestMergeabilityPending
@@ -774,6 +794,11 @@ func latestProjectedCheckStateVersion(states []models.PullRequestCheckState) int
 }
 
 func rebuildProjectedHealthSummary(summary models.PullRequestHealthSummary, states []models.PullRequestCheckState) models.PullRequestHealthSummary {
+	checkSetComplete := summary.CheckSetComplete == nil || *summary.CheckSetComplete
+	if checkSetComplete && projectedStatesAddUnknownChecks(summary.Checks, states) {
+		checkSetComplete = false
+		summary.CheckSetComplete = &checkSetComplete
+	}
 	summary.Checks = mergeProjectedCheckSummaries(summary.Checks, states)
 	summary.FailingTestCount = 0
 	for _, check := range summary.Checks {
@@ -781,9 +806,22 @@ func rebuildProjectedHealthSummary(summary models.PullRequestHealthSummary, stat
 			summary.FailingTestCount++
 		}
 	}
-	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, false)
+	summary.ChecksConfirmed = checkSetComplete && determineChecksConfirmed(summary.Checks, false)
 	summary.NeedsAgentAction = summary.HasConflicts || healthSummaryHasRepairableFailedChecks(summary)
 	return summary
+}
+
+func projectedStatesAddUnknownChecks(existing []models.PullRequestCheckSummary, states []models.PullRequestCheckState) bool {
+	known := make(map[string]struct{}, len(existing))
+	for _, check := range existing {
+		known[projectedCheckSummaryKey(check)] = struct{}{}
+	}
+	for _, state := range states {
+		if _, ok := known[projectedCheckSummaryKey(state.CheckSummary())]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeProjectedCheckSummaries(existing []models.PullRequestCheckSummary, states []models.PullRequestCheckState) []models.PullRequestCheckSummary {

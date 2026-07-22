@@ -419,6 +419,7 @@ func TestPRServiceMergePullRequestRunsMergedFollowUps(t *testing.T) {
 	prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(prMock, orgID, prID, "head-merge", 1)
 
 	prMock.ExpectBegin()
 	prMock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").

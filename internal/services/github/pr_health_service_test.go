@@ -371,7 +371,8 @@ func (a pullRequestHealthSummaryArg) Match(value interface{}) bool {
 	}
 	if summary.FailingTestCount != a.wantFailingTestCount ||
 		summary.NeedsAgentAction != a.wantNeedsAgentAction ||
-		summary.ChecksConfirmed != a.wantChecksConfirmed {
+		summary.ChecksConfirmed != a.wantChecksConfirmed ||
+		summary.CheckSetComplete == nil || !*summary.CheckSetComplete {
 		return false
 	}
 	for _, check := range summary.Checks {
@@ -743,7 +744,8 @@ func TestPRServiceBuildPullRequestHealthResponseRespectsStoredChecksConfirmed(t 
 		"failing_test_count":0,
 		"needs_agent_action":false,
 		"checks_confirmed":false,
-		"checks":[]
+		"check_set_complete":false,
+		"checks":[{"name":"unit tests","category":"test","status":"passed"}]
 	}`)
 
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id = .+ AND pull_request_id = .+").
@@ -1111,11 +1113,16 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 
 	tests := []struct {
 		name     string
+		initial  models.PullRequestHealthSummary
 		state    models.PullRequestCheckState
 		expected models.PullRequestHealthSummary
 	}{
 		{
-			name:  "failed test becomes a confirmed repairable blocker",
+			name: "failed test becomes a confirmed repairable blocker",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean,
+				Checks:     []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
 			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed},
 			expected: models.PullRequestHealthSummary{
 				MergeState: models.PullRequestMergeStateClean, FailingTestCount: 1, NeedsAgentAction: true, ChecksConfirmed: true,
@@ -1123,11 +1130,50 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 			},
 		},
 		{
-			name:  "pending test keeps checks unconfirmed",
+			name: "pending test keeps checks unconfirmed",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean,
+				Checks:     []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
 			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending},
 			expected: models.PullRequestHealthSummary{
 				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false,
 				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+		},
+		{
+			name: "new passing check invalidates authoritative membership",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(true),
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+		},
+		{
+			name: "known check can complete an authoritative set",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(true),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: true, CheckSetComplete: boolPtr(true),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
+			},
+		},
+		{
+			name: "partial set stays unconfirmed after known check completes",
+			initial: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPending}},
+			},
+			state: models.PullRequestCheckState{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed},
+			expected: models.PullRequestHealthSummary{
+				MergeState: models.PullRequestMergeStateClean, ChecksConfirmed: false, CheckSetComplete: boolPtr(false),
+				Checks: []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
 			},
 		},
 	}
@@ -1136,11 +1182,7 @@ func TestRebuildProjectedHealthSummary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			initial := models.PullRequestHealthSummary{
-				MergeState: models.PullRequestMergeStateClean,
-				Checks:     []models.PullRequestCheckSummary{{Name: "Backend Test", Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusPassed}},
-			}
-			actual := rebuildProjectedHealthSummary(initial, []models.PullRequestCheckState{tt.state})
+			actual := rebuildProjectedHealthSummary(tt.initial, []models.PullRequestCheckState{tt.state})
 			require.Equal(t, tt.expected, actual, "projected rebuild should derive aggregate health entirely from merged check state")
 		})
 	}
@@ -1218,6 +1260,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesFollowUpWhenInlineMergeabilityPend
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1357,6 +1400,7 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-sync", 2)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1412,29 +1456,6 @@ func TestPRServiceSyncPullRequestState(t *testing.T) {
 	mock.ExpectExec("UPDATE pull_requests SET ci_status").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID, "ci_status": models.PullRequestCIStatusFailure}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	mock.ExpectBegin()
-	mock.ExpectExec("DELETE FROM pull_request_check_states").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-sync"}).
-		WillReturnResult(pgxmock.NewResult("DELETE", 0))
-	mock.ExpectExec("INSERT INTO pull_request_check_states").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-sync",
-			"source": models.PullRequestCheckSourceCheckRun, "external_key": "unit tests", "name": "unit tests",
-			"category": models.PullRequestCheckCategoryTest, "status": models.PullRequestCheckStatusFailed,
-			"provider": "github-actions", "details_url": "https://example.com/tests/details", "summary": "2 tests failed",
-			"provider_event_id": "", "provider_sequence": int64(11), "provider_updated_at": pgxmock.AnyArg(), "projection_version": int64(0),
-		}).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mock.ExpectExec("INSERT INTO pull_request_check_states").
-		WithArgs(pgx.NamedArgs{
-			"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": "head-sync",
-			"source": models.PullRequestCheckSourceCheckRun, "external_key": "eslint", "name": "eslint",
-			"category": models.PullRequestCheckCategoryLint, "status": models.PullRequestCheckStatusPassed,
-			"provider": "github-actions", "details_url": "https://example.com/lint/details", "summary": "",
-			"provider_event_id": "", "provider_sequence": int64(12), "provider_updated_at": pgxmock.AnyArg(), "projection_version": int64(0),
-		}).
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	mock.ExpectCommit()
 
 	service := &PRService{
 		tokenProvider: &Service{cache: map[int64]*cachedToken{}},
@@ -1504,6 +1525,7 @@ func TestPRServiceSyncPullRequestStateIncludesCommitStatuses(t *testing.T) {
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-status", 2)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -1817,6 +1839,7 @@ func TestPRServiceSyncPullRequestStatePersistsMergeabilityPendingAndRequestsRetr
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 		WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+	expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-pending", 1)
 	mock.ExpectBegin()
 	mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -3027,6 +3050,7 @@ func TestPRServiceGetPullRequestHealthInlineSyncAndStartRepairErrors(t *testing.
 		mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 			WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+		expectCheckStateReconciliation(mock, orgID, pullRequestID, "head-inline", 1)
 		mock.ExpectBegin()
 		mock.ExpectExec("SELECT id[\\s\\S]+FROM pull_requests[\\s\\S]+FOR UPDATE").
 			WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
@@ -3464,6 +3488,25 @@ func expectReserveCheckStateVersion(mock pgxmock.PgxPoolIface, orgID, pullReques
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(pullRequestID))
 	mock.ExpectQuery("SELECT nextval").
 		WillReturnRows(pgxmock.NewRows([]string{"version"}).AddRow(version))
+	mock.ExpectCommit()
+}
+
+func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullRequestID uuid.UUID, headSHA string, stateCount int) {
+	mock.ExpectBegin()
+	mock.ExpectExec("DELETE FROM pull_request_check_states").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "head_sha": headSHA}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+	for range stateCount {
+		mock.ExpectExec("INSERT INTO pull_request_check_states").
+			WithArgs(pgx.NamedArgs{
+				"org_id": pgxmock.AnyArg(), "pull_request_id": pgxmock.AnyArg(), "head_sha": pgxmock.AnyArg(),
+				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
+				"category": pgxmock.AnyArg(), "status": pgxmock.AnyArg(), "provider": pgxmock.AnyArg(),
+				"details_url": pgxmock.AnyArg(), "summary": pgxmock.AnyArg(), "provider_event_id": pgxmock.AnyArg(),
+				"provider_sequence": pgxmock.AnyArg(), "provider_updated_at": pgxmock.AnyArg(), "projection_version": pgxmock.AnyArg(),
+			}).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	}
 	mock.ExpectCommit()
 }
 
