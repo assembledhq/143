@@ -251,6 +251,42 @@ func TestRunCLI_RejectsFlatCommandsWithMigrationHelp(t *testing.T) {
 	}
 }
 
+func TestCLIPathForTool_CodeReviewHistoryMapping(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		tool      string
+		namespace CLINamespace
+		action    CLIAction
+	}{
+		{tool: "code_review_history_list", namespace: NamespaceCodeReviewHistory, action: ActionList},
+		{tool: "code_review_history_get", namespace: NamespaceCodeReviewHistory, action: ActionGet},
+		{tool: "code_review_history_policy", namespace: NamespaceCodeReviewHistory, action: ActionPolicy},
+	}
+	for _, tt := range tests {
+		namespace, action, ok := cliPathForTool(tt.tool)
+		require.True(t, ok, "%s should map to a CLI path", tt.tool)
+		require.Equal(t, tt.namespace, namespace, "%s should live in the code-review-history namespace", tt.tool)
+		require.Equal(t, tt.action, action, "%s should map to the expected action", tt.tool)
+	}
+}
+
+func TestRunCLI_CodeReviewHistoryNamespaceDispatch(t *testing.T) {
+	t.Parallel()
+
+	source := NewInternalMetaToolSource(staticToolSource{}, "token", "https://143.dev")
+	filtered := NewCapabilityFilteredToolSource(source, ToolCapabilityPolicy{Capabilities: []models.AgentCapabilitySnapshotItem{
+		{ID: models.AgentCapabilityReviewFeedback, AccessLevel: models.AgentCapabilityAccessRead},
+	}})
+
+	var stdout, stderr bytes.Buffer
+	code := RunCLI(context.Background(), filtered, []string{"code-review-history", "--help"}, &stdout, &stderr)
+	require.Equal(t, 0, code, "namespace help should succeed: stderr=%s", stderr.String())
+	for _, action := range []string{"list", "get", "policy"} {
+		require.Contains(t, stdout.String(), action, "code-review-history namespace help should list the %s action", action)
+	}
+}
+
 func TestRunCLI_UnknownUnderscoreNameIsUnknownNamespace(t *testing.T) {
 	t.Parallel()
 
