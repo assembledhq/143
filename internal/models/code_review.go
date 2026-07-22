@@ -438,7 +438,6 @@ const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine,
 Require human review when:
 - the change affects authentication, billing, permissions, infrastructure, or production data
 - the change introduces a new architectural pattern or crosses unclear ownership boundaries
-- reviewers disagree or the risk cannot be evaluated confidently
 - the intended behavior cannot be determined from the pull request and repository context`
 
 type CodeReviewPolicyInheritance struct {
