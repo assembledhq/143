@@ -348,6 +348,39 @@ Per-session publish workflow state for PR creation, follow-up PR pushes, and bra
 - `(org_id, session_id)` — tenant-scoped point lookup
 - `(org_id, updated_at)` where any publish state is `queued` or `pushing` — stuck publish action sweeps
 
+### `session_publications`
+
+Durable per-changeset branch/PR publication operations. Unlike
+`session_publish_state`, which drives action UX, this table checkpoints
+external side effects so retries, webhooks, and reconciliation converge on one
+GitHub artifact.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | uuid | Primary key |
+| org_id | uuid | Tenant scope and FK -> organizations |
+| session_id | uuid | Scoped FK -> sessions |
+| changeset_id | uuid | Scoped FK -> session_changesets; unique with org |
+| repository_id | uuid | Scoped FK -> repositories |
+| state | text | Requested/review/branch/PR/recorded/completed/failure checkpoint |
+| source | text | `user`, `automation`, `agent_tool`, `backend`, `webhook`, `reconciler`, or `backfill` |
+| review_gate_state | text | `not_required`, `pending`, `passed`, `needs_human`, or `failed` |
+| job_queue | text | Original guarded `open_pr` worker queue (`default` or `agent`) |
+| request_payload | jsonb | Original scoped `open_pr` intent, preserved for exact replay |
+| request_generation_at | timestamptz | Original job enqueue time; newer explicit requests may reopen retryable terminal outcomes |
+| base_branch, head_branch | text | Desired GitHub branch relationship |
+| desired_head_sha, published_head_sha | text | Expected and observed remote heads |
+| github_pr_number, github_pr_url | integer, text | Resolved GitHub artifact |
+| attempt_count | integer | Number of accepted nonterminal attempts |
+| last_error_code, last_error_message | text | Latest retryable/terminal failure |
+| requested/attempt/checkpoint timestamps | timestamptz | Recovery and latency evidence |
+
+**Indexes:**
+- unique `(org_id, changeset_id)` — one operation per PR target
+- `(org_id, session_id, created_at DESC)` — session detail lookup
+- `(org_id, updated_at, id)` for reconcilable nonterminal states
+- unique `pull_requests (org_id, changeset_id)` where non-null — one PR association per changeset
+
 ### `session_execution_metadata`
 
 Execution metadata that is needed by runtime integrations but does not belong on the core session lifecycle row.
@@ -942,6 +975,7 @@ Durable, database-backed async work queue for the full pipeline (`ingest_webhook
 | locked_at | timestamptz | when worker claimed job |
 | last_error | text | latest error message |
 | dedupe_key | text | optional idempotency key for coalescing duplicates |
+| retry_window_started_at | timestamptz | first bounded external retry, preserved across worker restarts |
 | created_at | timestamptz | |
 | updated_at | timestamptz | |
 | completed_at | timestamptz | nullable |

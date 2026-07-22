@@ -2615,7 +2615,7 @@ var workerSessionColumns = []string{
 }
 
 var workerSessionThreadColumns = []string{
-	"id", "session_id", "org_id", "agent_type", "model_override",
+	"id", "session_id", "org_id", "agent_type", "model_override", "reasoning_effort",
 	"label", "instructions", "file_scope", "status", "agent_session_id", "current_turn", "last_activity_at",
 	"result_summary", "diff", "failure_explanation", "failure_category",
 	"started_at", "completed_at", "created_at",
@@ -2656,7 +2656,7 @@ func workerSessionThreadRow(threadID, sessionID, orgID uuid.UUID, agentType mode
 	now := time.Now()
 	nowPtr := &now
 	return []any{
-		threadID, sessionID, orgID, agentType, modelOverride,
+		threadID, sessionID, orgID, agentType, modelOverride, nil,
 		"Thread", nil, []string{}, status, nil, 1, nowPtr,
 		nil, nil, nil, nil,
 		nowPtr, nil, now,
@@ -4733,6 +4733,7 @@ type mockPMService struct {
 }
 
 type stubPRService struct {
+	preparePublicationAttemptFn    func(context.Context, *models.Session, models.SessionChangeset, ghservice.CreatePRParams) (ghservice.PublicationAttempt, error)
 	createPRFn                     func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
 	createBranchFn                 func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*ghservice.CreateBranchResult, error)
 	pushChangesToPRFn              func(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error)
@@ -4745,6 +4746,20 @@ type stubPRService struct {
 	queueMergeWhenReadyFn          func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error)
 	processMergeWhenReadyFn        func(context.Context, uuid.UUID, uuid.UUID) error
 	syncPRPreviewSurfacesFn        func(context.Context, ghservice.SyncPRPreviewSurfacesPayload) error
+}
+
+func (s *stubPRService) PreparePublicationAttempt(ctx context.Context, run *models.Session, changeset models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error) {
+	if s.preparePublicationAttemptFn != nil {
+		return s.preparePublicationAttemptFn(ctx, run, changeset, params)
+	}
+	return ghservice.PublicationAttempt{
+		Params: params,
+		Publication: models.SessionPublication{
+			OrgID: run.OrgID, SessionID: run.ID, ChangesetID: changeset.ID,
+			State: models.SessionPublicationStateRequested,
+		},
+		Started: true,
+	}, nil
 }
 
 func (s *stubPRService) CreatePR(ctx context.Context, run *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
@@ -4886,6 +4901,87 @@ func TestOpenPRHandler_WaitsForRunningSessionSnapshot(t *testing.T) {
 	require.ErrorAs(t, err, &retryable, "open_pr should requeue while the running session has not published a snapshot")
 	require.ErrorIs(t, retryable.Err, agent.ErrSnapshotPending, "open_pr should preserve the snapshot-pending sentinel")
 	require.NoError(t, mock.ExpectationsWereMet(), "open_pr should only read the session while waiting for the snapshot")
+}
+
+func TestOpenPRHandler_MissingCompletedSnapshotTerminalizesPublication(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+	}).WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	expectedMessage := fmt.Sprintf("session %s has no snapshot (status: %s): %s", sessionID, models.SessionStatusCompleted, ghservice.ErrSnapshotNotCaptured)
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.SessionPublicationStateTerminalFailed, "error_code": stringPtr("publication_failed"),
+		"error_message": stringPtr(expectedMessage), "completed": true,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	prepareCalls := 0
+	services := &Services{PR: &stubPRService{
+		preparePublicationAttemptFn: func(_ context.Context, _ *models.Session, _ models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error) {
+			prepareCalls++
+			return ghservice.PublicationAttempt{
+				Params: params,
+				Publication: models.SessionPublication{
+					OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+					State: models.SessionPublicationStateRequested, Source: models.SessionPublicationSourceUser,
+				},
+				Started: true,
+			}, nil
+		},
+		createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			return nil, errors.New("missing snapshots must fail before CreatePR")
+		},
+	}}
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := newOpenPRHandler(stores, services, zerolog.Nop())(context.Background(), "open_pr", payload)
+
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "a completed session without a publication snapshot should fail without retrying forever")
+	require.ErrorIs(t, err, ghservice.ErrSnapshotNotCaptured, "the terminal failure should retain the snapshot-not-captured classification")
+	require.Equal(t, 1, prepareCalls, "the handler should terminalize the exact publication attempt it started")
+	require.NoError(t, mock.ExpectationsWereMet(), "the missing snapshot should leave a durable terminal publication state")
+}
+
+func TestRegisterOpenPRPublicationDeadLetterTerminalizesExhaustedAttempt(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+	publication := models.SessionPublication{
+		OrgID: uuid.New(), SessionID: uuid.New(), ChangesetID: uuid.New(),
+		Source: models.SessionPublicationSourceAutomation,
+	}
+	deadLetterErr := errors.New("automation review service remained unavailable")
+	mock.ExpectExec("UPDATE session_publications").WithArgs(pgx.NamedArgs{
+		"org_id": publication.OrgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
+		"state": models.SessionPublicationStateTerminalFailed, "error_code": stringPtr("publication_failed"),
+		"error_message": stringPtr(deadLetterErr.Error()), "completed": true,
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+	registerOpenPRPublicationDeadLetter(ctx, stores, zerolog.Nop(), publication)
+	jobctx.RunDeadLetterHooks(ctx, deadLetterErr)
+
+	require.NoError(t, mock.ExpectationsWereMet(), "retry exhaustion should make pre-push publication failures terminal and visible")
 }
 
 func TestPushPRChangesHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
@@ -5687,6 +5783,37 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 	require.True(t, retryable.ConsumeAttempt, "pending mergeability should consume attempts so exponential backoff advances")
 }
 
+func TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	prID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	services := &Services{
+		PR: &stubPRService{
+			syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				return &ghservice.GitHubAPIError{
+					Method:     http.MethodGet,
+					Path:       "/repos/acme/repo/pulls/42",
+					StatusCode: http.StatusForbidden,
+					Body:       []byte(`{"message":"API rate limit exceeded"}`),
+					Header:     http.Header{"Retry-After": []string{"37"}},
+				}
+			},
+		},
+	}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+
+	err := newSyncPullRequestStateHandler(services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
+
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "rate-limited PR sync should remain pending until GitHub recovers")
+	require.False(t, retryable.ConsumeAttempt, "rate-limited PR sync should not consume its attempt budget")
+	require.NotNil(t, retryable.RetryAfter, "rate-limited PR sync should preserve GitHub's retry delay")
+	require.Equal(t, 78*time.Second, *retryable.RetryAfter, "rate-limited PR sync should apply the minimum delay and stable per-job jitter")
+	require.NotNil(t, retryable.MaxRetryDuration, "rate-limited PR sync should use a longer bounded retry window")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "rate-limited PR sync should survive a normal GitHub reset interval")
+}
+
 func TestSyncPullRequestStateHandlerTreatsAutoRepairEvaluationFailureAsNonFatal(t *testing.T) {
 	t.Parallel()
 
@@ -5722,6 +5849,304 @@ type prHandlerCalls struct {
 	version             int64
 	autoRepairReason    string
 	surfacePayload      ghservice.SyncPRPreviewSurfacesPayload
+}
+
+func TestPublishChangesetStackCreatePRParamsBuildsReplayableIntent(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	generationAt := time.Now().UTC()
+	draft := true
+	params, err := publishChangesetStackCreatePRParams(publishChangesetStackJobInput{
+		OrgID: orgID.String(), SessionID: sessionID.String(), AuthorMode: "user", Draft: &draft,
+	}, orgID, sessionID, changesetID, generationAt)
+	require.NoError(t, err, "stack publication should encode a per-changeset open_pr replay intent")
+	require.NotNil(t, params.ChangesetID, "stack publication should target the current changeset")
+	require.Equal(t, changesetID, *params.ChangesetID, "stack publication should preserve the current changeset ID")
+	require.Equal(t, models.SessionPublicationSourceUser, params.PublicationSource, "stack publication should record the user-owned request source")
+	require.Equal(t, models.SessionPublicationJobQueueAgent, params.PublicationQueue, "stack publication replay should return to the sandbox-owning agent queue")
+	require.Equal(t, generationAt, params.PublicationGenerationAt, "stack publication should retain the stable job generation")
+
+	var replay openPRJobInput
+	require.NoError(t, json.Unmarshal(params.PublicationRequestPayload, &replay), "stack publication replay payload should be valid open_pr input")
+	require.Equal(t, openPRJobInput{
+		SessionID: sessionID.String(), ChangesetID: changesetID.String(), OrgID: orgID.String(),
+		Draft: &draft, AuthorMode: "user",
+		PublicationSource: string(models.SessionPublicationSourceUser),
+		PublicationQueue:  string(models.SessionPublicationJobQueueAgent),
+	}, replay, "stack publication should persist the complete replay contract")
+}
+
+func TestPublishChangesetStackHandlerStopsTerminalReplayBeforeCreatePR(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	branch, worktree := "143/session/stack", "/workspace/stack"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		WorkingBranch: &branch, WorktreePath: &worktree, CreatedAt: now, UpdatedAt: now,
+	}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	mock.ExpectQuery("INSERT INTO session_changeset_leases").WithArgs(workerAnyArgs(8)...).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"changeset_id", "org_id", "session_id", "holder_id", "holder_type", "holder_label", "acquired_at", "heartbeat_at", "expires_at",
+		}).AddRow(changesetID, orgID, sessionID, uuid.New(), models.ChangesetLeaseTypePublish, "publish stack", now, now, now.Add(5*time.Minute)))
+	mock.ExpectExec("DELETE FROM session_changeset_leases").WithArgs(workerAnyArgs(4)...).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	prepareCalls, createCalls := 0, 0
+	services := &Services{PR: &stubPRService{
+		preparePublicationAttemptFn: func(_ context.Context, _ *models.Session, gotChangeset models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error) {
+			prepareCalls++
+			require.Equal(t, changesetID, gotChangeset.ID, "stack publication should prepare the current changeset")
+			return ghservice.PublicationAttempt{
+				Params: params,
+				Publication: models.SessionPublication{
+					OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+					State: models.SessionPublicationStateTerminalFailed,
+				},
+				Started: false,
+			}, nil
+		},
+		createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			createCalls++
+			return nil, errors.New("terminal stack replay must not call CreatePR")
+		},
+	}}
+	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `"}`)
+
+	err := newPublishChangesetStackHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypePublishChangesetStack, payload)
+
+	require.NoError(t, err, "terminal stack replay should stop successfully without GitHub side effects")
+	require.Equal(t, 1, prepareCalls, "stack publication should consult the durable state exactly once")
+	require.Equal(t, 0, createCalls, "terminal stack publication should not invoke CreatePR")
+	require.NoError(t, mock.ExpectationsWereMet(), "terminal stack replay should acquire and release only its local lease")
+}
+
+func TestPublicationRequestGenerationAtUsesOriginalJobEnqueueTime(t *testing.T) {
+	t.Parallel()
+
+	createdAt := time.Date(2026, time.July, 16, 18, 30, 0, 123456000, time.FixedZone("test", -7*60*60))
+	ctx := jobctx.WithJobCreatedAt(context.Background(), createdAt)
+
+	actual := publicationRequestGenerationAt(ctx)
+	require.Equal(t, createdAt.UTC(), actual, "publication retries should retain the original durable job generation across attempts")
+}
+
+func TestCompleteOpenPRJobRetriesPostPublicationWork(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	orgID, sessionID, requestedByUserID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), prCreationStateArg{state: models.PRCreationStateSucceeded}, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mergeCalls := 0
+	services := &Services{PR: &stubPRService{
+		queueMergeWhenReadyFn: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+			mergeCalls++
+			require.Equal(t, orgID, gotOrgID, "post-publication replay should retain the publication org")
+			require.Equal(t, prID, gotPRID, "post-publication replay should target the recorded pull request")
+			require.Equal(t, requestedByUserID, gotUserID, "post-publication replay should retain the requested auto-merge actor")
+			return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
+		},
+	}}
+	prURL := "https://github.com/assembledhq/143/pull/42"
+	err := completeOpenPRJob(
+		context.Background(), stores, services, zerolog.Nop(),
+		models.Session{ID: sessionID, OrgID: orgID},
+		openPRJobInput{MergeWhenReady: true, RequestedByUserID: requestedByUserID.String()},
+		nil,
+		&models.PullRequest{ID: prID, OrgID: orgID, GitHubPRURL: prURL},
+	)
+	require.NoError(t, err, "a completed publication retry should finish auto-merge and success-state work")
+	require.Equal(t, 1, mergeCalls, "post-publication replay should queue auto-merge exactly once per handler attempt")
+	require.NoError(t, mock.ExpectationsWereMet(), "post-publication success should persist the session state")
+}
+
+var workerChangesetTestColumns = []string{
+	"id", "org_id", "session_id", "is_primary", "order_index", "title", "summary",
+	"status", "target_branch", "base_branch", "working_branch", "stacked_on_changeset_id", "head_sha",
+	"expected_remote_head_sha", "base_head_sha", "worktree_path", "materialization_error", "materialized_diff",
+	"restack_delta_kind", "restack_delta_summary", "restack_confirmation_required",
+	"pr_creation_state", "pr_creation_error", "created_at", "updated_at",
+}
+
+func workerChangesetTestRow(changeset models.SessionChangeset) []any {
+	return []any{
+		changeset.ID, changeset.OrgID, changeset.SessionID, changeset.IsPrimary, changeset.OrderIndex, changeset.Title, changeset.Summary,
+		changeset.Status, changeset.TargetBranch, changeset.BaseBranch, changeset.WorkingBranch, changeset.StackedOnChangesetID, changeset.HeadSHA,
+		changeset.ExpectedRemoteHeadSHA, changeset.BaseHeadSHA, changeset.WorktreePath, changeset.MaterializationError, changeset.MaterializedDiff,
+		changeset.RestackDeltaKind, changeset.RestackDeltaSummary, changeset.RestackConfirmationRequired,
+		changeset.PRCreationState, changeset.PRCreationError, changeset.CreatedAt, changeset.UpdatedAt,
+	}
+}
+
+func TestOpenPRHandlerCompletedPublicationResumesPostPublicationWork(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+	stores.PullRequests = db.NewPullRequestStore(mock)
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	requestedByUserID, prID := uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	branch, headSHA, worktree := "143/session/recover", "0123456789abcdef0123456789abcdef01234567", "/workspace/repo"
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","org_id":"` + orgID.String() + `","merge_when_ready":true,"requested_by_user_id":"` + requestedByUserID.String() + `","publication_source":"user","publication_queue":"agent"}`)
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, nil)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusPROpen, TargetBranch: "main", BaseBranch: "main",
+		WorkingBranch: &branch, HeadSHA: &headSHA, ExpectedRemoteHeadSHA: &headSHA, WorktreePath: &worktree,
+		PRCreationState: models.PRCreationStatePushing, CreatedAt: now, UpdatedAt: now,
+	}
+	changesetArgs := pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(changesetArgs).
+		WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	prNumber := 42
+	publication := models.SessionPublication{
+		ID: uuid.New(), OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID, RepositoryID: repositoryID,
+		State: models.SessionPublicationStateCompleted, Source: models.SessionPublicationSourceUser,
+		ReviewGateState: models.SessionPublicationReviewGateNotRequired,
+		JobQueue:        models.SessionPublicationJobQueueAgent, RequestPayload: payload, RequestGenerationAt: now,
+		BaseBranch: "main", HeadBranch: branch, DesiredHeadSHA: &headSHA, PublishedHeadSHA: &headSHA,
+		GitHubPRNumber: &prNumber, RequestedAt: now, CompletedAt: &now, CreatedAt: now, UpdatedAt: now,
+	}
+	prURL := "https://github.com/assembledhq/143/pull/42"
+	mock.ExpectQuery("SELECT .*FROM pull_requests").WithArgs(changesetArgs).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "session_id", "changeset_id", "org_id", "github_pr_number", "github_pr_url", "github_repo",
+			"title", "status", "review_status", "authored_by", "created_at", "updated_at",
+		}).AddRow(
+			prID, &sessionID, &changesetID, orgID, 42, prURL, "assembledhq/143",
+			"Recovered PR", models.PullRequestStatusOpen, models.PullRequestReviewStatusPending, models.GitIdentitySourceUser, now, now,
+		))
+	mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(changesetArgs).
+		WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	mock.ExpectQuery("INSERT INTO session_publish_state").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), prCreationStateArg{state: models.PRCreationStateSucceeded}, pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+	mock.ExpectExec("UPDATE session_changesets").WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+		"state": models.PRCreationStateSucceeded, "error": (*string)(nil),
+	}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	createCalls, mergeCalls := 0, 0
+	services := &Services{PR: &stubPRService{
+		preparePublicationAttemptFn: func(_ context.Context, _ *models.Session, _ models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error) {
+			return ghservice.PublicationAttempt{Params: params, Publication: publication, Started: false}, nil
+		},
+		createPRFn: func(context.Context, *models.Session, ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			createCalls++
+			return nil, errors.New("completed publication must not recreate the PR")
+		},
+		queueMergeWhenReadyFn: func(_ context.Context, gotOrgID, gotPRID, gotUserID uuid.UUID) (*models.PullRequestMergeWhenReadyStatus, error) {
+			mergeCalls++
+			require.Equal(t, orgID, gotOrgID, "recovered post-publication work should retain org scope")
+			require.Equal(t, prID, gotPRID, "recovered post-publication work should target the recorded PR")
+			require.Equal(t, requestedByUserID, gotUserID, "recovered post-publication work should retain the auto-merge actor")
+			return &models.PullRequestMergeWhenReadyStatus{State: models.PullRequestMergeWhenReadyStateQueued}, nil
+		},
+	}}
+
+	err := newOpenPRHandler(stores, services, zerolog.Nop())(context.Background(), "open_pr", payload)
+	require.NoError(t, err, "a retry after publication completion should finish the worker-owned post-publication phase")
+	require.Equal(t, 0, createCalls, "completed publication replay should not repeat GitHub PR creation")
+	require.Equal(t, 1, mergeCalls, "completed publication replay should finish the requested auto-merge step")
+	require.NoError(t, mock.ExpectationsWereMet(), "completed publication replay should converge all local state")
+}
+
+func TestOpenPRHandlerPreparesBranchlessSnapshotPublicationBeforeCreatePR(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	t.Cleanup(mock.Close)
+	stores.SessionChangesets = db.NewSessionChangesetStore(mock)
+	stores.SessionPublications = db.NewSessionPublicationStore(mock)
+
+	orgID, sessionID, changesetID, repositoryID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	snapshotKey := "snap-branchless-publication"
+	preparedBranch := "143/prepared/snapshot-publication"
+	sessionRow := newWorkerSessionRow(sessionID, orgID, now, &snapshotKey)
+	setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
+	mock.ExpectQuery("SELECT .* FROM sessions").WithArgs(workerAnyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	changeset := models.SessionChangeset{
+		ID: changesetID, OrgID: orgID, SessionID: sessionID, IsPrimary: true,
+		Status: models.ChangesetStatusReady, TargetBranch: "main", BaseBranch: "main",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	changesetArgs := pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID}
+	expectChangeset := func() {
+		mock.ExpectQuery("SELECT .*FROM session_changesets").WithArgs(changesetArgs).
+			WillReturnRows(pgxmock.NewRows(workerChangesetTestColumns).AddRow(workerChangesetTestRow(changeset)...))
+	}
+	expectChangeset()
+	mock.ExpectExec("UPDATE session_publications").WithArgs(workerAnyArgs(5)...).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	for _, state := range []models.PRCreationState{models.PRCreationStatePushing, models.PRCreationStateSucceeded} {
+		expectChangeset()
+		mock.ExpectQuery("INSERT INTO session_publish_state").
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), prCreationStateArg{state: state}, pgxmock.AnyArg()).
+			WillReturnRows(pgxmock.NewRows(workerSessionColumns))
+		mock.ExpectExec("UPDATE session_changesets").WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
+			"state": state, "error": (*string)(nil),
+		}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	}
+
+	prepareCalls, createCalls := 0, 0
+	var preparedParams ghservice.CreatePRParams
+	services := &Services{PR: &stubPRService{
+		preparePublicationAttemptFn: func(_ context.Context, run *models.Session, gotChangeset models.SessionChangeset, params ghservice.CreatePRParams) (ghservice.PublicationAttempt, error) {
+			prepareCalls++
+			require.Nil(t, gotChangeset.WorkingBranch, "snapshot-backed changeset should remain branchless before preparation")
+			require.Equal(t, changesetID, *params.ChangesetID, "publication preparation should retain changeset scope")
+			params.PublicationHeadBranch = preparedBranch
+			preparedParams = params
+			return ghservice.PublicationAttempt{
+				Params: params,
+				Publication: models.SessionPublication{
+					OrgID: run.OrgID, SessionID: run.ID, ChangesetID: changesetID,
+					State: models.SessionPublicationStateRequested, Source: params.PublicationSource,
+					JobQueue: params.PublicationQueue, RequestPayload: params.PublicationRequestPayload,
+					HeadBranch: preparedBranch, RequestGenerationAt: params.PublicationGenerationAt,
+				},
+				Started: true,
+			}, nil
+		},
+		createPRFn: func(_ context.Context, _ *models.Session, params ...ghservice.CreatePRParams) (*models.PullRequest, error) {
+			createCalls++
+			require.Equal(t, []ghservice.CreatePRParams{preparedParams}, params, "CreatePR should receive the exact parameters returned by durable preparation")
+			return &models.PullRequest{ID: uuid.New(), OrgID: orgID}, nil
+		},
+	}}
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","org_id":"` + orgID.String() + `"}`)
+
+	err := newOpenPRHandler(stores, services, zerolog.Nop())(context.Background(), "open_pr", payload)
+
+	require.NoError(t, err, "branchless snapshot publication should be durably prepared before PR creation")
+	require.Equal(t, 1, prepareCalls, "branchless publication should be prepared exactly once")
+	require.Equal(t, 1, createCalls, "prepared branchless publication should invoke CreatePR exactly once")
+	require.NoError(t, mock.ExpectationsWereMet(), "branchless publication should converge local PR creation state")
 }
 
 func TestOpenPRHandler_SuccessMarksPushingAndSucceeded(t *testing.T) {
@@ -5990,7 +6415,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		OrgID:           orgID,
 		AutomationRunID: &automationRunID,
 	}
-	ok, err := ensureAutomationPrePRReview(context.Background(), stores, &Services{ReviewLoops: &stubWorkerReviewLoops{}}, zerolog.Nop(), run)
+	ok, err := ensureAutomationPrePRReview(context.Background(), stores, &Services{ReviewLoops: &stubWorkerReviewLoops{}}, zerolog.Nop(), run, nil)
 
 	require.False(t, ok, "pre-PR review should not allow PR creation while the loop is running")
 	var retryable *RetryableError
@@ -9099,6 +9524,69 @@ func TestPrimaryIssueIDFromSnapshot(t *testing.T) {
 	}), "primaryIssueIDFromSnapshot should return nil when there is no primary linked issue")
 }
 
+func TestPersistedOpenPRJobInputRestoresCallerChoices(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	draft := false
+	expected := openPRJobInput{
+		SessionID: sessionID.String(), ChangesetID: changesetID.String(), OrgID: orgID.String(),
+		IssueSnapshotID: uuid.NewString(), Draft: &draft, AuthorMode: "user", MergeWhenReady: true,
+		RequestedByUserID: uuid.NewString(), RequestedRole: string(models.RoleBuilder),
+		PublicationSource: string(models.SessionPublicationSourceAutomation),
+		PublicationQueue:  string(models.SessionPublicationJobQueueAgent),
+	}
+	payload, err := json.Marshal(expected)
+	require.NoError(t, err, "test should encode a complete durable open_pr intent")
+	publication := models.SessionPublication{
+		OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+		Source: models.SessionPublicationSourceAutomation, JobQueue: models.SessionPublicationJobQueueAgent,
+		RequestPayload: payload,
+	}
+
+	actual, restored, err := persistedOpenPRJobInput(publication)
+	require.NoError(t, err, "a scoped durable open_pr intent should be restorable")
+	require.True(t, restored, "a nonempty durable open_pr intent should replace a minimal continuation payload")
+	require.Equal(t, expected, actual, "restored intent should preserve draft, authorship, merge, role, actor, and issue snapshot choices")
+}
+
+func TestPersistedOpenPRJobInputRejectsScopeDrift(t *testing.T) {
+	t.Parallel()
+
+	orgID, sessionID, changesetID := uuid.New(), uuid.New(), uuid.New()
+	tests := []struct {
+		name        string
+		publication models.SessionPublication
+	}{
+		{
+			name: "changeset mismatch",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				Source: models.SessionPublicationSourceUser, JobQueue: models.SessionPublicationJobQueueDefault,
+				RequestPayload: json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + uuid.NewString() + `","publication_source":"user","publication_queue":"default"}`),
+			},
+		},
+		{
+			name: "queue mismatch",
+			publication: models.SessionPublication{
+				OrgID: orgID, SessionID: sessionID, ChangesetID: changesetID,
+				Source: models.SessionPublicationSourceUser, JobQueue: models.SessionPublicationJobQueueAgent,
+				RequestPayload: json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `","changeset_id":"` + changesetID.String() + `","publication_source":"user","publication_queue":"default"}`),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, restored, err := persistedOpenPRJobInput(tt.publication)
+			require.Error(t, err, "persisted replay intent should fail closed when durable scope metadata drifts")
+			require.False(t, restored, "invalid persisted replay intent should not be applied")
+		})
+	}
+}
+
 func TestOpenPRHandler_InvalidOrgID(t *testing.T) {
 	t.Parallel()
 
@@ -11190,6 +11678,102 @@ func TestContinueSessionHandler_WrapsSiblingSandboxRaceAsRetryable(t *testing.T)
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestContinueSessionHandler_WrapsUnreadySharedWorkspaceAsRetryable(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+	workerNodeID := "worker-review-owner"
+	containerID := "shared-review-container"
+	row := workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)
+	setWorkerSessionColumnValue(row, "container_id", &containerID)
+	setWorkerSessionColumnValue(row, "worker_node_id", &workerNodeID)
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(
+			pgxmock.NewRows(workerSessionColumns).AddRow(
+				row...,
+			),
+		)
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "workspace readiness retry should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "workspace readiness retry should remain scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "workspace readiness retry should preserve the requested thread id")
+			return fmt.Errorf("clone is still initializing: %w", agent.ErrSandboxWorkspaceNotReady)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should propagate the unready shared-workspace signal")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "ErrSandboxWorkspaceNotReady must be wrapped as RetryableError so the worker waits for the winning checkout")
+	require.NotNil(t, retryable.RetryAfter, "workspace readiness retries should use a short deliberate backoff")
+	require.ErrorIs(t, retryable.Err, agent.ErrSandboxWorkspaceNotReady, "the wrapped error must preserve the ErrSandboxWorkspaceNotReady sentinel")
+	require.NotNil(t, retryable.TargetNodeID, "workspace readiness retries should remain pinned to the sandbox-owning worker")
+	require.Equal(t, workerNodeID, *retryable.TargetNodeID, "workspace readiness retries should target the recorded sandbox owner")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before returning the retry")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
+func TestContinueSessionHandler_DeadLettersThreadCancelledDuringWorkspaceWait(t *testing.T) {
+	t.Parallel()
+
+	stores, mock := newTestStores(t)
+	defer mock.Close()
+	stores.SessionThreads = db.NewSessionThreadStore(mock)
+
+	orgID := uuid.New()
+	sessionID := uuid.New()
+	threadID := uuid.New()
+	issueID := uuid.New()
+
+	mock.ExpectQuery("SELECT .* FROM sessions").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(
+			workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 2, nil, nil)...,
+		))
+	mock.ExpectQuery("SELECT .* FROM session_threads").
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
+			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeCodex, nil, models.ThreadStatusRunning)...,
+		))
+
+	orch := &orchestratorServiceStub{
+		continueSessionFn: func(ctx context.Context, session *models.Session, opts *agent.ContinueSessionOptions) error {
+			require.NotNil(t, opts, "workspace-wait cancellation should preserve thread execution options")
+			require.NotNil(t, opts.ThreadID, "workspace-wait cancellation should remain scoped to the requested thread")
+			require.Equal(t, threadID, *opts.ThreadID, "workspace-wait cancellation should preserve the requested thread id")
+			return fmt.Errorf("cancel timestamp observed: %w", agent.ErrThreadCancelledBeforeWorkspaceReady)
+		},
+	}
+	handler := newContinueSessionHandler(stores, &Services{Orchestrator: orch}, zerolog.Nop())
+	payload := json.RawMessage(`{"session_id":"` + sessionID.String() + `","org_id":"` + orgID.String() + `","thread_id":"` + threadID.String() + `"}`)
+
+	err := handler(context.Background(), "continue_session", payload)
+	require.Error(t, err, "continue_session should terminate the cancelled workspace-waiting turn")
+	var fatal *FatalError
+	require.ErrorAs(t, err, &fatal, "workspace-wait cancellation should dead-letter instead of retrying after readiness")
+	require.ErrorIs(t, fatal.Err, agent.ErrThreadCancelledBeforeWorkspaceReady, "fatal error should preserve the workspace-wait cancellation sentinel")
+	require.Equal(t, 1, orch.continueSessionCalls, "continue_session should call the orchestrator once before dead-lettering the cancelled turn")
+	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
+}
+
 func TestRunPRReadinessHandler_DeadLetterMarksReadinessFailed(t *testing.T) {
 	t.Parallel()
 
@@ -11317,6 +11901,7 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 	threadID := uuid.New()
 	issueID := uuid.New()
 	threadModel := models.OpenCodeModelGemini3Flash
+	threadReasoning := models.ReasoningEffortXHigh
 	continuationErr := errors.New("sandbox hydrate failed")
 
 	mock.ExpectQuery("SELECT .* FROM sessions").
@@ -11326,10 +11911,12 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 				workerSessionRow(sessionID, issueID, orgID, models.SessionStatusIdle, 2, nil, nil)...,
 			),
 		)
+	threadRow := workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)
+	threadRow[5] = &threadReasoning
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(
-			workerSessionThreadRow(threadID, sessionID, orgID, models.AgentTypeOpenCode, &threadModel, models.ThreadStatusRunning)...,
+			threadRow...,
 		))
 	mock.ExpectExec("UPDATE session_threads SET status = @status").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -11341,6 +11928,8 @@ func TestContinueSessionHandler_ReleasesThreadOnContinuationFailure(t *testing.T
 			require.Equal(t, models.AgentTypeOpenCode, opts.AgentType, "thread execution should use the thread agent type")
 			require.NotNil(t, opts.ModelOverride, "thread execution should include the thread model override")
 			require.Equal(t, threadModel, *opts.ModelOverride, "thread execution should use the thread model")
+			require.NotNil(t, opts.ReasoningEffort, "thread execution should include the thread reasoning override")
+			require.Equal(t, threadReasoning, *opts.ReasoningEffort, "thread execution should use the thread reasoning effort")
 			return continuationErr
 		},
 	}

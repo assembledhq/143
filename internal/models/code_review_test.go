@@ -71,16 +71,57 @@ func TestDefaultCodeReviewPolicyConfig(t *testing.T) {
 	config := DefaultCodeReviewPolicyConfig()
 	require.Empty(t, config.ReviewInstructions, "default review instructions should preserve native review behavior")
 	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, config.AutomatedApprovalPolicy, "default approval policy should be conservative")
+	require.Contains(t, config.AutomatedApprovalPolicy, "Disregard GitHub checks, CI results, build statuses", "default approval policy should base approval on code rather than external check status")
+	require.Contains(t, config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "default approval policy should require an independent decision")
 
 	require.Equal(t, CodeReviewApprovalModeCommentOnly, config.ApprovalMode, "code reviewer should default to comment-only mode")
 	require.True(t, config.Enabled, "code reviewer should default enabled so explicit reviewer requests are honored")
 	require.Equal(t, 4, config.InlineCommentLimit, "default inline comment limit should match product design")
 	require.Equal(t, 5, config.RiskPolicy.MaxFilesChanged, "default acceptable-risk file threshold should be conservative")
 	require.Equal(t, 300, config.RiskPolicy.MaxLinesChanged, "default acceptable-risk line threshold should be conservative")
+	require.False(t, config.RiskPolicy.RequirePassingChecks, "default approval policy should evaluate code without requiring GitHub checks")
 	require.Equal(t, []AgentType{AgentTypeCodex, AgentTypeClaudeCode}, config.AgentRoster.Reviewers, "default roster should run two reviewers")
 	require.Equal(t, []string{DefaultCodexModel, DefaultClaudeCodeModel}, config.AgentRoster.ReviewerModels, "default roster should pin reviewer models")
+	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, config.AgentRoster.ReviewerReasoningEfforts, "each default reviewer should use high reasoning")
 	require.Equal(t, OpenCodeModelGPT55, *config.AgentRoster.OrchestratorModel, "default roster should pin the orchestrator model")
+	require.Equal(t, ReasoningEffortHigh, config.AgentRoster.ReasoningEffort, "code review orchestrator should default to high reasoning")
 	require.NoError(t, config.Validate(), "default code review policy should be valid")
+}
+
+func TestResolveCodeReviewPolicyConfigDefaultsLegacyRosterReasoning(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.AgentRoster.ReviewerReasoningEfforts = nil
+	config.AgentRoster.ReasoningEffort = ""
+
+	resolved := ResolveCodeReviewPolicyConfig(&config)
+
+	require.Equal(t, ReasoningEffortHigh, resolved.AgentRoster.ReasoningEffort, "legacy code review policies should inherit high reasoning")
+	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, resolved.AgentRoster.ReviewerReasoningEfforts, "legacy reviewers should inherit the roster reasoning level")
+}
+
+func TestCodeReviewPolicyRecordConfigDefaultsLegacyRosterReasoning(t *testing.T) {
+	t.Parallel()
+
+	config := DefaultCodeReviewPolicyConfig()
+	config.AgentRoster.ReviewerReasoningEfforts = nil
+	config.AgentRoster.ReasoningEffort = ""
+	record := CodeReviewPolicyRecord{
+		Enabled:                 config.Enabled,
+		ApprovalMode:            config.ApprovalMode,
+		ReviewInstructions:      config.ReviewInstructions,
+		AutomatedApprovalPolicy: config.AutomatedApprovalPolicy,
+		DescriptionPolicy:       config.DescriptionPolicy,
+		RiskPolicy:              config.RiskPolicy,
+		AgentRoster:             config.AgentRoster,
+		InlineCommentLimit:      config.InlineCommentLimit,
+	}
+
+	resolved := record.Config()
+
+	require.Equal(t, ReasoningEffortHigh, resolved.AgentRoster.ReasoningEffort, "stored legacy code review policies should run with high reasoning")
+	require.Equal(t, []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh}, resolved.AgentRoster.ReviewerReasoningEfforts, "stored legacy reviewers should inherit high reasoning")
 }
 
 func TestResolveCodeReviewPolicyConfigDoesNotMutateInput(t *testing.T) {
@@ -127,10 +168,24 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},
+		{name: "rejects reviewer reasoning count mismatch", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerReasoningEfforts = []ReasoningEffort{ReasoningEffortHigh}
+		}, expectErr: true},
 		{name: "rejects invalid reviewer model", mutate: func(c *CodeReviewPolicyConfig) {
 			c.AgentRoster.ReviewerModels = []string{DefaultCodexModel, DefaultCodexModel}
 		}, expectErr: true},
 		{name: "rejects invalid orchestrator model", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.OrchestratorModel = strPtr(DefaultCodexModel) }, expectErr: true},
+		{name: "accepts independent reviewer reasoning", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerReasoningEfforts = []ReasoningEffort{ReasoningEffortXHigh, ReasoningEffortMax}
+		}},
+		{name: "rejects invalid reviewer reasoning effort", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerReasoningEfforts[1] = ReasoningEffort("turbo")
+		}, expectErr: true},
+		{name: "rejects empty reviewer reasoning effort", mutate: func(c *CodeReviewPolicyConfig) {
+			c.AgentRoster.ReviewerReasoningEfforts[1] = ""
+		}, expectErr: true},
+		{name: "rejects invalid reasoning effort", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReasoningEffort = ReasoningEffort("turbo") }, expectErr: true},
+		{name: "rejects reasoning effort unsupported by reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerReasoningEfforts[0] = ReasoningEffortMax }, expectErr: true},
 		{name: "rejects oversized quorum", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.RequireReviewerQuorum = 3 }, expectErr: true},
 		{name: "rejects too short timeout", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.TimeoutSeconds = 30 }, expectErr: true},
 	}
@@ -151,39 +206,6 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 			require.NoError(t, err, "valid code review policy should be accepted")
 		})
 	}
-}
-
-func TestMergeCodeReviewPolicyConfigInheritsFieldByField(t *testing.T) {
-	t.Parallel()
-
-	base := DefaultCodeReviewPolicyConfig()
-	base.Enabled = true
-	base.ApprovalMode = CodeReviewApprovalModeCommentOnly
-	base.RiskPolicy.MaxFilesChanged = 9
-	base.InlineCommentLimit = 4
-	base.ReviewInstructions = "organization review guidance"
-	base.AutomatedApprovalPolicy = "organization approval guidance"
-	override := base
-	override.ApprovalMode = CodeReviewApprovalModeApproveAcceptable
-	override.RiskPolicy.MaxFilesChanged = 2
-	override.InlineCommentLimit = 8
-	override.ReviewInstructions = "repository review guidance"
-	override.AutomatedApprovalPolicy = "repository approval guidance"
-	override.Inheritance = CodeReviewPolicyInheritance{
-		InheritOrgDefaults: true,
-		OverrideFields:     []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldReviewInstructions},
-	}
-
-	merged := MergeCodeReviewPolicyConfig(base, override)
-
-	require.True(t, merged.Enabled, "merged policy should inherit fields outside the repository override list")
-	require.Equal(t, CodeReviewApprovalModeApproveAcceptable, merged.ApprovalMode, "merged policy should apply explicitly overridden approval mode")
-	require.Equal(t, 2, merged.RiskPolicy.MaxFilesChanged, "merged policy should apply explicitly overridden risk policy")
-	require.Equal(t, 4, merged.InlineCommentLimit, "merged policy should inherit non-overridden inline comment limit")
-	require.Equal(t, override.ReviewInstructions, merged.ReviewInstructions, "repository review instructions should override independently")
-	require.Equal(t, base.AutomatedApprovalPolicy, merged.AutomatedApprovalPolicy, "automated approval policy should inherit independently")
-	require.Equal(t, override.Inheritance, merged.Inheritance, "merged policy should preserve inheritance audit metadata")
-	require.Equal(t, []string{CodeReviewPolicyFieldApprovalMode, CodeReviewPolicyFieldReviewInstructions, CodeReviewPolicyFieldAutomatedApprovalPolicy, CodeReviewPolicyFieldRiskPolicy, CodeReviewPolicyFieldInlineCommentLimit}, CodeReviewPolicyOverrideFields(base, override), "override field detection should report prompt fields independently")
 }
 
 func TestResolveCodeReviewPolicyConfigNormalizesPromptFields(t *testing.T) {
@@ -221,6 +243,7 @@ func TestCodeReviewPolicyTemplates(t *testing.T) {
 
 			require.NotEmpty(t, template.Title, "template should have a display title")
 			require.Equal(t, CodeReviewApprovalModeApproveAcceptable, template.Config.ApprovalMode, "starter templates should be editable approval policies")
+			require.Contains(t, template.Config.AutomatedApprovalPolicy, "Unresolved human review threads must not count against approval.", "starter templates should require an independent decision")
 			require.NoError(t, template.Config.Validate(), "template config should be valid")
 		})
 	}
@@ -249,17 +272,19 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 		},
 		{
 			name: "blocks oversized sensitive fork with agent concerns",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.RequirePassingChecks = true
+			},
 			input: CodeReviewRiskInput{
-				FilesChanged:           6,
-				LinesChanged:           350,
-				ChangedPaths:           []string{"internal/auth/session.go"},
-				Categories:             []string{"auth"},
-				ChecksPassing:          false,
-				DescriptionPassed:      false,
-				FromFork:               true,
-				UnresolvedHumanThreads: 1,
-				BlockingFindings:       1,
-				ReviewerDisagreement:   true,
+				FilesChanged:         6,
+				LinesChanged:         350,
+				ChangedPaths:         []string{"internal/auth/session.go"},
+				Categories:           []string{"auth"},
+				ChecksPassing:        false,
+				DescriptionPassed:    false,
+				FromFork:             true,
+				BlockingFindings:     1,
+				ReviewerDisagreement: true,
 			},
 			expected: codeReviewRiskEvaluationForTest(
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 6, Limit: 5},
@@ -267,12 +292,22 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonDescriptionFailed},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonForkIneligible},
-				CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonReviewerDisagreement},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonSensitivePath, Subject: "internal/auth/session.go"},
 				CodeReviewRiskReason{Code: CodeReviewRiskReasonExcludedCategory, Subject: "auth"},
 			),
+		},
+		{
+			name: "default ignores failing GitHub checks",
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				LinesChanged:      20,
+				ChecksPassing:     false,
+				DescriptionPassed: true,
+				Author:            "devin",
+			},
+			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
 			name: "blocks missing required named check and ineligible author",
@@ -623,6 +658,9 @@ func TestCodeReviewPromptExamples(t *testing.T) {
 	require.Equal(t, DefaultCodeReviewAutomatedApprovalPolicy, approval[0].Policy, "the conservative example should match the built-in approval policy")
 	for _, example := range append([]CodeReviewPromptExampleOption(nil), review...) {
 		require.NotEmpty(t, example.Instructions, "every review example should contain usable instructions")
+	}
+	for _, example := range append([]CodeReviewAutomatedApprovalExampleOption(nil), approval...) {
+		require.Contains(t, example.Policy, "Unresolved human review threads must not count against approval.", "every approval example should require an independent decision")
 	}
 }
 

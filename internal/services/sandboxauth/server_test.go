@@ -26,10 +26,12 @@ type stubResolver struct {
 	resolution *identity.Resolution
 	err        error
 	calls      int
+	actions    []string
 }
 
-func (s *stubResolver) Resolve(_ context.Context, _ *models.Session, _ *models.Repository, _ models.OrgSettings, _ string) (*identity.Resolution, error) {
+func (s *stubResolver) ResolveSandbox(_ context.Context, _ *models.Session, _ *models.Repository, action string) (*identity.Resolution, error) {
 	s.calls++
+	s.actions = append(s.actions, action)
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -91,6 +93,7 @@ func TestServer_ServesResolverResponse(t *testing.T) {
 	require.Equal(t, IdentityUser, resp.Identity)
 	require.Equal(t, "alice", resp.Login)
 	require.Equal(t, DefaultUsername, resp.Username)
+	require.Equal(t, []string{"push"}, resolver.actions, "server should pass the requested action to least-privilege resolution")
 }
 
 func TestServer_RefreshesPerCall(t *testing.T) {
@@ -487,8 +490,8 @@ func TestServer_AcceptLoop_IgnoresClosedListenerAndReturnsOnOtherErrors(t *testi
 	t.Parallel()
 
 	srv := NewServer(&stubResolver{}, shortSocketDir(t), zerolog.Nop())
-	srv.acceptLoop(context.Background(), &errListener{err: net.ErrClosed}, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
-	srv.acceptLoop(context.Background(), &errListener{err: errors.New("accept failed")}, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+	srv.acceptLoop(context.Background(), &errListener{err: net.ErrClosed}, &models.Session{}, &models.Repository{}, zerolog.Nop())
+	srv.acceptLoop(context.Background(), &errListener{err: errors.New("accept failed")}, &models.Session{}, &models.Repository{}, zerolog.Nop())
 }
 
 func TestServer_HandleConn_ErrorBranches(t *testing.T) {
@@ -504,7 +507,7 @@ func TestServer_HandleConn_ErrorBranches(t *testing.T) {
 		go func() {
 			defer close(done)
 			NewServer(&stubResolver{}, shortSocketDir(t), zerolog.Nop()).
-				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, zerolog.Nop())
 		}()
 
 		_, err := clientConn.Write([]byte("not-json\n"))
@@ -526,7 +529,7 @@ func TestServer_HandleConn_ErrorBranches(t *testing.T) {
 		go func() {
 			defer close(done)
 			NewServer(resolver, shortSocketDir(t), zerolog.Nop()).
-				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, models.OrgSettings{}, zerolog.Nop())
+				handleConn(context.Background(), serverConn, &models.Session{}, &models.Repository{}, zerolog.Nop())
 		}()
 
 		require.NoError(t, json.NewEncoder(clientConn).Encode(&Request{Op: OpGet}), "client should send a valid request")

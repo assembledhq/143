@@ -101,6 +101,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	pullRequestStore := db.NewPullRequestStore(pool)
 	pullRequestFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	sessionChangesetStore := db.NewSessionChangesetStore(pool)
+	sessionPublicationStore := db.NewSessionPublicationStore(pool)
 	webhookDeliveryStore := db.NewWebhookDeliveryStore(pool)
 	jobStore := db.NewJobStore(pool)
 	pullRequestFeedbackStore.SetJobStore(jobStore)
@@ -191,6 +192,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				deployStore, repoStore, jobStore, logger,
 			)
 			prService.SetChangesetStore(sessionChangesetStore)
+			prService.SetPublicationStore(sessionPublicationStore)
 			prService.SetAppBaseURL(cfg.FrontendURL)
 			prService.SetPRPreviewSurfacesEnabled(cfg.PRPreviewSurfacesEnabled)
 			prService.SetReviewCommentStore(reviewCommentStore)
@@ -393,6 +395,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		logger,
 	)
 	sessionHandler.SetChangesetStore(sessionChangesetStore)
+	sessionHandler.SetPublicationStore(sessionPublicationStore)
 	sessionHandler.SetViewStore(sessionViewStore)
 	sessionHandler.SetIssueLinkStore(sessionIssueLinkStore)
 	sessionHandler.SetIssueSnapshotStore(sessionIssueSnapshotStore)
@@ -683,7 +686,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 	// Wire user credential store and LLM client into PR service.
 	if prService != nil {
-		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, logger)
+		githubAutomationTriggerer := automations.NewGitHubEventTriggerService(automationStore, automationRunStore, jobStore, pool, logger)
 		githubAutomationTriggerer.SetCapabilityResolver(agentCapabilitySvc)
 		prService.SetAutomationEventTriggerer(githubAutomationTriggerer)
 		prService.SetSessionMessageStore(sessionMessageStore)
@@ -1040,6 +1043,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalAgentCapabilitiesHandler := handlers.NewInternalAgentCapabilitiesHandler(agentCapabilitySvc, sessionStore, cfg.SessionSecret)
 		internalAgentPreviewHandler := handlers.NewInternalAgentPreviewHandler(previewHandler, sessionStore, cfg.SessionSecret, logger)
 		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
+		internalCodeReviewHandler := handlers.NewInternalCodeReviewHandler(codeReviewStore, sessionStore, cfg.SessionSecret)
 		internalChangesetHandler := handlers.NewInternalChangesetHandler(sessionStore, sessionHandler, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		r.Route("/api/v1/internal", func(r chi.Router) {
@@ -1060,6 +1064,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Post("/sessions/{id}/preview/visual-diff", internalAgentPreviewHandler.VisualDiff)
 			r.Post("/sessions/{id}/preview/assert", internalAgentPreviewHandler.Assert)
 			r.Post("/issues", internalIssueHandler.Create)
+			r.Post("/session/pr", internalPullRequestHandler.Create)
 			r.Post("/sessions/{sessionID}/pr", internalPullRequestHandler.Create)
 			r.Get("/sessions/{id}/changesets", internalChangesetHandler.List)
 			r.Get("/sessions/{id}/changesets/split-status", internalChangesetHandler.Status)
@@ -1087,6 +1092,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Get("/session-history/search", internalSessionHistoryHandler.Search)
 			r.Get("/session-history/{session_id}", internalSessionHistoryHandler.Get)
 			r.Get("/session-history/{session_id}/threads/{thread_id}/messages", internalSessionHistoryHandler.Messages)
+			r.Get("/code-reviews", internalCodeReviewHandler.List)
+			r.Get("/code-reviews/policy", internalCodeReviewHandler.Policy)
+			r.Get("/code-reviews/policies/{policy_id}", internalCodeReviewHandler.PolicyByID)
+			r.Get("/code-reviews/{session_id}", internalCodeReviewHandler.Get)
 			r.Get("/session-tabs", internalSessionTabsHandler.List)
 			r.Post("/session-tabs", internalSessionTabsHandler.Create)
 			r.Get("/session-tabs/{thread_id}", internalSessionTabsHandler.Get)
@@ -1644,7 +1653,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/pm/refresh", pmHandler.Refresh)
 				r.Get("/api/v1/previews/policies", branchPreviewHandler.ListPolicies)
 				r.Put("/api/v1/code-review-policies", codeReviewHandler.PutPolicy)
-				r.Delete("/api/v1/code-review-policies/repositories/{repository_id}", codeReviewHandler.ResetPolicy)
 				r.Post("/api/v1/code-review-github-trigger/setup", codeReviewHandler.SetupGitHubTrigger)
 				r.Delete("/api/v1/code-review-github-trigger", codeReviewHandler.DeleteGitHubTrigger)
 				r.Post("/api/v1/code-reviews/{id}/agent-results", codeReviewHandler.CreateAgentResult)

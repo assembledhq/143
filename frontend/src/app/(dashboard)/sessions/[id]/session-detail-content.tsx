@@ -145,7 +145,7 @@ import {
   writeStoredViewedThreadIds,
 } from "@/lib/session-thread-views";
 import { applySessionDetailToSessionListCaches } from "@/lib/session-list-cache";
-import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
+import type { ChangesetSummary, CodingCredentialSummary, HumanInputAnswerBody, HumanInputRequest, ListResponse, PRReadinessBypass, PRReadinessCheck, PRReadinessEnforcement, PRReadinessPolicyConfig, PRReadinessRun, ReviewLoopFixMode, Session, SessionDetail, SessionInputCommand, SessionInputReference, SessionLog, SessionMessage, SessionPublication, SessionReviewComment, SessionReviewLoop, SessionRetryMode, SessionStatus, SessionThread, SessionThreadFileEvent, SessionTimelineEntry, ThreadInboxEvent, ThreadRuntimeEvent, ThreadStatus, User, CodexAuthStatus, PullRequestHealthResponse, PullRequestStatus, SessionWorkspaceGenerationChangedEvent, SingleResponse, SessionTranscriptWindowResponse, SessionTranscriptTurn, SessionTranscriptEntry } from "@/lib/types";
 import { AgentTabStrip, computeThreadOverlap } from "./agent-tab-strip";
 import { AuditLogTrigger } from "@/components/audit/audit-log-trigger";
 import { ResizeHandle } from "@/components/resize-handle";
@@ -215,6 +215,51 @@ function sessionStatusTone(status: SessionStatus, prStatus?: PullRequestStatus |
   if (status === "completed" || status === "pr_created" || prStatus === "merged") return "success";
   if (status === "running" || status === "idle") return "primary";
   return "neutral";
+}
+
+const publicationStatePresentation: Record<SessionPublication["state"], { label: string; variant: "secondary" | "success" | "warning" | "destructive" | "info" }> = {
+  requested: { label: "Publication queued", variant: "secondary" },
+  review_pending: { label: "Reviewing changes", variant: "info" },
+  ready_to_publish: { label: "Ready to publish", variant: "info" },
+  branch_published: { label: "Branch published", variant: "info" },
+  pr_resolved: { label: "PR found", variant: "info" },
+  recorded: { label: "Recording PR", variant: "info" },
+  completed: { label: "PR published", variant: "success" },
+  completed_noop: { label: "No changes to publish", variant: "secondary" },
+  retryable_failed: { label: "Publication retrying", variant: "warning" },
+  terminal_failed: { label: "Publication failed", variant: "destructive" },
+};
+
+function publicationPresentation(publication: SessionPublication) {
+  if (publication.review_gate_state === "needs_human") {
+    return { label: "Human review needed", variant: "warning" as const };
+  }
+  if (publication.review_gate_state === "failed") {
+    return { label: "Review failed", variant: "destructive" as const };
+  }
+  if (publication.review_gate_state === "pending" &&
+    publication.state !== "requested" &&
+    publication.state !== "review_pending" &&
+    publication.state !== "ready_to_publish") {
+    return { label: "Review gate bypassed", variant: "warning" as const };
+  }
+  return publicationStatePresentation[publication.state];
+}
+
+function publicationHasReviewWarning(publication: SessionPublication) {
+  return publication.review_gate_state === "needs_human" ||
+    publication.review_gate_state === "failed" ||
+    (publication.review_gate_state === "pending" &&
+      publication.state !== "requested" &&
+      publication.state !== "review_pending" &&
+      publication.state !== "ready_to_publish");
+}
+
+function publicationIsVolatile(publication: SessionPublication) {
+  return publication.review_gate_state !== "needs_human" &&
+    publication.state !== "completed" &&
+    publication.state !== "completed_noop" &&
+    publication.state !== "terminal_failed";
 }
 
 // Defer the diff viewer until the user actually opens review mode. Saves
@@ -3760,6 +3805,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       if (isProvisionalSessionDetail(s)) return false;
       const sessionVolatile = workingStatusesSet.has(s.status);
       const threadVolatile = (s.threads ?? []).some((thread) => workingStatusesSet.has(thread.status));
+      const publicationVolatile = (s.publications ?? []).some(publicationIsVolatile);
       const serverInFlight = s.pr_creation_state === "queued" || s.pr_creation_state === "pushing";
       const waitingForServer = localPRState !== "idle" &&
         s.pr_creation_state !== "failed" &&
@@ -3777,7 +3823,7 @@ export function SessionDetailContent({ id }: { id: string }) {
       // machine advances without waiting for the user to navigate. Keep
       // polling during the optimistic local phases too, since the best-effort
       // queued write can legitimately lag the 202 response.
-      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer) {
+      if (serverInFlight || waitingForServer || pushInFlight || waitingForPushServer || branchInFlight || waitingForBranchServer || publicationVolatile) {
         return pollMs(2000);
       }
       return sessionVolatile || threadVolatile ? SESSION_DETAIL_ACTIVE_REFETCH_INTERVAL_MS : false;
@@ -3810,6 +3856,9 @@ export function SessionDetailContent({ id }: { id: string }) {
   const primaryChangeset = changesets.find((changeset) => changeset.is_primary) ?? changesets[0];
   const [selectedChangesetID, setSelectedChangesetID] = useState<string | null>(changesetParam);
   const selectedChangeset = changesets.find((changeset) => changeset.id === selectedChangesetID) ?? primaryChangeset;
+  const selectedPublication = (session?.publications ?? []).find((publication) => publication.changeset_id === selectedChangeset?.id);
+  const selectedPublicationPresentation = selectedPublication ? publicationPresentation(selectedPublication) : null;
+  const selectedPublicationHasReviewWarning = selectedPublication ? publicationHasReviewWarning(selectedPublication) : false;
   const stackTopChangeset = changesets.filter((changeset) => changeset.status !== "abandoned").at(-1);
   const hasMultipleChangesets = changesets.length > 1;
   const changesetLifecycleMutation = useMutation({
@@ -6483,6 +6532,18 @@ export function SessionDetailContent({ id }: { id: string }) {
             </TabsList>
           </div>
           <div aria-label="Session detail actions" className="flex items-center justify-end gap-2 shrink-0 pl-2">
+            {(!hasPR || selectedPublicationHasReviewWarning) && selectedPublication && selectedPublicationPresentation ? (
+              <Badge
+                variant={selectedPublicationPresentation.variant}
+                className="h-6"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+                title={selectedPublication.last_error_message || selectedPublicationPresentation.label}
+              >
+                {selectedPublicationPresentation.label}
+              </Badge>
+            ) : null}
             {hasPR && selectedPR?.github_pr_url ? (
               <>
                 {prStatus === "closed" && (

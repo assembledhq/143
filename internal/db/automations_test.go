@@ -834,6 +834,8 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			row := []any{
 				uuid.New(), uuid.New(), uuid.New(), now, models.AutomationTriggeredBySchedule,
 				nil, nil, nil, nil, nil, []byte(`{}`), "goal",
+				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil, nil, nil,
 				tc.runStatus, nil, nil, now, now,
 			}
 			if tc.session != nil {
@@ -887,6 +889,64 @@ func TestAutomationRunStore_ListByAutomation(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet())
 		})
 	}
+}
+
+func TestAutomationRunStore_ListByAutomationProjectsGitHubTriggerContext(t *testing.T) {
+	t.Parallel()
+	require.Contains(t, listByAutomationSelectColumns, "IN ('bot', 'system')", "run projection should classify GitHub system deliveries as automated triggers")
+
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "pgx mock should initialize")
+	defer mock.Close()
+	store := NewAutomationRunStore(mock)
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	orgID := uuid.New()
+	automationID := uuid.New()
+	runID := uuid.New()
+	provider := string(models.AutomationEventProviderGitHub)
+	providerEventID := "delivery-123"
+	repository := "assembledhq/143"
+	prNumber := 1846
+	prURL := "https://github.com/assembledhq/143/pull/1846"
+	prTitle := "Add structured outcomes"
+	headSHA := "abc123"
+	event := string(models.AutomationGitHubEventPullRequestUpdated)
+	eventID := "pull_request:synchronize:1846"
+	dedupeGroupID := "review:42"
+	actor := "github"
+	actorType := "System"
+	botTriggered := true
+	row := []any{
+		runID, automationID, orgID, now, models.AutomationTriggeredByGitHub,
+		nil, nil, nil, &provider, &providerEventID, []byte(`{"provider":"github"}`), "goal",
+		&repository, &prNumber, &prURL, &prTitle, &headSHA,
+		&event, &eventID, &dedupeGroupID, &actor, &actorType, &botTriggered,
+		models.AutomationRunStatusCompleted, &now, nil, now, now,
+	}
+	for i := 0; i < 13; i++ {
+		row = append(row, nil)
+	}
+	mock.ExpectQuery("SELECT .+ FROM automation_runs ar.+LEFT JOIN LATERAL").
+		WithArgs(anyArgs(2)...).
+		WillReturnRows(pgxmock.NewRows(AutomationRunListColumns).AddRow(row...))
+
+	runs, err := store.ListByAutomation(context.Background(), orgID, automationID, AutomationRunFilters{Limit: 25})
+	require.NoError(t, err, "ListByAutomation should project GitHub trigger metadata")
+	require.Equal(t, []models.AutomationRun{{
+		ID: runID, AutomationID: automationID, OrgID: orgID, TriggeredAt: now,
+		TriggeredBy: models.AutomationTriggeredByGitHub, Provider: func() *models.AutomationEventProvider { value := models.AutomationEventProviderGitHub; return &value }(),
+		ProviderEventID: &providerEventID, TriggerContext: []byte(`{"provider":"github"}`), GoalSnapshot: "goal",
+		Status: models.AutomationRunStatusCompleted, CompletedAt: &now, CreatedAt: now, UpdatedAt: now,
+		TriggerTarget: &models.AutomationRunTriggerTarget{
+			Repository: repository, PullRequestNumber: prNumber, PullRequestURL: prURL,
+			PullRequestTitle: &prTitle, HeadSHA: &headSHA,
+		},
+		TriggerDetails: &models.AutomationRunTriggerDetails{
+			Event: models.AutomationGitHubEventPullRequestUpdated, ProviderEventID: &providerEventID,
+			EventID: &eventID, DedupeGroupID: &dedupeGroupID, Actor: &actor, ActorType: &actorType, BotTriggered: true,
+		},
+	}}, runs, "run projection should separate trigger target and delivery details from execution status")
+	require.NoError(t, mock.ExpectationsWereMet(), "run projection query should remain org scoped")
 }
 
 func TestAutomationRunStore_UpdateStatus(t *testing.T) {

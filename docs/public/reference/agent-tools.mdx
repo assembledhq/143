@@ -60,6 +60,7 @@ Only configured namespaces appear in `143-tools --help`.
 | `pr` | `create` |
 | `project` | `propose` |
 | `eval` | `add` |
+| `code-review-history` | `list`, `get`, `policy` |
 
 ## Error tracking
 
@@ -604,7 +605,7 @@ Queue first-class 143 pull request creation for the current session.
 
 | Flag | Type | Required | Description |
 |---|---|---:|---|
-| `--session_id` | string | No | Session UUID. Defaults to `143_SESSION_ID`. |
+| `--session_id` | string | No | Compatibility override. Normally omit it: the backend derives the current session from the signed tool token. If supplied, it must match that token. |
 | `--draft` | boolean | No | Whether to create a draft PR. Omit to use the repo default. |
 | `--author_mode` | `auto` \| `app` \| `user` | No | PR author mode. Omit to use the default. |
 
@@ -613,6 +614,10 @@ Common use: open a PR through the same workflow as the app after tests pass.
 ```bash
 143-tools pr create --draft false
 ```
+
+This command queues the durable 143 publication workflow; it does not call the
+GitHub PR API from the sandbox. Sandbox GitHub API access is read-only for pull
+requests, while git push uses a separate repository-bound contents token.
 
 ### `project propose`
 
@@ -660,4 +665,61 @@ Common use: while bootstrapping evals, record a PR-derived coding task that shou
 
 ```bash
 143-tools eval add --pr_number 42 --pr_title "Fix checkout timeout" --base_commit_sha abc123 --solution_commit_sha def456 --solution_diff "$(git show --format= --patch def456)" --issue_description "Reproduce and fix the checkout timeout." --scoring_criteria '[{"name":"fixes-timeout","grader_type":"llm_judge","description":"The checkout path no longer times out."}]' --complexity moderate --fitness_score 0.9 --fitness_reasoning "Real regression with clear before/after behavior."
+```
+
+## 143 code review history
+
+Read access to past automated code reviews for the session's repository, mirroring the `session-history` namespace. These commands exist so agents can audit how the review policy behaved on real pull requests — which reviews approved, blocked, or escalated, and on what evidence — and then propose policy adjustments. Requires the `review_feedback` capability.
+
+### `code-review-history list`
+
+List past code reviews for the current repository, newest first. Rows are compact summaries: PR context, decision, status, risk verdict, and the `policy_id` of the policy version that governed the review. The full review body is only returned by `get`.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--decision` | `approved` \| `comment_only` \| `needs_human_review` \| `blocked` | No | Filter by review decision. |
+| `--status` | `queued` \| `running` \| `completed` \| `failed` \| `stale` \| `cancelled` | No | Filter by review run status. |
+| `--outcome` | `automatically_approved` \| `completed_not_approved` | No | Filter by posted outcome. |
+| `--acceptable` | boolean | No | `true` for reviews judged acceptable risk, `false` for reviews flagged for humans. |
+| `--search` | string | No | Match PR title, repo name, session title, or PR number. |
+| `--created_after` | string | No | Only reviews created after this RFC3339 timestamp. |
+| `--created_before` | string | No | Only reviews created before this RFC3339 timestamp. |
+| `--cursor` | string | No | Pagination cursor: the `id` of the last row from the previous page (also returned as `meta.next_cursor`). |
+| `--limit` | number | No | Max results. Defaults to `20`, capped at `50`. |
+
+Common use: sample recent decisions before judging whether the policy is behaving as intended.
+
+```bash
+143-tools code-review-history list --decision blocked --created_after 2026-06-01T00:00:00Z --limit 20
+```
+
+### `code-review-history get`
+
+Get one review in full: the posted review body, every finding (severity, confidence, file and line range, and whether it was posted as an inline comment), and each reviewer agent's structured verdict. Look up by the `session_id` field from a list row.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--session_id` | string | Yes | Code review session ID from `code-review-history list`. |
+| `--include_raw_output` | boolean | No | Include each reviewer agent's raw output, truncated. Defaults to `false`. |
+| `--include_prompts` | boolean | No | Include the rendered reviewer prompts, truncated. Defaults to `false`. |
+
+Common use: inspect why a review reached its decision — compare the findings and verdicts against the diff before proposing a policy change.
+
+```bash
+143-tools code-review-history get --session_id 9b8c1c33-8ddc-4d75-8f68-f6a72f2b6c1d
+```
+
+### `code-review-history policy`
+
+Get the org's code review policy. Without flags it returns the active resolved policy (`source` is `organization` for a saved policy or `default` when the org has never saved one). Pass `--policy_id` (from a review's `policy_id` field) to fetch the exact historical version that governed a past review.
+
+| Flag | Type | Required | Description |
+|---|---|---:|---|
+| `--policy_id` | string | No | Policy version UUID. Omit for the active policy. |
+
+Common use: diff the policy version behind a run of bad decisions against the current version, then draft an improved `review_instructions` or `automated_approval_policy` for a human to apply in review settings.
+
+```bash
+143-tools code-review-history policy
+143-tools code-review-history policy --policy_id 5c2f9a51-40cb-45f7-8f0d-6bc47d4e2a11
 ```

@@ -395,13 +395,28 @@ func CodeReviewLowRiskLaneApplies(lane CodeReviewLowRiskLane, categories []strin
 }
 
 type CodeReviewAgentRoster struct {
-	Reviewers             []AgentType `json:"reviewers"`
-	Orchestrator          AgentType   `json:"orchestrator"`
-	ReviewerModels        []string    `json:"reviewer_models,omitempty"`
-	OrchestratorModel     *string     `json:"orchestrator_model,omitempty"`
-	DisagreementBlocks    bool        `json:"disagreement_blocks"`
-	RequireReviewerQuorum int         `json:"require_reviewer_quorum"`
-	TimeoutSeconds        int         `json:"timeout_seconds"`
+	Reviewers                []AgentType       `json:"reviewers"`
+	Orchestrator             AgentType         `json:"orchestrator"`
+	ReviewerModels           []string          `json:"reviewer_models,omitempty"`
+	ReviewerReasoningEfforts []ReasoningEffort `json:"reviewer_reasoning_efforts,omitempty"`
+	OrchestratorModel        *string           `json:"orchestrator_model,omitempty"`
+	ReasoningEffort          ReasoningEffort   `json:"reasoning_effort,omitempty"`
+	DisagreementBlocks       bool              `json:"disagreement_blocks"`
+	RequireReviewerQuorum    int               `json:"require_reviewer_quorum"`
+	TimeoutSeconds           int               `json:"timeout_seconds"`
+}
+
+// ReviewerReasoningEffort returns the explicit effort for one reviewer. The
+// legacy roster-wide value remains the fallback for policies saved before
+// reviewer_reasoning_efforts was introduced.
+func (r CodeReviewAgentRoster) ReviewerReasoningEffort(index int) ReasoningEffort {
+	if index >= 0 && index < len(r.ReviewerReasoningEfforts) && r.ReviewerReasoningEfforts[index] != "" {
+		return r.ReviewerReasoningEfforts[index]
+	}
+	if r.ReasoningEffort != "" {
+		return r.ReasoningEffort
+	}
+	return ReasoningEffortHigh
 }
 
 type CodeReviewPolicyConfig struct {
@@ -413,7 +428,6 @@ type CodeReviewPolicyConfig struct {
 	RiskPolicy              CodeReviewRiskPolicy        `json:"risk_policy"`
 	AgentRoster             CodeReviewAgentRoster       `json:"agent_roster"`
 	InlineCommentLimit      int                         `json:"inline_comment_limit"`
-	Inheritance             CodeReviewPolicyInheritance `json:"inheritance,omitempty"`
 }
 
 const CodeReviewPromptMaxRunes = 8000
@@ -429,22 +443,21 @@ func codeReviewPolicyFieldError(field, message string) error {
 	return &CodeReviewPolicyValidationError{Field: field, Message: message}
 }
 
-const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine, well-tested changes when:
+const codeReviewIndependentApprovalPolicy = `
+
+Evaluate the pull request independently based on the code itself. Disregard GitHub checks, CI results, build statuses, and other external validation signals, whether passing, failing, or pending; they must not count for or against approval. Also disregard existing human review comments, review decisions, and review threads, whether open or resolved. Unresolved human review threads must not count against approval.`
+
+const DefaultCodeReviewAutomatedApprovalPolicy = `Automatically approve routine changes when:
 - the intent is clear and the change has a small, understandable scope
 - there are no blocking findings
 - the implementation follows established repository patterns
-- the available testing evidence is appropriate for the change
+- the test coverage visible in the code is appropriate for the change
 
 Require human review when:
 - the change affects authentication, billing, permissions, infrastructure, or production data
 - the change introduces a new architectural pattern or crosses unclear ownership boundaries
 - reviewers disagree or the risk cannot be evaluated confidently
-- the intended behavior cannot be determined from the pull request and repository context`
-
-type CodeReviewPolicyInheritance struct {
-	InheritOrgDefaults bool     `json:"inherit_org_defaults"`
-	OverrideFields     []string `json:"override_fields,omitempty"`
-}
+- the intended behavior cannot be determined from the pull request and repository context` + codeReviewIndependentApprovalPolicy
 
 func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 	return CodeReviewPolicyConfig{
@@ -490,7 +503,7 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 		RiskPolicy: CodeReviewRiskPolicy{
 			MaxFilesChanged:       5,
 			MaxLinesChanged:       300,
-			RequirePassingChecks:  true,
+			RequirePassingChecks:  false,
 			ExcludeSensitivePaths: true,
 			SensitivePaths:        defaultPRReadinessSensitivePaths(),
 			ExcludeCategories:     []string{"migrations", "dependencies", "auth", "billing", "permissions", "crypto", "infra"},
@@ -505,18 +518,17 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 			},
 		},
 		AgentRoster: CodeReviewAgentRoster{
-			Reviewers:             []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
-			Orchestrator:          AgentTypeOpenCode,
-			ReviewerModels:        []string{DefaultCodexModel, DefaultClaudeCodeModel},
-			OrchestratorModel:     strPtr(OpenCodeModelGPT55),
-			DisagreementBlocks:    true,
-			RequireReviewerQuorum: 2,
-			TimeoutSeconds:        1800,
+			Reviewers:                []AgentType{AgentTypeCodex, AgentTypeClaudeCode},
+			Orchestrator:             AgentTypeOpenCode,
+			ReviewerModels:           []string{DefaultCodexModel, DefaultClaudeCodeModel},
+			ReviewerReasoningEfforts: []ReasoningEffort{ReasoningEffortHigh, ReasoningEffortHigh},
+			OrchestratorModel:        strPtr(OpenCodeModelGPT55),
+			ReasoningEffort:          ReasoningEffortHigh,
+			DisagreementBlocks:       true,
+			RequireReviewerQuorum:    2,
+			TimeoutSeconds:           1800,
 		},
 		InlineCommentLimit: 4,
-		Inheritance: CodeReviewPolicyInheritance{
-			InheritOrgDefaults: false,
-		},
 	}
 }
 
@@ -579,11 +591,19 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	if len(config.AgentRoster.Reviewers) > 0 {
 		defaults.AgentRoster = config.AgentRoster
+		if defaults.AgentRoster.ReasoningEffort == "" {
+			defaults.AgentRoster.ReasoningEffort = ReasoningEffortHigh
+		}
+		if len(defaults.AgentRoster.ReviewerReasoningEfforts) == 0 {
+			defaults.AgentRoster.ReviewerReasoningEfforts = make([]ReasoningEffort, len(defaults.AgentRoster.Reviewers))
+			for i := range defaults.AgentRoster.ReviewerReasoningEfforts {
+				defaults.AgentRoster.ReviewerReasoningEfforts[i] = defaults.AgentRoster.ReasoningEffort
+			}
+		}
 	}
 	if config.InlineCommentLimit != 0 {
 		defaults.InlineCommentLimit = config.InlineCommentLimit
 	}
-	defaults.Inheritance = config.Inheritance
 	defaults.DescriptionPolicy = normalizeCodeReviewDescriptionPolicy(defaults.DescriptionPolicy)
 	return defaults
 }
@@ -648,12 +668,25 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	if len(c.AgentRoster.Reviewers) == 0 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "at least one reviewer agent is required")
 	}
-	for _, agentType := range c.AgentRoster.Reviewers {
+	if len(c.AgentRoster.ReviewerReasoningEfforts) > 0 && len(c.AgentRoster.ReviewerReasoningEfforts) != len(c.AgentRoster.Reviewers) {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "reviewer_reasoning_efforts must match reviewer count")
+	}
+	for idx, agentType := range c.AgentRoster.Reviewers {
 		if err := agentType.Validate(); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
 		}
 		if !AgentSupportsNativeReview(agentType) {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("agent %q does not support native review", agentType))
+		}
+		reasoningEffort := c.AgentRoster.ReviewerReasoningEffort(idx)
+		if len(c.AgentRoster.ReviewerReasoningEfforts) > 0 && c.AgentRoster.ReviewerReasoningEfforts[idx] == "" {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reviewer reasoning effort %d must be non-empty", idx+1))
+		}
+		if err := reasoningEffort.Validate(); err != nil {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid reviewer reasoning effort %d: %v", idx+1, err))
+		}
+		if agentType.SupportsReasoningEffort() && !agentType.SupportsReasoningEffortLevel(reasoningEffort) {
+			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by reviewer %q", reasoningEffort, agentType))
 		}
 	}
 	if len(c.AgentRoster.ReviewerModels) > 0 && len(c.AgentRoster.ReviewerModels) != len(c.AgentRoster.Reviewers) {
@@ -678,6 +711,12 @@ func (c CodeReviewPolicyConfig) Validate() error {
 		if err := ValidateModelForAgentType(c.AgentRoster.Orchestrator, strings.TrimSpace(*c.AgentRoster.OrchestratorModel)); err != nil {
 			return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("invalid orchestrator model: %v", err))
 		}
+	}
+	if err := c.AgentRoster.ReasoningEffort.Validate(); err != nil {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, err.Error())
+	}
+	if c.AgentRoster.Orchestrator.SupportsReasoningEffort() && !c.AgentRoster.Orchestrator.SupportsReasoningEffortLevel(c.AgentRoster.ReasoningEffort) {
+		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, fmt.Sprintf("reasoning effort %q is not supported by orchestrator %q", c.AgentRoster.ReasoningEffort, c.AgentRoster.Orchestrator))
 	}
 	if c.AgentRoster.RequireReviewerQuorum < 1 || c.AgentRoster.RequireReviewerQuorum > len(c.AgentRoster.Reviewers) {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldAgentRoster, "require_reviewer_quorum must be between 1 and reviewer count")
@@ -720,13 +759,12 @@ type CodeReviewPolicyRecord struct {
 	RiskPolicy              CodeReviewRiskPolicy        `db:"-" json:"risk_policy"`
 	AgentRoster             CodeReviewAgentRoster       `db:"-" json:"agent_roster"`
 	InlineCommentLimit      int                         `db:"inline_comment_limit" json:"inline_comment_limit"`
-	Inheritance             CodeReviewPolicyInheritance `db:"-" json:"inheritance,omitempty"`
 	CreatedByUserID         *uuid.UUID                  `db:"created_by_user_id" json:"created_by_user_id,omitempty"`
 	CreatedAt               time.Time                   `db:"created_at" json:"created_at"`
 }
 
 func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
-	return CodeReviewPolicyConfig{
+	config := CodeReviewPolicyConfig{
 		ApprovalMode:            r.ApprovalMode,
 		Enabled:                 r.Enabled,
 		ReviewInstructions:      r.ReviewInstructions,
@@ -735,15 +773,14 @@ func (r CodeReviewPolicyRecord) Config() CodeReviewPolicyConfig {
 		RiskPolicy:              r.RiskPolicy,
 		AgentRoster:             r.AgentRoster,
 		InlineCommentLimit:      r.InlineCommentLimit,
-		Inheritance:             r.Inheritance,
 	}
+	return ResolveCodeReviewPolicyConfig(&config)
 }
 
 type CodeReviewResolvedPolicy struct {
-	Config          CodeReviewPolicyConfig  `json:"config"`
-	Source          string                  `json:"source"`
-	Policy          *CodeReviewPolicyRecord `json:"policy,omitempty"`
-	InheritedPolicy *CodeReviewPolicyRecord `json:"inherited_policy,omitempty"`
+	Config CodeReviewPolicyConfig  `json:"config"`
+	Source string                  `json:"source"`
+	Policy *CodeReviewPolicyRecord `json:"policy,omitempty"`
 }
 
 const (
@@ -756,108 +793,6 @@ const (
 	CodeReviewPolicyFieldAgentRoster             = "agent_roster"
 	CodeReviewPolicyFieldInlineCommentLimit      = "inline_comment_limit"
 )
-
-func MergeCodeReviewPolicyConfig(base, override CodeReviewPolicyConfig) CodeReviewPolicyConfig {
-	base = ResolveCodeReviewPolicyConfig(&base)
-	override = ResolveCodeReviewPolicyConfig(&override)
-	if !override.Inheritance.InheritOrgDefaults {
-		return override
-	}
-	merged := base
-	fields := normalizedCodeReviewPolicyOverrideFields(override.Inheritance.OverrideFields)
-	apply := func(field string) bool {
-		_, ok := fields[field]
-		return ok
-	}
-	if apply(CodeReviewPolicyFieldEnabled) {
-		merged.Enabled = override.Enabled
-	}
-	if apply(CodeReviewPolicyFieldApprovalMode) {
-		merged.ApprovalMode = override.ApprovalMode
-	}
-	if apply(CodeReviewPolicyFieldReviewInstructions) {
-		merged.ReviewInstructions = override.ReviewInstructions
-	}
-	if apply(CodeReviewPolicyFieldAutomatedApprovalPolicy) {
-		merged.AutomatedApprovalPolicy = override.AutomatedApprovalPolicy
-	}
-	if apply(CodeReviewPolicyFieldDescriptionPolicy) {
-		merged.DescriptionPolicy = override.DescriptionPolicy
-	}
-	if apply(CodeReviewPolicyFieldRiskPolicy) {
-		merged.RiskPolicy = override.RiskPolicy
-	}
-	if apply(CodeReviewPolicyFieldAgentRoster) {
-		merged.AgentRoster = override.AgentRoster
-	}
-	if apply(CodeReviewPolicyFieldInlineCommentLimit) {
-		merged.InlineCommentLimit = override.InlineCommentLimit
-	}
-	merged.Inheritance = override.Inheritance
-	return ResolveCodeReviewPolicyConfig(&merged)
-}
-
-func CodeReviewPolicyOverrideFields(base, override CodeReviewPolicyConfig) []string {
-	base = ResolveCodeReviewPolicyConfig(&base)
-	override = ResolveCodeReviewPolicyConfig(&override)
-	fields := make([]string, 0, 6)
-	if base.Enabled != override.Enabled {
-		fields = append(fields, CodeReviewPolicyFieldEnabled)
-	}
-	if base.ApprovalMode != override.ApprovalMode {
-		fields = append(fields, CodeReviewPolicyFieldApprovalMode)
-	}
-	if base.ReviewInstructions != override.ReviewInstructions {
-		fields = append(fields, CodeReviewPolicyFieldReviewInstructions)
-	}
-	if base.AutomatedApprovalPolicy != override.AutomatedApprovalPolicy {
-		fields = append(fields, CodeReviewPolicyFieldAutomatedApprovalPolicy)
-	}
-	if !codeReviewJSONEqual(base.DescriptionPolicy, override.DescriptionPolicy) {
-		fields = append(fields, CodeReviewPolicyFieldDescriptionPolicy)
-	}
-	if !codeReviewJSONEqual(base.RiskPolicy, override.RiskPolicy) {
-		fields = append(fields, CodeReviewPolicyFieldRiskPolicy)
-	}
-	if !codeReviewJSONEqual(base.AgentRoster, override.AgentRoster) {
-		fields = append(fields, CodeReviewPolicyFieldAgentRoster)
-	}
-	if base.InlineCommentLimit != override.InlineCommentLimit {
-		fields = append(fields, CodeReviewPolicyFieldInlineCommentLimit)
-	}
-	return fields
-}
-
-func normalizedCodeReviewPolicyOverrideFields(fields []string) map[string]struct{} {
-	out := make(map[string]struct{}, len(fields))
-	for _, field := range fields {
-		field = strings.ToLower(strings.TrimSpace(field))
-		if field == "" {
-			continue
-		}
-		switch field {
-		case CodeReviewPolicyFieldEnabled,
-			CodeReviewPolicyFieldApprovalMode,
-			CodeReviewPolicyFieldReviewInstructions,
-			CodeReviewPolicyFieldAutomatedApprovalPolicy,
-			CodeReviewPolicyFieldDescriptionPolicy,
-			CodeReviewPolicyFieldRiskPolicy,
-			CodeReviewPolicyFieldAgentRoster,
-			CodeReviewPolicyFieldInlineCommentLimit:
-			out[field] = struct{}{}
-		}
-	}
-	return out
-}
-
-func codeReviewJSONEqual(left, right any) bool {
-	leftJSON, leftErr := json.Marshal(left)
-	rightJSON, rightErr := json.Marshal(right)
-	if leftErr != nil || rightErr != nil {
-		return false
-	}
-	return string(leftJSON) == string(rightJSON)
-}
 
 type CodeReviewSessionMetadata struct {
 	ID                    uuid.UUID               `db:"id" json:"id"`
@@ -1008,8 +943,8 @@ func CodeReviewPromptExamples() []CodeReviewPromptExampleOption {
 func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleOption {
 	return []CodeReviewAutomatedApprovalExampleOption{
 		{Key: CodeReviewAutomatedApprovalExampleConservative, Title: "Conservative low-risk approval", Description: "Approve routine changes and escalate uncertainty.", Policy: DefaultCodeReviewAutomatedApprovalPolicy},
-		{Key: CodeReviewAutomatedApprovalExampleDocumentation, Title: "Documentation-only approval", Description: "Approve clear documentation changes while escalating executable or generated changes.", Policy: "Automatically approve clear, accurate documentation-only changes when they match the implementation and contain no executable, configuration, generated, or security-sensitive changes.\n\nRequire human review whenever the change affects runtime behavior, configuration, generated files, permissions, secrets, or the intended documentation behavior is ambiguous."},
-		{Key: CodeReviewAutomatedApprovalExampleSmallRoutine, Title: "Small routine changes", Description: "Approve narrow changes that follow established patterns with proportionate tests.", Policy: "Automatically approve small, narrowly scoped changes that follow established repository patterns, have no blocking findings, and include test evidence proportionate to their risk.\n\nRequire human review for architectural changes, sensitive areas, unclear intent, reviewer disagreement, weak evidence, or any change whose impact cannot be evaluated confidently."},
+		{Key: CodeReviewAutomatedApprovalExampleDocumentation, Title: "Documentation-only approval", Description: "Approve clear documentation changes while escalating executable or generated changes.", Policy: "Automatically approve clear, accurate documentation-only changes when they match the implementation and contain no executable, configuration, generated, or security-sensitive changes.\n\nRequire human review whenever the change affects runtime behavior, configuration, generated files, permissions, secrets, or the intended documentation behavior is ambiguous." + codeReviewIndependentApprovalPolicy},
+		{Key: CodeReviewAutomatedApprovalExampleSmallRoutine, Title: "Small routine changes", Description: "Approve narrow changes that follow established patterns with proportionate tests.", Policy: "Automatically approve small, narrowly scoped changes that follow established repository patterns, have no blocking findings, and include test evidence proportionate to their risk.\n\nRequire human review for architectural changes, sensitive areas, unclear intent, reviewer disagreement, weak evidence, or any change whose impact cannot be evaluated confidently." + codeReviewIndependentApprovalPolicy},
 	}
 }
 
@@ -1108,41 +1043,42 @@ func templatePolicy(base CodeReviewPolicyConfig, opts templatePolicyOptions) Cod
 }
 
 type CodeReviewRiskInput struct {
-	FilesChanged           int
-	LinesChanged           int
-	ChangedPaths           []string
-	Categories             []string
-	ChecksPassing          bool
-	RequiredChecksPassing  map[string]bool
-	DescriptionPassed      bool
-	UpToDate               bool
-	Author                 string
-	AuthorClass            string
-	FromFork               bool
-	UnresolvedHumanThreads int
-	BlockingFindings       int
-	ReviewerDisagreement   bool
-	ScopeMismatch          bool
-	UnresolvedUncertainty  bool
-	PromptInjectionFound   bool
-	ContextFetchFailed     bool
-	HeadSHAChanged         bool
+	FilesChanged          int
+	LinesChanged          int
+	ChangedPaths          []string
+	Categories            []string
+	ChecksPassing         bool
+	RequiredChecksPassing map[string]bool
+	DescriptionPassed     bool
+	UpToDate              bool
+	Author                string
+	AuthorClass           string
+	FromFork              bool
+	BlockingFindings      int
+	ReviewerDisagreement  bool
+	ScopeMismatch         bool
+	UnresolvedUncertainty bool
+	PromptInjectionFound  bool
+	ContextFetchFailed    bool
+	HeadSHAChanged        bool
 }
 
 type CodeReviewRiskReasonCode string
 
 const (
-	CodeReviewRiskReasonReviewerDisabled             CodeReviewRiskReasonCode = "reviewer_disabled"
-	CodeReviewRiskReasonContextUnavailable           CodeReviewRiskReasonCode = "context_unavailable"
-	CodeReviewRiskReasonHeadChanged                  CodeReviewRiskReasonCode = "head_changed"
-	CodeReviewRiskReasonFilesLimitExceeded           CodeReviewRiskReasonCode = "files_limit_exceeded"
-	CodeReviewRiskReasonLinesLimitExceeded           CodeReviewRiskReasonCode = "lines_limit_exceeded"
-	CodeReviewRiskReasonChecksFailing                CodeReviewRiskReasonCode = "checks_failing"
-	CodeReviewRiskReasonRequiredCheckFailing         CodeReviewRiskReasonCode = "required_check_failing"
-	CodeReviewRiskReasonDescriptionFailed            CodeReviewRiskReasonCode = "description_failed"
-	CodeReviewRiskReasonBranchOutOfDate              CodeReviewRiskReasonCode = "branch_out_of_date"
-	CodeReviewRiskReasonForkIneligible               CodeReviewRiskReasonCode = "fork_ineligible"
-	CodeReviewRiskReasonAuthorIneligible             CodeReviewRiskReasonCode = "author_ineligible"
+	CodeReviewRiskReasonReviewerDisabled     CodeReviewRiskReasonCode = "reviewer_disabled"
+	CodeReviewRiskReasonContextUnavailable   CodeReviewRiskReasonCode = "context_unavailable"
+	CodeReviewRiskReasonHeadChanged          CodeReviewRiskReasonCode = "head_changed"
+	CodeReviewRiskReasonFilesLimitExceeded   CodeReviewRiskReasonCode = "files_limit_exceeded"
+	CodeReviewRiskReasonLinesLimitExceeded   CodeReviewRiskReasonCode = "lines_limit_exceeded"
+	CodeReviewRiskReasonChecksFailing        CodeReviewRiskReasonCode = "checks_failing"
+	CodeReviewRiskReasonRequiredCheckFailing CodeReviewRiskReasonCode = "required_check_failing"
+	CodeReviewRiskReasonDescriptionFailed    CodeReviewRiskReasonCode = "description_failed"
+	CodeReviewRiskReasonBranchOutOfDate      CodeReviewRiskReasonCode = "branch_out_of_date"
+	CodeReviewRiskReasonForkIneligible       CodeReviewRiskReasonCode = "fork_ineligible"
+	CodeReviewRiskReasonAuthorIneligible     CodeReviewRiskReasonCode = "author_ineligible"
+	// CodeReviewRiskReasonUnresolvedHumanReview is retained so historical decisions remain renderable.
+	// New risk evaluations deliberately do not emit it.
 	CodeReviewRiskReasonUnresolvedHumanReview        CodeReviewRiskReasonCode = "unresolved_human_review"
 	CodeReviewRiskReasonBlockingFindings             CodeReviewRiskReasonCode = "blocking_findings"
 	CodeReviewRiskReasonReviewerDisagreement         CodeReviewRiskReasonCode = "reviewer_disagreement"
@@ -1338,9 +1274,6 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	}
 	if len(policy.RiskPolicy.EligibleAuthors) > 0 && !codeReviewAuthorAllowed(input.Author, input.AuthorClass, policy.RiskPolicy.EligibleAuthors) {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible})
-	}
-	if input.UnresolvedHumanThreads > 0 {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonUnresolvedHumanReview})
 	}
 	if input.BlockingFindings > 0 {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonBlockingFindings})

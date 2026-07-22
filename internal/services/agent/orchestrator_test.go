@@ -5480,9 +5480,11 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 		*session.SnapshotKey: []byte("restored-snapshot"),
 	}
 
+	threadReasoning := models.ReasoningEffortXHigh
 	err := buildOrchestrator(d).ContinueSession(context.Background(), session, &agent.ContinueSessionOptions{
 		AgentType:            models.AgentTypeOpenCode,
 		ModelOverride:        &threadModel,
+		ReasoningEffort:      &threadReasoning,
 		ThreadAgentSessionID: nil,
 		ResultAgentSessionID: &threadAgentSessionID,
 		ThreadID:             &threadID,
@@ -5491,6 +5493,7 @@ func TestContinueSession_UsesThreadExecutionOptions(t *testing.T) {
 	require.Equal(t, threadModel, createdCfg.Env["OPENCODE_MODEL"], "ContinueSession should apply the thread model to the thread agent env")
 	require.NotContains(t, createdCfg.Env, "ANTHROPIC_MODEL", "ContinueSession should not apply the parent session model when a thread override is provided")
 	require.NotNil(t, promptSeen, "ContinueSession should execute the thread adapter")
+	require.Equal(t, threadReasoning, promptSeen.ReasoningEffort, "ContinueSession should apply the thread reasoning override")
 	require.False(t, promptSeen.Continuation, "first turn in a blank thread should start a fresh agent transcript")
 	require.Empty(t, promptSeen.ResumeSessionID, "blank thread should not resume the parent session's agent session id")
 	require.Equal(t, "thread-opencode-session", threadAgentSessionID, "ContinueSession should report the thread agent session id to the worker")

@@ -150,6 +150,27 @@ func (s *SessionChangesetStore) GetByID(ctx context.Context, orgID, sessionID, c
 	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionChangeset])
 }
 
+func (s *SessionChangesetStore) GetByWorkingBranch(ctx context.Context, orgID, repositoryID uuid.UUID, workingBranch string) (models.SessionChangeset, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+changesetSelectColumns+`
+		FROM session_changesets
+		WHERE session_changesets.org_id = @org_id
+		  AND session_changesets.working_branch = @working_branch
+		  AND EXISTS (
+			SELECT 1 FROM sessions
+			WHERE sessions.org_id = @org_id
+			  AND sessions.id = session_changesets.session_id
+			  AND sessions.repository_id = @repository_id
+		  )
+		ORDER BY session_changesets.updated_at DESC, session_changesets.id DESC
+		LIMIT 1`, pgx.NamedArgs{
+		"org_id": orgID, "repository_id": repositoryID, "working_branch": workingBranch,
+	})
+	if err != nil {
+		return models.SessionChangeset{}, fmt.Errorf("get session changeset by working branch: %w", err)
+	}
+	return pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionChangeset])
+}
+
 func (s *SessionChangesetStore) ListFullBySession(ctx context.Context, orgID, sessionID uuid.UUID) ([]models.SessionChangeset, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+changesetSelectColumns+`
 		FROM session_changesets
@@ -307,7 +328,9 @@ func (s *SessionChangesetStore) RecordPublishedHead(ctx context.Context, orgID, 
 		status = models.ChangesetStatusPROpen
 	}
 	result, err := s.db.Exec(ctx, `UPDATE session_changesets SET head_sha = @head_sha,
-		expected_remote_head_sha = @head_sha, status = @status, updated_at = now()
+		expected_remote_head_sha = @head_sha,
+		status = CASE WHEN status IN ('merged', 'abandoned') THEN status ELSE @status END,
+		updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND id = @changeset_id`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID, "head_sha": headSHA, "status": status,
 	})
