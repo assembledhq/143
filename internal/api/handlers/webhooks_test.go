@@ -1052,6 +1052,10 @@ func (s *codeReviewWebhookMetadataStore) GetByOutputKey(context.Context, uuid.UU
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
 
+func (s *codeReviewWebhookMetadataStore) GetBySessionID(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+}
+
 func (s *codeReviewWebhookMetadataStore) GetLatestByPullRequestHead(context.Context, uuid.UUID, uuid.UUID, string, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
 }
@@ -1078,6 +1082,14 @@ func (s *codeReviewWebhookMetadataStore) HasApprovedByPullRequest(context.Contex
 }
 
 func (s *codeReviewWebhookMetadataStore) FailReview(context.Context, uuid.UUID, uuid.UUID, string) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, nil
+}
+
+func (s *codeReviewWebhookMetadataStore) FailReviewWithStatus(context.Context, uuid.UUID, db.FailCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
+	return models.CodeReviewSessionMetadata{}, nil
+}
+
+func (s *codeReviewWebhookMetadataStore) MarkSupersededBy(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	return models.CodeReviewSessionMetadata{}, nil
 }
 

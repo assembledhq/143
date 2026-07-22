@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/metrics"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -33,6 +34,10 @@ type codeReviewMembershipStore interface {
 	Get(ctx context.Context, userID, orgID uuid.UUID) (models.OrganizationMembership, error)
 }
 
+type codeReviewRetryService interface {
+	RetryReview(ctx context.Context, input codereviewsvc.RetryReviewInput) (codereviewsvc.RetryReviewResult, error)
+}
+
 type CodeReviewHandler struct {
 	store        *db.CodeReviewStore
 	repos        *db.RepositoryStore
@@ -40,6 +45,7 @@ type CodeReviewHandler struct {
 	streams      *cache.CodeReviewStreams
 	audit        *db.AuditEmitter
 	memberships  codeReviewMembershipStore
+	retryService codeReviewRetryService
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -58,6 +64,10 @@ func (h *CodeReviewHandler) SetStreams(streams *cache.CodeReviewStreams) {
 
 func (h *CodeReviewHandler) SetMembershipStore(store codeReviewMembershipStore) {
 	h.memberships = store
+}
+
+func (h *CodeReviewHandler) SetRetryService(service codeReviewRetryService) {
+	h.retryService = service
 }
 
 // StreamUpdates is the org-scoped SSE endpoint backing the live code reviews
@@ -302,6 +312,71 @@ func (h *CodeReviewHandler) Evidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewEvidence]{Data: models.CodeReviewEvidence{AgentResults: results, Findings: findings, PromptArtifacts: artifacts}})
+}
+
+func (h *CodeReviewHandler) Retry(w http.ResponseWriter, r *http.Request) {
+	if h.retryService == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "CODE_REVIEW_RETRY_UNAVAILABLE", "code review retry is unavailable")
+		return
+	}
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	result, err := h.retryService.RetryReview(r.Context(), codereviewsvc.RetryReviewInput{
+		OrgID: orgID, SessionID: sessionID,
+	})
+	if err != nil {
+		if result.SessionID != uuid.Nil {
+			h.emitRetryAudit(r, result, "dispatch_failed")
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, r, http.StatusNotFound, "CODE_REVIEW_NOT_FOUND", "code review not found")
+			return
+		}
+		var conflict *codereviewsvc.RetryReviewConflictError
+		if errors.As(err, &conflict) {
+			writeErrorWithDetails(w, r, http.StatusConflict, "CODE_REVIEW_RETRY_CONFLICT", conflict.Message,
+				map[string]string{"reason": string(conflict.Code)}, err)
+			return
+		}
+		classification := ghservice.ClassifyRetry(err, time.Now())
+		if classification.RateLimited {
+			if classification.RetryAfter != nil {
+				seconds := int64((*classification.RetryAfter + time.Second - 1) / time.Second)
+				if seconds < 1 {
+					seconds = 1
+				}
+				w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+			}
+			writeError(w, r, http.StatusTooManyRequests, "GITHUB_RATE_LIMITED", "GitHub is rate-limited; retry after the requested wait", err)
+			return
+		}
+		writeError(w, r, http.StatusInternalServerError, "CODE_REVIEW_RETRY_FAILED", "failed to retry code review", err)
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, models.SingleResponse[codereviewsvc.RetryReviewResult]{Data: result})
+	h.emitRetryAudit(r, result, "queued")
+}
+
+func (h *CodeReviewHandler) emitRetryAudit(r *http.Request, result codereviewsvc.RetryReviewResult, dispatchStatus string) {
+	resourceID := result.PreviousSessionID.String()
+	newSessionID := result.SessionID
+	detailValues := map[string]any{
+		"previous_session_id":    result.PreviousSessionID,
+		"replacement_session_id": result.SessionID,
+		"metadata_id":            result.MetadataID,
+		"dispatch_status":        dispatchStatus,
+	}
+	if result.JobID != uuid.Nil {
+		detailValues["job_id"] = result.JobID
+	}
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), detailValues)
+	emitUserAuditWithSession(h.audit, r, models.AuditActionCodeReviewRetried, models.AuditResourceCodeReview,
+		&resourceID, &newSessionID, nil, details)
 }
 
 func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {

@@ -368,6 +368,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		TeamSlugs:         cfg.CodeReviewTeamSlugs,
 	})
 	codeReviewSvc.SetGitHubTriggerStore(codeReviewStore)
+	if prService != nil {
+		codeReviewSvc.SetRetryDependencies(pullRequestStore, prService)
+	}
 	codeReviewTriggerSetupSvc := codereviewsvc.NewGitHubTriggerSetupService(codeReviewStore, repoStore, appUserAuthSvc, logger)
 	webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)
 	sessionThreadFileEventStore := db.NewSessionThreadFileEventStore(pool)
@@ -377,6 +380,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		pullRequestHandler.SetFeedbackService(prService)
 	}
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
+	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
 	codeReviewHandler.SetGitHubTriggerSetupService(codeReviewTriggerSetupSvc)
 	prHealthStreams := cache.NewPullRequestStreams(redisClient, logger)
@@ -1560,6 +1564,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Use(middleware.RequireRole("admin", "member"))
 
 				r.Patch("/api/v1/repositories/{id}", repoHandler.Update)
+				r.Post("/api/v1/code-reviews/{id}/retry", codeReviewHandler.Retry)
 				r.Post("/api/v1/repositories/{id}/disconnect", repoHandler.Disconnect)
 				r.Post("/api/v1/repositories/{id}/reconnect", repoHandler.Reconnect)
 

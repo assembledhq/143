@@ -63,7 +63,7 @@ type codeReviewOrchestratorSynthesis struct {
 }
 
 func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
-	return func(ctx context.Context, _ string, payload json.RawMessage) error {
+	return func(ctx context.Context, _ string, payload json.RawMessage) (handlerErr error) {
 		if stores == nil || stores.CodeReviews == nil {
 			return fmt.Errorf("code review store unavailable")
 		}
@@ -75,6 +75,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("org_id and session_id are required")
 		}
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
+		defer func() {
+			recordCodeReviewAutomaticWait(ctx, stores.CodeReviews, logger, job, handlerErr)
+		}()
 		metadata, err := stores.CodeReviews.MarkRunning(ctx, job.OrgID, job.SessionID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -134,8 +137,14 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			switch phase {
 			case codeReviewAgentPhaseReviewers:
+				if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
+					return fmt.Errorf("set code review reviewer phase: %w", err)
+				}
 				return codeReviewWaitingForReviewers(policy.Config())
 			case codeReviewAgentPhaseOrchestrator:
+				if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSynthesizing); err != nil {
+					return fmt.Errorf("set code review synthesis phase: %w", err)
+				}
 				return codeReviewWaitingForOrchestrator(policy.Config())
 			}
 		}
@@ -179,6 +188,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return err
 		}
 		if codeReviewCanRunReviewerThreads(stores) {
+			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
+				return fmt.Errorf("set code review reviewer phase: %w", err)
+			}
 			if err := ensureCodeReviewReviewerThreads(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles); err != nil {
 				return err
 			}
@@ -201,6 +213,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			if codeReviewReviewerExecutionFailed(policy.Config(), agentResults) {
 				return failCodeReviewWithoutReviewerOutput(ctx, stores, services, logger, job, pr, agentResults)
+			}
+			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSynthesizing); err != nil {
+				return fmt.Errorf("set code review synthesis phase: %w", err)
 			}
 			if err := ensureCodeReviewOrchestratorThread(ctx, stores, services, logger, job, pr, health, policy, metadata, changedFiles, descriptionEvaluation, agentResults, findings); err != nil {
 				return err
@@ -233,6 +248,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		// Re-read all mutable PR gates immediately before deciding. A description,
 		// code, or check event can arrive while reviewer agents are still running;
 		// the final recommendation must reflect that newer state.
+		if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSyncingGitHub); err != nil {
+			return fmt.Errorf("set code review GitHub sync phase: %w", err)
+		}
 		if syncErr := syncCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
 			return syncErr
 		}
@@ -277,6 +295,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if cancelled, err := stopCodeReviewIfParentSessionCancelled(ctx, stores, services, logger, job, pr); cancelled || err != nil {
 			return err
+		}
+		if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
+			return fmt.Errorf("set code review publishing phase: %w", err)
 		}
 		submission, submitted, err := submitCodeReviewToGitHub(ctx, stores, services, job, metadata, decision.Decision, body)
 		if err != nil {
@@ -335,7 +356,13 @@ func stopCodeReviewIfParentSessionCancelled(ctx context.Context, stores *Stores,
 
 func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, results []models.CodeReviewAgentResult) error {
 	reason := codeReviewNoUsableReviewerOutputReason(results)
-	if _, err := stores.CodeReviews.FailReview(ctx, job.OrgID, job.SessionID, reason); err != nil {
+	if _, err := stores.CodeReviews.FailReviewWithStatus(ctx, job.OrgID, db.FailCodeReviewParams{
+		SessionID: job.SessionID,
+		Reason:    reason,
+		Code:      models.CodeReviewStatusCodeReviewerFailed,
+		Message:   "Reviewer agents did not produce usable output. Retry the review to start a fresh attempt.",
+		Retryable: true,
+	}); err != nil {
 		return fmt.Errorf("fail code review without usable reviewer output: %w", err)
 	}
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
@@ -444,7 +471,14 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
 		reason := codeReviewDeadLetterReason(deadLetterErr)
 		if stores != nil && stores.CodeReviews != nil {
-			if _, err := stores.CodeReviews.FailReview(hookCtx, job.OrgID, job.SessionID, reason); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			code, message, retryable := codeReviewTerminalFailureStatus(deadLetterErr)
+			if _, err := stores.CodeReviews.FailReviewWithStatus(hookCtx, job.OrgID, db.FailCodeReviewParams{
+				SessionID: job.SessionID,
+				Reason:    reason,
+				Code:      code,
+				Message:   message,
+				Retryable: retryable,
+			}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 				logger.Warn().Err(err).
 					Str("session_id", job.SessionID.String()).
 					Msg("failed to reconcile dead-lettered code review metadata")
@@ -457,6 +491,51 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 		}
 		removeCodeReviewRequestedReviewerAfterDeadLetter(hookCtx, stores, services, logger, job)
 	})
+}
+
+func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStore, logger zerolog.Logger, job runCodeReviewPayload, handlerErr error) {
+	if store == nil || handlerErr == nil {
+		return
+	}
+	classification := ghservice.ClassifyRetry(handlerErr, time.Now())
+	if !classification.RateLimited {
+		return
+	}
+	delay := classification.RetryAfter
+	var retryable *RetryableError
+	if errors.As(handlerErr, &retryable) && retryable.RetryAfter != nil {
+		delay = retryable.RetryAfter
+	}
+	if delay == nil {
+		fallback := githubRateLimitMinimumRetryAfter
+		delay = &fallback
+	}
+	retryAt := time.Now().Add(*delay).UTC()
+	if _, err := store.SetWaitingForGitHub(ctx, job.OrgID, job.SessionID, retryAt,
+		"GitHub is rate-limited. The review will resume automatically when the limit resets."); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		logger.Warn().Err(err).
+			Str("session_id", job.SessionID.String()).
+			Msg("failed to persist code review GitHub rate-limit wait")
+	}
+}
+
+func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	classification := ghservice.ClassifyRetry(err, time.Now())
+	if classification.RateLimited {
+		return models.CodeReviewStatusCodeGitHubRateLimited,
+			"GitHub remained rate-limited until automatic retries expired. Retry the review to start a fresh attempt.", true
+	}
+	if classification.Retryable {
+		return models.CodeReviewStatusCodeGitHubUnavailable,
+			"GitHub remained unavailable until automatic retries expired. Retry the review to start a fresh attempt.", true
+	}
+	var retryable *RetryableError
+	if errors.As(err, &retryable) {
+		return models.CodeReviewStatusCodeWorkerFailed,
+			"The review could not recover automatically. Retry the review to start a fresh attempt.", true
+	}
+	return models.CodeReviewStatusCodeWorkerFailed,
+		"The review stopped because of a non-retryable error. Check the failure details before trying again.", false
 }
 
 func removeCodeReviewRequestedReviewerAfterDeadLetter(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload) {

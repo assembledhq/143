@@ -67,6 +67,51 @@ func (s CodeReviewSessionStatus) Validate() error {
 	}
 }
 
+// CodeReviewPhase is the current operator-visible stage of a non-terminal
+// code review attempt. Terminal rows intentionally clear Phase: their Status
+// and persisted failure details are the durable operator contract instead.
+type CodeReviewPhase string
+
+const (
+	CodeReviewPhaseSyncingGitHub CodeReviewPhase = "syncing_github"
+	CodeReviewPhaseWaitingGitHub CodeReviewPhase = "waiting_for_github"
+	CodeReviewPhaseReviewing     CodeReviewPhase = "reviewing"
+	CodeReviewPhaseSynthesizing  CodeReviewPhase = "synthesizing"
+	CodeReviewPhasePublishing    CodeReviewPhase = "publishing"
+)
+
+func (p CodeReviewPhase) Validate() error {
+	switch p {
+	case CodeReviewPhaseSyncingGitHub, CodeReviewPhaseWaitingGitHub, CodeReviewPhaseReviewing,
+		CodeReviewPhaseSynthesizing, CodeReviewPhasePublishing:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewPhase: %q", p)
+	}
+}
+
+// CodeReviewStatusCode is a stable machine-readable explanation for an
+// operational wait or terminal failure. StatusMessage carries the concise
+// operator-facing action.
+type CodeReviewStatusCode string
+
+const (
+	CodeReviewStatusCodeGitHubRateLimited CodeReviewStatusCode = "github_rate_limited"
+	CodeReviewStatusCodeGitHubUnavailable CodeReviewStatusCode = "github_unavailable"
+	CodeReviewStatusCodeReviewerFailed    CodeReviewStatusCode = "reviewer_failed"
+	CodeReviewStatusCodeWorkerFailed      CodeReviewStatusCode = "worker_failed"
+)
+
+func (c CodeReviewStatusCode) Validate() error {
+	switch c {
+	case CodeReviewStatusCodeGitHubRateLimited, CodeReviewStatusCodeGitHubUnavailable,
+		CodeReviewStatusCodeReviewerFailed, CodeReviewStatusCodeWorkerFailed:
+		return nil
+	default:
+		return fmt.Errorf("invalid CodeReviewStatusCode: %q", c)
+	}
+}
+
 type CodeReviewDecision string
 
 const (
@@ -775,6 +820,12 @@ type CodeReviewSessionMetadata struct {
 	FromFork              bool                    `db:"from_fork" json:"from_fork"`
 	TriggerSource         CodeReviewTriggerSource `db:"trigger_source" json:"trigger_source"`
 	Status                CodeReviewSessionStatus `db:"status" json:"status"`
+	Phase                 *CodeReviewPhase        `db:"phase" json:"phase,omitempty"`
+	StatusCode            *CodeReviewStatusCode   `db:"status_code" json:"status_code,omitempty"`
+	StatusMessage         *string                 `db:"status_message" json:"status_message,omitempty"`
+	RetryAt               *time.Time              `db:"retry_at" json:"retry_at,omitempty"`
+	LastErrorAt           *time.Time              `db:"last_error_at" json:"last_error_at,omitempty"`
+	RetryableFailure      bool                    `db:"retryable_failure" json:"retryable_failure"`
 	Decision              *CodeReviewDecision     `db:"decision" json:"decision,omitempty"`
 	Acceptable            *bool                   `db:"acceptable" json:"acceptable,omitempty"`
 	Stale                 bool                    `db:"stale" json:"stale"`

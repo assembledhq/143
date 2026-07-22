@@ -289,6 +289,8 @@ export const api = {
     policyEvent: (body: import('./types').CodeReviewPolicyAnalyticsEvent) => post<void>('/api/v1/code-reviews/policy-events', body),
     evidence: (sessionId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewEvidence>>(`/api/v1/code-reviews/${sessionId}/evidence`),
+    retry: (sessionId: string) =>
+      post<import('./types').SingleResponse<import('./types').CodeReviewRetryResult>>(`/api/v1/code-reviews/${sessionId}/retry`),
     getPolicy: () => get<import('./types').SingleResponse<import('./types').CodeReviewResolvedPolicy>>('/api/v1/code-review-policies'),
     getGitHubTrigger: (repositoryId: string) =>
       get<import('./types').SingleResponse<import('./types').CodeReviewGitHubTriggerResponse>>(

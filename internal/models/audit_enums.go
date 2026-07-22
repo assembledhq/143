@@ -160,6 +160,7 @@ const (
 	AuditActionPRReadinessBypassed           AuditAction = "pr_readiness.bypassed" // #nosec G101 -- not a credential
 	AuditActionCodeReviewPolicyUpdated       AuditAction = "code_review_policy.updated"
 	AuditActionCodeReviewPolicyReset         AuditAction = "code_review_policy.reset"
+	AuditActionCodeReviewRetried             AuditAction = "code_review.retried"
 
 	// Auth actions
 	AuditActionAuthLogin    AuditAction = "auth.login"
@@ -236,7 +237,7 @@ func (a AuditAction) Validate() error {
 		AuditActionPreviewPolicyUpdated, AuditActionPreviewToolInvoked, AuditActionPreviewUpdated, AuditActionPreviewScreenshotCaptured,
 		AuditActionPRReadinessPolicyUpdated, AuditActionPRReadinessCustomCheckUpdated,
 		AuditActionPRReadinessCustomCheckDeleted, AuditActionPRReadinessBypassed,
-		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset,
+		AuditActionCodeReviewPolicyUpdated, AuditActionCodeReviewPolicyReset, AuditActionCodeReviewRetried,
 		AuditActionAuthLogin, AuditActionAuthLogout, AuditActionAuthRegister,
 		AuditActionAuthCLILogin, AuditActionAuthCLILogout,
 		AuditActionOrgJoinTokenCreated, AuditActionOrgJoinTokenRevealed, AuditActionOrgJoinTokenRevoked, AuditActionOrgJoinTokenUsed,
@@ -283,6 +284,7 @@ const (
 	AuditResourcePreview                    AuditResourceType = "preview"
 	AuditResourcePRReadinessPolicy          AuditResourceType = "pr_readiness_policy"
 	AuditResourceCodeReviewPolicy           AuditResourceType = "code_review_policy"
+	AuditResourceCodeReview                 AuditResourceType = "code_review"
 	AuditResourcePRReadinessCustomCheck     AuditResourceType = "pr_readiness_custom_check"
 	AuditResourcePRReadinessBypass          AuditResourceType = "pr_readiness_bypass" // #nosec G101 -- not a credential
 	AuditResourceAPIClient                  AuditResourceType = "api_client"
@@ -304,6 +306,7 @@ func (t AuditResourceType) Validate() error {
 		AuditResourceEvalTask, AuditResourceEvalRun, AuditResourceEvalBatch,
 		AuditResourceAutomation, AuditResourceOrganization, AuditResourcePreviewSecretBundle, AuditResourcePreviewPolicy, AuditResourcePreview,
 		AuditResourcePRReadinessPolicy, AuditResourcePRReadinessCustomCheck, AuditResourcePRReadinessBypass, AuditResourceCodeReviewPolicy,
+		AuditResourceCodeReview,
 		AuditResourceAPIClient, AuditResourceAPIToken,
 		AuditResourceCLIToken, AuditResourceOrgJoinToken, AuditResourceCLITool,
 		AuditResourceOrgDomain:

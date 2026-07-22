@@ -176,6 +176,7 @@ Every bot-triggered review creates a normal 143 session so transcript, tabs, age
 GitHub stays concise; the session keeps the full detail:
 
 - PR metadata, base/head SHA, author, requested reviewer, run status
+- current operational phase, automatic GitHub retry time, and curated failure action
 - description policy results
 - per-agent raw review outputs
 - orchestrator synthesis
@@ -202,7 +203,7 @@ Recommended tabs:
 
 | Tab | Purpose |
 | --- | --- |
-| Reviews | Filtered session list containing code review sessions, with PR, repository, author, risk, decision, status, requested-at, and completed-at columns. |
+| Reviews | Filtered session list containing code review sessions, with PR, repository, author, risk, decision, operational phase/status, retry time or failure action, requested-at, and completed-at columns. |
 | Configurations | Org and repository code review policies: enablement, description requirements, risk thresholds, agent roster, orchestrator, and approval mode. |
 
 The Reviews tab reuses the normal session list/detail route. Primary action opens the session; secondary actions open the GitHub PR, policy version, or final GitHub review.
@@ -432,6 +433,9 @@ Rules:
 - If the final GitHub review submission fails after session completion, retry idempotently using a stable review-output key for the session/head SHA/policy version.
 - If inline comments were already posted for the same head SHA, update or supersede them where GitHub permits; otherwise avoid posting duplicate line comments.
 - If policy changes while a review is running, finish under the policy version captured at session start unless an admin explicitly cancels and reruns.
+- GitHub rate limits keep the attempt running in `waiting_for_github` with the worker's scheduled `retry_at`; the UI shows automatic recovery and does not offer a competing manual retry.
+- When a retryable failure becomes terminal, an admin or member may call `POST /api/v1/code-reviews/{session_id}/retry`. The API validates the live PR head and monotonic-approval guard, creates a new immutable session/job under the current policy, and compare-and-set links the failed attempt through `superseded_by_session_id`. Completed, non-retryable, stale, cancelled, superseded, non-latest, closed-PR, and changed-head attempts return `409 Conflict`.
+- If job dispatch fails after the replacement session is created, the service terminalizes that replacement as retryable, links it to the original attempt, records a failed-dispatch audit event, and returns an error. The UI refreshes to expose the replacement's retry action; no terminal attempt is reopened or deleted.
 
 The Code reviews list should show stale and superseded sessions distinctly from failed sessions. Stale means "reviewed a head that is no longer current," not "the agents failed."
 
@@ -543,6 +547,12 @@ code_review_session_metadata (
     head_sha text not null,
     trigger_source text not null,
     status text not null,
+    phase text,
+    status_code text,
+    status_message text,
+    retry_at timestamptz,
+    last_error_at timestamptz,
+    retryable_failure boolean not null default false,
     decision text,
     acceptable boolean,
     stale boolean not null default false,

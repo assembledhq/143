@@ -71,7 +71,8 @@ const codeReviewPolicyColumns = `id, org_id, repository_id, active, version, ena
 		review_instructions, automated_approval_policy, description_policy, risk_policy, agent_roster, inline_comment_limit, created_by_user_id, created_at`
 
 const codeReviewMetadataColumns = `id, org_id, session_id, repository_id, pull_request_id, policy_id,
-	base_sha, head_sha, from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
+	base_sha, head_sha, from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
+	last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
 	review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
 	failure_reason, completed_at, created_at`
 
@@ -401,15 +402,27 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 			return err
 		}
 	}
+	if metadata.Phase != nil {
+		if err := metadata.Phase.Validate(); err != nil {
+			return err
+		}
+	}
+	if metadata.StatusCode != nil {
+		if err := metadata.StatusCode.Validate(); err != nil {
+			return err
+		}
+	}
 	rows, err := s.db.Query(ctx, `
 		INSERT INTO code_review_session_metadata (
 			org_id, session_id, repository_id, pull_request_id, policy_id, base_sha, head_sha,
-			from_fork, trigger_source, status, decision, acceptable, stale, superseded_by_session_id,
+			from_fork, trigger_source, status, phase, status_code, status_message, retry_at,
+			last_error_at, retryable_failure, decision, acceptable, stale, superseded_by_session_id,
 			review_output_key, prompt_artifact_key, github_review_id, github_review_url, final_review_body,
 			failure_reason, completed_at
 		) VALUES (
 			@org_id, @session_id, @repository_id, @pull_request_id, @policy_id, @base_sha, @head_sha,
-			@from_fork, @trigger_source, @status, @decision, @acceptable, @stale, @superseded_by_session_id,
+			@from_fork, @trigger_source, @status, @phase, @status_code, @status_message, @retry_at,
+			@last_error_at, @retryable_failure, @decision, @acceptable, @stale, @superseded_by_session_id,
 			@review_output_key, @prompt_artifact_key, @github_review_id, @github_review_url, @final_review_body,
 			@failure_reason, @completed_at
 		)
@@ -426,6 +439,12 @@ func (s *CodeReviewStore) CreateSessionMetadata(ctx context.Context, metadata *m
 		"from_fork":                metadata.FromFork,
 		"trigger_source":           metadata.TriggerSource,
 		"status":                   metadata.Status,
+		"phase":                    metadata.Phase,
+		"status_code":              metadata.StatusCode,
+		"status_message":           metadata.StatusMessage,
+		"retry_at":                 metadata.RetryAt,
+		"last_error_at":            metadata.LastErrorAt,
+		"retryable_failure":        metadata.RetryableFailure,
 		"decision":                 metadata.Decision,
 		"acceptable":               metadata.Acceptable,
 		"stale":                    metadata.Stale,
@@ -582,16 +601,127 @@ func (s *CodeReviewStore) GetLatestByPullRequestHead(ctx context.Context, orgID,
 func (s *CodeReviewStore) MarkRunning(ctx context.Context, orgID, sessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
-		SET status = 'running'
+		SET status = 'running',
+		    phase = CASE
+		        WHEN status = 'queued' OR phase IS NULL OR phase = 'waiting_for_github' THEN 'syncing_github'
+		        ELSE phase
+		    END,
+		    status_code = CASE WHEN status = 'queued' OR phase = 'waiting_for_github' THEN NULL ELSE status_code END,
+		    status_message = CASE WHEN status = 'queued' OR phase = 'waiting_for_github' THEN NULL ELSE status_message END,
+		    retry_at = CASE WHEN status = 'queued' OR phase = 'waiting_for_github' THEN NULL ELSE retry_at END,
+		    last_error_at = CASE WHEN status = 'queued' OR phase = 'waiting_for_github' THEN NULL ELSE last_error_at END,
+		    retryable_failure = CASE WHEN status = 'queued' OR phase = 'waiting_for_github' THEN false ELSE retryable_failure END
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND status IN ('queued', 'running')
+		  AND (
+		      status = 'queued'
+		      OR phase IS NULL
+		      OR phase = 'waiting_for_github'
+		      OR status_code IS NOT NULL
+		      OR status_message IS NOT NULL
+		      OR retry_at IS NOT NULL
+		      OR last_error_at IS NOT NULL
+		      OR retryable_failure = true
+		  )
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":     orgID,
 		"session_id": sessionID,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review running: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if errors.Is(err, pgx.ErrNoRows) {
+		current, getErr := s.GetBySessionID(ctx, orgID, sessionID)
+		if getErr != nil {
+			return models.CodeReviewSessionMetadata{}, getErr
+		}
+		if current.Status != models.CodeReviewSessionStatusQueued && current.Status != models.CodeReviewSessionStatusRunning {
+			return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+		}
+		return current, nil
+	}
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
+// SetOperationalPhase records a non-terminal lifecycle transition and clears
+// any prior automatic-wait or error state. A retrying worker therefore moves
+// back to a healthy phase as soon as it resumes useful work.
+func (s *CodeReviewStore) SetOperationalPhase(ctx context.Context, orgID, sessionID uuid.UUID, phase models.CodeReviewPhase) (models.CodeReviewSessionMetadata, error) {
+	if err := phase.Validate(); err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	if phase == models.CodeReviewPhaseWaitingGitHub {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("waiting_for_github requires retry details")
+	}
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET phase = @phase,
+		    status_code = NULL,
+		    status_message = NULL,
+		    retry_at = NULL,
+		    last_error_at = NULL,
+		    retryable_failure = false
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
+		  AND (
+		      phase IS DISTINCT FROM @phase
+		      OR status_code IS NOT NULL
+		      OR status_message IS NOT NULL
+		      OR retry_at IS NOT NULL
+		      OR last_error_at IS NOT NULL
+		      OR retryable_failure = true
+		  )
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "phase": phase,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review operational phase: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if errors.Is(err, pgx.ErrNoRows) {
+		current, getErr := s.GetBySessionID(ctx, orgID, sessionID)
+		if getErr != nil {
+			return models.CodeReviewSessionMetadata{}, getErr
+		}
+		if current.Status != models.CodeReviewSessionStatusQueued && current.Status != models.CodeReviewSessionStatusRunning {
+			return models.CodeReviewSessionMetadata{}, pgx.ErrNoRows
+		}
+		return current, nil
+	}
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
+// SetWaitingForGitHub persists an automatic rate-limit wait. The worker owns
+// retry scheduling; retryAt mirrors the delay it returned so the UI can show
+// the same recovery time without offering a competing manual action.
+func (s *CodeReviewStore) SetWaitingForGitHub(ctx context.Context, orgID, sessionID uuid.UUID, retryAt time.Time, message string) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET phase = 'waiting_for_github',
+		    status_code = 'github_rate_limited',
+		    status_message = @status_message,
+		    retry_at = @retry_at,
+		    last_error_at = now(),
+		    retryable_failure = true
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status IN ('queued', 'running')
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "retry_at": retryAt, "status_message": strings.TrimSpace(message),
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("set code review GitHub wait: %w", err)
 	}
 	metadata, err := collectOneCodeReviewMetadata(rows)
 	if err != nil {
@@ -623,6 +753,12 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
 		    stale = true,
+		    phase = NULL,
+		    status_code = NULL,
+		    status_message = NULL,
+		    retry_at = NULL,
+		    last_error_at = NULL,
+		    retryable_failure = false,
 		    superseded_by_session_id = COALESCE(@superseded_by_session_id, superseded_by_session_id),
 		    completed_at = COALESCE(completed_at, now())
 		WHERE org_id = @org_id
@@ -652,9 +788,15 @@ func (s *CodeReviewStore) MarkStale(ctx context.Context, orgID, sessionID uuid.U
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
 		    stale = true,
+		    phase = NULL,
 		    decision = 'blocked',
 		    acceptable = false,
 		    failure_reason = @failure_reason,
+		    status_code = NULL,
+		    status_message = NULL,
+		    retry_at = NULL,
+		    last_error_at = NULL,
+		    retryable_failure = false,
 		    completed_at = COALESCE(completed_at, now())
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
@@ -690,12 +832,18 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'completed',
+		    phase = NULL,
 		    decision = @decision,
 		    acceptable = @acceptable,
 		    github_review_id = @github_review_id,
 		    github_review_url = @github_review_url,
 		    final_review_body = @final_review_body,
 		    failure_reason = NULL,
+		    status_code = NULL,
+		    status_message = NULL,
+		    retry_at = NULL,
+		    last_error_at = NULL,
+		    retryable_failure = false,
 		    completed_at = now()
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
@@ -741,23 +889,78 @@ func (s *CodeReviewStore) RecordGitHubReview(ctx context.Context, orgID, session
 }
 
 func (s *CodeReviewStore) FailReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	return s.FailReviewWithStatus(ctx, orgID, FailCodeReviewParams{
+		SessionID: sessionID,
+		Reason:    reason,
+		Code:      models.CodeReviewStatusCodeWorkerFailed,
+		Message:   "The code review stopped before it could finish.",
+	})
+}
+
+type FailCodeReviewParams struct {
+	SessionID uuid.UUID
+	Reason    string
+	Code      models.CodeReviewStatusCode
+	Message   string
+	Retryable bool
+}
+
+func (s *CodeReviewStore) FailReviewWithStatus(ctx context.Context, orgID uuid.UUID, params FailCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
+	if err := params.Code.Validate(); err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'failed',
+		    phase = NULL,
 		    decision = 'blocked',
 		    acceptable = false,
 		    failure_reason = @failure_reason,
+		    status_code = @status_code,
+		    status_message = @status_message,
+		    retry_at = NULL,
+		    last_error_at = now(),
+		    retryable_failure = @retryable_failure,
 		    completed_at = now()
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND status IN ('queued', 'running')
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":         orgID,
-		"session_id":     sessionID,
-		"failure_reason": reason,
+		"org_id":            orgID,
+		"session_id":        params.SessionID,
+		"failure_reason":    strings.TrimSpace(params.Reason),
+		"status_code":       params.Code,
+		"status_message":    strings.TrimSpace(params.Message),
+		"retryable_failure": params.Retryable,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("fail code review: %w", err)
+	}
+	metadata, err := collectOneCodeReviewMetadata(rows)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	s.publishUpdated(ctx, metadata)
+	return metadata, nil
+}
+
+// MarkSupersededBy links a retryable terminal attempt to its replacement.
+// The compare-and-set guard makes repeated or concurrent retry requests safe.
+func (s *CodeReviewStore) MarkSupersededBy(ctx context.Context, orgID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error) {
+	rows, err := s.db.Query(ctx, `
+		UPDATE code_review_session_metadata
+		SET superseded_by_session_id = @replacement_session_id,
+		    status_message = 'A replacement attempt was started for this review.'
+		WHERE org_id = @org_id
+		  AND session_id = @session_id
+		  AND status = 'failed'
+		  AND retryable_failure = true
+		  AND superseded_by_session_id IS NULL
+		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "replacement_session_id": replacementSessionID,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, fmt.Errorf("supersede code review attempt: %w", err)
 	}
 	metadata, err := collectOneCodeReviewMetadata(rows)
 	if err != nil {
@@ -771,7 +974,13 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 	rows, err := s.db.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'cancelled',
+		    phase = NULL,
 		    failure_reason = @failure_reason,
+		    status_code = NULL,
+		    status_message = NULL,
+		    retry_at = NULL,
+		    last_error_at = NULL,
+		    retryable_failure = false,
 		    completed_at = COALESCE(completed_at, now())
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
@@ -813,7 +1022,8 @@ func (s *CodeReviewStore) ListReviews(ctx context.Context, orgID uuid.UUID, filt
 	}
 	query := `
 			SELECT m.id, m.org_id, m.session_id, m.repository_id, m.pull_request_id, m.policy_id,
-			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.decision, m.acceptable, m.stale,
+			       m.base_sha, m.head_sha, m.from_fork, m.trigger_source, m.status, m.phase, m.status_code,
+			       m.status_message, m.retry_at, m.last_error_at, m.retryable_failure, m.decision, m.acceptable, m.stale,
 			       m.superseded_by_session_id, m.review_output_key, m.prompt_artifact_key, m.github_review_id,
 			       m.github_review_url, m.final_review_body, m.failure_reason, m.completed_at, m.created_at,
 			       s.title AS session_title, r.full_name AS repository_name, pr.github_repo, pr.github_pr_number,

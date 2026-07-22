@@ -24,6 +24,14 @@ After someone requests 143 Code Reviewer once, new commits pushed to the pull re
 
 Once 143 submits an approval, that approval is final for the PR: later changes and reviewer rerequests do not start another 143 assessment, so automation never reverses or contradicts the approval.
 
+## Monitor and recover reviews
+
+The **Reviews** tab reports the current stage of each active attempt: syncing with GitHub, reviewing, synthesizing, or publishing. If GitHub rate-limits an operation, the attempt moves to **Waiting for GitHub** and shows when automatic processing will resume. You do not need to start another review while that countdown is active.
+
+When automatic recovery is exhausted, the failed attempt keeps a concise error and recommended action in its row and evidence panel. Organization admins and members can select **Retry review** for failures marked retryable. A retry creates a new session against the pull request's current head and current policy; it never rewrites the failed session or its evidence. The original attempt links to the replacement for audit history.
+
+A retry is rejected if the pull request has moved to another commit, is no longer open, already has a 143 approval, already has a newer replacement, or the current code review policy is disabled.
+
 ## Separate guidance from safeguards
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
